@@ -512,7 +512,7 @@ test('ask mode does not consume delegated effects even if a stale batch exists',
   assert.deepEqual(fixture.effects, []);
 });
 
-test('ask mode retires malformed argv and dependent drafts while leaving the valid prerequisite for an individual click', async () => {
+test('ask mode retires malformed argv without treating independent later checks as dependencies', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-ask-correction-'));
   const folders = vscode.workspace.workspaceFolders;
   const trusted = vscode.workspace.isTrusted;
@@ -531,8 +531,8 @@ test('ask mode retires malformed argv and dependent drafts while leaving the val
     assert.equal(store.get(drafts[0].id)?.status, 'pending');
     assert.equal(store.get(drafts[1].id)?.status, 'needs_replan');
     assert.equal(store.get(drafts[1].id)?.replan?.executed, false);
-    assert.equal(store.get(drafts[2].id)?.dependency?.targetId, drafts[1].id);
-    assert.equal(store.get(drafts[2].id)?.status, 'cancelled');
+    assert.equal(store.get(drafts[2].id)?.dependency, undefined);
+    assert.equal(store.get(drafts[2].id)?.status, 'pending');
     assert.deepEqual(f.effects, []);
   } finally {
     await store.flush(); store.dispose();
@@ -711,7 +711,7 @@ function workflowFixture(options: {
       cwdUri: vscode.Uri.file(os.tmpdir()).toString(), cwdLabel: os.tmpdir(), env: [], timeoutMs: 20_000
     };
     return {
-    id, sessionId: 's', agentRunId: 'r', messageId: 'a', status: 'pending', specHash: hashDraftRunSpec(spec), spec,
+    id, sessionId: 's', agentRunId: 'r', messageId: 'a', status: 'pending', executionStarted: false, executionPhase: 'not_dispatched', specHash: hashDraftRunSpec(spec), spec,
     effectAssessment: { version: 1, verdict: 'likely_readonly', effects: ['workspace_read'], evidence: [] },
     outputHead: '', outputTail: '', outputBytes: 0, outputTruncated: false, omittedOutputBytes: 0,
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
@@ -724,7 +724,8 @@ function workflowFixture(options: {
       flush: async () => {},
       get: (id: string) => reviews.get(id),
       getLatestForTarget: () => undefined,
-      findDenialForAction: () => undefined
+      findDenialForAction: () => undefined,
+      findHardRunDenial: () => undefined
     },
     approvalReviewer: {
       createHostPolicyApproval: async (request: Record<string, unknown>) => ({ status: 'reviewed', record: makeReview(request) }),
@@ -737,7 +738,7 @@ function workflowFixture(options: {
     getApprovalReviewerModelContext: async () => ({ model: { id: 'model' } }),
     enterTaskWork: () => undefined,
     loadTaskBudget: async () => undefined,
-    authorizedExternalReferenceUris: new Set(), selectedSourceId: 'source', selectedModelId: 'model',
+    authorizedExternalReferenceUris: new Set(), authorizedExternalExecutionUris: new Set(), selectedSourceId: 'source', selectedModelId: 'model',
     sessionStore: { activeSessionId: 's', getActiveSession: () => session, persist: async () => {} },
     changeSets: {
       flush: async () => {},
@@ -759,7 +760,7 @@ function workflowFixture(options: {
       preflightApproval: async (id: string) => draftRun(id),
       setPendingDependency: () => true,
       markNotExecuted: () => true,
-      getRunsForSegments: () => [],
+      getRunsForSegments: () => (options.draftRunIds ?? ['d1', 'd2']).map(draftRun),
       attachApprovalReview: () => true,
       approveAndRun: async (id: string, uris: Set<string>, options: { delegatedApproval: () => boolean }) => {
         assert.equal(options.delegatedApproval(), true);

@@ -593,7 +593,16 @@ export interface DraftRunEnvironmentEntry {
   value: string;
 }
 
+export interface DraftRunPrerequisite {
+  draftRunId: string;
+  specHash: string;
+  condition: 'completed' | 'predicate_true';
+}
+
 export interface DraftRunSpec {
+  /** Immutable, hash-bound evidence gates; never authorizes the referenced action. */
+  prerequisites?: DraftRunPrerequisite[];
+  replacesDraftRun?: { draftRunId: string; specHash: string };
   executable: string;
   args: string[];
   reason: string;
@@ -616,6 +625,7 @@ export interface DraftRunEffectAssessment {
 }
 
 export interface DraftRunProposal {
+  capabilityDiagnostic?: import('../approvals/authorization/commandCapability').CommandCapabilityDiagnostic;
   id: string;
   spec: DraftRunSpec;
   specHash: string;
@@ -662,6 +672,10 @@ export type DraftRunBatchDisplay = Pick<DraftRunBatchState,
 };
 
 export interface DraftRun extends DraftRunProposal {
+  /** Host execution facts. Missing legacy values mean unknown. */
+  executionStarted?: boolean;
+  executionPhase?: 'not_dispatched' | 'spawn_failed' | 'exited' | 'result_unknown';
+  gitQueryResult?: import('../runs/gitQueryResult').GitQueryResult;
   /** Audit retained, but missing host origin cannot authorize execution or result delivery. */
   historyOriginUnverified?: boolean;
   /** Host-only history membership; never replaces the real execution outcome. */

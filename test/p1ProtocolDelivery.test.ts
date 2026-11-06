@@ -245,8 +245,8 @@ test('V14 hides the suspended reader in all three payload lanes and preserves V1
     assert.equal(sha(getAgentSystemPrompt({ language: 'en', ...options })), baseline.system);
     assert.ok(names.includes(READ_PLUGIN_SKILL_TOOL_NAME));
   }
-  assert.equal(CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION, 14);
-  assert.equal(CURRENT_PROVIDER_TOOL_SCHEMA_VERSION, 14);
+  assert.equal(CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION, 15);
+  assert.equal(CURRENT_PROVIDER_TOOL_SCHEMA_VERSION, 15);
   for (const language of ['en', 'zh-CN'] as const) {
     assert.equal(getAgentSystemPrompt({ language, requestProtocolVersion: 14 }), getAgentSystemPrompt({ language, requestProtocolVersion: 13 }));
   }

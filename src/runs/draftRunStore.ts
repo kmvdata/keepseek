@@ -1,3 +1,8 @@
+import { normalizeCommandCapabilityDiagnostic } from '../approvals/authorization/commandCapability';
+import { CommandCapabilityError } from '../approvals/authorization/executionBoundary';
+import { normalizeDraftRunPlan } from './draftRunProposal';
+import { inspectDraftRunDependencies, inspectDraftRunDependencyFacts, inspectGitAncestorPrerequisite } from './draftRunDependencies';
+import { isSuccessfulDraftRunOutcome, normalizeGitQueryResult } from './gitQueryResult';
 import { writeJsonAtomic } from '../shared/atomicStorage';
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
@@ -111,7 +116,9 @@ export class DraftRunStore {
           continue;
         }
         if (draftRun.status === 'approved' || draftRun.status === 'running' || (draftRun.status === 'pending' && draftRun.spec.restricted)) {
+          const wasRunning = draftRun.status === 'running';
           draftRun.status = 'failed';
+          if (wasRunning) { draftRun.executionStarted = undefined; draftRun.executionPhase = 'result_unknown'; }
           draftRun.error = 'DraftRun was interrupted by an extension restart and was not resumed.';
           draftRun.finishedAt = new Date().toISOString();
           draftRun.updatedAt = draftRun.finishedAt;
@@ -150,6 +157,7 @@ export class DraftRunStore {
     agentRunId: string;
     sessionId?: string;
     messageId?: string;
+    rootTaskRunIds?: ReadonlySet<string>;
   }): DraftRun[] {
     if (this.findHistoryInvalidation(input.sessionId ?? '', input.messageId ?? '', input.agentRunId)) return [];
     const now = new Date().toISOString();
@@ -158,16 +166,30 @@ export class DraftRunStore {
       agentRunId: input.agentRunId,
       sessionId: input.sessionId ?? '',
       messageId: input.messageId ?? '',
-      status: 'pending',
+      status: proposal.capabilityDiagnostic?.blocking ? 'needs_replan' : 'pending',
+      executionStarted: false,
+      executionPhase: 'not_dispatched',
       outputHead: '',
       outputTail: '',
       outputBytes: 0,
       outputTruncated: false,
       omittedOutputBytes: 0,
+      finishedAt: proposal.capabilityDiagnostic?.blocking ? now : undefined,
       createdAt: now,
       updatedAt: now
     }));
     for (const draftRun of added) {
+      const replacement = draftRun.spec.replacesDraftRun;
+      if (replacement) {
+        const original = this.draftRuns.get(replacement.draftRunId);
+        const valid = original && !isHistoryInactive(original) && original.sessionId === draftRun.sessionId
+          && (original.agentRunId === draftRun.agentRunId || input.rootTaskRunIds?.has(original.id))
+          && original.specHash === replacement.specHash && original.executionStarted === false
+          && original.status === 'needs_replan' && !original.replacementDraftRunId
+          && JSON.stringify(original.spec.prerequisites ?? []) === JSON.stringify(draftRun.spec.prerequisites ?? []);
+        if (valid) { original.replacementDraftRunId = draftRun.id; original.updatedAt = now; this.emitState(original); }
+        else { draftRun.status = 'failed'; draftRun.error = 'Replacement identity or prerequisites changed. / 替代来源身份或前置条件已变化。'; }
+      }
       this.draftRuns.set(draftRun.id, draftRun);
       this.emitState(draftRun);
     }
@@ -407,11 +429,16 @@ export class DraftRunStore {
     reason?: string;
   }): boolean {
     const draft = this.draftRuns.get(id);
-    if (!draft || isHistoryInactive(draft) || draft.status !== 'pending' || draft.specHash !== expectedSpecHash || this.approving.has(id)) return false;
+    if (!draft || isHistoryInactive(draft) || draft.specHash !== expectedSpecHash || this.approving.has(id)
+      || !(draft.status === 'pending' || draft.status === 'needs_replan'
+        && draft.executionStarted === false && draft.executionPhase === 'not_dispatched')) return false;
     const replan = normalizeDraftRunReplan(result.replan, id, draft.agentRunId, draft.specHash);
     const dependency = normalizeApprovalDependency(result.dependency);
     if (!replan && !dependency && !result.reason) return false;
     draft.status = replan ? 'needs_replan' : dependency ? 'cancelled' : 'failed';
+    draft.executionStarted = false;
+    draft.executionPhase = 'not_dispatched';
+    draft.capabilityDiagnostic = replan?.diagnostic ?? draft.capabilityDiagnostic;
     draft.replan = replan;
     draft.dependency = dependency;
     draft.error = result.reason;
@@ -433,9 +460,25 @@ export class DraftRunStore {
   }
 
   /** Reusable hard checks that run before model review and again before execution. */
-  public async preflightApproval(id: string, authorizedExternalReferenceUris: ReadonlySet<string>): Promise<DraftRun> {
+  private assertDependencies(run: DraftRun, rootTaskRunIds?: ReadonlySet<string>): void {
+    const decision = inspectDraftRunDependencies(run, id => this.get(id), rootTaskRunIds);
+    if (!decision.allowed) throw new Error(decision.reason);
+  }
+
+  private async assertDependencyFacts(run: DraftRun, authorizedUris: ReadonlySet<string>, rootTaskRunIds?: ReadonlySet<string>): Promise<void> {
+    const decision = await inspectDraftRunDependencyFacts(run, id => this.get(id), rootTaskRunIds);
+    if (!decision.allowed) throw new Error(decision.reason);
+    const prior = Array.from(this.draftRuns.values()).filter(candidate => candidate.id !== run.id
+      && candidate.sessionId === run.sessionId
+      && (rootTaskRunIds ? rootTaskRunIds.has(candidate.id) : candidate.agentRunId === run.agentRunId));
+    const ancestry = await inspectGitAncestorPrerequisite(run, prior, authorizedUris);
+    if (!ancestry.allowed) throw new Error(ancestry.reason);
+  }
+
+  public async preflightApproval(id: string, authorizedExternalReferenceUris: ReadonlySet<string>, rootTaskRunIds?: ReadonlySet<string>): Promise<DraftRun> {
     const draftRun = this.draftRuns.get(id);
     if (!draftRun || isHistoryInactive(draftRun) || draftRun.status !== 'pending' || draftRun.dependency) throw new Error('Pending executable DraftRun was not found.');
+    await this.assertDependencyFacts(draftRun, authorizedExternalReferenceUris, rootTaskRunIds);
     await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris);
     if (isHistoryInactive(draftRun) || this.draftRuns.get(id) !== draftRun || draftRun.status !== 'pending') throw new Error('DraftRun history changed during approval.');
     return cloneDraftRun(draftRun);
@@ -468,6 +511,7 @@ export class DraftRunStore {
       /** Finite batch click authority, rechecked after every asynchronous boundary. */
       userApproval?: () => boolean;
       expectedSpecHash?: string;
+      rootTaskRunIds?: ReadonlySet<string>;
     } = {}
   ): Promise<DraftRun | undefined> {
     const draftRun = this.draftRuns.get(id);
@@ -486,6 +530,7 @@ export class DraftRunStore {
         throw new Error('DraftRun state changed during approval.');
       }
       checkDraftRunApprovalBoundary(draftRun, authorizedExternalReferenceUris, options.expectedSpecHash);
+      this.assertDependencies(draftRun, options.rootTaskRunIds);
     };
     try {
       assertAuthorized();
@@ -497,6 +542,7 @@ export class DraftRunStore {
       await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris);
       const scope = restricted ? undefined : await inspectDraftRunScope(draftRun);
       const verifyScope = async () => {
+        await this.assertDependencyFacts(draftRun, authorizedExternalReferenceUris, options.rootTaskRunIds);
         if (restricted && original) {
           await options.verifyScope?.();
           return { restrictedLaunch: await verifyRestrictedPythonSyntax(draftRun, original) };
@@ -519,6 +565,10 @@ export class DraftRunStore {
 
       assertAuthorized();
       draftRun.status = 'running';
+      // Persist uncertainty before crossing the adapter boundary. A restart in
+      // the dispatch/result gap must never revive the old not-dispatched fact.
+      draftRun.executionStarted = undefined;
+      draftRun.executionPhase = 'result_unknown';
       draftRun.startedAt = new Date().toISOString();
       draftRun.updatedAt = draftRun.startedAt;
       this.emitState(draftRun);
@@ -542,6 +592,8 @@ export class DraftRunStore {
         abortController.abort();
       }
       executionStarted = true;
+      draftRun.executionStarted = undefined;
+      draftRun.executionPhase = 'result_unknown';
       const execution = this.executor.execute({
         draftRun: cloneDraftRun(draftRun),
         permit,
@@ -560,21 +612,34 @@ export class DraftRunStore {
       }
       const outcome = await execution.finally(() => options.signal?.removeEventListener('abort', abort));
       if (outcome.started === false) draftRun.startedAt = undefined;
+      draftRun.executionStarted = outcome.started;
+      draftRun.executionPhase = outcome.phase ?? (outcome.started === false ? 'not_dispatched' : 'result_unknown');
+      draftRun.gitQueryResult = normalizeGitQueryResult(outcome.queryResult
+        ? { ...outcome.queryResult, scopeFingerprint: verifiedScope?.fingerprint } : undefined);
+      const successful = isSuccessfulDraftRunOutcome(outcome);
       draftRun.exitCode = outcome.exitCode;
       draftRun.signal = outcome.signal;
       draftRun.timedOut = outcome.timedOut;
       draftRun.error = outcome.error
         ?? (!outcome.cancelled && outcome.timedOut ? 'DraftRun reached its timeout and was stopped.' : undefined)
-        ?? (!outcome.cancelled && outcome.exitCode !== 0
+        ?? (outcome.queryResult?.errorCode ? `Git query: ${outcome.queryResult.errorCode}.` : undefined)
+        ?? (!outcome.cancelled && !successful
           ? `DraftRun exited with code ${outcome.exitCode ?? 'unknown'}.`
           : undefined);
       draftRun.status = outcome.cancelled
         ? 'cancelled'
-        : outcome.timedOut || outcome.error || outcome.exitCode !== 0
+        : !successful
           ? 'failed'
           : 'done';
     } catch (error) {
-      if (options.userApproval && options.signal?.aborted && !executionStarted) {
+      draftRun.executionStarted = executionStarted ? undefined : false;
+      draftRun.executionPhase = executionStarted ? 'result_unknown' : 'not_dispatched';
+      if (error instanceof CommandCapabilityError && !executionStarted) {
+        draftRun.status = 'needs_replan';
+        draftRun.capabilityDiagnostic = error.diagnostic;
+        draftRun.error = error.message;
+        draftRun.startedAt = undefined;
+      } else if (options.userApproval && options.signal?.aborted && !executionStarted) {
         // A revoked batch click does not turn a never-started command into a
         // failure or rejection. A future click must authorize it anew.
         draftRun.status = 'pending';
@@ -629,11 +694,14 @@ export class DraftRunStore {
     if (!source || isHistoryInactive(source) || !TERMINAL_STATUSES.has(source.status) || source.replan || source.dependency || source.spec.restricted || source.replacementDraftRunId) {
       return undefined;
     }
+    if (source.executionPhase === 'result_unknown'
+      || (source.status === 'failed' && source.executionStarted === undefined)) return undefined;
     const now = new Date().toISOString();
     const clone: DraftRun = {
       ...cloneDraftRun(source),
       id: randomUUID(),
       status: 'pending',
+      executionStarted: false, executionPhase: 'not_dispatched', gitQueryResult: undefined,
       authorizationSource: undefined,
       approvedAt: undefined,
       startedAt: undefined,
@@ -750,8 +818,12 @@ export class DraftRunStore {
       output: getDraftRunOutput(draftRun),
       error: draftRun.error ?? null,
       replacementDraftRunId: draftRun.replacementDraftRunId,
-      originalDraftRunId: draftRun.spec.restricted?.originalDraftRunId,
+      originalDraftRunId: draftRun.spec.restricted?.originalDraftRunId ?? draftRun.spec.replacesDraftRun?.draftRunId,
       executed: draftRun.replacementDraftRunId ? false : undefined,
+      executionStarted: draftRun.executionStarted,
+      executionPhase: draftRun.executionPhase ?? 'result_unknown',
+      capabilityDiagnostic: draftRun.capabilityDiagnostic,
+      gitQueryResult: draftRun.gitQueryResult,
       replan: draftRun.replan,
       dependency: draftRun.dependency,
       gitCommitEvidence: draftRun.gitCommitEvidence,
@@ -977,6 +1049,7 @@ function cloneProposal(proposal: DraftRunProposal): DraftRunProposal {
       ...proposal.spec,
       args: [...proposal.spec.args],
       env: proposal.spec.env.map((entry) => ({ ...entry })),
+      ...normalizeDraftRunPlan(proposal.spec),
       ...(proposal.spec.restricted ? { restricted: { ...proposal.spec.restricted } } : {})
     },
     effectAssessment: {
@@ -991,6 +1064,8 @@ function cloneDraftRun(draftRun: DraftRun): DraftRun {
   return { ...draftRun, ...cloneProposal(draftRun),
     replan: draftRun.replan ? { ...draftRun.replan, candidateArgs: draftRun.replan.candidateArgs?.slice() } : undefined,
     dependency: draftRun.dependency ? { ...draftRun.dependency } : undefined,
+    capabilityDiagnostic: normalizeCommandCapabilityDiagnostic(draftRun.capabilityDiagnostic),
+    gitQueryResult: normalizeGitQueryResult(draftRun.gitQueryResult),
     gitCommitPlan: draftRun.gitCommitPlan ? structuredClone(draftRun.gitCommitPlan) : undefined,
     gitCommitEvidence: draftRun.gitCommitEvidence ? structuredClone(draftRun.gitCommitEvidence) : undefined,
     gitPushAttempt: draftRun.gitPushAttempt ? structuredClone(draftRun.gitPushAttempt) : undefined,
@@ -1087,8 +1162,14 @@ function normalizeStoredDraftRun(value: unknown): DraftRun | undefined {
     || typeof plan.originalDraftRunId !== 'string' || typeof plan.target !== 'string' || typeof plan.targetUri !== 'string'
     || ![plan.originalSpecHash, plan.snapshotHash, plan.boundaryFingerprint].every(hash => typeof hash === 'string' && /^[a-f0-9]{64}$/u.test(hash))
     || !Number.isSafeInteger(plan.snapshotBytes) || plan.snapshotBytes < 0)) return undefined;
+  try { normalizeDraftRunPlan(record.spec); } catch { return undefined; }
   return cloneDraftRun({
     ...record,
+    executionStarted: typeof record.executionStarted === 'boolean' ? record.executionStarted : undefined,
+    executionPhase: ['not_dispatched', 'spawn_failed', 'exited', 'result_unknown'].includes(record.executionPhase ?? '')
+      ? record.executionPhase : 'result_unknown',
+    capabilityDiagnostic: normalizeCommandCapabilityDiagnostic(record.capabilityDiagnostic),
+    gitQueryResult: normalizeGitQueryResult(record.gitQueryResult),
     historyOriginUnverified: record.historyOriginUnverified === true || undefined,
     historyInvalidationId: typeof record.historyInvalidationId === 'string' && record.historyInvalidationId ? record.historyInvalidationId : undefined,
     replacementDraftRunId: typeof record.replacementDraftRunId === 'string' ? record.replacementDraftRunId : undefined,

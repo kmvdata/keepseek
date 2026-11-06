@@ -6,6 +6,8 @@ import type { RestrictedPythonSyntaxLaunch } from './restrictedPythonSyntax';
 import { StringDecoder } from 'node:string_decoder';
 import * as vscode from 'vscode';
 import type { DraftRun, ExecutionPermit } from '../shared/types';
+import { analyzeCommand } from '../approvals/authorization/commandSemantics';
+import { interpretGitQueryResult, type GitQueryResult } from './gitQueryResult';
 
 const RESTRICTED_OUTPUT_LIMIT_BYTES = 8_192;
 const EXIT_STREAM_CLOSE_GRACE_MS = 1_500;
@@ -18,12 +20,15 @@ export interface DraftRunOutputChunk {
 }
 
 export interface DraftRunExecutionOutcome {
+  /** Missing means unknown, including adapters that predate execution evidence. */
   started?: boolean;
+  phase?: 'not_dispatched' | 'spawn_failed' | 'exited' | 'result_unknown';
   exitCode?: number;
   signal?: string;
   timedOut: boolean;
   cancelled: boolean;
   error?: string;
+  queryResult?: GitQueryResult;
 }
 
 export interface VerifiedDraftRunLaunch {
@@ -78,6 +83,7 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
     validatePermit(input.draftRun, input.permit);
     const restricted = input.restrictedLaunch;
     const gitRemote = input.verifiedLaunch?.gitRemote;
+    const gitLocalQuery = analyzeCommand(input.draftRun.spec).gitLocalQuery;
     if (Boolean(input.draftRun.spec.restricted) !== Boolean(restricted)
       || (restricted && input.permit.source !== 'delegated_approver')) {
       throw new Error('Restricted DraftRun requires its verified launch and delegated permit.');
@@ -95,7 +101,7 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
       throw new Error('Another DraftRun is already running.');
     }
     if (input.signal?.aborted) {
-      return { started: false, timedOut: false, cancelled: true };
+      return { started: false, phase: 'not_dispatched', timedOut: false, cancelled: true };
     }
 
     const { pty, terminal } = this.getOrCreateSessionTerminal(input.draftRun.sessionId);
@@ -122,6 +128,7 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
     return await new Promise<DraftRunExecutionOutcome>((resolve) => {
       let settled = false;
       let started = false;
+      let spawnFailed = false;
       child.once('spawn', () => { started = true; });
       let exitCloseTimer: ReturnType<typeof setTimeout> | undefined;
       let terminationSettleTimer: ReturnType<typeof setTimeout> | undefined;
@@ -131,6 +138,9 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
       let outputLimitError: string | undefined;
       let remoteStdout = '';
       let remoteStderr = '';
+      let queryStdout = '';
+      let queryStderr = '';
+      let queryOutputTruncated = false;
       const stdoutDecoder = new StringDecoder('utf8');
       const stderrDecoder = new StringDecoder('utf8');
       const emit = (stream: DraftRunOutputChunk['stream'], text: string) => {
@@ -167,7 +177,16 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
           }
           return;
         }
-        emit(stream, decoder.write(chunk));
+        const text = decoder.write(chunk);
+        if (gitLocalQuery) {
+          // Query facts must be interpreted from complete bounded stdout, never
+          // from the store's display head/tail or from a model's claim.
+          if (stream === 'stdout' && gitLocalQuery.kind !== 'log') {
+            if (Buffer.byteLength(queryStdout, 'utf8') + chunk.byteLength <= 512 * 1024) queryStdout += text;
+            else queryOutputTruncated = true;
+          } else if (stream === 'stderr') queryStderr = (queryStderr + text).slice(0, 8192);
+        }
+        emit(stream, text);
       };
       child.stdout?.on('data', (chunk: Buffer) => onData('stdout', stdoutDecoder, chunk));
       child.stderr?.on('data', (chunk: Buffer) => onData('stderr', stderrDecoder, chunk));
@@ -195,13 +214,27 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
             outcome.error = gitTransportError(remoteStderr, gitRemote.kind, !started);
           }
         } else {
-          emit('stdout', stdoutDecoder.end());
-          emit('stderr', stderrDecoder.end());
+          const stdoutEnd = stdoutDecoder.end();
+          const stderrEnd = stderrDecoder.end();
+          queryStdout += stdoutEnd;
+          queryStderr += stderrEnd;
+          emit('stdout', stdoutEnd);
+          emit('stderr', stderrEnd);
+          if (gitLocalQuery) {
+            outcome.queryResult = interpretGitQueryResult(input.draftRun.spec, outcome, queryStdout, queryStderr);
+            if (queryOutputTruncated && outcome.queryResult) outcome.queryResult = {
+              version: 1, kind: gitLocalQuery.kind, errorCode: 'invalid_query_output'
+            };
+            if (outcome.queryResult?.errorCode) outcome.error =
+              `Git query ${outcome.queryResult.errorCode}. / Git 查询失败：${outcome.queryResult.errorCode}。`;
+          }
         }
         this.running.delete(input.draftRun.id);
         pty.write(`\r\n[KeepSeek DraftRun ${formatOutcomeLabel(outcome)}]\r\n`);
         pty.finishRun();
-        resolve({ ...outcome, started });
+        resolve({ ...outcome, started: started ? true : spawnFailed ? false : undefined,
+          phase: spawnFailed ? 'spawn_failed' : outcome.exitCode !== undefined || outcome.signal
+            ? 'exited' : 'result_unknown' });
       };
       const currentOutcome = (error?: string): DraftRunExecutionOutcome => ({
         exitCode,
@@ -241,11 +274,12 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
       if (input.signal?.aborted) {
         abortExecution();
       }
-      child.once('error', (error) => finish({
-        timedOut: running.timedOut,
-        cancelled: running.cancelRequested,
-        error: error.message
-      }));
+      child.once('error', (error) => {
+        // Node emits spawn only after a child has actually launched. A startup
+        // error without a pid proves it never did; a later error does not.
+        spawnFailed = !started && child.pid === undefined;
+        finish({ timedOut: running.timedOut, cancelled: running.cancelRequested, error: error.message });
+      });
       child.once('exit', (code, signal) => {
         if (settled) {
           return;

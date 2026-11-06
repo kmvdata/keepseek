@@ -1,3 +1,4 @@
+import { normalizeCommandCapabilityDiagnostic } from './authorization/commandCapability';
 import type { ChatSession } from '../shared/types';
 import type { HistoryTruncationScope } from '../sessions/historyTruncation';
 
@@ -36,7 +37,8 @@ export interface DraftRunReplanResult {
   specHash: string;
   rootTaskId: string;
   executionSegmentId: string;
-  phase: 'preflight';
+  phase: 'capability' | 'preflight';
+  diagnostic?: import('./authorization/commandCapability').CommandCapabilityDiagnostic;
   code: string;
   reason: string;
   executed: false;
@@ -104,9 +106,9 @@ export function normalizeDraftRunReplan(value: unknown, id: string, segmentId: s
   if (!v || v.draftRunId !== id || v.executionSegmentId !== segmentId
     || typeof v.specHash !== 'string' || (specHash !== undefined && specHash !== v.specHash)
     || typeof v.rootTaskId !== 'string' || typeof v.code !== 'string' || typeof v.reason !== 'string'
-    || v.phase !== 'preflight' || v.executed !== false) return undefined;
+    || !['capability', 'preflight'].includes(v.phase) || v.executed !== false) return undefined;
   return { draftRunId: id, executionSegmentId: segmentId, specHash: v.specHash, rootTaskId: v.rootTaskId,
-    phase: 'preflight', executed: false, code: v.code.slice(0, 100), reason: v.reason.slice(0, 2000),
+    phase: v.phase, diagnostic: normalizeCommandCapabilityDiagnostic(v.diagnostic), executed: false, code: v.code.slice(0, 100), reason: v.reason.slice(0, 2000),
     candidateArgs: Array.isArray(v.candidateArgs) && v.candidateArgs.every(arg => typeof arg === 'string')
       ? v.candidateArgs.slice(0, 16).map(arg => arg.slice(0, 300)) : undefined,
     dependsOn: typeof v.dependsOn === 'string' ? v.dependsOn : undefined };

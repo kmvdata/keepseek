@@ -15,7 +15,7 @@ import {
   mergeCostLimits,
   mergeDurations
 } from './executionPolicy';
-import { createRunCheckpoint, checkpointCopy, AgentInterruptedError, recoveryBlocker, endpointHash, isCostLimitExhausted, migrateLegacyCapacityCheckpoint } from './runCheckpoint';
+import { createRunCheckpoint, checkpointCopy, type RunCheckpoint, AgentInterruptedError, recoveryBlocker, endpointHash, isCostLimitExhausted, migrateLegacyCapacityCheckpoint } from './runCheckpoint';
 import { restorePluginSkillProgress, type PluginSkillProgress } from './runCheckpoint';
 import { assertPluginSkillsCurrent, executePluginSkillRead } from './pluginSkillRuntime';
 import {
@@ -214,6 +214,9 @@ import { DelegationTracker } from './delegation';
 import { createChangeSet } from '../edits/changeSet';
 import { RepairLoopTracker, RunValidationStateTracker } from './repairLoop';
 import { RunDetailsBuilder } from './logging/runDetails';
+import { commandCapabilityReplan, commandRecoveryKey } from '../runs/commandRecovery';
+import { analyzeCommandCapability } from '../approvals/authorization/commandCapability';
+import { normalizeDraftRunPlan } from '../runs/draftRunProposal';
 import { createDraftRunProposal } from '../runs/draftRunProposal';
 import { normalizeApprovalMode } from './approvalMode';
 import {
@@ -1814,6 +1817,9 @@ export class AgentLoop {
       const anthropicToolResults: AnthropicUserContentBlock[] = [];
       const acceptedEmulatedHandoffs: Array<{ toolCallId: string; toolName: string }> = [];
       const batchWorkFingerprints: string[] = [];
+      const commandRecoveryBatchId = createHash('sha256').update(JSON.stringify([
+        turn, assistant.tool_calls?.map(call => call.id) ?? []
+      ])).digest('hex');
       let rolloverAfterBatchReason: ContextEpochRolloverReason | undefined;
       let strategyWarningAfterBatch = false;
       let noProgressStopAfterBatch = false;
@@ -2066,6 +2072,8 @@ export class AgentLoop {
                 authorization: authorizationDecision,
                 historyArchive: request.historyArchive,
                 parentRequest: request,
+                commandRecovery: checkpoint,
+                commandRecoveryBatchId,
                 parentRunId: trace.runId,
                 onUsage: runCallbacks.onUsage,
                 onUsageLedgerRecord: runCallbacks.onUsageLedgerRecord,
@@ -2492,6 +2500,9 @@ export class AgentLoop {
       committedProvider = structuredClone(providerRunState);
       checkpoint.lastStepAt = new Date().toISOString();
       await saveStep();
+      if (checkpoint.commandRecoveryExhausted) {
+        throw new AgentInterruptedError('no_progress_loop', 'Command correction stopped: the same root cause repeated or the task correction budget was exhausted. Diagnostics and successful work are saved. / 命令纠错已停止：同根因重复或任务纠错预算耗尽，诊断及已完成工作已保存。');
+      }
       if (noProgressStopAfterBatch) {
         throw new AgentInterruptedError('no_progress_loop', request.language === 'en'
           ? 'The task stopped because the same tool work and unchanged result repeated after a strategy-change warning.'
@@ -3742,6 +3753,8 @@ ${launch.evidence.content}`;
       evidenceTaskId?: string;
       exposedToolNames?: ReadonlySet<string>;
       onPluginSkillRead?: (progress: PluginSkillProgress) => void;
+      commandRecovery?: RunCheckpoint;
+      commandRecoveryBatchId?: string;
       delegation?: DelegationTracker;
     } = {}
   ): Promise<string> {
@@ -3926,7 +3939,7 @@ ${launch.evidence.content}`;
             expectedSnapshot: options.authorization.executionSnapshot
           });
         case RUN_DRAFT_TOOL_NAME:
-          return await this.createDraftRun(args, draftRuns, options.parentRequest?.approvalMode, language);
+          return await this.createDraftRun(args, draftRuns, options.parentRequest?.approvalMode, language, options.commandRecovery, options.parentRequest, options.commandRecoveryBatchId);
         case CREATE_DRAFT_EDIT_TOOL_NAME:
           return await this.createDraftEdit(args, draftEdits, language);
         case CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME:
@@ -4042,9 +4055,18 @@ ${launch.evidence.content}`;
     args: Record<string, unknown>,
     draftRuns: DraftRunProposal[],
     approvalMode: AgentRequest['approvalMode'],
-    language: KeepseekLanguage
+    language: KeepseekLanguage,
+    commandRecovery?: RunCheckpoint,
+    parentRequest?: AgentRequest,
+    commandRecoveryBatchId?: string
   ): Promise<string> {
     const rawArgs = args.args;
+    if ((parentRequest?.requestProtocolVersion ?? 1) < 15
+      && (args.prerequisites !== undefined || args.replacesDraftRun !== undefined)) {
+      return JSON.stringify({ ok: false, errorType: 'command_plan_protocol_required', phase: 'capability',
+        started: false, executed: false, requiredProtocolVersion: 15,
+        message: 'Command plan fields require a controlled protocol boundary. Nothing prepared or dispatched; prerequisite gates were not discarded. / 命令计划字段需要在受控边界升级协议。未准备或启动命令，未丢弃前置条件。' });
+    }
     if (!Array.isArray(rawArgs) || !rawArgs.every((value) => typeof value === 'string')) {
       throw new Error('Tool argument "args" must be an array of strings.');
     }
@@ -4068,9 +4090,40 @@ ${launch.evidence.content}`;
       workspaceFolder: this.readOptionalString(args, 'workspaceFolder'),
       cwd: this.readOptionalString(args, 'cwd'),
       timeoutMs: this.readOptionalNumber(args, 'timeoutMs'),
-      env
+      env,
+      ...((parentRequest?.requestProtocolVersion ?? 1) >= 15 ? normalizeDraftRunPlan(args) : {})
     });
-    draftRuns.push(draftRun);
+    // Old frozen schemas cannot express immutable replacement links. Diagnose
+    // before creating a persistent draft there; intent/evidence still retains
+    // the original argv and result. V15 keeps the source draft for linked audit.
+    const persistProposal = !draftRun.capabilityDiagnostic?.blocking || (parentRequest?.requestProtocolVersion ?? 1) >= 15;
+    if (persistProposal) draftRuns.push(draftRun);
+    if (draftRun.capabilityDiagnostic?.blocking) {
+      const rootTaskId = parentRequest?.approvalRootTaskId ?? commandRecovery?.taskId ?? 'current-tool-loop';
+      const run = { ...draftRun, agentRunId: commandRecovery?.taskId ?? '', status: 'pending',
+        executionStarted: false, executionPhase: 'not_dispatched' } as import('../shared/types').DraftRun;
+      const diagnosis = commandCapabilityReplan(run, rootTaskId)!;
+      const keys = commandRecovery?.commandRecoveryKeys ?? [];
+      const key = commandRecoveryKey(run, diagnosis);
+      const recoveryBatch = commandRecovery?.commandRecoveryBatch;
+      const sameBatch = recoveryBatch && recoveryBatch.id === commandRecoveryBatchId ? recoveryBatch.keys : [];
+      const observed = sameBatch.includes(key);
+      const exhausted = !observed && (keys.includes(key) || keys.length >= 2);
+      if (commandRecovery) {
+        if (!exhausted && !observed) { keys.push(key); sameBatch.push(key); }
+        if (commandRecoveryBatchId) commandRecovery.commandRecoveryBatch = { id: commandRecoveryBatchId, keys: sameBatch };
+        commandRecovery.commandRecoveryKeys = keys;
+        commandRecovery.commandRecoveryExhausted = exhausted || undefined;
+      }
+      return JSON.stringify({ ok: false, status: 'needs_replan', executed: false, started: false,
+        draftRunId: draftRun.id, specHash: draftRun.specHash, proposalPersisted: persistProposal, diagnostic: draftRun.capabilityDiagnostic,
+        recovery: { allowed: !exhausted, reason: exhausted ? 'command_recovery_limit' : 'fresh_proposal_required', remaining: Math.max(0, 2 - keys.length) },
+        capability: { version: draftRun.capabilityDiagnostic.capabilityVersion,
+          supportedForms: analyzeCommandCapability(draftRun.spec).supportedForms,
+          scope: 'Finite host argv grammar; dynamic executable, repository, scope and authorization checks still apply.' },
+        message: 'Nothing dispatched. Preserve the original goal and all prerequisites; prepare a fresh proposal with a new identity. Candidate argv are suggestions requiring fresh checks and approval. Do not remove unknown options blindly or bypass a safety denial. / 尚未启动。保留原目标及所有前置条件，准备新身份草稿；候选需重新检查审批，勿盲删未知参数或绕过安全拒绝。'
+      });
+    }
     return JSON.stringify({
       ok: true,
       draftRun: {

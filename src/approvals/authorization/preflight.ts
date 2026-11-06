@@ -65,9 +65,9 @@ export async function inspectAutomaticRunAuthorization(run: DraftRun, grants: Ex
       reason: 'Automatic Git release requires a bounded ref query or an explicit, non-forced push. / 自动 Git 发布要求范围明确的引用查询，或显式且非强制的引用推送。' }
       : !allowed || knownRemote && !grants.matches(draftRunIdentity(run), scope) ? { code: 'external_authorization_required' as const,
       reason: reason || 'An exact external operation grant is required. / 此操作需要事先精确授权外部目标。' }
-      : packageGlobal || gitUnverified || gitUnbounded ? { code: 'hard_blocked' as const,
+      : packageGlobal || gitUnbounded ? { code: 'hard_blocked' as const,
         reason: reason || 'The command would use an unverified repository, configuration or system target. / 命令涉及未经核实的仓库、配置或系统目标。' }
-        : hasIncompleteLaunch ? { code: 'insufficient_launch_evidence' as const,
+        : gitUnverified || hasIncompleteLaunch ? { code: 'insufficient_launch_evidence' as const,
           reason: reason || 'The exact launch cannot be verified. / 无法核实实际启动配置。' } : undefined;
     return { allowed: !refusal, refusal, route: scope.trustedProjectScript || (!scope.uncertain && !scope.externalUris.length)
       ? 'host_policy' : 'auto_approval_review', scope, authorizedUris, reason };

@@ -18,7 +18,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-const success: DraftRunExecutionOutcome = { exitCode: 0, timedOut: false, cancelled: false };
+const success: DraftRunExecutionOutcome = { started: true, phase: 'exited', exitCode: 0, timedOut: false, cancelled: false };
 
 class DisplayTestExecutor implements DraftRunExecutorAdapter {
   calls: string[] = [];

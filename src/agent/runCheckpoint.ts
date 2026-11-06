@@ -48,6 +48,11 @@ export interface RunCheckpoint {
   runBudget?: LogicalRunBudgetState;
   budgetLimits?: import('./executionPolicy').LogicalRunBudgetLimits;
   retries: number;
+  /** Finite correction ledger inherited by every segment and epoch in a task. */
+  commandRecoveryKeys?: string[];
+  commandRecoveryExhausted?: boolean;
+  /** Same response siblings count as one observation; persisted for interrupted delivery. */
+  commandRecoveryBatch?: { id: string; keys: string[] };
   lastNetworkAt?: string;
   lastEventAt?: string;
   lastContentAt?: string;
@@ -188,6 +193,12 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
         if (!args || typeof args !== 'object' || Array.isArray(args)) return undefined;
       }
     }
+    if (cp.commandRecoveryKeys !== undefined && (!Array.isArray(cp.commandRecoveryKeys)
+      || cp.commandRecoveryKeys.length > 2 || cp.commandRecoveryKeys.some(key => typeof key !== 'string' || !/^[a-f0-9]{64}$/u.test(key)))) return undefined;
+    if (cp.commandRecoveryBatch !== undefined && (!cp.commandRecoveryBatch || !/^[a-f0-9]{64}$/u.test(cp.commandRecoveryBatch.id)
+      || !Array.isArray(cp.commandRecoveryBatch.keys) || cp.commandRecoveryBatch.keys.length > 2
+      || cp.commandRecoveryBatch.keys.some(key => typeof key !== 'string' || !/^[a-f0-9]{64}$/u.test(key)))) return undefined;
+    if (cp.commandRecoveryExhausted !== undefined && typeof cp.commandRecoveryExhausted !== 'boolean') return undefined;
     if (cp.exactRecoveryBlocked !== undefined && typeof cp.exactRecoveryBlocked !== 'boolean') return undefined;
     if (cp.outputBudgetPolicyVersion !== undefined && ![1, OUTPUT_BUDGET_POLICY_VERSION].includes(cp.outputBudgetPolicyVersion)) return undefined;
     if (cp.lastRequestBudget && !normalizeRequestBudget(cp.lastRequestBudget)) return undefined;
@@ -520,6 +531,8 @@ export function grantCheckpointToolBudgetSegment(cp: RunCheckpoint): RunCheckpoi
 
 /** A host continuation inherits safety counters, never prior tool state or approvals. */
 export function inheritTaskBudget(cp: RunCheckpoint, budget: import('../sessions/userTaskBudget').UserTaskBudget): void {
+  cp.commandRecoveryKeys = budget.commandRecoveryKeys?.slice();
+  cp.commandRecoveryExhausted = budget.commandRecoveryExhausted;
   cp.usedMs = budget.usedMs;
   cp.maxExecutionMs = budget.maxExecutionMs;
   cp.maxCost = budget.maxCost;

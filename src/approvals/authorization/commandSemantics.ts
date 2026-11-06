@@ -19,12 +19,34 @@ export interface CommandSemantics {
   gitStage?: { pathspecs: string[] };
   gitTagQuery?: true;
   gitTagQueryNeedsSort?: true;
+  gitLocalQuery?: GitLocalQuery;
   gitTagCreate?: { ref: string; target?: string };
   gitRemote?: GitRemoteCommand;
   gitCommit?: { all: boolean; messages: string[] };
   gitRefMutation?: { name: string; action: 'create' | 'delete' | 'force' };
   gitReplan?: GitCommandReplan;
   projectScript?: true;
+}
+
+/** Exact finite query grammar. Runtime, repository and helper checks remain mandatory. */
+export interface GitLocalQuery {
+  kind: 'ancestor' | 'tag_list' | 'revision_parse' | 'revision_count' | 'log';
+  revisions: string[];
+}
+
+/** Local refs, bounded ancestry suffixes and explicit object peeling; no reflog,
+ * path lookup (revision:path), command substitution or revision-set shortcuts. */
+export function isLocalGitRevision(value: string): boolean {
+  if (!value || value.length > 512) return false;
+  const base = value.replace(/(?:(?:[~^]\d{0,6})|(?:\^\{(?:tree|commit|tag|object)\}))+$/u, '');
+  return /^[\p{L}\p{N}_][\p{L}\p{N}_.+/-]*$/u.test(base)
+    && !base.includes('..') && !base.includes('//') && !base.endsWith('.') && !base.endsWith('/')
+    && base.split('/').every(part => !part.startsWith('.') && !part.endsWith('.lock'));
+}
+
+export function isLocalGitRevisionRange(value: string): boolean {
+  const parts = value.split('..');
+  return parts.length === 2 && parts.every(isLocalGitRevision);
 }
 
 export type GitRemoteCommand =
@@ -136,13 +158,21 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
   const reason = (code: AuthorizationReason['code'], detail: string, en: string, zh: string) => {
     result.reasons.push(authorizationReason(code, detail, en, zh));
   };
-  const unsupported = (value: string) => reason('unsupported_option', value,
-    'This argument or behavior is outside the host command grammar.',
-    '该参数或行为不在宿主命令语法内。');
+  const unsupported = (value: string, argumentIndex?: number) => {
+    reason('unsupported_option', value, 'This argument or behavior is outside the host command grammar.',
+      '该参数或行为不在宿主命令语法内。');
+    if (argumentIndex !== undefined) result.reasons.at(-1)!.argumentIndex = argumentIndex;
+  };
+  const invalid = (detail: string, argumentIndex?: number) => {
+    reason('invalid_argv', detail, 'Invalid or incomplete arguments for this supported query.',
+      '此受支持查询的参数无效或不完整。');
+    if (argumentIndex !== undefined) result.reasons.at(-1)!.argumentIndex = argumentIndex;
+  };
   const valueAfter = (index: number, role: ArgumentRole): number => {
     arg(index, 'option');
     if (index + 1 >= args.length) {
       reason('missing_option_value', args[index], 'Missing option value.', '缺少选项值。');
+      result.reasons.at(-1)!.argumentIndex = index;
       return index;
     }
     arg(index + 1, role);
@@ -177,10 +207,11 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
         else arg(i, 'option_value');
         reason('git_configuration', token, 'Git configuration is overridden.', 'Git 配置被覆盖。');
       } else {
-        arg(i, 'option'); unsupported(token);
+        arg(i, 'option'); unsupported(token, i);
         if (['-p', '--paginate'].includes(token) || token.startsWith('--exec-path')) helper(token);
       }
     }
+    const subcommandIndex = i;
     const subcommand = args[i];
     if (subcommand) arg(i++, 'subcommand');
     const operands = args.slice(i);
@@ -213,7 +244,27 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
     const staging = subcommand === 'add';
     const committing = subcommand === 'commit';
     const status = subcommand === 'status';
-    if (!viewing && !staging && !committing && !status && !listingTags && !boundedRef && !result.gitRemote) unsupported(subcommand ?? 'missing Git subcommand');
+    const localQuery = ['merge-base', 'rev-parse', 'rev-list'].includes(subcommand);
+    if (!viewing && !staging && !committing && !status && !listingTags && !boundedRef && !result.gitRemote && !localQuery) unsupported(subcommand ?? 'missing Git subcommand', subcommand ? subcommandIndex : undefined);
+    let query: GitLocalQuery | undefined;
+    if (localQuery) {
+      const revisions = subcommand === 'rev-parse' ? operands : operands.slice(1);
+      const valid = subcommand === 'merge-base'
+        ? operands[0] === '--is-ancestor' && revisions.length === 2 && revisions.every(isLocalGitRevision)
+        : subcommand === 'rev-list'
+          ? operands[0] === '--count' && revisions.length === 1
+            && (isLocalGitRevision(revisions[0]) || isLocalGitRevisionRange(revisions[0]))
+          : revisions.length >= 1 && revisions.length <= 16 && revisions.every(isLocalGitRevision);
+      if (valid) query = { kind: subcommand === 'merge-base' ? 'ancestor' : subcommand === 'rev-list' ? 'revision_count' : 'revision_parse', revisions };
+      else {
+        const option = subcommand === 'merge-base' ? '--is-ancestor' : subcommand === 'rev-list' ? '--count' : undefined;
+        const bad = operands.findIndex((token, offset) => option && offset === 0 ? token !== option
+          : !(isLocalGitRevision(token) || subcommand === 'rev-list' && isLocalGitRevisionRange(token)));
+        if (bad >= 0 && operands[bad].startsWith('-')) unsupported(operands[bad], i + bad);
+        else invalid(bad >= 0 ? operands[bad] : `${subcommand} requires ${subcommand === 'merge-base' ? '--is-ancestor and two revisions' : subcommand === 'rev-list' ? '--count and one revision or A..B range' : 'one to sixteen local revisions'}`,
+          bad >= 0 ? i + bad : undefined);
+      }
+    }
     const commitMessages: string[] = [];
     const commitPathspecPositions: number[] = [];
     let commitAll = false;
@@ -222,8 +273,10 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
     let noIndex = false;
     for (; i < args.length; i++) {
       const token = args[i];
-      if (!paths && token === '--') { paths = true; arg(i, 'option'); continue; }
-      if (tagRoles) {
+      if (localQuery) {
+        arg(i, token.startsWith('-') ? 'option' : 'revision');
+      } else if (!paths && token === '--') { paths = true; arg(i, 'option'); continue; }
+      else if (tagRoles) {
         arg(i, tagRoles[i - (args.length - operands.length)]);
       } else if (result.gitRemote) {
         arg(i, token.startsWith('-') ? 'option' : 'text');
@@ -256,7 +309,7 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
           commitPathspecPositions.push(i + 1);
         } else {
           unsupportedCommitOption = true;
-          unsupported(token);
+          unsupported(token, i);
           if (['-F', '--file', '-t', '--template', '--pathspec-from-file'].includes(token)) {
             i = valueAfter(i, 'read_path');
           } else if (/^(?:--(?:file|template|pathspec-from-file)=|-[Ft].)/su.test(token)) {
@@ -273,49 +326,49 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
           arg(i, 'option');
         } else if (paths || !token.startsWith('-')) {
           arg(i, 'read_path');
-          if (token.startsWith(':') || /[*?[]/u.test(token)) unsupported(token);
+          if (token.startsWith(':') || /[*?[]/u.test(token)) unsupported(token, i);
         } else {
-          arg(i, 'option'); unsupported(token);
+          arg(i, 'option'); unsupported(token, i);
         }
       } else if (paths) {
         arg(i, 'read_path');
         if (token.startsWith(':') || /[*?[]/u.test(token)) reason('unsupported_pathspec', token,
           'Git pathspec expansion is not resolved by this preflight.', '此预检不解析 Git pathspec 展开范围。');
       } else if (token === '--output' || token.startsWith('--output=')) {
-        effects.add('workspace_write'); unsupported(token);
+        effects.add('workspace_write'); unsupported(token, i);
         if (token === '--output') i = valueAfter(i, 'write_path');
         else arg(i, 'write_path', token.slice('--output='.length));
       } else if (['--ext-diff', '--textconv', '--show-signature'].includes(token)) {
         arg(i, 'option'); helper(token);
       } else if (token === '--remerge-diff' || /^--diff-merges=(?:remerge|r)$/u.test(token)) {
-        arg(i, 'option'); effects.add('workspace_write'); unsupported(token);
+        arg(i, 'option'); effects.add('workspace_write'); unsupported(token, i);
       } else if (token === '-O' || token.startsWith('-O')) {
-        unsupported(token);
+        unsupported(token, i);
         if (token === '-O') i = valueAfter(i, 'read_path');
         else arg(i, 'read_path', token.slice(2));
       } else if (['-n', '--max-count', '-U', '--unified'].includes(token)) {
         i = valueAfter(i, 'option_value');
-        if (!/^\d+$/u.test(args[i])) unsupported(args[i]);
+        if (!/^\d+$/u.test(args[i])) invalid(args[i] ?? token, i);
       } else if (/^(?:--(?:format|pretty|date|encoding|grep|author|committer)=)/u.test(token)) {
         const value = token.slice(token.indexOf('=') + 1);
         arg(i, 'text', value);
         if (/^--(?:format|pretty)=/u.test(token) && /%G/u.test(value)) helper(token);
       } else if (/^(?:--(?:max-count|unified)=\d+|-[nU]\d+)$/u.test(token)
         || (subcommand === 'log' && /^-\d+$/u.test(token))
-        || (subcommand === 'log' && /^--decorate(?:=(?:short|full|auto|no))?$/u.test(token))
+        || (subcommand === 'log' && /^(?:--no-decorate|--decorate(?:=(?:short|full|auto|no))?)$/u.test(token))
         || ['--format', '--pretty', '--oneline', '--stat', '--numstat', '--shortstat', '--name-only', '--name-status',
           '--raw', '-p', '-u', '--patch', '-s', '--no-patch', '--no-ext-diff', '--no-textconv', '--no-color',
           '--color=never', '--cached', '--staged', '--summary', '--check', '--binary', '--full-index', '--no-renames', '--exit-code', '--quiet'].includes(token)) {
         arg(i, 'option');
       } else if (token === '--no-index') {
-        arg(i, 'option'); noIndex = true; unsupported(token);
+        arg(i, 'option'); noIndex = true; unsupported(token, i);
       } else if (token.startsWith('-')) {
-        arg(i, 'option'); unsupported(token);
+        arg(i, 'option'); unsupported(token, i);
       } else {
         // A bare diff operand may be a revision or a file. Git can
         // implicitly use --no-index when an operand is outside the worktree.
-        const obviousRevision = /^(?:HEAD|[a-f0-9]{4,64}|refs\/[a-zA-Z0-9_./-]+)(?:[~^]\d*)?$/u.test(token)
-          && !/(?:^|\/)\.\.(?:\/|$)/u.test(token);
+        const obviousRevision = isLocalGitRevisionRange(token) || isLocalGitRevision(token)
+          && (subcommand === 'log' && !token.includes('/') || /^(?:HEAD|[a-f0-9]{4,64}|refs\/)/u.test(token) || /\^\{(?:tree|commit|tag|object)\}$/u.test(token));
         arg(i, noIndex || !obviousRevision ? 'read_path' : 'revision');
       }
     }
@@ -342,6 +395,13 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
     }
     if (result.gitReplan) {
       result.reasons.push({ code: 'git_commit_argv', detail: result.gitReplan.code, message: result.gitReplan.message });
+    }
+    if (!result.reasons.some(item => ['unsupported_option', 'missing_option_value', 'invalid_argv', 'external_helper', 'git_configuration'].includes(item.code))) {
+      if (query) result.gitLocalQuery = query;
+      else if (listingTags) result.gitLocalQuery = { kind: 'tag_list', revisions: [] };
+      else if (subcommand === 'log' && !effects.has('workspace_write')) result.gitLocalQuery = {
+        kind: 'log', revisions: result.arguments.filter(item => item.role === 'revision').map(item => item.value)
+      };
     }
     // This exact display-only override has an equivalent for captured stdout.
     // Keep the original config override outside the automatic approval grammar.
@@ -372,7 +432,7 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
       if (!paths && token.startsWith('-') && token !== '-') {
         if (['head', 'tail'].includes(program) && ['-n', '-c', '--lines', '--bytes'].includes(token)) {
           i = valueAfter(i, 'option_value');
-          if (!/^[+-]?\d+$/u.test(args[i])) unsupported(args[i]);
+          if (!/^[+-]?\d+$/u.test(args[i])) invalid(args[i] ?? token, i);
         } else if (['head', 'tail'].includes(program) && /^(?:-[nc][+-]?\d+|--(?:lines|bytes)=[+-]?\d+)$/u.test(token)) {
           arg(i, 'option');
         } else if (['grep', 'rg'].includes(program) && ['-e', '--regexp', '-f', '--file'].includes(token)) {
@@ -380,9 +440,9 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
         } else if (['grep', 'rg'].includes(program) && /^--(?:regexp|file)=/u.test(token)) {
           patternSeen = true; arg(i, token.startsWith('--file=') ? 'read_path' : 'text', token.slice(token.indexOf('=') + 1));
         } else if (shortOptions[program].test(token)) arg(i, 'option');
-        else { arg(i, 'option'); unsupported(token); if (/^--(?:pre|hostname-bin)(?:=|$)/u.test(token)) helper(token); }
+        else { arg(i, 'option'); unsupported(token, i); if (/^--(?:pre|hostname-bin)(?:=|$)/u.test(token)) helper(token); }
       } else if (!patternSeen) { arg(i, 'text'); patternSeen = true; }
-      else if (program === 'pwd') { arg(i, 'text'); unsupported(token); }
+      else if (program === 'pwd') { arg(i, 'text'); unsupported(token, i); }
       else arg(i, 'read_path');
     }
     // rg searches directories, ignore/config files and symlinked explicit roots;

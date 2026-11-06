@@ -131,8 +131,31 @@ test('SpawnDraftRunExecutor honors a pre-aborted signal without opening a proces
   });
 
   assert.equal(outcome.cancelled, true);
+  assert.equal(outcome.started, false);
+  assert.equal(outcome.phase, 'not_dispatched');
   assert.equal(output, '');
   assert.equal(executor.showTerminal(draftRun.id), false);
+});
+
+test('SpawnDraftRunExecutor distinguishes a failed launch from an executed command', async () => {
+  const executor = new SpawnDraftRunExecutor();
+  try {
+    const missing = createDraftRun([]);
+    missing.spec.executable = os.tmpdir() + '/keepseek-definitely-missing-executable';
+    missing.specHash = hashDraftRunSpec(missing.spec);
+    const failed = await executor.execute({ draftRun: missing,
+      permit: new DraftRunAuthorizationService().createUserClickPermit(missing), onOutput: () => {} });
+    assert.equal(failed.started, false);
+    assert.equal(failed.phase, 'spawn_failed');
+    assert.equal(failed.exitCode, undefined);
+    assert.match(failed.error ?? '', /ENOENT/u);
+    const actual = createDraftRun(['-e', 'process.exitCode = 3']);
+    const exited = await executor.execute({ draftRun: actual,
+      permit: new DraftRunAuthorizationService().createUserClickPermit(actual), onOutput: () => {} });
+    assert.equal(exited.started, true);
+    assert.equal(exited.phase, 'exited');
+    assert.equal(exited.exitCode, 3);
+  } finally { executor.dispose(); }
 });
 
 test('SpawnDraftRunExecutor settles when a detached descendant keeps inherited output open', {

@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import { Script } from 'node:vm';
 import * as vscode from './stubs/vscode';
 import { DraftRunBatchCoordinator } from '../src/runs/draftRunBatchCoordinator';
+import { canIsolateDraftRunFailure, inspectDraftRunDependencies, orderDraftRunDependencies } from '../src/runs/draftRunDependencies';
 import { DraftRunStore } from '../src/runs/draftRunStore';
 import { DraftRunAuthorizationService } from '../src/runs/draftRunAuthorization';
 import { hashDraftRunSpec } from '../src/runs/draftRunProposal';
@@ -23,7 +24,7 @@ function deferred<T>() {
   const promise = new Promise<T>((done) => { resolve = done; });
   return { promise, resolve };
 }
-const success: DraftRunExecutionOutcome = { exitCode: 0, timedOut: false, cancelled: false };
+const success: DraftRunExecutionOutcome = { exitCode: 0, timedOut: false, cancelled: false, started: true, phase: 'exited' };
 class ControlledExecutor implements DraftRunExecutorAdapter {
   calls: Parameters<DraftRunExecutorAdapter['execute']>[0][] = [];
   active = 0;
@@ -189,6 +190,112 @@ test('failures and timeout in B leave C pending, without model continuation or r
   }
 });
 
+test('a failed readonly observation does not stop a verified independent observation or launch the later mutation', async () => fixture(async f => {
+  const reads = [f.proposal('first', { executable: 'pwd', args: [], env: [] }),
+    f.proposal('independent', { executable: 'ls', args: ['.'], env: [] }), f.proposal('mutation')];
+  f.store.addProposals({ proposals: reads, sessionId: 's', agentRunId: 'r', messageId: 'assistant' });
+  const executing = f.execute(f.accept());
+  await f.executor.started(1); f.executor.finish('first', { ...success, exitCode: 2 });
+  await f.executor.started(2); f.executor.finish('independent');
+  await executing;
+  assert.deepEqual(f.executor.calls.map(call => call.draftRun.id), ['first', 'independent']);
+  assert.equal(f.store.get('first')?.status, 'failed');
+  assert.equal(f.store.get('independent')?.status, 'done');
+  assert.equal(f.store.get('mutation')?.status, 'pending');
+  assert.equal(f.batch.state?.phase, 'failed');
+  assert.equal(f.batch.state?.completed, 1);
+}));
+
+test('immutable evidence dependencies reject absent, cross-task, hash-changed, cyclic and replacement records', async () => fixture(async f => {
+  const [first, second] = f.add(['first', 'second']);
+  const get = (id: string) => id === first.id ? first : id === second.id ? second : undefined;
+  first.status = 'done';
+  second.spec.prerequisites = [{ draftRunId: first.id, specHash: first.specHash, condition: 'completed' }];
+  assert.equal(inspectDraftRunDependencies(second, get).allowed, true);
+  assert.equal(inspectDraftRunDependencies(second, get, new Set([second.id])).code, 'dependency_identity');
+  assert.equal(inspectDraftRunDependencies(second, () => undefined).code, 'dependency_missing');
+  const originalHash = first.specHash;
+  first.specHash = 'changed';
+  assert.equal(inspectDraftRunDependencies(second, get).code, 'dependency_identity');
+  first.specHash = originalHash;
+  first.agentRunId = 'another-task';
+  assert.equal(inspectDraftRunDependencies(second, get).code, 'dependency_identity');
+  first.agentRunId = second.agentRunId;
+  first.replacementDraftRunId = 'new-draft';
+  assert.equal(inspectDraftRunDependencies(second, get).code, 'dependency_identity');
+  delete first.replacementDraftRunId;
+  first.spec.prerequisites = [{ draftRunId: second.id, specHash: second.specHash, condition: 'completed' }];
+  assert.equal(inspectDraftRunDependencies(second, get).code, 'dependency_cycle');
+  delete first.spec.prerequisites;
+  assert.deepEqual(orderDraftRunDependencies([second.id, first.id], get), [first.id, second.id]);
+  first.gitQueryResult = { version: 1, kind: 'ancestor', predicate: false };
+  assert.equal(inspectDraftRunDependencies(second, get).code, 'dependency_condition');
+  first.gitQueryResult.predicate = true;
+  second.spec.prerequisites[0].condition = 'predicate_true';
+  assert.equal(inspectDraftRunDependencies(second, get).allowed, true);
+  delete first.gitQueryResult;
+  assert.equal(inspectDraftRunDependencies(second, get).code, 'dependency_condition');
+}));
+
+test('a manual finite batch orders bound prerequisites and refuses invalid dependencies without stopping independent queries', async () => {
+  await fixture(async f => {
+    const observation = f.proposal('observation', { executable: 'pwd', args: [], env: [] });
+    const dependent = f.proposal('dependent', { prerequisites: [{ draftRunId: observation.id, specHash: observation.specHash, condition: 'completed' }] });
+    f.store.addProposals({ proposals: [dependent, observation], sessionId: 's', agentRunId: 'r', messageId: 'assistant' });
+    const executing = f.execute(f.accept());
+    await f.executor.started(1);
+    assert.equal(f.executor.calls[0].draftRun.id, observation.id);
+    f.executor.finish(observation.id);
+    await f.executor.started(2); f.executor.finish(dependent.id);
+    await executing;
+    assert.equal(f.batch.state?.phase, 'waiting');
+    assert.deepEqual(f.executor.calls.map(call => call.draftRun.id), [observation.id, dependent.id]);
+  });
+  await fixture(async f => {
+    const bad = f.proposal('bad-dependency', { prerequisites: [{ draftRunId: 'missing', specHash: '0'.repeat(64), condition: 'completed' }] });
+    const observation = f.proposal('observation', { executable: 'pwd', args: [], env: [] });
+    f.store.addProposals({ proposals: [bad, observation], sessionId: 's', agentRunId: 'r', messageId: 'assistant' });
+    const executing = f.execute(f.accept());
+    await f.executor.started(1); f.executor.finish(observation.id);
+    await executing;
+    assert.deepEqual(f.executor.calls.map(call => call.draftRun.id), [observation.id]);
+    assert.equal(f.store.get(bad.id)?.dependency?.targetId, 'missing');
+    assert.equal(f.batch.state?.phase, 'failed');
+  });
+});
+
+test('only an explicit host no-dispatch fact isolates an unknown failed predecessor', async () => fixture(async f => {
+  const [failed, query] = f.store.addProposals({ proposals: [f.proposal('unknown'),
+    f.proposal('query', { executable: 'pwd', args: [], env: [] })], sessionId: 's', agentRunId: 'r' });
+  failed.status = 'failed';
+  delete failed.executionStarted;
+  delete failed.executionPhase;
+  assert.equal(await canIsolateDraftRunFailure(query, [failed], new Set()), false);
+  failed.executionStarted = false;
+  assert.equal(await canIsolateDraftRunFailure(query, [failed], new Set()), false);
+  failed.executionPhase = 'not_dispatched';
+  assert.equal(await canIsolateDraftRunFailure(query, [failed], new Set()), true);
+  failed.executionStarted = true;
+  failed.executionPhase = 'result_unknown';
+  assert.equal(await canIsolateDraftRunFailure(query, [failed], new Set()), false);
+}));
+
+test('a false ancestor result blocks following writes even without a model-supplied prerequisite', async () => fixture(async f => {
+  const predicate = f.proposal('ancestor', { executable: 'git', args: ['merge-base', '--is-ancestor', '0.5.0', 'HEAD'], env: [] });
+  const mutation = f.proposal('rewrite');
+  const observation = f.proposal('independent', { executable: 'pwd', args: [], env: [] });
+  f.store.addProposals({ proposals: [predicate, mutation, observation], sessionId: 's', agentRunId: 'r', messageId: 'assistant' });
+  const executing = f.execute(f.accept());
+  await f.executor.started(1);
+  f.executor.finish(predicate.id, { ...success, exitCode: 1, queryResult: { version: 1, kind: 'ancestor', predicate: false } });
+  await f.executor.started(2); f.executor.finish(observation.id);
+  await executing;
+  assert.deepEqual(f.executor.calls.map(call => call.draftRun.id), [predicate.id, observation.id]);
+  assert.equal(f.store.get(predicate.id)?.status, 'done');
+  assert.equal(f.store.get(mutation.id)?.dependency?.targetId, predicate.id);
+  assert.equal(f.batch.state?.phase, 'failed');
+}));
+
 test('per-command cwd validation allows a directory created by A; missing cwd stops B and leaves C pending', async () => {
   for (const create of [true, false]) await fixture(async (f) => {
     const cwd = path.join(f.workspaceRoot, 'generated');
@@ -253,7 +360,7 @@ test('whole snapshot requires trust and exact external cwd authorization, withou
 test('old cancellation and continuation flags do not block a fresh batch; clones stay outside its authorization', async () => fixture(async (f) => {
   f.add(['old', 'A', 'B']);
   const old = f.store.approveAndRun('old', new Set(), { autoContinue: true });
-  await f.executor.started(1); f.executor.finish('old', { timedOut: false, cancelled: true }); await old;
+  await f.executor.started(1); f.executor.finish('old', { timedOut: false, cancelled: true, started: false, phase: 'not_dispatched' }); await old;
   const snapshot = f.batch.snapshots('s')[0]; const id = f.accept();
   const executing = f.execute(id); await f.executor.started(2);
   const clone = f.store.cloneAsPending('old')!;
@@ -618,6 +725,58 @@ function bulk(cards: UiElement[]) {
   return elements(cards).filter((item) => item.dataset.draftRunAction === 'approveDraftRunBatch'
     || ['applyChangeSet', 'discardChangeSet', 'revertChangeSet'].includes(item.dataset.changeSetAction));
 }
+
+test('command cards distinguish launch facts, capability corrections and predicate results without changing execution outcomes', async () => fixture(async f => {
+  f.add(['A']);
+  for (const language of ['en', 'zh-CN'] as const) {
+    const ui = renderHarness(f, language);
+    const labels = WEBVIEW_TRANSLATIONS[language];
+    const draft = ui.state.draftRuns[0];
+    const nodesFor = (value: unknown) => elements([ui.api.createDraftRunCard(value)]);
+    const statusCases = [
+      { executionStarted: false, executionPhase: 'not_dispatched', title: labels.draftRunTitleNotDispatched, status: labels.draftRunStatusNotExecuted },
+      { executionStarted: false, executionPhase: 'spawn_failed', title: labels.draftRunTitleSpawnFailed, status: labels.draftRunStatusSpawnFailed },
+      { executionStarted: true, executionPhase: 'exited', title: labels.draftRunTitleFailed, status: labels.draftRunStatusFailed },
+      { executionStarted: true, executionPhase: 'result_unknown', title: labels.draftRunTitleResultUnknown, status: labels.draftRunStatusResultUnknown },
+      { executionStarted: undefined, executionPhase: undefined, title: labels.draftRunTitleResultUnknown, status: labels.draftRunStatusResultUnknown }
+    ];
+    for (const item of statusCases) {
+      const value = { ...draft, status: 'failed', startedAt: 'legacy timestamp is not proof',
+        executionStarted: item.executionStarted, executionPhase: item.executionPhase,
+        output: 'saved output', error: 'specific failure' };
+      const before = JSON.stringify(value);
+      const nodes = nodesFor(value);
+      assert.ok(nodes.some(node => node.className === 'draft-run-title' && node.textContent === item.title));
+      assert.ok(nodes.some(node => node.className === 'draft-run-meta' && node.textContent.startsWith(item.status)));
+      assert.ok(nodes.some(node => node.className === 'draft-run-output' && node.textContent.includes('saved output') && node.textContent.includes('specific failure')));
+      if (item.title === labels.draftRunTitleResultUnknown) {
+        assert.ok(!nodes.some(node => node.dataset.draftRunAction === 'cloneDraftRun'), 'unknown effects require verification before a retry');
+      }
+      assert.equal(JSON.stringify(value), before, 'presentation preserves the recorded execution outcome');
+    }
+    const capability = { code: 'unsupported_option', phase: 'capability', started: false, category: 'capability',
+      blocking: true, argumentIndex: 1, token: '--future-option', capabilityVersion: 1,
+      reason: '<script>Literal diagnostic</script>', candidateArgs: ['--version'] };
+    const correction = { ...draft, status: 'needs_replan', executionStarted: false, executionPhase: 'not_dispatched', capabilityDiagnostic: capability };
+    const correctedNodes = nodesFor(correction);
+    assert.ok(correctedNodes.some(node => node.className === 'draft-run-meta' && node.textContent.startsWith(labels.draftRunStatusNeedsReplan)));
+    assert.ok(correctedNodes.some(node => node.textContent.includes('args[1]') && node.textContent.includes('--future-option')));
+    assert.ok(correctedNodes.some(node => node.textContent === labels.approvalCommandReplanReason.replace('{reason}', capability.reason)));
+    assert.ok(correctedNodes.some(node => node.textContent.startsWith(labels.draftRunCorrectionCandidate.split('{command}')[0])));
+    assert.ok(!correctedNodes.some(node => node.type === 'button'), 'a correction diagnostic grants no execution action');
+    const dependentNodes = nodesFor({ ...draft, status: 'cancelled', executionStarted: false, executionPhase: 'not_dispatched',
+      dependency: { targetId: 'prerequisite', label: 'tag check' } });
+    assert.ok(dependentNodes.some(node => node.className === 'draft-run-meta' && node.textContent.startsWith(labels.draftRunStatusDependencyBlocked)));
+    const supersededNodes = nodesFor({ ...correction, replacementDraftRunId: 'replacement' });
+    assert.ok(supersededNodes.some(node => node.textContent === labels.draftRunTitleSuperseded));
+    assert.ok(supersededNodes.some(node => node.textContent === labels.draftRunReplacement.replace('{id}', 'replacement')));
+    const replacementNodes = nodesFor({ ...draft, spec: { ...draft.spec, replacesDraftRun: { draftRunId: draft.id, specHash: draft.specHash } } });
+    assert.ok(replacementNodes.some(node => node.textContent === labels.draftRunOriginal.replace('{id}', draft.id)));
+    const falseNodes = nodesFor({ ...draft, status: 'done', exitCode: 1, executionStarted: true, executionPhase: 'exited', gitQueryResult: { predicate: false } });
+    assert.ok(falseNodes.some(node => node.className === 'draft-run-meta' && node.textContent.includes(labels.draftRunPredicateFalse)));
+    assert.ok(falseNodes.some(node => node.textContent === labels.draftRunTitleDone));
+  }
+}));
 
 const longAuthorizationReason = '等待你授权精确操作范围：Command scope cannot be established statically; authorize this exact operation. / 无法静态确定命令范围，请确认这条精确操作。';
 

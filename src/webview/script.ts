@@ -3558,11 +3558,23 @@ export function getScript(): string {
       var replan = draftRun.replan || target?.replan;
       var approvalBlocked = ['hard_blocked', 'identity_mismatch', 'missing'].includes(target?.status);
       var displayStatus = statusValue;
-      if (statusValue === 'pending' && state.approvalMode === 'delegate' && !state.isBusy) {
+      if (draftRun.replacementDraftRunId && statusValue === 'needs_replan') {
+        displayStatus = 'superseded';
+      } else if ((dependency || target?.status === 'dependency_blocked') && !['done', 'running', 'approved'].includes(statusValue)) {
+        displayStatus = 'dependency_blocked';
+      } else if (statusValue === 'failed' || statusValue === 'cancelled') {
+        if (draftRun.executionPhase === 'spawn_failed' && draftRun.executionStarted === false) {
+          displayStatus = 'spawn_failed';
+        } else if (draftRun.executionPhase === 'not_dispatched' && draftRun.executionStarted === false) {
+          displayStatus = 'not_dispatched';
+        } else if (draftRun.executionPhase !== 'exited' || draftRun.executionStarted !== true) {
+          displayStatus = 'result_unknown';
+        }
+      } else if (statusValue === 'pending' && state.approvalMode === 'delegate' && !state.isBusy) {
         displayStatus = 'blocked';
-      } else if (statusValue === 'needs_replan' || target?.status === 'needs_replan') {
+      } else if (statusValue === 'needs_replan' || (statusValue === 'pending' && target?.status === 'needs_replan')) {
         displayStatus = 'needs_replan';
-      } else if (dependency || target?.status === 'dependency_blocked' || (statusValue === 'pending' && approvalBlocked)) {
+      } else if (statusValue === 'pending' && approvalBlocked) {
         displayStatus = 'blocked';
       } else if (statusValue === 'pending' && state.approvalMode !== 'ask'
         && !['manual_required', 'denied', 'review_unavailable', 'needs_authorization'].includes(target?.status)) {
@@ -3585,6 +3597,9 @@ export function getScript(): string {
       var meta = document.createElement('div');
       meta.className = 'draft-run-meta';
       meta.textContent = [existingRelease || draftRun.gitReusedDraftRunId ? '' : getDraftRunStatusLabel(displayStatus), spec.reason].filter(Boolean).join(' · ');
+      if (typeof draftRun.gitQueryResult?.predicate === 'boolean') {
+        meta.textContent += ' · ' + t(draftRun.gitQueryResult.predicate ? 'draftRunPredicateTrue' : 'draftRunPredicateFalse');
+      }
       if (draftRun.authorizationSource === 'delegated_approver') {
         meta.textContent += ' · ' + t('approvalSourceLabel') + ': ' + getApprovalSourceLabel(draftRun.approvalReview);
       } else if (draftRun.authorizationSource === 'user_click') {
@@ -3612,22 +3627,35 @@ export function getScript(): string {
       actions.className = 'draft-run-actions';
       header.append(heading);
       if (draftRun.replacementDraftRunId) {
-        appendApprovalStateNote(header, t('approvalRestrictedReplacement', { id: draftRun.replacementDraftRunId }));
+        appendApprovalStateNote(header, t('draftRunReplacement', { id: draftRun.replacementDraftRunId }));
         if (target?.reason) appendApprovalStateNote(header, target.reason);
       } else if (spec.restricted?.originalDraftRunId) {
         appendApprovalStateNote(header, t('approvalRestrictedOriginal', { id: spec.restricted.originalDraftRunId }));
+      } else if (spec.replacesDraftRun?.draftRunId) {
+        appendApprovalStateNote(header, t('draftRunOriginal', { id: spec.replacesDraftRun.draftRunId }));
       }
       if (dependency) {
         appendApprovalStateNote(header, formatApprovalDependency(dependency));
       } else if (target?.status === 'dependency_blocked') {
         appendApprovalStateNote(header, t('approvalDependencyBlocked'));
       }
-      var diagnostic = replan?.reason || (target?.status === 'needs_replan' ? target.reason : undefined);
+      var capability = draftRun.capabilityDiagnostic || replan?.diagnostic;
+      var diagnostic = replan?.reason || capability?.reason || (target?.status === 'needs_replan' ? target.reason : undefined);
       if (diagnostic) appendApprovalStateNote(header, t('approvalCommandReplanReason', { reason: diagnostic }));
+      if (capability) {
+        var argument = Number.isInteger(capability.argumentIndex) ? 'args[' + capability.argumentIndex + ']' : '';
+        appendApprovalStateNote(header, [t('draftRunCapabilityVersion', { version: capability.capabilityVersion }),
+          capability.code, argument, capability.token].filter(Boolean).join(' · '));
+        if (Array.isArray(capability.candidateArgs)) {
+          appendApprovalStateNote(header, t('draftRunCorrectionCandidate', {
+            command: formatShellCommand(spec.executable, capability.candidateArgs, spec.env)
+          }));
+        }
+      }
       if (target?.status === 'needs_replan' && target.reason && target.reason !== diagnostic) {
         appendApprovalStateNote(header, target.reason);
       }
-      if (!dependency && displayStatus !== 'needs_replan' && target?.status !== 'dependency_blocked') {
+      if (!dependency && !['needs_replan', 'superseded'].includes(displayStatus) && target?.status !== 'dependency_blocked') {
         appendDraftRunActions(actions, draftRun, header, target, approvalBlocked);
       }
       var processing = state.approvalProcessing;
@@ -3836,7 +3864,10 @@ export function getScript(): string {
         if (draftRun.startedAt) {
           container.append(createDraftRunActionButton(t('draftRunOpenTerminal'), 'openDraftRunTerminal', draftRun, true, false));
         }
-        if (state.approvalMode !== 'delegate' && !draftRun.spec?.restricted && !draftRun.replacementDraftRunId) {
+        var uncertainResult = ['failed', 'cancelled'].includes(statusValue)
+          && !(draftRun.executionStarted === false && ['not_dispatched', 'spawn_failed'].includes(draftRun.executionPhase))
+          && !(draftRun.executionStarted === true && draftRun.executionPhase === 'exited');
+        if (state.approvalMode !== 'delegate' && !draftRun.spec?.restricted && !draftRun.replacementDraftRunId && !uncertainResult) {
           container.append(createDraftRunActionButton(t('draftRunClone'), 'cloneDraftRun', draftRun, true));
         }
       }
@@ -3873,6 +3904,11 @@ export function getScript(): string {
       switch (statusValue) {
         case 'preparing': return t('draftRunTitlePreparing');
         case 'needs_replan': return t('draftRunTitleNeedsReplan');
+        case 'dependency_blocked': return t('draftRunTitleBlocked');
+        case 'not_dispatched': return t('draftRunTitleNotDispatched');
+        case 'spawn_failed': return t('draftRunTitleSpawnFailed');
+        case 'result_unknown': return t('draftRunTitleResultUnknown');
+        case 'superseded': return t('draftRunTitleSuperseded');
         case 'blocked': return t('draftRunTitleBlocked');
         case 'no_changes': return t('draftRunTitleNoChanges');
         case 'approved':
@@ -3919,7 +3955,12 @@ export function getScript(): string {
       switch (statusValue) {
         case 'preparing': return t('draftRunStatusPreparing');
         case 'no_changes': return t('draftRunStatusNoChanges');
-        case 'needs_replan':
+        case 'needs_replan': return t('draftRunStatusNeedsReplan');
+        case 'dependency_blocked': return t('draftRunStatusDependencyBlocked');
+        case 'not_dispatched': return t('draftRunStatusNotExecuted');
+        case 'spawn_failed': return t('draftRunStatusSpawnFailed');
+        case 'result_unknown': return t('draftRunStatusResultUnknown');
+        case 'superseded': return t('draftRunStatusSuperseded');
         case 'blocked': return t('draftRunStatusNotExecuted');
         case 'approved': return t('draftRunStatusApproved');
         case 'rejected': return t('draftRunStatusRejected');

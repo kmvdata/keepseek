@@ -1,4 +1,6 @@
-export { analyzeCommand, inspectGitCommandReplan, type GitCommandReplan } from './commandSemantics';
+export { analyzeCommand, inspectGitCommandReplan, type GitCommandReplan, type GitLocalQuery } from './commandSemantics';
+export { analyzeCommandCapability, normalizeCommandCapabilityDiagnostic, COMMAND_CAPABILITY_VERSION,
+  type CommandCapabilityAnalysis, type CommandCapabilityDiagnostic } from './commandCapability';
 export { analyzeDraftRunEffects } from './commandEffects';
 export { inspectDraftRunScope } from './commandScope';
 export { ExactOperationGrants } from './exactOperationGrants';

@@ -1,3 +1,4 @@
+import { analyzeCommandCapability, type CommandCapabilityDiagnostic } from './commandCapability';
 import { realpath } from 'node:fs/promises';
 import * as vscode from 'vscode';
 import type { DraftRun, DraftRunSpec } from '../../shared/types';
@@ -5,6 +6,13 @@ import { hashDraftRunSpec } from '../../runs/draftRunProposal';
 import { getFileReferenceAuthorizationKey } from '../../context/references/fileReference';
 import { findCanonicalWorkspaceFolder } from './pathScope';
 import { inspectGitCommandReplan, type GitCommandReplan } from './commandSemantics';
+
+export class CommandCapabilityError extends Error {
+  public constructor(public readonly diagnostic: CommandCapabilityDiagnostic) {
+    super(diagnostic.reason);
+    this.name = 'CommandCapabilityError';
+  }
+}
 
 export class InvalidGitCommitError extends Error {
   public constructor(public readonly diagnosis: GitCommandReplan) {
@@ -34,7 +42,8 @@ export async function validateDraftRunBeforeApproval(
     throw new Error(`Authorize the exact external working directory before running this DraftRun: ${cwdUri.toString()}`);
   }
   checkDraftRunApprovalBoundary(draftRun, authorizedExternalReferenceUris);
-  assertValidGitCommitArguments(draftRun.spec);
+  const diagnosis = analyzeCommandCapability(draftRun.spec).diagnostics.find(item => item.blocking);
+  if (diagnosis) throw new CommandCapabilityError(diagnosis);
 }
 
 export function checkDraftRunApprovalIdentity(draftRun: DraftRun, expectedSpecHash?: string): void {

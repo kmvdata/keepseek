@@ -42,6 +42,8 @@ export const READ_PLUGIN_SKILL_TOOL_NAME = 'keepseek_read_plugin_skill';
 export const PLUGIN_SKILL_REQUEST_PROTOCOL_VERSION = 12;
 /** New lanes omit the suspended reader; V12/V13 remain byte-stable. */
 export const PLUGIN_SKILL_SUSPENSION_PROTOCOL_VERSION = 14;
+/** Immutable command dependency/replacement metadata; older schemas stay frozen. */
+export const COMMAND_PLAN_PROTOCOL_VERSION = 15;
 
 const UNPROJECTED_HISTORY_MESSAGE_LIMIT = 24;
 const CORE_AGENT_TOOL_NAMES_V1 = [
@@ -1362,7 +1364,9 @@ function createDraftRunTool(requestProtocolVersion: number): DeepSeekFunctionToo
     type: 'function',
     function: {
       name: RUN_DRAFT_TOOL_NAME,
-      description: requestProtocolVersion >= 13
+      description: requestProtocolVersion >= COMMAND_PLAN_PROTOCOL_VERSION
+        ? 'Prepare one immutable command; never start a process. Static capability errors return structured diagnostics in this tool loop: correct the argv and propose a fresh command, never drop unknown options blindly. Bind replacements to the original ID/hash and retain every prerequisite. Prerequisites are evidence gates, not authorization; use predicate_true for required facts. Ask requires a fresh user approval; delegate repeats host checks/review. Denied effects cannot be pursued through variants. Reuse completed evidence and wait for actual results.'
+        : requestProtocolVersion >= 13
         ? 'Prepare one immutable pending DraftRun; never start a process. The host checks exact executable, argv, cwd, environment, hash and scope, then obtains a single-use permit: individual approval in ask; host policy, an independent reviewer or a precise one-shot user decision in delegate (Approve for me). Processes have extension-host privileges without an OS sandbox. Denied effects cannot be pursued through equivalents. Wait for actual results.'
         : requestProtocolVersion >= 7
         ? 'Prepare one immutable pending DraftRun. This tool never starts a process. The host displays the exact executable, argv, cwd, environment, purpose and risks, then obtains a one-shot execution permit under the user-selected mode: a user click in ask, an isolated subagent-model review in model_review, or host-policy automatic approval without model review in delegate. A model-review denial may only be answered with a materially safer new action, never a variant or indirect equivalent. Wait for actual results before claiming execution.'
@@ -1395,7 +1399,21 @@ function createDraftRunTool(requestProtocolVersion: number): DeepSeekFunctionToo
               required: ['name', 'value'],
               additionalProperties: false
             }
-          }
+          },
+          ...(requestProtocolVersion >= COMMAND_PLAN_PROTOCOL_VERSION ? {
+            prerequisites: {
+              type: 'array', description: 'Required existing host command evidence in this task. A false predicate never satisfies a gate.',
+              items: { type: 'object', properties: {
+                draftRunId: { type: 'string' }, specHash: { type: 'string' },
+                condition: { type: 'string', enum: ['completed', 'predicate_true'] }
+              }, required: ['draftRunId', 'specHash', 'condition'], additionalProperties: false }
+            },
+            replacesDraftRun: {
+              type: 'object', description: 'Original unstarted correction ID/hash; all prerequisites must be retained. Never transfers approval.',
+              properties: { draftRunId: { type: 'string' }, specHash: { type: 'string' } },
+              required: ['draftRunId', 'specHash'], additionalProperties: false
+            }
+          } : {})
         },
         required: ['executable', 'args', 'reason'],
         additionalProperties: false

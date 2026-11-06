@@ -11,7 +11,7 @@ import type {
   DraftRunExecutorAdapter,
   DraftRunOutputChunk
 } from '../src/runs/draftRunExecutor';
-import { hashDraftRunSpec } from '../src/runs/draftRunProposal';
+import { createDraftRunProposal, hashDraftRunSpec } from '../src/runs/draftRunProposal';
 import { DraftRunStore } from '../src/runs/draftRunStore';
 import { DraftRunAuthorizationService } from '../src/runs/draftRunAuthorization';
 import { ApprovalReviewStore } from '../src/approvals/approvalReviewStore';
@@ -688,3 +688,56 @@ function createProposal(workspaceRoot: string, options: {
     effectAssessment: analyzeDraftRunEffects(spec)
   };
 }
+
+
+test('capability rejection and immutable replacement persist without approval or inherited execution authority', async () => {
+  await withDraftRunFixture(async ({ root, store, executor }) => {
+    const original = await createDraftRunProposal({ executable: 'head', args: ['-n'], reason: 'Read bounded preview' });
+    const [rejected] = store.addProposals({ proposals: [original], sessionId: 's', agentRunId: 'r' });
+    assert.equal(rejected.status, 'needs_replan');
+    assert.equal(rejected.executionStarted, false);
+    assert.equal(rejected.executionPhase, 'not_dispatched');
+    assert.equal(await store.approveAndRun(rejected.id, new Set()), undefined);
+    const replacement = await createDraftRunProposal({ executable: 'head', args: ['-n', '1', 'input.txt'],
+      reason: 'Read bounded preview', replacesDraftRun: { draftRunId: rejected.id, specHash: rejected.specHash } });
+    const [fresh] = store.addProposals({ proposals: [replacement], sessionId: 's', agentRunId: 'r', rootTaskRunIds: new Set() });
+    assert.equal(fresh.status, 'pending');
+    assert.notEqual(fresh.specHash, rejected.specHash);
+    assert.equal(store.get(rejected.id)?.replacementDraftRunId, fresh.id);
+    assert.equal(fresh.authorizationSource, undefined);
+    assert.equal(executor.executeCount, 0);
+    await store.flush();
+    const restored = new DraftRunStore(vscode.Uri.file(path.join(root, 'storage')) as never, executor);
+    await restored.initialize();
+    assert.equal(restored.get(rejected.id)?.status, 'needs_replan');
+    assert.equal(restored.get(fresh.id)?.status, 'pending');
+    assert.equal(restored.get(fresh.id)?.authorizationSource, undefined);
+    assert.equal(executor.executeCount, 0);
+    restored.dispose();
+  });
+});
+
+test('an adapter throw after dispatch and missing legacy execution facts never become unstarted recovery', async () => {
+  await withDraftRunFixture(async ({ root, workspaceRoot, store, executor }) => {
+    const proposal = createProposal(workspaceRoot);
+    store.addProposals({ proposals: [proposal], sessionId: 's', agentRunId: 'r' });
+    executor.execute = async () => { throw new Error('Result channel lost after adapter dispatch'); };
+    const result = await store.approveAndRun(proposal.id, new Set());
+    assert.equal(result?.status, 'failed');
+    assert.equal(result?.executionStarted, undefined);
+    assert.equal(result?.executionPhase, 'result_unknown');
+    assert.equal(store.cloneAsPending(proposal.id), undefined);
+    await store.flush();
+    const file = path.join(root, 'storage', 'draft-runs.json');
+    const data = JSON.parse(await readFile(file, 'utf8'));
+    for (const run of data.draftRuns) { delete run.executionStarted; delete run.executionPhase; }
+    await writeFile(file, JSON.stringify(data));
+    const restored = new DraftRunStore(vscode.Uri.file(path.join(root, 'storage')) as never, executor);
+    await restored.initialize();
+    assert.equal(restored.get(proposal.id)?.executionStarted, undefined);
+    assert.equal(restored.get(proposal.id)?.executionPhase, 'result_unknown');
+    assert.equal(restored.cloneAsPending(proposal.id), undefined);
+    assert.equal(await restored.approveAndRun(proposal.id, new Set()), undefined);
+    restored.dispose();
+  });
+});

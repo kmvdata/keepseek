@@ -18,7 +18,7 @@ const redirectedEntries = ['commondir', 'gitdir', 'objects/info/alternates', 'ob
 const inProgressEntries = ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply', 'sequencer'];
 const maxWorkingTreeBytes = 32 * 1024 * 1024;
 
-type GitScopeResult = { fingerprint: string; repository: string; cwd: string; branchRef?: string; remote?: GitRemoteScope }
+type GitScopeResult = { fingerprint: string; repository: string; cwd: string; branchRef?: string; remote?: GitRemoteScope; revisionPaths?: string[] }
   | { reason: string; externalPath?: string; binding?: string; hardBlocked?: boolean };
 
 async function inspectEntry(file: string) {
@@ -42,6 +42,9 @@ export async function inspectLocalGitScope(input: {
   commitAll?: boolean;
   addPathspecs?: readonly string[];
   addTracksOnly?: boolean;
+  /** Bare log operands can mean either revisions or paths. Only concrete
+   * worktree/index matches become path candidates; refs are never invented files. */
+  ambiguousRevisionOperands?: readonly string[];
   remote?: GitRemoteCommand;
   refMutation?: { name: string; action: 'create' | 'delete' | 'force' };
 }): Promise<GitScopeResult> {
@@ -198,11 +201,27 @@ export async function inspectLocalGitScope(input: {
     if (/(?:^|\0)160000 [a-f0-9]+ [0-3]\t/u.test(indexEntries)) {
       return { reason: 'Git index contains a nested repository or submodule. / Git 索引包含嵌套仓库或子模块。' };
     }
+    const revisionPaths: string[] = [];
+    if (input.ambiguousRevisionOperands?.length) {
+      const trackedPaths = indexEntries.split('\0').filter(Boolean).map(record => record.slice(record.indexOf('\t') + 1));
+      for (const operand of input.ambiguousRevisionOperands) {
+        const target = joinUnresolvedPath(cwd, operand);
+        const relative = path.relative(repository, target).split(path.sep).join('/');
+        if (await inspectEntry(target) || trackedPaths.some(file => file === relative || file.startsWith(relative + '/'))) {
+          revisionPaths.push(target);
+        }
+      }
+    }
     const replacements = await inspectEntry(path.join(metadata, 'refs', 'replace'));
     if (replacements?.isSymbolicLink() || ((entries[8] || replacements)
       && await readSnapshot(['for-each-ref', '--count=1', '--format=%(refname)', 'refs/replace']))) {
       return { reason: 'Git uses replacement references. / Git 使用对象替换引用。' };
     }
+    // Loose non-HEAD branches and tags can change without changing HEAD, the
+    // packed-refs file or the top refs directory. Bind their resolved objects
+    // too so an old query predicate cannot authorize a write after a ref moves.
+    // The fixed probe shares readSnapshot's finite output/timeout limits.
+    const localRefs = await readSnapshot(['for-each-ref', '--sort=refname', '--format=%(refname)%00%(objectname)']);
 
     const committing = input.subcommand === 'commit';
     const staging = input.subcommand === 'add';
@@ -275,14 +294,15 @@ export async function inspectLocalGitScope(input: {
     const fingerprint = createHash('sha256').update(JSON.stringify([
       repository, metadata, directory.dev, directory.ino, headText, headRefIdentity,
       entryIdentity(entries[1]), entryIdentity(entries[8]), stdout, hooksPath, hookIdentities,
-      operationMarkers, mutationStatus, workingTree, referenceIdentity, pushRefSnapshot, remote
+      operationMarkers, mutationStatus, workingTree, referenceIdentity, pushRefSnapshot, localRefs, remote
     ])).digest('hex');
     if (scopeReason) return { reason: scopeReason, binding: fingerprint };
     if (executableHook) return {
       reason: `Git can execute a repository hook: ${executableHook}. / Git 可能执行仓库 hook：${executableHook}。`,
       binding: fingerprint
     };
-    return { fingerprint, repository, cwd, remote, branchRef: headText.startsWith('ref: refs/heads/') ? headText.slice(5) : undefined };
+    return { fingerprint, repository, cwd, remote, ...(revisionPaths.length ? { revisionPaths } : {}),
+      branchRef: headText.startsWith('ref: refs/heads/') ? headText.slice(5) : undefined };
   } catch {
     return { reason: 'Git repository settings could not be verified. / 无法核实 Git 仓库设置。' };
   }

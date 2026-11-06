@@ -162,8 +162,14 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectR
         && argument.index > gitCommand.index && ['--cached', '--staged'].includes(argument.value)),
       addPathspecs: parsed.arguments.filter(argument => argument.role === 'read_path' && argument.index > gitCommand.index).map(argument => argument.value),
       addTracksOnly: parsed.arguments.some(argument => argument.role === 'option' && argument.index > gitCommand.index
-        && ['-u', '--update'].includes(argument.value)) });
+        && ['-u', '--update'].includes(argument.value)),
+      ambiguousRevisionOperands: gitCommand.value === 'log' ? parsed.arguments.filter(argument => argument.role === 'revision'
+        && !/[~^]|\.\./u.test(argument.value)).map(argument => argument.value) : undefined });
     if ('fingerprint' in git) {
+      // Git may interpret a bare ref-shaped operand as a path when it matches
+      // the worktree or index. Preserve normal protected/external path checks
+      // for those concrete targets without treating genuine refs as files.
+      for (const target of git.revisionPaths ?? []) await check(target, 'read_path');
       if (paths.some(target => target.role === 'read_path' && !isPathInside(git.repository, vscode.Uri.parse(target.uri).fsPath))) {
         diagnostics[gitRuntime] = { ...diagnostics[gitRuntime], message: 'Git paths must stay inside this repository. / Git 路径必须位于当前仓库内。' };
       } else {

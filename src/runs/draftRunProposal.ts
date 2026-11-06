@@ -6,8 +6,10 @@ import { getConfiguredDraftRunTimeoutMs } from '../shared/config';
 import type {
   DraftRunEnvironmentEntry,
   DraftRunProposal,
-  DraftRunSpec
+  DraftRunSpec,
+  DraftRunPrerequisite
 } from '../shared/types';
+import { analyzeCommandCapability } from '../approvals/authorization/commandCapability';
 import { analyzeDraftRunEffects } from '../approvals/authorization/commandEffects';
 import { findCanonicalWorkspaceFolder } from '../approvals/authorization/pathScope';
 
@@ -19,6 +21,8 @@ export interface DraftRunProposalInput {
   cwd?: string;
   timeoutMs?: number;
   env?: DraftRunEnvironmentEntry[];
+  prerequisites?: DraftRunPrerequisite[];
+  replacesDraftRun?: { draftRunId: string; specHash: string };
 }
 
 export async function createDraftRunProposal(input: DraftRunProposalInput): Promise<DraftRunProposal> {
@@ -57,13 +61,15 @@ export async function createDraftRunProposal(input: DraftRunProposalInput): Prom
       : 'external working directory',
     externalCwd: !workspaceFolder,
     timeoutMs: Math.min(requestedTimeoutMs, configuredTimeoutMs),
-    env
+    env,
+    ...normalizeDraftRunPlan(input)
   };
   return {
     id: randomUUID(),
     spec,
     specHash: hashDraftRunSpec(spec),
-    effectAssessment: analyzeDraftRunEffects(spec)
+    effectAssessment: analyzeDraftRunEffects(spec),
+    capabilityDiagnostic: analyzeCommandCapability(spec).diagnostics.find(item => item.blocking)
   };
 }
 
@@ -78,7 +84,9 @@ export function hashDraftRunSpec(spec: DraftRunSpec): string {
     reason: spec.reason,
     timeoutMs: spec.timeoutMs,
     workspaceFolder: spec.workspaceFolder ?? '',
-    restricted: spec.restricted
+    restricted: spec.restricted,
+    ...(spec.prerequisites ? { prerequisites: spec.prerequisites } : {}),
+    ...(spec.replacesDraftRun ? { replacesDraftRun: spec.replacesDraftRun } : {})
   })).digest('hex');
 }
 
@@ -160,4 +168,31 @@ function validateString(value: string, label: string, maxLength: number): string
     throw new Error(`DraftRun ${label} is too long.`);
   }
   return value;
+}
+
+/** Invalid plan metadata is rejected, never silently dropped from a hashed spec. */
+export function normalizeDraftRunPlan(input: { prerequisites?: unknown; replacesDraftRun?: unknown }):
+  Pick<DraftRunSpec, 'prerequisites' | 'replacesDraftRun'> {
+  const result: Pick<DraftRunSpec, 'prerequisites' | 'replacesDraftRun'> = {};
+  const identity = (value: unknown): value is { draftRunId: string; specHash: string } => {
+    const v = value as { draftRunId?: unknown; specHash?: unknown } | undefined;
+    return !!v && typeof v.draftRunId === 'string' && v.draftRunId.length > 0 && v.draftRunId.length <= 256
+      && typeof v.specHash === 'string' && /^[a-f0-9]{64}$/u.test(v.specHash);
+  };
+  if (input.prerequisites !== undefined) {
+    if (!Array.isArray(input.prerequisites) || input.prerequisites.length > 32) throw new Error('Invalid command prerequisites.');
+    const seen = new Set<string>();
+    result.prerequisites = input.prerequisites.map(value => {
+      if (!identity(value) || !['completed', 'predicate_true'].includes((value as DraftRunPrerequisite).condition) || seen.has(value.draftRunId)) {
+        throw new Error('Invalid or duplicate command prerequisite.');
+      }
+      seen.add(value.draftRunId);
+      return { draftRunId: value.draftRunId, specHash: value.specHash, condition: (value as DraftRunPrerequisite).condition } as DraftRunPrerequisite;
+    });
+  }
+  if (input.replacesDraftRun !== undefined) {
+    if (!identity(input.replacesDraftRun)) throw new Error('Invalid command replacement identity.');
+    result.replacesDraftRun = { draftRunId: input.replacesDraftRun.draftRunId, specHash: input.replacesDraftRun.specHash };
+  }
+  return result;
 }

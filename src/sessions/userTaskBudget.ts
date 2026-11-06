@@ -2,10 +2,10 @@ import type { RunCheckpoint } from '../agent/runCheckpoint';
 import { createLogicalRunBudgetState, normalizeLogicalRunBudgetLimits } from '../agent/executionPolicy';
 
 /** Safety ledger carried between execution segments; distinct from display time. */
-export type UserTaskBudget = Pick<RunCheckpoint, 'usedMs' | 'maxExecutionMs' | 'maxCost' | 'usedCostByCurrency' | 'runBudget' | 'budgetLimits' | 'delegationBudget'> & { version: 1 };
+export type UserTaskBudget = Pick<RunCheckpoint, 'usedMs' | 'maxExecutionMs' | 'maxCost' | 'usedCostByCurrency' | 'runBudget' | 'budgetLimits' | 'delegationBudget' | 'commandRecoveryKeys' | 'commandRecoveryExhausted'> & { version: 1 };
 export function taskBudgetFromCheckpoint(cp: RunCheckpoint): UserTaskBudget {
   return structuredClone({ version: 1, usedMs: cp.usedMs, maxExecutionMs: cp.maxExecutionMs,
-    maxCost: cp.maxCost, usedCostByCurrency: cp.usedCostByCurrency, runBudget: cp.runBudget, budgetLimits: cp.budgetLimits, delegationBudget: cp.delegationBudget });
+    commandRecoveryKeys: cp.commandRecoveryKeys, commandRecoveryExhausted: cp.commandRecoveryExhausted, maxCost: cp.maxCost, usedCostByCurrency: cp.usedCostByCurrency, runBudget: cp.runBudget, budgetLimits: cp.budgetLimits, delegationBudget: cp.delegationBudget });
 }
 export function normalizeUserTaskBudgets(value: unknown): Record<string, UserTaskBudget> {
   const result: Record<string, UserTaskBudget> = Object.create(null);
@@ -25,7 +25,10 @@ export function normalizeUserTaskBudgets(value: unknown): Record<string, UserTas
       || !Array.isArray(v.delegationBudget.parents) || !Array.isArray(v.delegationBudget.paths)
       || v.delegationBudget.parents.some(p => !Array.isArray(p) || p.length !== 2 || typeof p[0] !== 'string' || !Number.isSafeInteger(p[1]) || p[1] < 0)
       || v.delegationBudget.paths.some(p => !Array.isArray(p) || p.length !== 2 || p.some(s => typeof s !== 'string')))) continue;
-    result[id] = { version: 1, usedMs: v.usedMs, maxExecutionMs: v.maxExecutionMs, maxCost: v.maxCost,
+    if (v.commandRecoveryKeys !== undefined && (!Array.isArray(v.commandRecoveryKeys) || v.commandRecoveryKeys.length > 2
+      || v.commandRecoveryKeys.some(key => typeof key !== 'string' || !/^[a-f0-9]{64}$/u.test(key)))) continue;
+    result[id] = {
+      commandRecoveryKeys: v.commandRecoveryKeys?.slice(), commandRecoveryExhausted: v.commandRecoveryExhausted === true || undefined, version: 1, usedMs: v.usedMs, maxExecutionMs: v.maxExecutionMs, maxCost: v.maxCost,
       usedCostByCurrency: v.usedCostByCurrency ? { ...v.usedCostByCurrency } : {},
       runBudget: v.runBudget ? createLogicalRunBudgetState(v.runBudget) : undefined,
       budgetLimits: normalizeLogicalRunBudgetLimits(v.budgetLimits),

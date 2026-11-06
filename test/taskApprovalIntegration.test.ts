@@ -536,7 +536,7 @@ for (const mode of ['delegate'] as const) test(`${mode} rechecks symlink scope a
   });
 });
 
-test('Git format/source variants without a local repository do not reach review or execution', async () => {
+test('Git queries without repository evidence return bounded diagnosis without review or execution', async () => {
   for (const mode of ['delegate'] as const) await fixture(mode, async f => {
     f.response.draftEdits = [];
     f.response.draftRuns = [await createDraftRunProposal({ executable: 'git',
@@ -547,7 +547,8 @@ test('Git format/source variants without a local repository do not reach review 
     await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
     assert.equal(f.executions(), 0); assert.equal(f.reviews(), 0);
     const target = f.session.approvalProcessing?.targets[0];
-    assert.equal(target?.status, mode === 'delegate' ? 'hard_blocked' : 'manual_required');
+    assert.equal(target?.status, 'insufficient_launch_evidence');
+    assert.equal(f.continuations(), 1, 'missing repository evidence gets one same-task correction opportunity');
     assert.match(target?.reason ?? '', /No Git repository|未找到 Git 仓库/u);
     assert.doesNotMatch(target?.reason ?? '', /Script contents|脚本内容/u);
     assert.deepEqual(f.runs.get(f.response.draftRuns[0].id)!.effectAssessment.effects, ['workspace_read', 'unknown']);
@@ -884,7 +885,7 @@ test('the logged Git argv receive independent repairs and finish a real same-tas
       assert.equal(staging.gitStageEvidence?.head, previousHead);
       assert.equal(firstStatus.replan?.executed, false);
       assert.equal(firstCommit.replan?.executed, false);
-      assert.equal(firstCommit.dependency?.targetId, firstStatus.id);
+      assert.equal(firstCommit.dependency, undefined, 'each malformed argv has its own diagnosis, not a positional dependency');
       assert.equal(git('rev-parse', 'HEAD^').trim(), previousHead);
       assert.equal(git('log', '-1', '--format=%s').trim(), title);
       assert.match(git('log', '-1', '--format=%B'), /\$HOME 和 ;/u);
@@ -2076,5 +2077,171 @@ test('a reviewer denial hands a materially safer path back to the same task with
     assert.equal(f.runs.get(safe.id)?.status, 'done');
     assert.equal(f.executions(), 1); assert.equal(f.reviews(), 1); assert.equal(f.manualRequests(), 0);
     assert.equal(f.session.approvalProcessing?.rootTaskId, f.message.userTask?.id);
+  });
+});
+
+test('a non-Git capability gap returns a structured diagnostic and fresh approval in the same task', async () => {
+  await fixture('delegate', async f => {
+    await writeFile(path.join(f.workspace, 'input.txt'), 'first\nsecond\n');
+    const reviews = (f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews;
+    const spawn = new SpawnDraftRunExecutor();
+    const launched: string[][] = [];
+    const runs = new DraftRunStore(vscode.Uri.file(path.join(f.root, 'capability-recovery')) as never, {
+      execute: input => { launched.push(input.draftRun.spec.args); return spawn.execute(input); },
+      cancel: id => spawn.cancel(id), showTerminal: id => spawn.showTerminal(id), dispose: () => spawn.dispose()
+    }, new DraftRunAuthorizationService(reviews));
+    Object.assign(f.host, { draftRuns: runs, hasActiveBackgroundRun: () => false });
+    try {
+      const broken = await createDraftRunProposal({ executable: 'head', args: ['-n'], reason: 'Read first line' });
+      const independent = await createDraftRunProposal({ executable: 'cat', args: ['input.txt'], reason: 'Read requested input' });
+      f.response.draftEdits = []; f.response.draftRuns = [broken, independent];
+      let turns = 0;
+      let repaired: Awaited<ReturnType<typeof createDraftRunProposal>> | undefined;
+      const originalUser = JSON.stringify(f.session.messages[0]);
+      Object.assign(f.host, { sendPrompt: async (prompt: string) => {
+        if (++turns !== 1) return;
+        assert.match(prompt, /host_missing_option_value/u);
+        assert.match(prompt, /"started":false/u);
+        assert.match(prompt, /Reuse completed work/u);
+        repaired = await createDraftRunProposal({ executable: 'head', args: ['-n', '1', 'input.txt'], reason: 'Read first line',
+          replacesDraftRun: { draftRunId: broken.id, specHash: broken.specHash } });
+        const userTask = { ...f.message.userTask!, reason: 'approval' as const };
+        const assistant: ChatMessage = { id: 'capability-repaired', role: 'assistant', content: '', createdAt: f.message.createdAt, userTask };
+        f.session.messages.push(assistant);
+        const response: AgentResponse = { ...f.response, draftRuns: [repaired] };
+        const checkpoint = createRunCheckpoint(f.cp.request as AgentRequest, 0, 'same root task capability repair', f.scope.folderUris);
+        checkpoint.status = 'completed'; checkpoint.finalResponse = response;
+        await f.host.saveAgentCheckpoint(f.session, assistant, checkpoint);
+        f.host.queueResponseApprovals(f.session, assistant, response);
+        return response;
+      } });
+      await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+      f.host.queueResponseApprovals(f.session, f.message, f.response);
+      await f.host.maybeAutoContinueDraftRun();
+      assert.equal(turns, 2, JSON.stringify(f.session.approvalProcessing));
+      assert.deepEqual(launched, [['input.txt'], ['-n', '1', 'input.txt']]);
+      assert.equal(runs.get(broken.id)?.executionStarted, false);
+      assert.equal(runs.get(broken.id)?.status, 'needs_replan');
+      assert.equal(runs.get(broken.id)?.replacementDraftRunId, repaired?.id);
+      assert.notEqual(repaired?.specHash, broken.specHash);
+      assert.equal(runs.get(independent.id)?.status, 'done');
+      assert.equal(runs.get(repaired!.id)?.status, 'done');
+      assert.equal(runs.get(repaired!.id)?.outputHead, 'first\n');
+      assert.equal(f.reviews(), 0); assert.equal(f.manualRequests(), 0);
+      assert.equal(f.session.approvalProcessing?.rootTaskId, f.message.userTask?.id);
+      assert.equal(JSON.stringify(f.session.messages[0]), originalUser);
+      assert.ok(f.session.messages.every(message => message.role !== 'user' || message.id === 'user'), 'no forged user for correction');
+      const again = f.queue.take(f.session.id);
+      if (again) await f.host.executeDelegatedApprovals(again);
+      assert.equal(launched.length, 2, 'completed query and replacement are not replayed');
+    } finally { await runs.flush(); runs.dispose(); }
+  });
+});
+
+
+test('capability recovery keeps one root-cause limit across fresh IDs, argv variants and segments', async () => {
+  await fixture('delegate', async f => {
+    const first = await createDraftRunProposal({ executable: 'head', args: ['--future-fixture-one'], reason: 'Read requested data' });
+    f.response.draftEdits = []; f.response.draftRuns = [first];
+    let turns = 0;
+    Object.assign(f.host, { hasActiveBackgroundRun: () => false, sendPrompt: async () => {
+      turns++;
+      const again = await createDraftRunProposal({ executable: 'head', args: ['--future-fixture-two'], reason: 'Different wording does not solve grammar',
+        replacesDraftRun: { draftRunId: first.id, specHash: first.specHash } });
+      const assistant: ChatMessage = { id: 'same-root-cause', role: 'assistant', content: '', createdAt: f.message.createdAt,
+        userTask: { ...f.message.userTask!, reason: 'approval' as const } };
+      f.session.messages.push(assistant);
+      const response: AgentResponse = { ...f.response, draftRuns: [again] };
+      const checkpoint = createRunCheckpoint(f.cp.request as AgentRequest, 0, 'same root', f.scope.folderUris);
+      checkpoint.status = 'completed'; checkpoint.finalResponse = response;
+      await f.host.saveAgentCheckpoint(f.session, assistant, checkpoint);
+      f.host.queueResponseApprovals(f.session, assistant, response);
+      return response;
+    } });
+    await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+    f.host.queueResponseApprovals(f.session, f.message, f.response);
+    await f.host.maybeAutoContinueDraftRun();
+    assert.equal(turns, 1, JSON.stringify(f.session.approvalProcessing));
+    assert.equal(f.executions(), 0); assert.equal(f.reviews(), 0); assert.equal(f.manualRequests(), 0);
+    assert.equal(f.session.approvalProcessing?.status, 'stopped');
+    assert.equal(f.session.approvalProcessing?.replanKeys?.length, 1);
+    assert.match(f.session.approvalProcessing?.reason ?? '', /repeat|same kind|重复/iu);
+    assert.equal(f.session.approvalProcessing?.rootTaskId, f.message.userTask?.id);
+  });
+});
+
+test('a false ancestor fact blocks later implicit Git mutation while independent facts still run', async () => {
+  await fixture('delegate', async f => {
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: f.workspace, encoding: 'utf8', stdio: 'pipe' });
+    git('init'); git('config', 'user.name', 'KeepSeek Fixture'); git('config', 'user.email', 'fixture@example.invalid');
+    git('commit', '--allow-empty', '-m', 'base'); git('tag', '0.5.0'); git('commit', '--allow-empty', '-m', 'later');
+    const reviews = (f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews;
+    const spawn = new SpawnDraftRunExecutor();
+    const launched: string[][] = [];
+    const runs = new DraftRunStore(vscode.Uri.file(path.join(f.root, 'false-ancestor')) as never, {
+      execute: input => { launched.push(input.draftRun.spec.args); return spawn.execute(input); },
+      cancel: id => spawn.cancel(id), showTerminal: id => spawn.showTerminal(id), dispose: () => spawn.dispose()
+    }, new DraftRunAuthorizationService(reviews));
+    Object.assign(f.host, { draftRuns: runs });
+    try {
+      f.session.messages[0].content = 'Inspect ancestry, then stage project changes only if the condition permits it.';
+      const commands = [['merge-base', '--is-ancestor', 'HEAD', '0.5.0'], ['add', '--all', '.'], ['tag', '--list', '0.5.0']];
+      f.response.draftEdits = [];
+      f.response.draftRuns = await Promise.all(commands.map(args => createDraftRunProposal({ executable: 'git', args, reason: 'Inspect local condition and project state' })));
+      await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+      f.host.queueResponseApprovals(f.session, f.message, f.response);
+      await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+      assert.deepEqual(launched, [commands[0], commands[2]]);
+      assert.equal(runs.get(f.response.draftRuns[0].id)?.gitQueryResult?.predicate, false);
+      assert.equal(runs.get(f.response.draftRuns[0].id)?.exitCode, 1);
+      assert.deepEqual(f.session.approvalProcessing?.targets.map(target => target.status), ['executed', 'dependency_blocked', 'executed']);
+      assert.equal(runs.get(f.response.draftRuns[1].id)?.executionStarted, false);
+      assert.equal(f.reviews(), 0); assert.equal(f.continuations(), 0);
+    } finally { await runs.flush(); runs.dispose(); }
+  });
+});
+
+test('a started read-only failure returns actual evidence for a bounded fresh query without claiming it never ran', async () => {
+  await fixture('delegate', async f => {
+    await mkdir(path.join(f.workspace, 'input.txt'));
+    const reviews = (f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews;
+    const spawn = new SpawnDraftRunExecutor();
+    const launched: string[][] = [];
+    const runs = new DraftRunStore(vscode.Uri.file(path.join(f.root, 'readonly-failure-recovery')) as never, {
+      execute: input => { launched.push(input.draftRun.spec.args); return spawn.execute(input); },
+      cancel: id => spawn.cancel(id), showTerminal: id => spawn.showTerminal(id), dispose: () => spawn.dispose()
+    }, new DraftRunAuthorizationService(reviews));
+    Object.assign(f.host, { draftRuns: runs, hasActiveBackgroundRun: () => false });
+    try {
+      const failed = await createDraftRunProposal({ executable: 'cat', args: ['input.txt'], reason: 'Read requested input' });
+      f.response.draftEdits = []; f.response.draftRuns = [failed];
+      let turns = 0;
+      Object.assign(f.host, { sendPrompt: async (prompt: string) => {
+        if (++turns !== 1) return;
+        assert.match(prompt, /verified read-only process exited with a failure/u);
+        await rm(path.join(f.workspace, 'input.txt'), { recursive: true });
+        await writeFile(path.join(f.workspace, 'input.txt'), 'verified input\n');
+        const next = await createDraftRunProposal({ executable: 'cat', args: ['input.txt'], reason: 'Read the actual file with a fresh approval' });
+        const assistant: ChatMessage = { id: 'readonly-fresh-query', role: 'assistant', content: '', createdAt: f.message.createdAt,
+          userTask: { ...f.message.userTask!, reason: 'approval' as const } };
+        f.session.messages.push(assistant);
+        const response: AgentResponse = { ...f.response, draftRuns: [next] };
+        const checkpoint = createRunCheckpoint(f.cp.request as AgentRequest, 0, 'same root read recovery', f.scope.folderUris);
+        checkpoint.status = 'completed'; checkpoint.finalResponse = response;
+        await f.host.saveAgentCheckpoint(f.session, assistant, checkpoint);
+        f.host.queueResponseApprovals(f.session, assistant, response);
+        return response;
+      } });
+      await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+      f.host.queueResponseApprovals(f.session, f.message, f.response);
+      await f.host.maybeAutoContinueDraftRun();
+      assert.deepEqual(launched, [['input.txt'], ['input.txt']], 'one exact readonly retry receives fresh authorization');
+      assert.equal(turns, 2, JSON.stringify(f.session.approvalProcessing));
+      assert.equal(runs.get(failed.id)?.status, 'failed');
+      assert.equal(runs.get(failed.id)?.executionStarted, true);
+      assert.equal(runs.get(failed.id)?.executionPhase, 'exited');
+      assert.equal(f.reviews(), 0); assert.equal(f.manualRequests(), 0);
+      assert.equal(f.session.approvalProcessing?.rootTaskId, f.message.userTask?.id);
+    } finally { await runs.flush(); runs.dispose(); }
   });
 });

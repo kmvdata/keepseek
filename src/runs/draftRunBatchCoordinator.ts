@@ -3,9 +3,10 @@ import { randomUUID } from 'node:crypto';
 import type { DraftRun, DraftRunBatchSnapshot, DraftRunBatchState } from '../shared/types';
 import type { DraftRunStore } from './draftRunStore';
 import type { HistoryTruncationScope } from '../sessions/historyTruncation';
+import { canIsolateDraftRunFailure, inspectDraftRunDependencies, inspectGitAncestorPrerequisite, orderDraftRunDependencies } from './draftRunDependencies';
 
 type BatchStore = Pick<DraftRunStore, 'get' | 'toWebviewState' | 'flush' | 'approveAndRun'
-  | 'validateApprovalBoundary' | 'cancelAutoContinuations' | 'recordBatchDisplay'>;
+  | 'validateApprovalBoundary' | 'cancelAutoContinuations' | 'recordBatchDisplay' | 'setPendingDependency'>;
 
 /** One finite user-click authorization, with an independent once-only continuation. */
 export class DraftRunBatchCoordinator {
@@ -124,6 +125,7 @@ export class DraftRunBatchCoordinator {
 
   public async execute(operationId: string, input: {
     authorizedUris: ReadonlySet<string>;
+    rootTaskRunIds?: ReadonlySet<string>;
     assertContext: () => void;
     onCurrent: (run: DraftRun | undefined) => void;
   }): Promise<void> {
@@ -151,28 +153,70 @@ export class DraftRunBatchCoordinator {
       await this.store.flush();
       assertValid();
       this.assertSnapshot(op.state);
-      for (const [index, entry] of op.state.entries.entries()) {
+      const failedRuns: DraftRun[] = [];
+      let firstFailure: string | undefined;
+      const entries = orderDraftRunDependencies(op.state.entries.map(entry => entry.draftRunId), id => this.store.get(id))
+        .map(id => op.state.entries.find(entry => entry.draftRunId === id)!);
+      for (const [index, entry] of entries.entries()) {
         assertValid();
         op.state.currentIndex = index + 1;
         const run = this.store.validateApprovalBoundary(entry.draftRunId, input.authorizedUris, entry.specHash);
+        const dependency = inspectDraftRunDependencies(run, id => this.store.get(id), input.rootTaskRunIds);
+        if (!dependency.allowed) {
+          firstFailure ??= dependency.reason;
+          this.store.setPendingDependency(run.id, run.specHash, dependency.dependency);
+          failedRuns.push({ ...run, executionStarted: false, executionPhase: 'not_dispatched' });
+          continue;
+        }
+        const prior = [...(input.rootTaskRunIds ?? new Set(op.state.entries.map(item => item.draftRunId)))]
+          .flatMap(id => { const member = this.store.get(id); return member ? [member] : []; });
+        const ancestor = await inspectGitAncestorPrerequisite(run, prior, input.authorizedUris);
+        assertValid();
+        if (!ancestor.allowed) {
+          firstFailure ??= ancestor.reason;
+          this.store.setPendingDependency(run.id, run.specHash, ancestor.dependency);
+          failedRuns.push({ ...run, executionStarted: false, executionPhase: 'not_dispatched' });
+          continue;
+        }
+        if (failedRuns.length && !await canIsolateDraftRunFailure(run, failedRuns, input.authorizedUris)) {
+          continue;
+        }
+        assertValid();
         op.state.phase = 'running';
         op.state.remaining = op.state.entries.length - index - 1;
         op.state.currentCommand = run.spec.executable;
         input.onCurrent(run);
         this.notifyChanged();
         assertValid();
-        const result = await this.store.approveAndRun(entry.draftRunId, input.authorizedUris, {
-          signal: op.controller.signal, expectedSpecHash: entry.specHash,
-          userApproval: () => { assertValid(); return true; }
-        });
+        let result: DraftRun | undefined;
+        try {
+          result = await this.store.approveAndRun(entry.draftRunId, input.authorizedUris, {
+            signal: op.controller.signal, expectedSpecHash: entry.specHash,
+            rootTaskRunIds: input.rootTaskRunIds,
+            userApproval: () => { assertValid(); return true; }
+          });
+        } catch (error) {
+          assertValid();
+          firstFailure ??= error instanceof Error ? error.message : String(error);
+          failedRuns.push(this.store.get(run.id) ?? run);
+          input.onCurrent(undefined);
+          continue;
+        }
         op.state.remaining = op.state.entries.filter((item) => this.store.get(item.draftRunId)?.status === 'pending').length;
         assertValid();
-        if (!result || result.status !== 'done') throw new Error(result?.error ?? `Command ${index + 1} did not succeed.`);
+        if (!result || result.status !== 'done') {
+          firstFailure ??= result?.error ?? `Command ${index + 1} did not succeed.`;
+          failedRuns.push(result ?? run);
+          input.onCurrent(undefined);
+          this.notifyChanged();
+          continue;
+        }
         op.state.completed++;
         input.onCurrent(undefined);
         this.notifyChanged();
       }
       assertValid();
+      if (firstFailure) throw new Error(firstFailure);
       op.state.phase = 'waiting';
       op.state.currentCommand = undefined;
     } catch (error) {

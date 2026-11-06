@@ -12,6 +12,7 @@ import { ApprovalReviewStore } from '../src/approvals/approvalReviewStore';
 import { createDraftRunReviewRequest } from '../src/approvals/approvalReviewSurface';
 import { analyzeCommand, analyzeDraftRunEffects, assertAutomaticRunAuthorization, draftRunIdentity,
   ExactOperationGrants, inspectAutomaticRunAuthorization, inspectGitCommandReplan } from '../src/approvals/authorization';
+import { analyzeCommandCapability, normalizeCommandCapabilityDiagnostic } from '../src/approvals/authorization/commandCapability';
 import { inspectLocalGitScope } from '../src/approvals/authorization/localGitScope';
 import { hasValidationBlockingRisk } from '../src/agent/tools/validationRisk';
 import { DraftRunAuthorizationService } from '../src/runs/draftRunAuthorization';
@@ -63,6 +64,154 @@ test('Git tag list consumes option values and literal patterns without granting 
   ]) assert.equal(analyzeCommand(createSpec('git', args)).gitTagQuery, undefined, JSON.stringify(args));
   const redirected = analyzeCommand(createSpec('git', ['--git-dir', '/tmp/untrusted', 'tag', '-l', 'release*']));
   assert.ok(redirected.reasons.some(reason => reason.code === 'git_configuration'));
+});
+
+test('finite Git queries distinguish revisions, ranges, peeling and explicit paths', () => {
+  for (const [args, kind, revisions] of [
+    [['log', '--oneline', '--no-decorate', '0.5.0..HEAD'], 'log', ['0.5.0..HEAD']],
+    [['tag', '--list', '0.5.0'], 'tag_list', []],
+    [['merge-base', '--is-ancestor', '0.5.0', 'HEAD'], 'ancestor', ['0.5.0', 'HEAD']],
+    [['rev-parse', 'HEAD^{tree}', 'HEAD', '0.5.0^{commit}'], 'revision_parse', ['HEAD^{tree}', 'HEAD', '0.5.0^{commit}']],
+    [['rev-list', '--count', '0.5.0..HEAD'], 'revision_count', ['0.5.0..HEAD']]
+  ] as Array<[string[], string, string[]]>) {
+    const analysis = analyzeCommandCapability(createSpec('git', args));
+    assert.equal(analysis.supported, true, JSON.stringify(args));
+    assert.deepEqual(analysis.semantics.gitLocalQuery, { kind, revisions });
+    assert.deepEqual(analysis.semantics.effects, ['workspace_read']);
+    assert.deepEqual(analysis.semantics.reasons.map(item => item.code), ['git_runtime']);
+    assert.equal(analysis.semantics.arguments.some(item => item.role === 'read_path'), false);
+  }
+  const paths = analyzeCommand(createSpec('git', ['log', '--oneline', '0.5.0..HEAD', '--', '../external/file.ts']));
+  assert.equal(paths.arguments.at(-1)?.role, 'read_path');
+  assert.equal(paths.arguments.find(item => item.value === '0.5.0..HEAD')?.role, 'revision');
+  assert.equal(analyzeCommand(createSpec('git', ['show', '0.5.0^{commit}'])).arguments.at(-1)?.role, 'revision');
+});
+
+test('capability diagnostics preserve exact argv and never invent generic flag deletion', () => {
+  const spec = createSpec('git', ['log', '--oneline', '--future-option', '0.5.0..HEAD']);
+  const before = JSON.stringify(spec);
+  const analysis = analyzeCommandCapability(spec);
+  assert.equal(analysis.supported, false);
+  assert.equal(analysis.semantics.gitLocalQuery, undefined);
+  const diagnostic = analysis.diagnostics.find(item => item.blocking)!;
+  assert.equal(diagnostic.code, 'host_unsupported_option');
+  assert.equal(diagnostic.phase, 'capability');
+  assert.equal(diagnostic.started, false);
+  assert.equal(diagnostic.argumentIndex, 2);
+  assert.equal(diagnostic.token, '--future-option');
+  assert.equal(diagnostic.candidateArgs, undefined);
+  assert.equal(JSON.stringify(spec), before);
+  for (const args of [
+    ['merge-base', '--is-ancestor', 'HEAD'], ['merge-base', '--is-ancestor', 'HEAD', 'HEAD', 'HEAD'],
+    ['rev-list', '--count'], ['rev-list', '--count', 'A...B'], ['rev-list', '--count', 'HEAD', 'other'],
+    ['rev-parse', '../outside'], ['rev-parse', 'HEAD:../outside'], ['rev-parse', 'HEAD@{1}'],
+    ['rev-parse', 'HEAD^{blob}'], ['log', '-n']
+  ]) {
+    const invalid = analyzeCommandCapability(createSpec('git', args));
+    assert.equal(invalid.supported, false, JSON.stringify(args));
+    assert.equal(invalid.semantics.gitLocalQuery, undefined);
+    assert.ok(invalid.diagnostics.some(item => item.blocking && item.category === 'invalid_argv'));
+  }
+  const unsupported = analyzeCommandCapability(createSpec('git', ['rev-parse', '--output=/tmp/out']));
+  assert.equal(unsupported.supported, false);
+  assert.equal(unsupported.diagnostics[0].category, 'capability');
+  assert.equal(unsupported.diagnostics[0].argumentIndex, 1);
+  assert.equal(analyzeCommandCapability(createSpec('custom-command', ['--version'])).diagnostics[0].blocking, false);
+});
+
+test('capability recovery keeps missing launch facts unknown and accepts only bounded explicit static diagnostics', () => {
+  const diagnostic = analyzeCommandCapability(createSpec('cat', ['--unknown'])).diagnostics[0];
+  assert.deepEqual(normalizeCommandCapabilityDiagnostic(diagnostic), diagnostic);
+  const legacy = { ...diagnostic } as Record<string, unknown>;
+  delete legacy.started;
+  assert.equal(normalizeCommandCapabilityDiagnostic(legacy), undefined);
+  assert.equal(normalizeCommandCapabilityDiagnostic({ ...diagnostic, started: true }), undefined);
+  assert.equal(normalizeCommandCapabilityDiagnostic({ ...diagnostic, capabilityVersion: 2 }), undefined);
+  assert.equal(normalizeCommandCapabilityDiagnostic({ ...diagnostic, argumentIndex: -1 }), undefined);
+  assert.equal(normalizeCommandCapabilityDiagnostic({ ...diagnostic, candidateArgs: ['bad\0arg'] }), undefined);
+});
+
+test('Git decoration synonyms have verified identical output without changing the original argv', async t => {
+  if (process.platform === 'win32') return t.skip('POSIX Git fixture');
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'keepseek-decoration-')));
+  try {
+    const git = (...args: string[]) => execFileSync('/usr/bin/git', args, { cwd: root, env: createControlledEnvironment([]), encoding: 'utf8', stdio: 'pipe' });
+    git('init', '-q');
+    git('-c', 'user.name=Query Fixture', '-c', 'user.email=query@example.invalid', '-c', 'commit.gpgsign=false',
+      'commit', '--allow-empty', '-m', 'query fixture');
+    git('tag', '0.5.0');
+    git('-c', 'user.name=Query Fixture', '-c', 'user.email=query@example.invalid', '-c', 'commit.gpgsign=false',
+      'commit', '--allow-empty', '-m', 'later fixture');
+    const args = ['log', '--oneline', '--no-decorate', '0.5.0..HEAD'];
+    const capability = analyzeCommandCapability(createSpec('git', args));
+    assert.deepEqual(capability.equivalents, [{ argumentIndex: 2, token: '--no-decorate', replacement: '--decorate=no' }]);
+    assert.equal(git(...args), git('log', '--oneline', '--decorate=no', '0.5.0..HEAD'));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('bare Git log refs retain protected path checks for real worktree/index matches without inventing files for tags or ranges', async t => {
+  if (process.platform === 'win32') return t.skip('POSIX Git fixture');
+  const { workspace, createRun } = await projectScriptFixture(t);
+  const env = createControlledEnvironment([]);
+  const git = (...args: string[]) => execFileSync('/usr/bin/git', args, { cwd: workspace, env, encoding: 'utf8', stdio: 'pipe' });
+  git('init', '-q');
+  for (const file of ['credentials', 'cookies', 'README.md']) await writeFile(path.join(workspace, file), 'public fixture marker\n');
+  git('add', '--', 'credentials', 'cookies', 'README.md');
+  git('-c', 'user.name=Scope Fixture', '-c', 'user.email=scope@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-m', 'public fixture');
+  git('tag', '0.5.0');
+  await rm(path.join(workspace, 'cookies')); // Still indexed: absence on disk is not absence of a path operand.
+  const grants = new ExactOperationGrants();
+  for (const operand of ['credentials', 'cookies']) {
+    // No log or file content is executed/read; the fixed index/config probes
+    // establish the ambiguity and the host rejects it before dispatch.
+    assert.throws(() => git('rev-parse', '--verify', '--end-of-options', `${operand}^{object}`));
+    await assert.rejects(inspectAutomaticRunAuthorization(await createRun('/usr/bin/git', ['log', '--oneline', operand]), grants, 'delegate'), /Protected credential/u);
+  }
+  for (const operand of ['0.5.0', '0.5.0..HEAD', '0.5.0^{commit}']) {
+    const authorization = await inspectAutomaticRunAuthorization(await createRun('/usr/bin/git', ['log', '--oneline', operand]), grants, 'delegate');
+    assert.equal(authorization.allowed, true, operand);
+    assert.equal(authorization.route, 'host_policy', operand);
+    assert.equal(authorization.scope.paths.some(target => target.role === 'read_path'), false, 'a genuine revision is not a virtual filesystem target');
+  }
+  const ordinaryPath = await inspectAutomaticRunAuthorization(await createRun('/usr/bin/git', ['log', '--oneline', 'README.md']), grants, 'delegate');
+  assert.equal(ordinaryPath.allowed, true);
+  assert.ok(ordinaryPath.scope.paths.some(target => target.role === 'read_path' && target.uri === vscode.Uri.file(path.join(workspace, 'README.md')).toString()));
+});
+
+test('missing Git repository evidence is recoverable diagnosis while the original command remains unauthorized', async t => {
+  if (process.platform === 'win32') return t.skip('POSIX Git fixture');
+  const { createRun } = await projectScriptFixture(t);
+  const run = await createRun('/usr/bin/git', ['log', '--oneline', '--no-decorate', 'HEAD']);
+  const grants = new ExactOperationGrants();
+  const decision = await inspectAutomaticRunAuthorization(run, grants, 'delegate');
+  assert.equal(decision.allowed, false);
+  assert.equal(decision.refusal?.code, 'insufficient_launch_evidence');
+  assert.match(decision.refusal.reason, /No Git repository/u);
+  assert.equal(decision.scope.gitCwd, undefined);
+  assert.equal(decision.scope.uncertain, true);
+  await assert.rejects(assertAutomaticRunAuthorization(run, grants, decision.scope.fingerprint, 'delegate'), /Nothing executed/u);
+  // Scope consent cannot manufacture missing executable/repository evidence.
+  grants.grant(draftRunIdentity(run), decision.scope);
+  const granted = await inspectAutomaticRunAuthorization(run, grants, 'delegate');
+  assert.equal(granted.allowed, false);
+  assert.equal(granted.refusal?.code, 'insufficient_launch_evidence');
+});
+
+test('missing Git evidence never downgrades explicit configuration or helper restrictions', async t => {
+  if (process.platform === 'win32') return t.skip('POSIX Git fixture');
+  const { createRun } = await projectScriptFixture(t);
+  for (const args of [
+    ['-c', 'core.pager=cat', 'log', '--oneline', 'HEAD'],
+    ['log', '--show-signature', 'HEAD'],
+    ['diff', '--ext-diff', 'HEAD']
+  ]) {
+    const run = await createRun('/usr/bin/git', args);
+    const decision = await inspectAutomaticRunAuthorization(run, new ExactOperationGrants(), 'delegate');
+    assert.equal(decision.allowed, false, JSON.stringify(args));
+    assert.equal(decision.refusal?.code, 'hard_blocked', JSON.stringify(args));
+    assert.equal(decision.scope.gitCwd, undefined);
+    assert.ok(decision.scope.diagnostics.some(item => ['git_configuration', 'external_helper'].includes(item.code)));
+  }
 });
 
 test('Git remote argv only recognizes bounded reads and non-forced explicit push refs', () => {
