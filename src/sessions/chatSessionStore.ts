@@ -47,6 +47,8 @@ import {
   normalizeTurnUsageStatsValue
 } from '../agent/usageStats';
 import { normalizeUsageLedgerValue } from '../agent/usageLedger';
+import { cloneSessionTitleMetadata, lockSessionTitleMetadata, normalizeSessionTitle, sessionTitleBasisMatches,
+  type SessionTitleBasis, type SessionTitleMetadata } from './sessionTitle';
 
 export const SESSION_STORAGE_KEY = 'keepseek.chatSessions';
 export const SESSION_STORAGE_VERSION = 2;
@@ -101,6 +103,88 @@ export class ChatSessionStore {
   private sessionSummaries = new Map<string, ChatSessionSummary>();
   private activeSessionIdValue = '';
   private approvalModeValue: ApprovalMode = 'ask';
+  private readonly stagedTitles = new Map<string, {
+    token: string; revision: number; title: string; metadata: SessionTitleMetadata;
+  }>();
+
+  /** Loaded sessions only: background naming must never load an entire old history. */
+  public getSessionById(sessionId: string): ChatSession | undefined {
+    return this.sessions.find(session => session.id === sessionId && this.isInCurrentWorkspace(session));
+  }
+
+  /** Synchronous invalidation wins against a response arriving during a new turn. */
+  public invalidateSessionTitle(sessionId: string): void {
+    const session = this.getSessionById(sessionId);
+    if (!session) return;
+    const state = normalizeSessionTitle(session.autoTitle, session.customTitle, { preserveRunning: true });
+    this.stagedTitles.delete(sessionId);
+    if (state.status !== 'running') return;
+    session.autoTitle = { ...state, status: 'pending', revision: state.revision + 1,
+      attempt: undefined, lastOutcome: 'stale' };
+    // A completed candidate may already be in an adapter write. Queue its
+    // invalidation behind that write even when no subsequent user turn saves.
+    void this.persist('session_title_invalidated').catch(() => { /* next normal barrier / load normalization */ });
+  }
+
+  public async claimSessionTitle(sessionId: string, taskId: string, basis: SessionTitleBasis): Promise<{
+    token: string; revision: number;
+  } | undefined> {
+    const session = this.getSessionById(sessionId);
+    if (!session || session.customTitle || session.pendingHistoryTruncation) return undefined;
+    const state = normalizeSessionTitle(session.autoTitle, session.customTitle, { preserveRunning: true });
+    if (state.status !== 'pending' || state.lastAttemptTaskId === taskId || !sessionTitleBasisMatches(session.messages, basis)) return undefined;
+    const token = randomUUID();
+    const revision = state.revision + 1;
+    session.autoTitle = { ...state, status: 'running', revision, lastAttemptTaskId: taskId,
+      attempt: { token, taskId, basis }, completed: undefined };
+    try { await this.persist('session_title_claim'); }
+    catch (error) {
+      if (session.autoTitle?.attempt?.token === token) session.autoTitle = {
+        ...session.autoTitle, status: 'pending', attempt: undefined, lastOutcome: 'save_failed' };
+      throw error;
+    }
+    return this.matchesTitleAttempt(sessionId, token, revision) ? { token, revision } : undefined;
+  }
+
+  /** Only a committed candidate is exposed to memory/UI. Retries save the same candidate. */
+  public async finishSessionTitle(sessionId: string, token: string, result: {
+    title?: string; outcome: SessionTitleMetadata['lastOutcome'];
+  }): Promise<boolean> {
+    const session = this.getSessionById(sessionId);
+    const attempt = session?.autoTitle?.attempt;
+    if (!session || !attempt || !this.matchesTitleAttempt(sessionId, token, session.autoTitle!.revision)) return false;
+    if (!result.title) {
+      session.autoTitle = { ...session.autoTitle!, status: 'pending', attempt: undefined, lastOutcome: result.outcome };
+      await this.persist('session_title_result');
+      return false;
+    }
+    const revision = session.autoTitle!.revision;
+    const candidate = { token, revision, title: result.title, metadata: {
+      ...session.autoTitle!, status: 'completed' as const, attempt: undefined,
+      completed: { taskId: attempt.taskId, basis: attempt.basis }, lastOutcome: result.outcome
+    } };
+    for (let save = 0; save < 2; save += 1) {
+      if (!this.matchesTitleAttempt(sessionId, token, revision)) return false;
+      this.stagedTitles.set(sessionId, candidate);
+      try {
+        await this.persist('session_title_commit');
+        return this.getSessionById(sessionId)?.autoTitle === candidate.metadata;
+      } catch {
+        this.stagedTitles.delete(sessionId);
+      }
+    }
+    if (this.matchesTitleAttempt(sessionId, token, revision)) session.autoTitle = {
+      ...session.autoTitle!, status: 'pending', attempt: undefined, lastOutcome: 'save_failed' };
+    return false;
+  }
+
+  private matchesTitleAttempt(sessionId: string, token: string, revision: number): boolean {
+    const session = this.getSessionById(sessionId);
+    return !!session && !session.customTitle && !session.pendingHistoryTruncation
+      && session.autoTitle?.status === 'running' && session.autoTitle.revision === revision
+      && session.autoTitle.attempt?.token === token
+      && sessionTitleBasisMatches(session.messages, session.autoTitle.attempt.basis);
+  }
 
   public constructor(
     private readonly sessionStorage: ChatSessionStorageAdapter,
@@ -239,6 +323,17 @@ export class ChatSessionStore {
       workspaceName: this.workspaceScope.name,
       workspaceFolders: this.workspaceScope.folderUris
     };
+    const copiedIds = new Map(source.messages.map((message, index) => [message.id, copied.messages[index].id]));
+    for (const message of copied.messages) {
+      const task = message.userTask;
+      if (!task) continue;
+      const originMessageId = copiedIds.get(task.originMessageId);
+      if (!originMessageId) { message.userTask = undefined; continue; }
+      const taskId = copiedIds.get(task.id) ?? originMessageId;
+      copiedIds.set(task.id, taskId);
+      message.userTask = { ...task, id: taskId, originMessageId };
+    }
+    copied.autoTitle = cloneSessionTitleMetadata(source.autoTitle, source.customTitle, copiedIds, copied.messages);
 
     this.sessions.unshift(copied);
     this.setActiveSessionId(copied.id);
@@ -270,6 +365,8 @@ export class ChatSessionStore {
 
     session.title = normalizedTitle;
     session.customTitle = normalizedTitle;
+    session.autoTitle = lockSessionTitleMetadata(session.autoTitle);
+    this.stagedTitles.delete(sessionId);
     session.updatedAt = new Date().toISOString();
     await this.persist();
     return session;
@@ -293,6 +390,7 @@ export class ChatSessionStore {
     });
     for (const id of ids) {
       this.sessionSummaries.delete(id);
+      this.stagedTitles.delete(id);
     }
 
     if (deletedActiveSession) {
@@ -303,6 +401,9 @@ export class ChatSessionStore {
       this.ensureActiveSession();
     }
     this.compact();
+    // An already-started title snapshot must finish before deleting its shard;
+    // otherwise that adapter write could recreate the deleted session.
+    await this.persistenceDrain?.catch(() => {});
     await this.sessionStorage.deleteWorkspaceSessions(this.workspaceScope.key, Array.from(ids));
     await this.persist();
     return {
@@ -382,13 +483,14 @@ export class ChatSessionStore {
     return cp?.id === messageId ? cp.runCheckpoint : undefined;
   }
 
-  public async getTaskCheckpoint(messageId: string): Promise<import('../agent/runCheckpoint').RunCheckpoint | undefined> {
-    const session = this.getActiveSession();
+  public async getTaskCheckpoint(messageId: string, sessionId?: string): Promise<import('../agent/runCheckpoint').RunCheckpoint | undefined> {
+    const session = sessionId ? this.getSessionById(sessionId) : this.getActiveSession();
+    if (!session) return undefined;
     const message = session.messages.find(item => item.id === messageId);
     if (message?.runCheckpoint) return message.runCheckpoint;
     if (!message?.runCheckpointArchive) return undefined;
     const stored = await this.sessionStorage.loadMessageCheckpoint?.(this.workspaceScope.key, session.id, messageId);
-    if (this.getActiveSession() !== session || !session.messages.includes(message)) return undefined;
+    if ((sessionId ? this.getSessionById(sessionId) : this.getActiveSession()) !== session || !session.messages.includes(message)) return undefined;
     const cp = normalizeRunCheckpoint(stored);
     return cp?.taskId === message.runCheckpointArchive.summary.taskId ? cp : undefined;
   }
@@ -415,7 +517,34 @@ export class ChatSessionStore {
       this.pendingPersistence = undefined;
       const processing = performance.now();
       try {
+        // A title candidate stays out of live memory until this write commits.
+        // Re-evaluate at the queue boundary: newer turns/renames may have
+        // invalidated a candidate while an earlier save was in flight.
+        for (const saved of next.snapshot.sessions) {
+          const live = this.getSessionById(saved.id);
+          if (!live || live.workspaceKey !== next.scope.key) continue;
+          const staged = this.stagedTitles.get(saved.id);
+          const valid = staged && this.matchesTitleAttempt(saved.id, staged.token, staged.revision);
+          saved.title = valid ? staged.title : live.title;
+          saved.customTitle = live.customTitle;
+          saved.autoTitle = structuredClone(valid ? staged.metadata : live.autoTitle);
+          const summary = next.snapshot.sessionSummaries?.find(item => item.id === saved.id);
+          if (summary) { summary.title = saved.title; summary.customTitle = live.customTitle; }
+        }
         await this.sessionStorage.saveWorkspace(next.scope, next.snapshot);
+        for (const saved of next.snapshot.sessions) {
+          const staged = this.stagedTitles.get(saved.id);
+          if (staged && saved.autoTitle?.status === 'completed'
+            && saved.autoTitle.revision === staged.metadata.revision
+            && saved.autoTitle.completed?.taskId === staged.metadata.completed?.taskId
+            && this.matchesTitleAttempt(saved.id, staged.token, staged.revision)) {
+            const live = this.getSessionById(saved.id)!;
+            live.title = staged.title;
+            live.autoTitle = staged.metadata;
+            this.sessionSummaries.set(live.id, toSessionSummary(live, this.language));
+            this.stagedTitles.delete(live.id);
+          }
+        }
         // Release archived bodies only after the object graph AND manifest commit.
         // An in-flight newer checkpoint wins; never detach its recovery state.
         for (const savedSession of next.snapshot.sessions) {
@@ -431,6 +560,9 @@ export class ChatSessionStore {
           }
         }
       } catch (error) {
+        // Pending generic saves are re-projected from live titles above. They
+        // cannot resurrect a rejected staged candidate.
+        for (const saved of next.snapshot.sessions) this.stagedTitles.delete(saved.id);
         this.rejectPersistenceWaitersThrough(next.revision, error);
         throw error;
       }
@@ -662,6 +794,7 @@ export function createEmptySession(
   return {
     id: randomUUID(),
     title: localize(language, 'defaultSessionTitle'),
+    autoTitle: normalizeSessionTitle(undefined, undefined),
     messages: [],
     executionTime: { version: 1, byTask: {}, incomplete: false },
     approvalMode,
@@ -822,10 +955,12 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
     const workspaceFolders = Array.isArray(item.workspaceFolders)
       ? item.workspaceFolders.filter((folder): folder is string => typeof folder === 'string' && Boolean(folder))
       : workspaceScope.folderUris;
+    const autoTitle = normalizeSessionTitle(item.autoTitle, customTitle, { messages });
 
     sessions.push({
       id: item.id,
       title,
+      autoTitle,
       messages,
       approvalMode: normalizeStoredApprovalMode(item.approvalMode),
       approvalModeMigrated: item.approvalMode === 'model_review' || item.approvalModeMigrated === true || undefined,

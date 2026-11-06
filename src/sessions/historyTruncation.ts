@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { ChatMessage, ChatSession } from '../shared/types';
 import { executionSegmentId } from './userTask';
+import { reconcileSessionTitleAfterTruncation } from './sessionTitle';
 
 /** Host-only ownership evidence. Never serialize this into Provider input. */
 export interface HistoryTruncationScope {
@@ -87,6 +88,16 @@ export async function executeHistoryTruncation(
     // Retry this write on recovery as an earlier rejected write may never have
     // reached disk. No independent Store mutation precedes its acknowledgement.
     session.pendingHistoryTruncation = plan;
+    // Invalidate before the journal's first asynchronous barrier. A late title
+    // response cannot commit against history being removed.
+    const naming = reconcileSessionTitleAfterTruncation(session.autoTitle, session.customTitle,
+      session.messages.filter(message => plan.retainedMessageIds.includes(message.id)));
+    session.autoTitle = naming.metadata;
+    if (naming.resetTitle && !session.customTitle) {
+      const firstUser = session.messages.find(message => message.role === 'user' && plan.retainedMessageIds.includes(message.id))
+        ?? plan.replacement;
+      session.title = fallbackTitle(firstUser.content);
+    }
     await hooks.persistSession();
     await hooks.invalidateOperations(plan);
     await hooks.commitOperations?.(plan);
@@ -106,6 +117,13 @@ export async function executeHistoryTruncation(
   } finally {
     transactions.delete(session);
   }
+}
+
+function fallbackTitle(content: string): string {
+  const text = content.replace(/\s+/gu, ' ').trim();
+  // Keep the existing temporary-title contract without splitting code points.
+  const points = Array.from(text);
+  return points.length > 48 ? `${points.slice(0, 48).join('')}...` : text;
 }
 
 export async function recoverPendingHistoryTruncation(

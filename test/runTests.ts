@@ -1,6 +1,7 @@
 import './registerVscodeStub';
 import './approvalMode.test';
 import './approvalReviewer.test';
+import './oneShotTextRequest.test';
 import './accountResolver.test';
 import './accountRuntime.test';
 import './accountStore.test';
@@ -87,12 +88,16 @@ import './interactionTrace.test';
 import './modelNetworkRecoveryRuntime.test';
 import './providerNetworkRecovery.test';
 import './providerStreamRecovery.test';
-
 import './modelOutputBudget.test';
 import './longTaskPerformance.test';
 import './p0SubagentPersistence.test';
 import './p1ProtocolDelivery.test';
 import './p1SubagentResultReader.test';
 import './p1Delegation.test';
-
 import './taskApprovalIntegration.test';
+import './sessionTitle.test';
+import './sessionTitleStorage.test';
+import './sessionTitleCompletion.test';
+import './sessionTitleRequest.test';
+import './sessionTitleWebview.test';
+import './sessionTitleIntegration.test';

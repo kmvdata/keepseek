@@ -1182,6 +1182,7 @@ export function getScript(): string {
             titleInput.blur();
           } else if (event.key === 'Escape') {
             event.preventDefault();
+            titleInput.dataset.cancelTitleEdit = 'true';
             titleInput.value = titleInput.dataset.originalTitle || '';
             titleInput.blur();
           }
@@ -1256,6 +1257,14 @@ export function getScript(): string {
 
     function handleKeepseekHostMessage(event) {
       var message = event.data;
+      if (message.type === 'sessionTitleUpdated') {
+        applySessionTitleUpdate(message);
+        return;
+      }
+      if (message.type === 'sessionTitleUsageUpdated') {
+        applySessionTitleUsageUpdate(message);
+        return;
+      }
       if (message.type === 'taskTiming') {
         if (message.sessionId === state.activeSessionId && state.usageMetrics) {
           state.usageMetrics.executionTime = message.executionTime;
@@ -1558,6 +1567,49 @@ export function getScript(): string {
         currentSessionTitle.textContent = title;
         currentSessionTitle.title = title;
       }
+    }
+
+    // A background title must leave the composer, open title editor, and
+    // transcript intact. Patch only already-known session labels in place.
+    function applySessionTitleUpdate(message) {
+      if (typeof message.sessionId !== 'string' || typeof message.title !== 'string' || !message.title.trim()) return;
+      var known = false;
+      (Array.isArray(state.sessionSummaries) ? state.sessionSummaries : []).forEach(function(session) {
+        if (session.id === message.sessionId && !session.customTitle) {
+          session.title = message.title;
+          known = true;
+        }
+      });
+      if (!known) return;
+      if (state.activeSessionId === message.sessionId) renderCurrentSessionTitle();
+      if (!sessionMenu || !sessionMenuOpen || editingSessionTitleId === message.sessionId) return;
+      sessionMenu.querySelectorAll('.session-menu-item').forEach(function(row) {
+        if (row.dataset.sessionOrigin !== 'current' || row.dataset.sessionId !== message.sessionId) return;
+        var label = row.querySelector('span.session-menu-item-title');
+        if (label) { label.textContent = message.title; label.title = message.title; }
+      });
+    }
+
+    function applySessionTitleUsageUpdate(message) {
+      if (message.sessionId !== state.activeSessionId || !state.usageMetrics) return;
+      var metrics = state.usageMetrics;
+      if (message.sessionUsageStats && typeof message.sessionUsageStats === 'object') {
+        metrics.sessionUsageStats = message.sessionUsageStats;
+      }
+      var incoming = message.usageDetails;
+      if (incoming && typeof incoming === 'object') {
+        metrics.usageDetails = Object.assign({}, metrics.usageDetails || {}, {
+          session: incoming.session,
+          sessionTitle: incoming.sessionTitle,
+          subagents: incoming.subagents
+        });
+      }
+      if (Array.isArray(message.referenceCostSourceIds)) {
+        metrics.referenceCostSourceIds = message.referenceCostSourceIds;
+      }
+      // Only redraw usage surfaces; keep the latest main reply, task clock,
+      // cache diagnostics, composer and manual-title editor untouched.
+      if (window.keepseekInputControls?.renderUsage) window.keepseekInputControls.renderUsage();
     }
 
     function applyStaticTranslations() {
@@ -2283,6 +2335,11 @@ export function getScript(): string {
     }
 
     function commitSessionTitle(input) {
+      if (input.dataset.cancelTitleEdit === 'true') {
+        editingSessionTitleId = '';
+        renderSessionMenu();
+        return;
+      }
       var sessionId = input.dataset.sessionId || '';
       var originalTitle = input.dataset.originalTitle || '';
       var title = input.value.replace(/\\s+/g, ' ').trim();
@@ -2294,7 +2351,7 @@ export function getScript(): string {
       }
       input.value = title;
       editingSessionTitleId = '';
-      if (!sessionId || title === originalTitle) {
+      if (!sessionId) {
         renderSessionMenu();
         return;
       }

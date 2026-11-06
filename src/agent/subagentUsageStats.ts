@@ -109,6 +109,9 @@ export interface ActualUsageBreakdown {
 export interface UsageDetailsViewModel {
   session: ActualUsageBreakdown;
   lastTurn?: ActualUsageBreakdown;
+  /** Lightweight auxiliary requests, included in subagent totals without
+   * inventing tool-capable child tasks or lifecycle summaries. */
+  sessionTitle?: ActualUsageSlice;
   subagents?: {
     acceptedTaskCount?: number;
     queuedCount: number;
@@ -370,13 +373,15 @@ export function createUsageDetailsViewModel(input: {
   const session = splitActualUsage(normalizedSession);
   const lastTurn = input.lastTurnUsage ? splitActualUsage(normalizeTurnUsageStatsValue(input.lastTurnUsage)) : undefined;
   const subagentStats = normalizeSubagentSessionUsageStatsValue(input.subagentUsageStats);
+  const titleRecords = input.subagentLedgerRecords?.filter(record => record.source === 'subagent' && record.purpose === 'session_title') ?? [];
+  const sessionTitle = titleRecords.length ? toActualUsageSlice(rebuildSessionUsageStatsFromLedger(titleRecords)) : undefined;
   const activities = [...new Map((input.subagentActivities ?? []).map(activity => [activity.id, activity])).values()];
   const hasSubagentActualUsage = (session.subagent.providerAttemptCount ?? 0) > 0
     || session.subagent.requestCount > 0 || session.subagent.totalTokens > 0;
   const hasSubagents = Boolean(subagentStats?.totalCount || subagentStats?.rootHandoffCount || hasSubagentActualUsage || activities.length || input.lifecycleIncomplete
     || input.observedInvocations?.delegate || input.observedInvocations?.parallel);
   if (!hasSubagents) {
-    return { session, lastTurn };
+    return { session, lastTurn, ...(sessionTitle ? { sessionTitle } : {}) };
   }
   const isolated = subagentStats?.isolatedIntermediateTokensEstimate ?? 0;
   const handoff = subagentStats?.rootHandoffTokensEstimate ?? 0;
@@ -430,6 +435,7 @@ export function createUsageDetailsViewModel(input: {
   return {
     session,
     lastTurn,
+    ...(sessionTitle ? { sessionTitle } : {}),
     subagents: {
       acceptedTaskCount,
       queuedCount: activities.filter(activity => activity.status === 'queued').length,
@@ -451,8 +457,8 @@ export function createUsageDetailsViewModel(input: {
       handoffCountByKind: subagentStats?.handoffCountByKind ?? createEmptyHandoffCounts(),
       estimatesAvailable: Boolean(subagentStats?.totalCount),
       summariesIncomplete: (subagentStats?.byModel ?? []).reduce((sum, group) => sum + (group.usage?.requestCount ?? 0), 0)
-        < session.subagent.requestCount || (subagentStats?.byModel ?? []).reduce((sum, group) => sum + (group.usage?.providerAttemptCount ?? 0), 0)
-        < (session.subagent.providerAttemptCount ?? 0),
+        < session.subagent.requestCount - (sessionTitle?.requestCount ?? 0) || (subagentStats?.byModel ?? []).reduce((sum, group) => sum + (group.usage?.providerAttemptCount ?? 0), 0)
+        < (session.subagent.providerAttemptCount ?? 0) - (sessionTitle?.providerAttemptCount ?? 0),
       byModel,
       byProfileLane: (subagentStats?.byProfileLane ?? []).map((group) => ({
         ...cloneSubagentUsageGroup(group), usage: ledgerRecords ? groupedActual(['profile', group.profile, group.lane], () => ledgerRecords.filter(record =>

@@ -41,12 +41,13 @@ export class ReferenceCostIndex {
             updateUsageLedgerStatsIndex(group, projected);
           }
         }
-        if (!resetTurn && Number.isFinite(since) && Date.parse(record.requestStartedAt) >= since) updateUsageLedgerStatsIndex(this.turn, projected);
+        if (!resetTurn && record.purpose !== 'session_title' && Number.isFinite(since)
+          && Date.parse(record.requestStartedAt) >= since) updateUsageLedgerStatsIndex(this.turn, projected);
       }
     }
     const projected = [...this.total.records.values()];
     if (resetTurn && Number.isFinite(since)) for (const record of projected) {
-      if (Date.parse(record.requestStartedAt) >= since) updateUsageLedgerStatsIndex(this.turn, record);
+      if (record.purpose !== 'session_title' && Date.parse(record.requestStartedAt) >= since) updateUsageLedgerStatsIndex(this.turn, record);
     }
     return projected;
   }

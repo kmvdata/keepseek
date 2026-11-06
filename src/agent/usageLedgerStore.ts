@@ -40,6 +40,9 @@ export class UsageLedgerStore {
   private readonly decoder = new TextDecoder();
   private readonly queues = new Map<string, Promise<unknown>>();
   private readonly indexes = new Map<string, LedgerIndex>();
+  // IDs are never reused. Late auxiliary callbacks must not recreate deleted
+  // buckets in this host lifetime; restarted hosts have no live callbacks.
+  private readonly deletedSessions = new Set<string>();
 
   public constructor(private readonly globalStorageUri?: vscode.Uri) {}
 
@@ -58,8 +61,9 @@ export class UsageLedgerStore {
     sessionId: string,
     records: readonly ProviderUsageLedgerRecord[]
   ): Promise<{ appended: number; duplicates: number }> {
-    if (!this.globalStorageUri || !sessionId.trim() || !records.length) return { appended: 0, duplicates: 0 };
+    if (!this.globalStorageUri || !sessionId.trim() || !records.length || this.deletedSessions.has(sessionId)) return { appended: 0, duplicates: 0 };
     return await this.enqueue(sessionId, async () => {
+      if (this.deletedSessions.has(sessionId)) return { appended: 0, duplicates: 0 };
       const normalized = records.map(normalizeUsageLedgerRecord).filter(
         (record): record is ProviderUsageLedgerRecord => Boolean(record)
       );
@@ -97,7 +101,7 @@ export class UsageLedgerStore {
           records: [...nextRecords.values()],
           updatedAt: new Date().toISOString()
         } satisfies StoredUsageLedgerBucket, { durable: true });
-        const index = this.indexes.get(sessionId);
+        const index = this.deletedSessions.has(sessionId) ? undefined : this.indexes.get(sessionId);
         if (index) for (const record of unique) this.updateIndex(index, record);
         appended += unique.length;
       }
@@ -170,7 +174,7 @@ export class UsageLedgerStore {
       legacyAggregate: false,
       incomplete: page.damagedBucketCount > 0
     };
-    this.indexes.set(sessionId, { records: new Map(page.records.map(record => [recordIdentity(record), record])),
+    if (!this.deletedSessions.has(sessionId)) this.indexes.set(sessionId, { records: new Map(page.records.map(record => [recordIdentity(record), record])),
       stats: rebuildSessionUsageStatsFromLedger(page.records, { incomplete: ledger.incomplete }), damagedBucketCount: page.damagedBucketCount });
     return { ledger, summary: summarizeUsageLedger(ledger), damagedBucketCount: page.damagedBucketCount };
     });
@@ -179,8 +183,12 @@ export class UsageLedgerStore {
   /** Startup scans once; normal appends update the index only after durable commit.
    * Explicit rebuild remains the disk integrity check and repair entrypoint. */
   public async current(sessionId: string) {
+    const empty = () => ({ ledger: { version: 1 as const, records: [] as ProviderUsageLedgerRecord[], legacyAggregate: false, incomplete: false },
+      stats: undefined as ChatSession['usageStats'], damagedBucketCount: 0 });
+    if (this.deletedSessions.has(sessionId)) return empty();
     if (!this.indexes.has(sessionId)) await this.rebuild(sessionId);
     return this.enqueue(sessionId, async () => {
+      if (this.deletedSessions.has(sessionId)) return empty();
       const index = this.indexes.get(sessionId)!;
       const records = [...index.records.values()];
       const incomplete = index.damagedBucketCount > 0;
@@ -195,13 +203,17 @@ export class UsageLedgerStore {
   }
 
   public async deleteSession(sessionId: string): Promise<void> {
-    if (!this.globalStorageUri || !sessionId.trim()) return;
+    if (!sessionId.trim()) return;
+    this.deletedSessions.add(sessionId);
     this.indexes.delete(sessionId);
-    try {
-      await vscode.workspace.fs.delete(this.sessionUri(hashText(sessionId)), { recursive: true, useTrash: false });
-    } catch {
-      // Missing or partially removed ledger directories are already clean.
-    }
+    await this.enqueue(sessionId, async () => {
+      if (!this.globalStorageUri) return;
+      try {
+        await vscode.workspace.fs.delete(this.sessionUri(hashText(sessionId)), { recursive: true, useTrash: false });
+      } catch {
+        // Missing or partially removed ledger directories are already clean.
+      }
+    });
   }
 
   private async readBucket(sessionId: string, bucket: number): Promise<{
@@ -230,6 +242,7 @@ export class UsageLedgerStore {
     damagedBucketCount: number;
   }> {
     const records: ProviderUsageLedgerRecord[] = [];
+    if (this.deletedSessions.has(sessionId)) return { records, damagedBucketCount: 0 };
     let damagedBucketCount = 0;
     for (let bucket = 0; bucket < USAGE_LEDGER_STORE_BUCKET_COUNT; bucket += 1) {
       const stored = await this.readBucket(sessionId, bucket);

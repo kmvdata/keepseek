@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import * as vscode from 'vscode';
 import {
   getSessionUpdatedTimestamp,
+  createSessionTitle,
   normalizeStoredActiveSessionIds,
   normalizeStoredSessions,
   SESSION_STORAGE_KEY,
@@ -65,6 +66,8 @@ export interface WorkspaceSessionIndex {
 export interface SessionIndexEntry extends ChatSessionSummary {
   storageFile: string;
   byteLength?: number;
+  /** The atomic workspace index commits an automatic title, after its shard. */
+  autoTitleCommit?: string;
 }
 
 interface LegacyWorkspaceSessionFile {
@@ -183,7 +186,8 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
       entries.set(summary.id, {
         ...summary,
         storageFile: previous?.storageFile ?? getSessionStorageFile(summary.id),
-        byteLength: previous?.byteLength
+        byteLength: previous?.byteLength,
+        autoTitleCommit: previous?.autoTitleCommit
       });
     }
 
@@ -193,7 +197,8 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
       entries.set(session.id, {
         ...toSessionSummary(session),
         storageFile: getSessionStorageFile(session.id),
-        byteLength
+        byteLength,
+        autoTitleCommit: automaticTitleCommit(session)
       });
     }));
 
@@ -438,7 +443,8 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
       const value = { version: 2, workspaceKey: file.workspaceKey, session };
       const byteLength = new TextEncoder().encode(JSON.stringify(value)).byteLength;
       await writeJsonAtomic(this.getSessionUri(workspaceHash, session.id), value);
-      entries.push({ ...toSessionSummary(session), storageFile: getSessionStorageFile(session.id), byteLength });
+      entries.push({ ...toSessionSummary(session), storageFile: getSessionStorageFile(session.id), byteLength,
+        autoTitleCommit: automaticTitleCommit(session) });
     }
     const index: WorkspaceSessionIndex = {
       version: 2,
@@ -490,6 +496,21 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     if (!isRecord(stored)) return undefined;
     const scope = { key: index.workspaceKey, name: index.workspaceName, folderUris: index.workspaceFolders };
     const session = normalizeStoredSessions({ sessions: [stored] }, scope)[0];
+    if (session?.autoTitle?.status === 'completed') {
+      const entry = index.sessions.find(candidate => candidate.id === session.id);
+      // Shards are written before the index. An interrupted/failed index commit
+      // must not turn a rejected title into success on restart or orphan repair.
+      if (!entry?.autoTitleCommit || entry.autoTitleCommit !== automaticTitleCommit(session)) {
+        const state = session.autoTitle;
+        session.autoTitle = { version: 1, status: 'pending', revision: state.revision + 1,
+          lastAttemptTaskId: state.lastAttemptTaskId ?? state.completed?.taskId,
+          lastOutcome: entry?.customTitle ? 'manual' : 'save_failed' };
+        session.customTitle = entry?.customTitle ?? session.customTitle;
+        session.title = session.customTitle ?? entry?.title
+          ?? createSessionTitle(session.messages.find(message => message.role === 'user'
+            && !message.contextMeta?.displayKind)?.content ?? '');
+      }
+    }
     return session?.workspaceKey === index.workspaceKey ? session : undefined;
   }
 
@@ -745,9 +766,20 @@ function normalizeSessionIndexEntry(value: unknown, workspaceKey: string, worksp
     workspaceName: nonEmptyString(value.workspaceName) ?? workspaceName,
     isFavorite: value.isFavorite === true,
     customTitle: nonEmptyString(value.customTitle),
+    autoTitleCommit: typeof value.autoTitleCommit === 'string' && /^[a-f0-9]{64}$/u.test(value.autoTitleCommit)
+      ? value.autoTitleCommit : undefined,
     storageFile: nonEmptyString(value.storageFile) ?? getSessionStorageFile(id),
     byteLength: typeof value.byteLength === 'number' && value.byteLength >= 0 ? Math.floor(value.byteLength) : undefined
   };
+}
+
+function automaticTitleCommit(session: ChatSession): string | undefined {
+  const state = session.autoTitle;
+  if (session.customTitle || state?.status !== 'completed' || !state.completed) return undefined;
+  return createHash('sha256').update(JSON.stringify([
+    session.id, session.title, state.revision, state.completed.taskId,
+    state.completed.basis.messages.map(ref => [ref.id, ref.hash]), state.completed.basis.lastMessageId
+  ]), 'utf8').digest('hex');
 }
 
 function normalizeLegacyWorkspaceSessionFile(value: unknown, fallback?: WorkspaceMetadata | WorkspaceSessionScope): LegacyWorkspaceSessionFile | undefined {

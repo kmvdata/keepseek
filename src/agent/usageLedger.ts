@@ -356,6 +356,7 @@ export function normalizeUsageLedgerRecord(value: unknown): ProviderUsageLedgerR
     attemptIndex: Number(value.attemptIndex),
     kind: value.kind,
     ...(typeof value.subagentId === 'string' && /^[A-Za-z0-9_.:-]{1,256}$/u.test(value.subagentId) ? { subagentId: value.subagentId } : {}),
+    ...(value.purpose === 'session_title' && value.source === 'subagent' ? { purpose: 'session_title' as const } : {}),
     source: normalizeSource(value.source),
     ...(requestBudget ? { requestBudget } : {}),
     sourceId: snapshot.sourceId,

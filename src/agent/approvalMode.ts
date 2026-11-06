@@ -68,6 +68,13 @@ export class DelegatedApprovalQueue {
     if (this.active === controller) { this.active = undefined; this.activeBatch = undefined; }
   }
 
+  /** Read-only lifecycle observation; never claims or starts an approval. */
+  public hasPending(sessionId: string, rootTaskId?: string): boolean {
+    const matches = (batch: DelegatedApprovalBatch | undefined) => Boolean(batch && batch.sessionId === sessionId
+      && (!rootTaskId || batch.rootTaskId === rootTaskId));
+    return matches(this.pending) || matches(this.activeBatch);
+  }
+
   /** Revoke only work whose execution segment left the full host history. */
   public invalidateHistory(scope: HistoryTruncationScope, removedTargetIds: readonly string[] = []): void {
     const affected = (batch: DelegatedApprovalBatch | undefined) => batch?.sessionId === scope.sessionId

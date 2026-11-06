@@ -36,7 +36,7 @@ import { usageFormattersFragment } from '../src/webview/input/usage/formatters';
 import { getScript } from '../src/webview/script';
 import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
 import { createProviderCacheObservation } from '../src/agent/cacheObservation';
-import { buildReferenceCostView } from '../src/agent/usageReferenceCosts';
+import { buildReferenceCostView, ReferenceCostIndex } from '../src/agent/usageReferenceCosts';
 
 test('host ledger flush preserves ref damage and does not spin after storage failure', async () => {
   const price = createUsagePriceSnapshot({ originalModelId: 'fixture', sourceId: 'fixture', provider: 'qwencloud',
@@ -86,6 +86,51 @@ test('reference fees propagate to child totals, model groups, work types and ind
   assert.equal(view.subagents?.byProfileLane[0].usage?.cost, expected);
   assert.equal(view.subagents?.recentRuns[0].usage?.cost, expected);
   assert.equal(JSON.stringify(subagents), original);
+});
+
+test('automatic title usage is a labeled subagent subset without tool child tasks', () => {
+  const price = createUsagePriceSnapshot({ originalModelId: 'title-model', sourceId: 'title-account', provider: 'qwencloud',
+    protocol: 'chat-completions', supportsBilling: false, requestStartedAt: '2026-11-06T00:00:00.000Z' });
+  const records = createUsageLedgerRecords({ requestId: 'session_title_fixture', attempts: [price], source: 'subagent',
+    usage: event('subagent').usage }).map(record => ({ ...record, purpose: 'session_title' as const }));
+  const failed = createUsageLedgerRecords({ requestId: 'session_title_failed', attempts: [price], source: 'subagent' })
+    .map(record => ({ ...record, purpose: 'session_title' as const }));
+  const all = [...records, ...failed];
+  const sessionUsageStats = rebuildSessionUsageStatsFromLedger(all);
+  const details = createUsageDetailsViewModel({ sessionUsageStats, subagentLedgerRecords: all });
+  assert.equal(details.sessionTitle?.totalTokens, 120);
+  assert.equal(details.sessionTitle?.providerAttemptCount, 2);
+  assert.equal(details.sessionTitle?.usageResponseCount, 1);
+  assert.equal(details.subagents?.totalCount, 0);
+  assert.equal(details.subagents?.recentRuns.length, 0);
+  assert.equal(details.subagents?.summariesIncomplete, false, 'auxiliary requests need no fabricated child summaries');
+  assert.equal(details.subagents?.byModel[0].sourceId, 'title-account');
+  for (const language of ['zh-CN', 'en'] as const) {
+    const ui = createUsageAnalysisHarness(language, false);
+    ui.setSession({ sessionUsageStats, subagentLedgerRecords: all });
+    ui.render();
+    const note = ui.body.querySelector('.usage-session-title-purpose');
+    assert.ok(note?.textContent.includes(WEBVIEW_TRANSLATIONS[language].usageSessionTitlePurpose));
+    assert.match(note!.textContent, /120 Tokens/u);
+  }
+});
+
+test('automatic title reference costs join session totals while preserving the latest main reply', () => {
+  const lastUserAt = '2026-11-06T00:00:00.000Z';
+  const price = createUsagePriceSnapshot({ originalModelId: 'fixture', sourceId: 'fixture', provider: 'qwencloud',
+    protocol: 'chat-completions', supportsBilling: false, requestStartedAt: '2026-11-06T00:00:01.000Z' });
+  const main = createUsageLedgerRecords({ requestId: 'main_reply', attempts: [price], source: 'executor', usage: event('executor').usage });
+  const title = createUsageLedgerRecords({ requestId: 'session_title_cost', attempts: [price], source: 'subagent', usage: event('subagent').usage })
+    .map(record => ({ ...record, purpose: 'session_title' as const }));
+  const ledger = (records: typeof main) => ({ version: 1 as const, records, incomplete: false, legacyAggregate: false });
+  const index = new ReferenceCostIndex();
+  const before = buildReferenceCostView(ledger(main), { lastUserAt }, index);
+  const after = buildReferenceCostView(ledger([...main, ...title]), { lastUserAt }, index);
+  assert.ok(after.session!.sessionCost > before.session!.sessionCost);
+  assert.deepEqual(after.turn, before.turn, 'incremental title bookkeeping cannot change the main reply display');
+  const restored = buildReferenceCostView(ledger([...main, ...title]), { lastUserAt });
+  assert.deepEqual(restored.turn, before.turn, 'restored reference indices use the same boundary');
+  assert.equal(restored.session!.bySource?.subagent?.totalTokens, 120);
 });
 
 test('attempt and usage response counts survive normalization, aggregation and host view conversion', () => {

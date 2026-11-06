@@ -317,3 +317,37 @@ test('transport ledger persistence failure cannot become a network retry or disp
     assert.equal(posts, 0); assert.equal(attempts, 1);
   } finally { globalThis.fetch = original; }
 });
+
+test('deletion serializes with an in-flight ledger commit and rejects queued or late auxiliary usage', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'keepseek-ledger-delete-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const uri = vscode.Uri.file(root) as never;
+  const store = new UsageLedgerStore(uri);
+  await store.current('deleted-parent');
+  let reached!: () => void;
+  const committing = new Promise<void>(resolve => { reached = resolve; });
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const originalRename = vscode.workspace.fs.rename;
+  let first = true;
+  vscode.workspace.fs.rename = async (...args) => {
+    if (first && args[1].fsPath.includes('usage-ledger')) { first = false; reached(); await gate; }
+    return originalRename(...args);
+  };
+  try {
+    const active = store.append('deleted-parent', { ...record(true, 'active-title'), purpose: 'session_title' });
+    await committing;
+    const queued = store.append('deleted-parent', record(true, 'queued-title'));
+    const deleted = store.deleteSession('deleted-parent');
+    assert.equal(await store.append('deleted-parent', record(true, 'late-title')), false);
+    assert.equal(store.peekStats('deleted-parent'), undefined);
+    release();
+    await Promise.all([active, deleted]);
+    assert.equal(await queued, false);
+    assert.equal((await store.current('deleted-parent')).ledger.records.length, 0);
+    assert.equal(store.peekStats('deleted-parent'), undefined);
+    assert.equal((await new UsageLedgerStore(uri).readAll('deleted-parent')).total, 0);
+    const identity = createHash('sha256').update('deleted-parent').digest('hex');
+    await assert.rejects(readdir(join(root, 'usage-ledger', 'v2', identity)), { code: 'ENOENT' });
+  } finally { release(); vscode.workspace.fs.rename = originalRename; }
+});

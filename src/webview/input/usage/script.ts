@@ -182,7 +182,7 @@ export const usageRenderFragment: WebviewFragment = {
         usageDetailsBody.append(createContextWindowSection(metrics));
         usageDetailsBody.append(createSessionMetricsSection(metrics, selected));
         usageDetailsBody.append(createCacheDiagnosticsSection(metrics));
-        usageDetailsBody.append(createUsageAnalysisSection(selected, usageGroups, sessionUsage, details.subagents));
+        usageDetailsBody.append(createUsageAnalysisSection(selected, usageGroups, sessionUsage, details.subagents, details.sessionTitle));
         usageDetailsBody.scrollTop = scrollTop;
       }
 
@@ -426,7 +426,7 @@ export const usageRenderFragment: WebviewFragment = {
         return section;
       }
 
-      function createUsageAnalysisSection(selected, usageGroups, sessionUsage, subagents) {
+      function createUsageAnalysisSection(selected, usageGroups, sessionUsage, subagents, sessionTitle) {
         var section = createUsageSection('usageAnalysisTitle');
         var sources = (usageGroups || []).filter(hasActualUsage);
         if (sources.length || hasActualUsage(selected.total)) {
@@ -446,6 +446,12 @@ export const usageRenderFragment: WebviewFragment = {
           var types = createUsageAnalysisGroup('usageTypeTitle', 'usage-analysis-type');
           types.append(usageNode('p', 'usage-note', t('usageResponsibilityScope')));
           appendTypeAnalysis(types, typeItems);
+          if (hasActualUsage(sessionTitle)) {
+            types.append(usageNode('p', 'usage-note usage-session-title-purpose', t('usageSessionTitlePurpose') + ' · '
+              + t('usageAttemptResponseCounts', {
+                attempts: sessionTitle.providerAttemptCount || 0, responses: sessionTitle.usageResponseCount || 0
+              }) + ' · ' + formatUsageTokens(sessionTitle) + ' Tokens · ' + formatAnalysisCost(sessionTitle)));
+          }
           if (subagents) {
             var fallbackModels = (subagents.byModel || []).filter(function(model) {
               return !findSubagentSource(model, sources);

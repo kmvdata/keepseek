@@ -123,6 +123,8 @@ export interface UsageCostRates {
 }
 
 export interface UsageEvent {
+  /** Isolated auxiliary request attribution; absent on legacy records. */
+  purpose?: 'session_title';
   usage: Usage;
   cost: number;
   currency: string;
@@ -317,6 +319,8 @@ export interface CacheDiagnosticsMetrics {
 }
 
 export interface ProviderUsageLedgerRecord {
+  /** Isolated auxiliary request attribution; never a synthetic child task. */
+  purpose?: 'session_title';
   /** Stable task owner; old records may only have cacheObservation.taskId. */
   subagentId?: string;
   requestBudget?: import('../agent/requestBudget').RequestBudgetSnapshot;
@@ -969,6 +973,8 @@ export interface PlanWorkflowView extends Omit<PlanWorkflowRecord, 'contentHash'
 }
 
 export interface ChatSession {
+  /** Host-only automatic naming state; never part of Provider history. */
+  autoTitle?: import('../sessions/sessionTitle').SessionTitleMetadata;
   /** Durable edit/resend intent; actions stay blocked until it is reconciled. */
   pendingHistoryTruncation?: import('../sessions/historyTruncation').PendingHistoryTruncation;
   pendingApproval?: import('../approvals/manualApproval').ManualApprovalSnapshot;

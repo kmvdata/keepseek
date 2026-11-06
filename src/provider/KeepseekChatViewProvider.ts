@@ -1,3 +1,7 @@
+import type { AgentRequest } from '../shared/types';
+import { SessionTitleCoordinator } from '../sessions/sessionTitleCoordinator';
+import { captureSessionTitleCompletion, checkSessionTitleCompletion, type SessionTitleCompletion } from './sessionTitleCompletion';
+import { requestSessionTitle, mergeSessionTitleTaskBudget } from './sessionTitleRequest';
 import { approvalDisposition } from '../approvals/approvalReviewTypes';
 import { getAutoApprovalReviewerSetting } from '../shared/config';
 import { ExecutionClock, ExecutionCostBudget, LogicalBudgetExceededError, LogicalRunBudget, SharedUpstreamTokenBudget } from '../agent/executionPolicy';
@@ -260,6 +264,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = CHAT_VIEW_TYPE;
 
   private readonly fileContext = new FileContextStore();
+  private readonly sessionTitles: SessionTitleCoordinator;
+  private readonly sessionTitleCandidates = new Map<string, {
+    completion: SessionTitleCompletion;
+    durable: boolean;
+    parentRequest: Pick<AgentRequest, 'model' | 'sourceConfig'>;
+  }>();
+  private titleLifecycleDisposed = false;
   private readonly agentRunner: AgentRunner;
   private readonly agentRequestCoordinator: AgentRequestCoordinator;
   private readonly sourceStore: ModelSourceStore;
@@ -388,7 +399,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     if (existing) return existing;
     const message = [...session.messages].reverse().find(item => item.userTask?.id === link.id && executionSegmentId(item));
     if (!message) return undefined;
-    const checkpoint = await this.sessionStore.getTaskCheckpoint(message.id);
+    const checkpoint = await this.sessionStore.getTaskCheckpoint(message.id, session.id);
     if (!checkpoint) throw new Error(this.t('approvalIdentityMissing'));
     session.userTaskBudgets ??= {};
     return session.userTaskBudgets[link.id] = taskBudgetFromCheckpoint(checkpoint);
@@ -486,6 +497,14 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     private readonly sessionInitialization: Promise<void> = Promise.resolve(),
     private readonly startupTrace?: StartupPerformanceTrace
   ) {
+    this.sessionTitles = new SessionTitleCoordinator(this.sessionStore, {
+      canCommit: () => vscode.workspace.isTrusted && !this.titleLifecycleDisposed,
+      onCommitted: sessionId => {
+        const session = this.sessionStore.getSessionById(sessionId);
+        if (session) this.postToWebview({ type: 'sessionTitleUpdated', sessionId, title: session.title });
+      },
+      onDiagnostic: (sessionId, taskId, outcome, elapsedMs) => console.info('[KeepSeek] session_title', { sessionId, taskId, outcome, elapsedMs })
+    });
     this.usageLedgerStore = new UsageLedgerStore(this.globalStorageUri);
     this.traceLogService = new InteractionTraceLogService(this.globalStorageUri);
     this.skillStore = new SkillStore(skillState);
@@ -580,6 +599,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   public dispose(): void {
+    this.titleLifecycleDisposed = true;
+    this.sessionTitles?.dispose();
+    this.sessionTitleCandidates?.clear();
     this.sharedProjectSources?.dispose();
     this.pluginSkillPreviewRegistration?.dispose();
     this.pluginSkillPreviews.clear();
@@ -621,6 +643,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   public async refreshWorkspaceScope(): Promise<void> {
+    this.sessionTitles?.cancelAll();
+    this.sessionTitleCandidates?.clear();
     this.draftRunBatches?.cancel();
     this.currentRunAbortController?.abort();
     await this.activeRunSettled;
@@ -1167,6 +1191,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         }
         return;
       case 'renameSession':
+        this.sessionTitles?.cancel(message.sessionId);
+        this.sessionTitleCandidates?.delete(message.sessionId);
         if (await this.sessionStore.renameSession(message.sessionId, message.title)) {
           this.postState();
         }
@@ -1951,7 +1977,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       previousSummary,
       summarizeUsageLedger(session.usageLedger)
     );
-    session.updatedAt = new Date().toISOString();
+    if (record.purpose !== 'session_title') session.updatedAt = new Date().toISOString();
     this.queueUsageLedgerFlush(session);
   }
 
@@ -2012,10 +2038,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           incomplete: session.usageLedgerRef.incomplete
         } : undefined;
       }
-      session.updatedAt = new Date().toISOString();
+      const titleOnly = snapshot?.records.length && snapshot.records.every(record => record.purpose === 'session_title');
+      if (!titleOnly) session.updatedAt = new Date().toISOString();
       // No whole-session save for a derived ledger refresh. The raw buckets are
       // already durable and startup always reconciles them, including no-ref sessions.
-      if (this.sessionStore.activeSessionId === session.id) this.postState();
+      if (titleOnly) this.postSessionTitleUsage(session);
+      else if (this.sessionStore.activeSessionId === session.id) this.postState();
       succeeded = true;
     }).catch((error) => {
       // Inline records remain the crash-safe migration source until the v2
@@ -2030,6 +2058,23 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         // loop. Retain the inline batch; a later usage event can retry it.
         if (succeeded && normalizeUsageLedgerValue(session.usageLedger)?.records.length) this.queueUsageLedgerFlush(session);
       }
+    });
+  }
+
+  private postSessionTitleUsage(session: ChatSession): void {
+    if (this.titleLifecycleDisposed || this.sessionStore.activeSessionId !== session.id
+      || this.sessionStore.getSessionById(session.id) !== session) return;
+    const reference = this.referenceCostViews.get(session.id);
+    const sessionUsageStats = applyReferenceCostView(session.usageStats, reference?.session);
+    this.postToWebview({ type: 'sessionTitleUsageUpdated', sessionId: session.id,
+      sessionUsageStats, referenceCostSourceIds: reference?.referenceSourceIds ?? [],
+      usageDetails: createUsageDetailsViewModel({
+        sessionUsageStats, subagentUsageStats: session.subagentUsageStats,
+        subagentLedgerRecords: reference?.records, ledgerUsageIndex: this.referenceCostIndexes.get(session.id),
+        subagentActivities: this.subagentRuntime.getUsageActivities(session.id),
+        lifecycleIncomplete: this.subagentRecoveryIncomplete.has(session.id),
+        observedInvocations: countObservedSubagentInvocations(session.messages)
+      })
     });
   }
 
@@ -2386,6 +2431,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
+    for (const id of uniqueSessionIds) {
+      this.sessionTitles?.cancel(id);
+      this.sessionTitleCandidates?.delete(id);
+    }
     const result = await this.sessionStore.deleteSessions(uniqueSessionIds);
     if (!result.deletedCount) {
       return;
@@ -3998,6 +4047,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private abortPrompt(): void {
+    if (this.isBusy || this.isStartingRun || this.activeDraftRunId) {
+      const id = this.sessionStore.activeSessionId;
+      this.sessionTitleCandidates?.delete(id);
+      this.sessionTitles?.cancel(id);
+    }
     this.externalAuthorizationEpoch = (this.externalAuthorizationEpoch ?? 0) + 1;
     this.manualToolApproval?.decide(false);
     this.changeActionAbortController?.abort();
@@ -4532,6 +4586,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         ? `${script} passed.`
         : `${script} 已通过。`);
       await this.appendBackgroundOutcomeMessage(completed.stopReason ?? `${script} passed.`);
+      this.flushSessionTitleCompletions();
       return;
     }
     if (response.repairLoop.stopReason === 'authorization_denied') {
@@ -4919,6 +4974,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       if (executionMode === 'normal' && session.approvalMode !== 'ask' && !controller.signal.aborted) {
         this.queueResponseApprovals(session, message, response, cp.taskId);
       }
+      if (!controller.signal.aborted) {
+        const frozen = this.approvalMainContexts.get(`${session.id}:${message.id}`);
+        if (frozen?.sourceConfig) this.rememberSessionTitleCompletion(session, message, response, { model: frozen.model, sourceConfig: frozen.sourceConfig });
+      }
     } catch (error) {
       vscode.window.showWarningMessage(getErrorMessage(error));
     } finally {
@@ -4931,7 +4990,15 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.isBusy = false; this.liveTurnUsage = undefined; this.liveContextUsage = undefined;
       await this.applyPendingModelSelectionAfterRun();
       this.setAgentActivity({ base: 'idle', phase: 'idle' });
-      try { await this.sessionStore.persist(); } catch (error) { vscode.window.showErrorMessage(this.t('runStorageFailed') + ': ' + getErrorMessage(error)); }
+      try {
+        await this.sessionStore.persist();
+        const title = this.sessionTitleCandidates?.get(session.id);
+        if (title?.completion.assistantMessageId === message.id) title.durable = true;
+      }
+      catch (error) {
+        this.sessionTitleCandidates?.delete(session.id);
+        vscode.window.showErrorMessage(this.t('runStorageFailed') + ': ' + getErrorMessage(error));
+      }
       this.postState();
       settled(); this.activeRunSettled = undefined;
       if (!controller.signal.aborted) this.scheduleDraftRunAutoContinuation();
@@ -5007,6 +5074,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   private async sendPrompt(...args: Parameters<KeepseekChatViewProvider['sendPromptImpl']>): Promise<AgentResponse | undefined> {
     if (!args[0].trim()) return;
+    const incoming = args[4];
+    if (!this.isBusy && !this.isStartingRun && !incoming?.delegatedContinuation && !incoming?.draftRunAutoContinue
+      && !incoming?.repairLoop && !incoming?.planExecutionContinuation) {
+      const id = this.sessionStore.activeSessionId;
+      this.sessionTitles?.cancel(id);
+      this.sessionTitleCandidates?.delete(id);
+    }
     if (!await this.awaitRunContextRefresh()) return;
     if (args[4]?.replaceMessageId && (this.activeDraftRunId || this.delegatedApprovalInFlight
       || this.draftRunAutoContinueInFlight || this.hasActiveBackgroundRun() || this.draftRunBatches?.locked)) {
@@ -5065,6 +5139,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         : sendOptions.draftRunAutoContinue ? 'command' : sendOptions.repairLoop ? 'repair' : 'recovery' }
       : { version: 1, id: userMessageId, originMessageId: userMessageId, reason: 'user' };
     args[4] = { ...sendOptions, userMessageId, userTask, approvalRootTaskId: userTask.id };
+    if (!inherited || sendOptions.replaceMessageId) {
+      this.sessionTitles?.cancel(taskSession.id);
+      this.sessionTitleCandidates?.delete(taskSession.id);
+    }
     const work = this.enterTaskWork(taskSession, userTask);
     this.activeTaskScope = work;
     this.isStartingRun = true;
@@ -5093,7 +5171,15 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.isStartingRun = false;
       if (this.currentRunAbortController === preparationController) this.currentRunAbortController = undefined;
       settled(); this.activeRunSettled = undefined;
-      try { await this.sessionStore.persist(); } catch (error) { vscode.window.showErrorMessage(this.t('runStorageFailed') + ': ' + getErrorMessage(error)); }
+      try {
+        await this.sessionStore.persist();
+        const title = this.sessionTitleCandidates?.get(taskSession.id);
+        if (title?.completion.taskId === userTask.id) title.durable = true;
+      }
+      catch (error) {
+        this.sessionTitleCandidates?.delete(taskSession.id);
+        vscode.window.showErrorMessage(this.t('runStorageFailed') + ': ' + getErrorMessage(error));
+      }
       this.postState();
       if (!preparationController.signal.aborted) this.scheduleDraftRunAutoContinuation();
     }
@@ -5103,6 +5189,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     return {
       persistSession: () => this.sessionStore.persist(),
       invalidateOperations: async (scope: HistoryTruncationScope) => {
+        this.sessionTitles?.cancel(session.id);
+        this.sessionTitleCandidates?.delete(session.id);
         this.externalAuthorizationEpoch = (this.externalAuthorizationEpoch ?? 0) + 1;
         this.manualToolApproval?.decide(false);
         this.externalEffectGrants?.clear();
@@ -5520,11 +5608,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       const contextInstructions = rebaseStableContext ? computedContextInstructions : activeSession.contextInstructions;
 
       if (truncation) {
-        if (replacementIndex === 0 && !activeSession.customTitle) {
+        if (replacementIndex === 0 && !activeSession.customTitle && activeSession.autoTitle?.status !== 'completed') {
           activeSession.title = createSessionTitle(trimmedPrompt, this.language);
         }
       } else if (!activeSession.messages.length) {
-        if (!activeSession.customTitle) {
+        if (!activeSession.customTitle && activeSession.autoTitle?.status !== 'completed') {
           activeSession.title = createSessionTitle(trimmedPrompt, this.language);
         }
         activeSession.createdAt = now;
@@ -5916,6 +6004,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         this.queueResponseApprovals(activeSession, assistantMessage, response, options?.approvalRootTaskId, options?.backgroundRunId);
 
       }
+      if (!abortController.signal.aborted && assistantMessage) {
+        this.rememberSessionTitleCompletion(activeSession, assistantMessage, response, { model, sourceConfig });
+      }
     } catch (error) {
       if (this.sessionStore.getActiveSession().pendingHistoryTruncation) {
         // Preserve the journal's exact history for retry/restart reconciliation.
@@ -5967,7 +6058,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       const activeSession = this.sessionStore.getActiveSession();
       if (!activeSession.messages.length) {
         const now = new Date().toISOString();
-        if (!activeSession.customTitle) {
+        if (!activeSession.customTitle && activeSession.autoTitle?.status !== 'completed') {
           activeSession.title = createSessionTitle(trimmedPrompt, this.language);
         }
         activeSession.createdAt = now;
@@ -6650,6 +6741,76 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     return fingerprint;
   }
 
+  private rememberSessionTitleCompletion(session: ChatSession, message: ChatMessage, response: AgentResponse,
+    parentRequest: Pick<AgentRequest, 'model' | 'sourceConfig'>): void {
+    const completion = captureSessionTitleCompletion(session.id, message, response);
+    if (!completion) return;
+    this.sessionTitleCandidates?.set(session.id, { completion, durable: false, parentRequest: {
+      model: { ...parentRequest.model }, sourceConfig: parentRequest.sourceConfig && { ...parentRequest.sourceConfig }
+    } });
+  }
+
+  /** Only explicit response candidates reach this convergence point. UI refreshes
+   * may drain existing continuations but never manufacture a naming attempt. */
+  private flushSessionTitleCompletions(): void {
+    if (!this.sessionTitles || this.titleLifecycleDisposed) return;
+    if (!vscode.workspace.isTrusted) {
+      this.sessionTitles.cancelAll(); this.sessionTitleCandidates.clear(); return;
+    }
+    for (const [sessionId, candidate] of this.sessionTitleCandidates) {
+      if (!candidate.durable) continue;
+      const session = this.sessionStore.getSessionById(sessionId);
+      if (!session) { this.sessionTitleCandidates.delete(sessionId); continue; }
+      const runs = this.getRootTaskDraftRuns(session, candidate.completion.taskId);
+      const background = this.backgroundRunCoordinator.getActiveRun();
+      const check = checkSessionTitleCompletion(session, candidate.completion, {
+        running: this.isBusy || this.isStartingRun || !!this.activeDraftRunId || !!this.activeChangeActions?.size,
+        queuedApproval: this.delegatedApprovalInFlight || this.delegatedApprovals.hasPending(sessionId, candidate.completion.taskId),
+        commandContinuation: this.draftRunAutoContinueInFlight || this.draftRunBatches?.pending
+          || runs.some(run => !!run.autoContinueRequested && !run.resultBoundMessageId),
+        manualApproval: !!this.manualToolApproval,
+        background: background?.sessionId === sessionId && ['running', 'waiting_for_apply', 'waiting_for_authorization'].includes(background.status)
+      });
+      if (!check.ready) {
+        if (['scope', 'superseded', 'stopped'].includes(check.reason)) this.sessionTitleCandidates.delete(sessionId);
+        continue;
+      }
+      // Consume the volatile event once. Persistent round dedup lives in Store.
+      this.sessionTitleCandidates.delete(sessionId);
+      void this.sessionTitles.complete(sessionId, check.taskId, async request => {
+        const current = this.sessionStore.getSessionById(sessionId);
+        const message = current?.messages.find(item => item.id === check.messageId);
+        if (!current || !message?.userTask || request.signal.aborted) throw new Error('stale');
+        const budget = await this.loadTaskBudget(current, message.userTask);
+        if (!budget || request.signal.aborted) throw new Error('unavailable');
+        let previousBudget = structuredClone(budget);
+        return requestSessionTitle({
+          globalStorageUri: this.globalStorageUri, workspaceKey: this.sessionStore.workspaceKey,
+          sourceStore: this.sourceStore, settingsStore: this.subagentSettingsStore,
+          parentRequest: candidate.parentRequest, language: this.language,
+          sessionId, taskId: check.taskId, userPrompt: request.userPrompt,
+          token: request.token, signal: request.signal, taskBudget: structuredClone(budget),
+          onUsageLedgerRecord: async record => {
+            const latest = this.sessionStore.getSessionById(sessionId);
+            if (latest) await this.applyUsageLedgerRecord(latest, record);
+          },
+          onBudgetChanged: async next => {
+            if (!vscode.workspace.isTrusted || this.titleLifecycleDisposed) {
+              this.sessionTitles.cancel(sessionId);
+              throw new Error('stale');
+            }
+            const latest = this.sessionStore.getSessionById(sessionId);
+            const taskBudget = latest?.userTaskBudgets?.[check.taskId];
+            if (!latest || !taskBudget) return;
+            latest.userTaskBudgets![check.taskId] = mergeSessionTitleTaskBudget(taskBudget, previousBudget, next);
+            previousBudget = structuredClone(next);
+            await this.sessionStore.persist('session_title_budget');
+          }
+        });
+      });
+    }
+  }
+
   private scheduleDraftRunAutoContinuation(): void {
     if (this.draftRunAutoContinueTimer || this.draftRunAutoContinueInFlight || this.delegatedApprovalInFlight) {
       return;
@@ -6662,6 +6823,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async maybeAutoContinueDraftRun(): Promise<void> {
+    try { await this.drainDraftRunAutoContinuations(); }
+    finally { this.flushSessionTitleCompletions(); }
+  }
+
+  private async drainDraftRunAutoContinuations(): Promise<void> {
     if (this.sessionStore.getActiveSession().pendingHistoryTruncation) return;
     if (this.draftRunBatches?.pending) {
       await this.maybeAutoContinueDraftRunBatch();
