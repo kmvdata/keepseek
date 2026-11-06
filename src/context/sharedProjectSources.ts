@@ -39,7 +39,7 @@ export class SharedProjectSources implements vscode.Disposable {
     if (options.force) this.dirty = true;
     const selection = ++this.selection;
     const revision = this.sourceRevision;
-    const identity = await this.identity(cwd);
+    const identity = await this.measure('source-identity', sessionId, () => this.identity(cwd));
     const key = `${revision}:${identity}`;
     let entry = this.snapshots.get(key);
     if (entry) {
@@ -50,7 +50,7 @@ export class SharedProjectSources implements vscode.Disposable {
       if (task) this.diagnostics.merged++;
       else {
         this.diagnostics.misses++;
-        task = this.read(cwd);
+        task = this.read(cwd, sessionId);
         this.pending.set(key, task);
       }
       try {
@@ -91,13 +91,29 @@ export class SharedProjectSources implements vscode.Disposable {
       maxFileBytes: getConfiguredMaxFileBytes() })).digest('hex');
   }
 
-  private async read(cwd?: string): Promise<SourceSnapshot> {
-    const config = await loadSharedCodexConfig({ cwd: cwd ? vscode.Uri.parse(cwd) : undefined });
-    const instructions = await new ProjectInstructionsResolver().resolve({ snapshot: config });
+  private async read(cwd: string | undefined, sessionId: string): Promise<SourceSnapshot> {
+    const config = await this.measure('shared-config', sessionId, () => loadSharedCodexConfig({ cwd: cwd ? vscode.Uri.parse(cwd) : undefined }));
+    const instructions = await this.measure('project-instructions', sessionId, () => new ProjectInstructionsResolver().resolve({ snapshot: config }));
     // Resolution adds all candidate filenames, including missing overrides/fallbacks, before freezing.
     const result = freezeSourceData({ config, instructions });
     this.instructionSnapshots.set(config, instructions);
     return result;
+  }
+
+  private async measure<T>(stage: string, sessionId: string, work: () => Promise<T>): Promise<T> {
+    const started = performance.now();
+    const session = createHash('sha256').update(sessionId).digest('hex').slice(0, 12);
+    const sourceRevision = this.sourceRevision;
+    console.info('[KeepSeek] interaction_stage', { stage, session, sourceRevision, event: 'begin' });
+    try {
+      const value = await work();
+      console.info('[KeepSeek] interaction_stage', { stage, session, sourceRevision,
+        event: sourceRevision === this.sourceRevision && !this.disposed ? 'end' : 'stale', elapsedMs: Math.max(0, performance.now() - started) });
+      return value;
+    } catch (error) {
+      console.info('[KeepSeek] interaction_stage', { stage, session, sourceRevision, event: 'failed', elapsedMs: Math.max(0, performance.now() - started) });
+      throw error;
+    }
   }
 
   /** Bind consumers to their owned read result rather than the mutable selected-session facade. */

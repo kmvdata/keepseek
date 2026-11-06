@@ -15,6 +15,10 @@ import type { SessionTitleRequestInput } from '../src/provider/sessionTitleReque
 import type { SessionTitleCoordinator } from '../src/sessions/sessionTitleCoordinator';
 import type { WebviewMessage } from '../src/provider/webviewMessages';
 import type { ChatMessage, ChatSession, ChatSessionSummary, KeepseekModel, ProviderUsageLedgerRecord } from '../src/shared/types';
+import { OneShotTextRequestError } from '../src/agent/oneShotTextRequest';
+import type { SubagentModelSetting } from '../src/agent/subagents/types';
+import { createUsageLedgerRecords, createUsagePriceSnapshot } from '../src/agent/usageLedger';
+import { UsageLedgerStore } from '../src/agent/usageLedgerStore';
 
 const scope = { key: 'workspace:title-regeneration', name: 'Title regeneration', folderUris: [] };
 const generated = '{"decision":"set","title":"会话标题重建"}';
@@ -84,6 +88,9 @@ interface TitleHost {
   availableModels: KeepseekModel[];
   selectedSourceId: string;
   selectedModelId: string;
+  subagentModelSetting: SubagentModelSetting;
+  usageLedgerStore: UsageLedgerStore;
+  usageLedgerFlushes: Map<string, Promise<void>>;
   changeSets: { flush(): Promise<void> };
   draftRuns: { flush(): Promise<void> };
   views: Set<unknown>;
@@ -129,6 +136,8 @@ async function fixture(t: TestContext, options: { legacy?: boolean; customTitle?
     { displayName: 'KeepSeek', version: 'test', publisher: 'keepseek', author: 'keepseek', repositoryUrl: '', license: 'MIT' });
   const host = provider as unknown as TitleHost;
   Object.assign(host, { sessionReady: true, approvalDataReady: true, requestContextReady: true,
+    runContextReadiness: 'ready', sessionRecoveryReady: true,
+    commandSettingsReadiness: { mainModel: 'ready', subagentModel: 'ready', autoApprovalReviewer: 'ready', executionMode: 'ready', approvalMode: 'ready' },
     availableModels: [{ id: 'main-a', label: 'Main A', sourceId: 'source-a', provider: 'deepseek' },
       { id: 'main-b', label: 'Main B', sourceId: 'source-b', provider: 'deepseek' }],
     selectedSourceId: 'source-a', selectedModelId: 'main-a' });
@@ -149,7 +158,7 @@ async function fixture(t: TestContext, options: { legacy?: boolean; customTitle?
     else Object.assign(vscode, { StatusBarAlignment: previousAlignment });
     await rm(root, { recursive: true, force: true });
   });
-  return { host, store, storage, session, history, posts, inputs,
+  return { host, store, storage, session, history, posts, inputs, storageUri: uri,
     setRequest: (next: typeof request) => { request = next; } };
 }
 
@@ -274,6 +283,56 @@ test('manual regeneration records already-spent usage in A after switching witho
   assert.equal(store.activeSessionId, b.id);
 });
 
+test('a stale title response retains its charged usage durably after a newer manual naming intent', async t => {
+  const { host, store, session: active, history, posts, inputs, setRequest, storageUri } = await fixture(t, { historyCount: 1 });
+  const target = history[0];
+  const started = deferred(), release = deferred();
+  const record: ProviderUsageLedgerRecord = { ...createUsageLedgerRecords({ requestId: 'stale-title-charge', source: 'subagent',
+    usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120, cacheHitTokens: 0, cacheMissTokens: 100, cacheDataStatus: 'reported' },
+    attempts: [createUsagePriceSnapshot({ originalModelId: 'fixture-title-model', sourceId: 'source-a', provider: 'deepseek', protocol: 'chat-completions',
+      requestStartedAt: new Date(0).toISOString(), supportsBilling: true, rates: { inputPrice: 1, cacheHitPrice: 0.1, outputPrice: 2, currency: 'USD' } })] })[0],
+    purpose: 'session_title' };
+  setRequest(async input => {
+    started.resolve(); await release.promise;
+    await input.onUsageLedgerRecord(record);
+    return generated;
+  });
+  const pending = host.handleMessage({ type: 'regenerateSessionTitle', sessionId: target.id, requestId: 'rename-after-dispatch' });
+  await started.promise;
+  try {
+    await host.handleMessage({ type: 'renameSession', sessionId: target.id, title: 'My newer title' });
+    assert.equal(inputs[0].signal.aborted, true);
+    assert.equal(store.getSessionById(target.id)?.title, 'My newer title');
+  } finally { release.resolve(); }
+  await pending;
+  await Promise.all(host.usageLedgerFlushes.values());
+  const durable = await new UsageLedgerStore(storageUri as never).current(target.id);
+  assert.equal(durable.ledger.records.length, 1);
+  assert.equal(durable.ledger.records[0].requestId, 'stale-title-charge');
+  assert.equal(durable.ledger.records[0].usage?.totalTokens, 120);
+  assert.ok(durable.ledger.records[0].cost > 0);
+  assert.equal(durable.ledger.records[0].purpose, 'session_title');
+  assert.equal(store.activeSessionId, active.id);
+  assert.equal(store.getSessionById(target.id)?.title, 'My newer title');
+  assert.equal(posts.some(post => post.type === 'sessionTitleUpdated' && post.sessionId === target.id), false);
+});
+
+test('a configured fixed title model remains usable when the main picker selection is missing', async t => {
+  const { host, session, inputs, posts } = await fixture(t);
+  host.selectedSourceId = 'missing-main-source';
+  host.selectedModelId = 'missing-main-model';
+  host.subagentModelSetting = { version: 1, mode: 'fixed', sourceId: 'source-b', modelId: 'main-b', updatedAt: new Date(0).toISOString() };
+  await host.handleMessage({ type: 'regenerateSessionTitle', sessionId: session.id, requestId: 'fixed-without-main' });
+  assert.equal(inputs.length, 1);
+  assert.equal(inputs[0].parentRequest.model.id, 'main-b');
+  assert.equal(inputs[0].parentRequest.model.sourceId, 'source-b');
+  assert.equal(inputs[0].setting?.mode, 'fixed');
+  assert.equal(inputs[0].setting?.modelId, 'main-b');
+  assert.equal(session.title, '会话标题重建');
+  assert.ok(posts.some(post => post.type === 'sessionTitleRegeneration' && post.requestId === 'fixed-without-main'
+    && post.running === false && post.outcome === 'updated'));
+});
+
 test('busy, unready, unknown and untrusted manual requests are rejected and release only their own UI gesture', async t => {
   const { host, session, posts, inputs } = await fixture(t);
   host.isBusy = true;
@@ -284,7 +343,7 @@ test('busy, unready, unknown and untrusted manual requests are rejected and rele
     assert.equal(host.isStartingRun, true);
     await host.handleMessage({ type: 'regenerateSessionTitle', sessionId: session.id, requestId: 'isStartingRun' });
   } finally { host.interactions.finish(preparation); }
-  for (const property of ['sessionReady', 'approvalDataReady', 'requestContextReady'] as const) {
+  for (const property of ['sessionReady', 'approvalDataReady'] as const) {
     host[property] = false;
     await host.handleMessage({ type: 'regenerateSessionTitle', sessionId: session.id, requestId: property });
     host[property] = true;
@@ -299,8 +358,45 @@ test('busy, unready, unknown and untrusted manual requests are rejected and rele
   assert.equal(host.manualSessionTitleRequests.size, 0);
   const statuses = posts.filter(post => post.type === 'sessionTitleRegeneration');
   assert.deepEqual(statuses.filter(post => post.running === false).map(post => post.requestId),
-    ['isBusy', 'isStartingRun', 'sessionReady', 'approvalDataReady', 'requestContextReady', 'unknown', 'untrusted']);
+    ['isBusy', 'isStartingRun', 'sessionReady', 'approvalDataReady', 'unknown', 'untrusted']);
   assert.deepEqual(statuses.filter(post => post.running === true).map(post => post.requestId), ['unknown']);
+  assert.ok(statuses.filter(post => post.running === false).every(post => typeof post.outcome === 'string' && typeof post.reason === 'string'));
+});
+
+test('a safe history refresh does not wait for the current project Skills or occupy its navigation owner', async t => {
+  const { host, store, session, history, posts, inputs } = await fixture(t, { historyCount: 1 });
+  host.requestContextReady = false;
+  const operation = host.interactions.begin('navigation', session.id, 'preparing_context')!;
+  try {
+    await host.handleMessage({ type: 'regenerateSessionTitle', sessionId: history[0].id, requestId: 'independent-context' });
+    assert.equal(inputs.length, 1);
+    assert.equal(host.requestContextReady, false);
+    assert.equal(host.interactions.current, operation);
+    assert.equal(host.isBusy, false);
+    assert.equal(store.activeSessionId, session.id);
+    assert.ok(posts.some(post => post.type === 'sessionTitleRegeneration' && post.requestId === 'independent-context'
+      && post.running === false && post.outcome === 'updated'));
+  } finally { host.interactions.finish(operation); }
+});
+
+test('explicit no-material and unchanged title results close their own request without replacing the conversation', async t => {
+  const { host, session, posts, inputs, setRequest } = await fixture(t);
+  const empty = await host.handleMessage({ type: 'regenerateSessionTitle', sessionId: 'unknown', requestId: 'missing-target' });
+  assert.equal(empty, undefined);
+  setRequest(async () => '{"decision":"defer","title":null}');
+  const old = session.title;
+  await host.handleMessage({ type: 'regenerateSessionTitle', sessionId: session.id, requestId: 'no-topic' });
+  assert.equal(session.title, old);
+  setRequest(async () => JSON.stringify({ decision: 'set', title: '同一标题' }));
+  await host.handleMessage({ type: 'regenerateSessionTitle', sessionId: session.id, requestId: 'new-title' });
+  await host.handleMessage({ type: 'regenerateSessionTitle', sessionId: session.id, requestId: 'same-title' });
+  assert.equal(session.title, '同一标题');
+  const outcomes = posts.filter(post => post.type === 'sessionTitleRegeneration' && post.running === false);
+  assert.deepEqual(outcomes.map(post => [post.requestId, post.outcome]),
+    [['missing-target', 'stale'], ['no-topic', 'no_material'], ['new-title', 'updated'], ['same-title', 'unchanged']]);
+  assert.equal(inputs.length, 3);
+  await host.handleMessage({ type: 'regenerateSessionTitle', sessionId: session.id, requestId: 'same-title' });
+  assert.equal(inputs.length, 3, 'a repeated request identity replays its terminal without charging again');
 });
 
 test('a failed manual claim never dispatches and a later gesture can retry with bounded auxiliary budget metadata', async t => {
@@ -318,6 +414,43 @@ test('a failed manual claim never dispatches and a later gesture can retry with 
   assert.equal(Object.keys(session.userTaskBudgets ?? {}).filter(id => id.startsWith('session_title_manual_')).length, 1);
   assert.ok(session.userTaskBudgets?.preservedRoot);
 });
+
+test('a failed auxiliary-budget save after a successful claim is save_failed and dispatches no model', async t => {
+  const { host, storage, session, posts, inputs } = await fixture(t);
+  const save = storage.saveWorkspace.bind(storage);
+  let writes = 0;
+  storage.saveWorkspace = async (...args: Parameters<typeof save>) => {
+    if (++writes === 2) throw new Error('private budget persistence failure');
+    await save(...args);
+  };
+  const old = session.title;
+  await host.handleMessage({ type: 'regenerateSessionTitle', sessionId: session.id, requestId: 'budget-save-failure' });
+  assert.equal(inputs.length, 0);
+  assert.equal(session.title, old);
+  assert.ok(posts.some(post => post.type === 'sessionTitleRegeneration' && post.requestId === 'budget-save-failure'
+    && post.running === false && post.outcome === 'save_failed'));
+  assert.equal(host.manualSessionTitleRequests.size, 0);
+});
+
+for (const reason of ['unavailable', 'timeout', 'invalid', 'cancelled'] as const) {
+  test(`Host manual ${reason} reports a matching safe terminal and allows a later explicit retry`, async t => {
+    const { host, session, posts, inputs, setRequest } = await fixture(t);
+    const old = session.title;
+    setRequest(async () => { throw new OneShotTextRequestError(reason, 'private raw Provider body or credentials'); });
+    await host.handleMessage({ type: 'regenerateSessionTitle', sessionId: session.id, requestId: `manual-${reason}` });
+    const result = posts.find(post => post.type === 'sessionTitleRegeneration' && post.requestId === `manual-${reason}` && post.running === false);
+    assert.equal(result?.sessionId, session.id);
+    assert.equal(result?.outcome, reason);
+    assert.equal(typeof result?.reason, 'string');
+    assert.doesNotMatch(JSON.stringify(result), /private raw/u);
+    assert.equal(session.title, old);
+    assert.equal(host.manualSessionTitleRequests.size, 0);
+    setRequest(async () => generated);
+    await host.handleMessage({ type: 'regenerateSessionTitle', sessionId: session.id, requestId: `retry-${reason}` });
+    assert.equal(inputs.length, 2);
+    assert.equal(session.title, '会话标题重建');
+  });
+}
 
 test('an unloaded history row refresh updates only its session while the active conversation and request bytes remain intact', async t => {
   const { host, store, storage, session: active, history, posts, inputs } = await fixture(t, { historyCount: 1 });
@@ -356,6 +489,7 @@ test('history loading claims the row synchronously and retains the click model s
     await release.promise;
   };
   const pending = host.handleMessage({ type: 'regenerateSessionTitle', sessionId: target.id, requestId: 'loading-first' });
+  const capturedSetting = structuredClone(host.subagentModelSetting);
   await started.promise;
   try {
     await host.handleMessage({ type: 'regenerateSessionTitle', sessionId: target.id, requestId: 'loading-duplicate' });
@@ -366,12 +500,36 @@ test('history loading claims the row synchronously and retains the click model s
     assert.equal(host.isStartingRun, false);
     host.selectedSourceId = 'source-b'; host.selectedModelId = 'main-b';
     host.availableModels[0].id = 'mutated-after-click';
+    host.subagentModelSetting.mode = 'fixed';
+    host.subagentModelSetting.sourceId = 'later-source';
+    host.subagentModelSetting.modelId = 'later-model';
   } finally { release.resolve(); }
   await pending;
   assert.equal(inputs.length, 1);
   assert.equal(inputs[0].parentRequest.model.id, 'main-a');
   assert.equal(inputs[0].parentRequest.model.sourceId, 'source-a');
+  assert.deepEqual(inputs[0].setting, capturedSetting);
   assert.equal(store.activeSessionId, active.id);
+  assert.equal(host.manualSessionTitleRequests.size, 0);
+});
+
+test('a new runtime conflict during history loading closes the accepted request with its actual reason', async t => {
+  const { host, storage, history, inputs, posts } = await fixture(t, { historyCount: 1 });
+  const target = history[0];
+  const started = deferred(), release = deferred();
+  t.after(() => release.resolve());
+  storage.beforeSessionLoad = async () => { started.resolve(); await release.promise; };
+  const pending = host.handleMessage({ type: 'regenerateSessionTitle', sessionId: target.id, requestId: 'became-busy' });
+  await started.promise;
+  host.isBusy = true;
+  release.resolve();
+  try { await pending; } finally { host.isBusy = false; }
+  const result = posts.find(post => post.type === 'sessionTitleRegeneration'
+    && post.requestId === 'became-busy' && post.running === false);
+  assert.equal(result?.outcome, 'busy');
+  assert.equal(typeof result?.reason, 'string');
+  assert.doesNotMatch(String(result?.reason), /model|模型|titleRefresh/u);
+  assert.equal(inputs.length, 0);
   assert.equal(host.manualSessionTitleRequests.size, 0);
 });
 

@@ -2,7 +2,8 @@ import type * as vscode from 'vscode';
 import type { ModelSourceStore } from '../accounts/accountStore';
 import type { SubagentSettingsStore } from '../accounts/subagentSettingsStore';
 import { resolveConfiguredSubagentModel } from '../accounts/subagentModelResolver';
-import { createLogicalRunBudgetState, ExecutionCostBudget, LogicalRunBudget, SharedUpstreamTokenBudget } from '../agent/executionPolicy';
+import { createLogicalRunBudgetState, ExecutionCostBudget, LogicalBudgetExceededError, LogicalRunBudget, SharedUpstreamTokenBudget } from '../agent/executionPolicy';
+import type { SubagentModelSetting } from '../agent/subagents/types';
 import { OneShotTextRequestError, requestOneShotText } from '../agent/oneShotTextRequest';
 import { getConfiguredAgentMaxCost, getConfiguredAgentMaxExecutionMs, getConfiguredAgentMaxTreeUpstreamTokens,
   getConfiguredModelRequestTimeoutMs, getConfiguredSubagentMaxExecutionMs, getConfiguredSubagentMaxUpstreamTokens } from '../shared/config';
@@ -18,6 +19,8 @@ export interface SessionTitleRequestInput {
   settingsStore: SubagentSettingsStore;
   /** Captured from the execution segment or explicit click, never re-read from the picker. */
   parentRequest: Pick<AgentRequest, 'model'> & Partial<Pick<AgentRequest, 'sourceConfig'>>;
+  /** Explicit clicks freeze the default subagent selection with the main model. */
+  setting?: Pick<SubagentModelSetting, 'mode' | 'sourceId' | 'modelId'>;
   language: KeepseekLanguage;
   sessionId: string;
   taskId: string;
@@ -67,7 +70,11 @@ export function restoreSessionTitleBudget(budget: UserTaskBudget, now = Date.now
   if (!(timeoutMs > 0)) {
     throw new OneShotTextRequestError('timeout', 'Session title task time budget is exhausted / 会话标题任务时间预算已用尽');
   }
-  run.assertCanDispatch();
+  try { run.assertCanDispatch(); }
+  catch (error) {
+    if (!(error instanceof LogicalBudgetExceededError)) throw error;
+    throw new OneShotTextRequestError(error.budgetReason === 'run_time_budget_exhausted' ? 'timeout' : 'unavailable', error.message);
+  }
   return { cost: new ExecutionCostBudget(budget.maxCost ?? 0, budget.usedCostByCurrency), run, timeoutMs };
 }
 
@@ -105,13 +112,20 @@ export async function requestSessionTitle(input: SessionTitleRequestInput): Prom
   // picker mutation while the auxiliary request is being prepared.
   const parentRequest = { model: { ...input.parentRequest.model },
     sourceConfig: input.parentRequest.sourceConfig && { ...input.parentRequest.sourceConfig } };
+  const setting = input.setting && { ...input.setting };
   const original = structuredClone(input.taskBudget);
   const restored = restoreSessionTitleBudget(original);
-  const resolved = await resolveConfiguredSubagentModel({
-    globalStorageUri: input.globalStorageUri, workspaceKey: input.workspaceKey,
-    sourceStore: input.sourceStore, settingsStore: input.settingsStore,
-    parentRequest, language: input.language
-  });
+  let resolved: Awaited<ReturnType<typeof resolveConfiguredSubagentModel>>;
+  try {
+    resolved = await resolveConfiguredSubagentModel({
+      globalStorageUri: input.globalStorageUri, workspaceKey: input.workspaceKey,
+      sourceStore: input.sourceStore, settingsStore: input.settingsStore,
+      parentRequest, language: input.language, setting
+    });
+  } catch (error) {
+    if (input.signal.aborted) throw new OneShotTextRequestError('cancelled', 'Session title cancelled / 会话标题已取消');
+    throw new OneShotTextRequestError('unavailable', error instanceof Error ? error.message : 'Session title model unavailable / 标题模型不可用');
+  }
   if (input.signal.aborted) throw new OneShotTextRequestError('cancelled', 'Session title cancelled / 会话标题已取消');
   const startedAt = performance.now();
   const publishBudget = async () => {
@@ -134,6 +148,11 @@ export async function requestSessionTitle(input: SessionTitleRequestInput): Prom
       onUsageLedgerRecord: input.onUsageLedgerRecord,
       onBudgetChanged: publishBudget
     });
+  } catch (error) {
+    if (error instanceof LogicalBudgetExceededError) {
+      throw new OneShotTextRequestError(error.budgetReason === 'run_time_budget_exhausted' ? 'timeout' : 'unavailable', error.message);
+    }
+    throw error;
   } finally {
     // Covers admission/transport failures before the one-shot cleanup hook too.
     await publishBudget();

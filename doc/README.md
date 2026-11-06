@@ -16,7 +16,7 @@
 | 共享指令、配置子集与普通 Skills | [共享 Codex 配置](keepseek-codex-shared-config.md) | `context/shared*`、`projectInstructions.ts`、`skills/`；`projectInstructions`、`skillDiscovery`、`skillActivationResolver` |
 | 已暂停的 Codex 插件 Skills 与历史读取边界 | [插件 Skills](keepseek-codex-plugin-skills.md) | `codexPluginSupport.ts`、`pluginSkillRuntime.ts`；`skillDiscovery`、`skillActivationResolver`、`p1ProtocolDelivery` |
 | 引用语法、授权与打开 | [文件引用规范](keepseek-file-reference-spec.md) | `context/references/`；`fileReference`、`fileReferenceOpener`、`referenceResources` |
-| 输入框状态、会话导航、提交与异步拥有者 | [交互生命周期](keepseek-interaction-lifecycle.md) | `provider/interactionState.ts`、Host/Webview 状态入口、`sharedProjectSources.ts`；`sessionNavigation`、`inputComposition` |
+| 首次加载、输入框状态、会话导航、提交与异步拥有者 | [交互生命周期](keepseek-interaction-lifecycle.md) | `provider/interactionState.ts`、Host/Webview 状态入口、`sharedProjectSources.ts`；`sessionNavigation`、`startupPerformance`、`interactionState`、`inputComposition` |
 | 输入、fragment、消息、快捷键 | [架构地图的 Host/Webview 入口](keepseek-code-architecture.md#2-宿主与-webview) | `webview/input/composition.ts`、`richTextShortcuts.ts`；`inputComposition`、`richTextShortcuts` |
 | 本次任务与会话累计有效计时 | [计时口径](execution-time-statistics.md) | `sessions/executionTimeStats.ts`、`userTask.ts`；`executionTimeStats`、`usageStats` |
 | 会话自动短标题、历史列表刷新与并发提交 | [会话标题](keepseek-session-title-verification.md) | `sessions/sessionTitle*`、`provider/sessionTitle*`；`sessionTitle`、`sessionTitleStorage`、`sessionTitleCompletion`、`sessionTitleRequest`、`sessionTitleWebview`、`sessionTitleRegeneration` |

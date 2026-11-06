@@ -10,12 +10,56 @@ import { toActivatedSkill, type SkillManifest } from '../src/skills/skillTypes';
 import { CODEX_PLUGIN_SKILLS_UNAVAILABLE } from '../src/skills/codexPluginSupport';
 import type { SharedCodexConfigSnapshot } from '../src/context/sharedCodexConfig';
 
+function fakeDiscovery(read: (config?: SharedCodexConfigSnapshot) => Promise<SkillManifest[]>): SkillDiscovery {
+  return { discoverSnapshot: async (config?: SharedCodexConfigSnapshot) => ({ manifests: await read(config), diagnostics: [] }) } as unknown as SkillDiscovery;
+}
+
+test('a paused obsolete Skill scan does not block another source or replace its diagnostics', async () => {
+  let release!: () => void; let started!: () => void;
+  const ready = new Promise<void>(resolve => { started = resolve; });
+  const barrier = new Promise<void>(resolve => { release = resolve; });
+  const firstSkill = manifest('old', 'old-flow', 'agentsUser', false);
+  const nextSkill = manifest('current', 'current-flow', 'agentsUser', false);
+  const configs = ['A', 'B'].map(fingerprint => ({ codexHome: vscode.Uri.file('/fixture/source'), projectDocMaxBytes: 32768,
+    fallbackFilenames: [], skillRules: [], origins: {}, diagnostics: [], watchedUris: [], fingerprint }));
+  const starts: string[] = [];
+  const read = async (config?: SharedCodexConfigSnapshot) => {
+    starts.push(config!.fingerprint);
+    if (config === configs[0]) { started(); await barrier; }
+    return { manifests: [{ ...(config === configs[0] ? firstSkill : nextSkill) }], diagnostics: [`diagnostic-${config!.fingerprint}`] };
+  };
+  const discovery = {
+    diagnostics: [] as string[],
+    async discover(this: { diagnostics: string[] }, config?: SharedCodexConfigSnapshot) {
+      const result = await read(config); this.diagnostics = result.diagnostics; return result.manifests;
+    },
+    discoverSnapshot: read
+  } as unknown as SkillDiscovery;
+  const store = new SkillStore(new MemoryMemento(), discovery);
+  const old = store.refresh(configs[0]);
+  await ready;
+  let nextDone = false;
+  const next = store.refresh(configs[1]).then(() => { nextDone = true; });
+  // One event-loop turn drains the controlled promises without a wall-clock wait.
+  await new Promise<void>(resolve => setImmediate(resolve));
+  const during = { starts: [...starts], nextDone, items: store.getManifests().map(item => item.id),
+    diagnostics: store.getStateView(session('B')).diagnostics };
+  release(); await Promise.all([old, next]);
+  assert.deepEqual(during.starts, ['A', 'B']);
+  assert.equal(during.nextDone, true, 'unrelated source B must not wait for abandoned A');
+  assert.deepEqual(during.items, [nextSkill.id]);
+  assert.deepEqual(during.diagnostics, ['diagnostic-B']);
+  assert.deepEqual(store.getStateView(session('B')).diagnostics, ['diagnostic-B']);
+  assert.equal(store.sourceDiagnostics.scans, 2);
+  assert.equal(store.sourceDiagnostics.stale, 1);
+});
+
 test('unchanged Skill source scans merge and navigation preserves session-owned activation', async () => {
   const skill = manifest('reusable', 'reuse-flow', 'agentsUser', true);
   let scans = 0; let loads = 0; let release!: () => void; let started!: () => void;
   const ready = new Promise<void>(yes => { started = yes; });
   const barrier = new Promise<void>(yes => { release = yes; });
-  const discovery = { discover: async () => { scans++; started(); await barrier; return [{ ...skill }]; } } as unknown as SkillDiscovery;
+  const discovery = fakeDiscovery(async () => { scans++; started(); await barrier; return [{ ...skill }]; });
   const loader = { loadSkill: async (item: SkillManifest) => { loads++; return toActivatedSkill(item, 'STABLE BODY'); } } as SkillLoader;
   const store = new SkillStore(new MemoryMemento(), discovery, loader, new SkillActivationResolver(), () => 'scope');
   const config: SharedCodexConfigSnapshot = { codexHome: vscode.Uri.file('/fixture/source'), projectDocMaxBytes: 32768,
@@ -46,7 +90,7 @@ test('a late Skill body read cannot enter the next source version or its error s
   let release!: () => void; let started!: () => void; let loads = 0;
   const ready = new Promise<void>(yes => { started = yes; });
   const barrier = new Promise<void>(yes => { release = yes; });
-  const discovery = { discover: async () => [{ ...skill }] } as unknown as SkillDiscovery;
+  const discovery = fakeDiscovery(async () => [{ ...skill }]);
   const loader = { loadSkill: async (item: SkillManifest) => {
     const load = ++loads; if (load === 1) { started(); await barrier; }
     return toActivatedSkill(item, `BODY VERSION ${load}`);
@@ -148,7 +192,7 @@ test('same-name automatic matches require explicit source selection', () => {
 test('workspace-default personal Skill persists and activates in a new session', async () => {
   const personal = manifest('personal-style', 'personal-style', 'agentsUser', false);
   const memento = new MemoryMemento();
-  const discovery = { discover: async () => [personal] } as SkillDiscovery;
+  const discovery = fakeDiscovery(async () => [personal]);
   const loader = {
     loadSkill: async (item: SkillManifest) => toActivatedSkill(item, '# Personal style\n\nUse concise replies.')
   } as SkillLoader;
@@ -191,7 +235,7 @@ test('stale plugin catalog entries cannot be listed, selected, previewed, or inh
     loadSkill: async (item: SkillManifest) => toActivatedSkill(item, 'STANDALONE_WORKFLOW'),
     loadPluginSkill: async () => { pluginLoads++; throw new Error('Plugin loader must not be reached'); }
   } as unknown as SkillLoader;
-  const discovery = { discover: async () => [ordinary, plugin] } as SkillDiscovery;
+  const discovery = fakeDiscovery(async () => [ordinary, plugin]);
   const store = new SkillStore(new MemoryMemento(), discovery, loader, new SkillActivationResolver(), () => 'workspace-one');
   await store.refresh();
   const chat = session('plugin-history-session');
@@ -323,7 +367,7 @@ test('frozen implicit activation still respects allowImplicit false', () => {
 test('implicit activation freezes per session and ignores later prompt changes', async () => {
   const implicit = manifest('auto-freeze', 'freeze-flow', 'agentsWorkspace', true);
   const memento = new MemoryMemento();
-  const discovery = { discover: async () => [implicit] } as SkillDiscovery;
+  const discovery = fakeDiscovery(async () => [implicit]);
   const loader = {
     loadSkill: async (item: SkillManifest) => toActivatedSkill(item, '# Freeze flow')
   } as SkillLoader;
@@ -351,7 +395,7 @@ test('implicit activation freezes per session and ignores later prompt changes',
 test('implicit activation freezes the empty set too (no late activation on later prompts)', async () => {
   const implicit = manifest('late-freeze', 'late-flow', 'agentsWorkspace', true);
   const memento = new MemoryMemento();
-  const discovery = { discover: async () => [implicit] } as SkillDiscovery;
+  const discovery = fakeDiscovery(async () => [implicit]);
   const loader = {
     loadSkill: async (item: SkillManifest) => toActivatedSkill(item, '# Late flow')
   } as SkillLoader;

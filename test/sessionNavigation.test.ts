@@ -10,6 +10,7 @@ import { ChatSessionStore, type StoredWorkspaceSessionState } from '../src/sessi
 import { GlobalSessionStorage } from '../src/sessions/globalSessionStorage';
 import type { SessionTitleCoordinator } from '../src/sessions/sessionTitleCoordinator';
 import type { SharedProjectSources } from '../src/context/sharedProjectSources';
+import type { SkillStore } from '../src/skills/skillStore';
 import type { InteractionSnapshot } from '../src/provider/interactionState';
 import type { WebviewMessage } from '../src/provider/webviewMessages';
 import type { AgentResponse, ChatMessage, ChatSession } from '../src/shared/types';
@@ -23,16 +24,22 @@ function deferred<T = void>() {
 interface NavigationHost {
   handleMessage(message: WebviewMessage): Promise<void>;
   initializeAfterWebviewReady(): Promise<void>;
+  ensureSessionNavigationReady(): Promise<void>;
+  refreshWorkspaceScope(): Promise<void>;
+  refreshSkills(options?: { post?: boolean }): Promise<void>;
   postState(options: { immediate?: boolean; forceFull?: boolean }): void;
   isStartingRun: boolean;
   isBusy: boolean;
   sessionReady: boolean;
   approvalDataReady: boolean;
   requestContextReady: boolean;
+  sessionRecoveryReady: boolean;
+  activeSessionEntryRevision: number;
   draftRunAutoContinueTimer?: ReturnType<typeof setTimeout>;
   scheduleDraftRunAutoContinuation(): void;
   sessionTitles: SessionTitleCoordinator;
   sharedProjectSources: SharedProjectSources;
+  skillStore: SkillStore;
   currentRunContextsBySession: Map<string, unknown>;
   activeRunSettled?: Promise<void>;
   awaitRunContextRefresh(): Promise<boolean>;
@@ -75,7 +82,7 @@ test('navigation preparation never advertises a running task or a Stop action', 
   const navigation = host.handleMessage({ type: 'selectSession', sessionId: second.id });
   await reading.promise;
   publish();
-  const during = posts.at(-1)?.state as { isBusy?: boolean; interaction?: { phase: string; canCancel: boolean; canSubmit: boolean; canEdit: boolean } };
+  const during = posts.at(-1)?.state as { isBusy?: boolean; interaction?: { phase: string; canCancel: boolean; canSubmit: boolean; canEdit: boolean; canNavigate: boolean } };
   // Capture before releasing the barrier, but always settle the operation even
   // when this regression is run against the old implementation.
   release.resolve();
@@ -85,6 +92,227 @@ test('navigation preparation never advertises a running task or a Stop action', 
   assert.equal(during.interaction?.canCancel, false);
   assert.equal(during.interaction?.canSubmit, false);
   assert.equal(during.interaction?.canEdit, true);
+  assert.equal(during.interaction?.canNavigate, true, 'context reads no longer own the safely committed navigation');
+});
+
+test('safe history selection allows another navigation while old context is pending without releasing the new recovery owner', async t => {
+  const { host, store, first, second, posts, publish, errors } = await fixture(t);
+  const oldContextEntered = deferred(); const releaseOldContext = deferred();
+  const newRecoveryEntered = deferred(); const releaseNewRecovery = deferred();
+  t.after(() => { releaseOldContext.resolve(); releaseNewRecovery.resolve(); });
+  const resolveSkills = host.skillStore.resolveAndLoadSkills.bind(host.skillStore);
+  let pauseOld = true;
+  host.skillStore.resolveAndLoadSkills = async input => {
+    const result = await resolveSkills(input);
+    if (input.session.id === second.id && pauseOld) {
+      pauseOld = false; oldContextEntered.resolve(); await releaseOldContext.promise;
+      throw new Error('obsolete history context failed');
+    }
+    return result;
+  };
+  const oldNavigation = host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  await oldContextEntered.promise;
+  publish();
+  assert.equal(store.activeSessionId, second.id);
+  assert.equal(lastState(posts).interaction?.canNavigate, true);
+  assert.equal(lastState(posts).interaction?.canEdit, true);
+  assert.equal(lastState(posts).interaction?.canSubmit, false);
+  const load = host.changeSets.loadSession!.bind(host.changeSets);
+  host.changeSets.loadSession = async sessionId => {
+    if (sessionId === first.id) { newRecoveryEntered.resolve(); await releaseNewRecovery.promise; }
+    await load(sessionId);
+  };
+  const newNavigation = host.handleMessage({ type: 'selectSession', sessionId: first.id });
+  await newRecoveryEntered.promise;
+  publish();
+  const owner = lastState(posts).interaction?.operationId;
+  assert.ok(owner);
+  const entryFloor = host.activeSessionEntryRevision;
+  const changedCount = posts.filter(post => post.type === 'sessionChanged').length;
+  releaseOldContext.resolve(); await oldNavigation;
+  publish();
+  assert.equal(store.activeSessionId, first.id);
+  assert.equal(lastState(posts).interaction?.operationId, owner, 'old finally cannot release a newer navigation owner');
+  assert.equal(lastState(posts).interaction?.canNavigate, false, 'new target operation recovery still owns navigation');
+  assert.equal(host.activeSessionEntryRevision, entryFloor, 'old completion cannot create a new entry revision');
+  assert.equal(posts.filter(post => post.type === 'sessionChanged').length, changedCount);
+  assert.equal(errors.length, 0);
+  releaseNewRecovery.resolve(); await newNavigation;
+  publish();
+  assert.equal(lastState(posts).interaction?.canSubmit, true);
+});
+
+test('A to B to A context preparation ignores the previous A generation failure and completion publication', async t => {
+  const { host, store, first, second, posts, publish, errors } = await fixture(t);
+  await host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  const entered = deferred(); const release = deferred();
+  t.after(() => release.resolve());
+  const resolveSkills = host.skillStore.resolveAndLoadSkills.bind(host.skillStore);
+  let pauseFirstA = true;
+  host.skillStore.resolveAndLoadSkills = async input => {
+    const result = await resolveSkills(input);
+    if (input.session.id === first.id && pauseFirstA) {
+      pauseFirstA = false; entered.resolve(); await release.promise;
+      throw new Error('previous A preparation failed');
+    }
+    return result;
+  };
+  const previousA = host.handleMessage({ type: 'selectSession', sessionId: first.id });
+  await entered.promise;
+  await host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  await host.handleMessage({ type: 'selectSession', sessionId: first.id });
+  publish();
+  assert.equal(lastState(posts).interaction?.canSubmit, true);
+  const entryFloor = host.activeSessionEntryRevision;
+  const changedCount = posts.filter(post => post.type === 'sessionChanged').length;
+  release.resolve(); await previousA;
+  publish();
+  assert.equal(store.activeSessionId, first.id);
+  assert.equal(lastState(posts).interaction?.canSubmit, true);
+  assert.equal(host.activeSessionEntryRevision, entryFloor);
+  assert.equal(posts.filter(post => post.type === 'sessionChanged').length, changedCount);
+  assert.equal(errors.length, 0);
+});
+
+for (const action of ['newSession', 'copyOtherWorkspaceSession'] as const) {
+  test(`${action} releases navigation after safe selection while its context continues loading`, async t => {
+    const { host, store, storage, first, publish, posts, errors } = await fixture(t);
+    const foreignScope = { key: 'workspace:copy-context', name: 'Copy Context', folderUris: [] };
+    const sourceId = 'copy-source';
+    if (action === 'copyOtherWorkspaceSession') await storage.saveWorkspace(foreignScope, {
+      activeSessionId: sourceId,
+      sessions: [{ ...first, id: sourceId, workspaceKey: foreignScope.key, workspaceName: foreignScope.name, workspaceFolders: [] }]
+    });
+    const entered = deferred(); const release = deferred();
+    t.after(() => release.resolve());
+    const resolveSkills = host.skillStore.resolveAndLoadSkills.bind(host.skillStore);
+    let pauseTarget = true;
+    host.skillStore.resolveAndLoadSkills = async input => {
+      const result = await resolveSkills(input);
+      if (input.session.id !== first.id && pauseTarget) {
+        pauseTarget = false; entered.resolve(); await release.promise;
+      }
+      return result;
+    };
+    const preparing = host.handleMessage(action === 'newSession' ? { type: action }
+      : { type: action, workspaceKey: foreignScope.key, sessionId: sourceId });
+    await entered.promise;
+    publish();
+    assert.notEqual(store.activeSessionId, first.id);
+    assert.equal(lastState(posts).interaction?.canNavigate, true);
+    assert.equal(lastState(posts).interaction?.canEdit, true);
+    assert.equal(lastState(posts).interaction?.canSubmit, false);
+    await host.handleMessage({ type: 'selectSession', sessionId: first.id });
+    const entryFloor = host.activeSessionEntryRevision;
+    release.resolve(); await preparing;
+    publish();
+    assert.equal(store.activeSessionId, first.id);
+    assert.equal(lastState(posts).interaction?.canSubmit, true);
+    assert.equal(host.activeSessionEntryRevision, entryFloor);
+    assert.equal(errors.length, 0);
+  });
+}
+
+test('cold startup context for the previous session cannot hold or overwrite a ready history target', async t => {
+  const { host, store, first, second, publish, posts } = await fixture(t, { skipStartup: true });
+  const started = deferred(); const release = deferred();
+  t.after(() => release.resolve());
+  const refresh = host.sharedProjectSources.refresh.bind(host.sharedProjectSources);
+  let initial = true;
+  host.sharedProjectSources.refresh = async (...args) => {
+    const result = await refresh(...args);
+    if (args[0] === first.id && initial) {
+      initial = false; started.resolve(); await release.promise;
+    }
+    return result;
+  };
+  const startup = host.initializeAfterWebviewReady();
+  await started.promise;
+  await host.ensureSessionNavigationReady();
+  assert.equal(host.requestContextReady, false, 'old startup context is still required for the old session');
+  await host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  publish();
+  assert.equal(store.activeSessionId, second.id);
+  assert.equal(lastState(posts).interaction?.canSubmit, true, 'target is ready before the unrelated old promise ends');
+  assert.equal(host.sessionRecoveryReady, true);
+  release.resolve(); await startup;
+  publish();
+  assert.equal(lastState(posts).interaction?.canSubmit, true, 'old failure/finally cannot take readiness away');
+  assert.equal(host.sharedProjectSources.sessionId, second.id, 'old continuation does not reselect the source facade');
+  assert.ok(host.currentRunContextsBySession.has(second.id));
+  t.diagnostic(JSON.stringify({ boundary: 'cold-start-history', oldContextPaused: true, targetCanSubmitBeforeRelease: true,
+    oldCompletionIgnored: true, sourceReads: host.sharedProjectSources.diagnostics }));
+});
+
+for (const action of ['refresh', 'retry'] as const) {
+  test(`same-session ${action} owns readiness when the old startup Skill load fails late`, async t => {
+    const { host, store, first, publish, posts } = await fixture(t, { skipStartup: true });
+    const started = deferred(); const release = deferred();
+    t.after(() => release.resolve());
+    const resolveSkills = host.skillStore.resolveAndLoadSkills.bind(host.skillStore);
+    let initial = true;
+    host.skillStore.resolveAndLoadSkills = async input => {
+      if (initial) {
+        initial = false; started.resolve(); await release.promise;
+        throw new Error('old Skill source was superseded');
+      }
+      return resolveSkills(input);
+    };
+    const startup = host.initializeAfterWebviewReady();
+    await started.promise;
+    await host.ensureSessionNavigationReady();
+    host.sharedProjectSources.dirty = true;
+    if (action === 'refresh') await host.refreshSkills();
+    else await host.handleMessage({ type: 'retryInteraction' });
+    publish();
+    assert.equal(lastState(posts).interaction?.canSubmit, true, 'new preparation completed while old Skill work is paused');
+    release.resolve(); await startup;
+    publish();
+    assert.equal(store.activeSessionId, first.id, 'the race stays within one session');
+    assert.equal(lastState(posts).interaction?.canSubmit, true, 'late startup failure cannot replace the new ready state');
+    assert.notEqual(lastState(posts).interaction?.phase, 'failed');
+  });
+}
+
+test('target operation recovery failure is retried before submission becomes available', async t => {
+  const { host, second, publish, posts } = await fixture(t);
+  const originalLoad = host.changeSets.loadSession!.bind(host.changeSets);
+  let attempts = 0;
+  host.changeSets.loadSession = async sessionId => {
+    if (sessionId === second.id && ++attempts === 1) throw new Error('target recovery read failed');
+    await originalLoad(sessionId);
+  };
+  await host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  publish();
+  assert.equal(host.sessionRecoveryReady, false);
+  assert.equal(lastState(posts).interaction?.canSubmit, false);
+  await host.handleMessage({ type: 'retryInteraction' });
+  publish();
+  assert.equal(attempts, 2, 'retry reloads the necessary target records');
+  assert.equal(host.sessionRecoveryReady, true);
+  assert.equal(lastState(posts).interaction?.canSubmit, true);
+});
+
+test('deleting the active history row restores the replacement session recovery readiness', async t => {
+  const { host, store, first, publish, posts } = await fixture(t);
+  const previousWarning = vscode.window.showWarningMessage;
+  vscode.window.showWarningMessage = async (_message, ...items) => items.find(item => typeof item === 'string') as never;
+  t.after(() => { vscode.window.showWarningMessage = previousWarning; });
+  await host.handleMessage({ type: 'deleteSessions', sessionIds: [first.id] });
+  publish();
+  assert.notEqual(store.activeSessionId, first.id);
+  assert.equal(host.sessionRecoveryReady, true);
+  assert.equal(lastState(posts).interaction?.canSubmit, true);
+});
+
+test('workspace scope change restores target operations before opening task submission', async t => {
+  const { host, store, publish, posts } = await fixture(t);
+  const initial = store.activeSessionId;
+  await host.refreshWorkspaceScope();
+  publish();
+  assert.notEqual(store.activeSessionId, initial, 'isolated fixture scope differs from the configured workspace scope');
+  assert.equal(host.sessionRecoveryReady, true);
+  assert.equal(lastState(posts).interaction?.canSubmit, true);
 });
 
 function messages(taskId: string): ChatMessage[] {
@@ -95,7 +323,7 @@ function messages(taskId: string): ChatMessage[] {
   ];
 }
 
-async function fixture(t: TestContext, options: { delayLoad?: boolean; loadFailure?: boolean } = {}) {
+async function fixture(t: TestContext, options: { delayLoad?: boolean; loadFailure?: boolean; skipStartup?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'keepseek-session-navigation-'));
   const uri = vscode.Uri.file(root);
   const scope = { key: 'workspace:navigation', name: 'Navigation', folderUris: [] };
@@ -154,7 +382,7 @@ async function fixture(t: TestContext, options: { delayLoad?: boolean; loadFailu
     else Object.assign(vscode, { StatusBarAlignment: previousAlignment });
     await rm(root, { recursive: true, force: true });
   });
-  if (!options.delayLoad) await host.initializeAfterWebviewReady();
+  if (!options.delayLoad && !options.skipStartup) await host.initializeAfterWebviewReady();
   const publish = () => host.postState({ immediate: true, forceFull: true });
   return { host, store, storage, scope, first, second, posts, errors, releaseLoad, initialization, publish };
 }
@@ -286,15 +514,15 @@ test('rapid history navigation drops concurrent targets and persists the same fi
   const entered = deferred();
   const release = deferred();
   t.after(() => release.resolve());
-  const read = host.sharedProjectSources.refresh.bind(host.sharedProjectSources);
-  host.sharedProjectSources.refresh = async (...args) => { entered.resolve(); await release.promise; return read(...args); };
+  const save = storage.saveWorkspace.bind(storage);
+  storage.saveWorkspace = async (...args) => { entered.resolve(); await release.promise; return save(...args); };
   const navigating = host.handleMessage({ type: 'selectSession', sessionId: second.id });
   await entered.promise;
   try {
     await host.handleMessage({ type: 'selectSession', sessionId: first.id });
     await host.handleMessage({ type: 'selectSession', sessionId: second.id });
     await host.handleMessage({ type: 'newSession' });
-    assert.equal(store.activeSessionId, second.id, 'the original navigation retains its ownership');
+    assert.equal(store.activeSessionId, second.id, 'selection persistence retains navigation ownership');
   } finally { release.resolve(); await navigating; }
   await host.handleMessage({ type: 'selectSession', sessionId: first.id });
   await host.handleMessage({ type: 'selectSession', sessionId: second.id });

@@ -33,6 +33,22 @@ test('standard roots only: no arbitrary .agents, AGENTS.md skill, or old CODEX_H
   assert.equal(manifests.length, 1); assert.equal(manifests[0].enabled, true); assert.equal(manifests[0].allowImplicit, true);
   assert.match(manifests[0].description, /Review: changes\n检查证据/u);
 });
+test('concurrent discovery snapshots own their manifests and diagnostics while legacy discover remains compatible', async () => {
+  const f = await fixture(); await f.put('project', markdown('project'));
+  await symlink(f.root, path.join(f.repo, '.agents/skills/escape'));
+  const untrusted = await loadSharedCodexConfig({ folders: [f.folder], codexHome: vscode.Uri.file(f.home), trusted: false });
+  const [trustedResult, untrustedResult] = await Promise.all([
+    f.discovery.discoverSnapshot(f.config), f.discovery.discoverSnapshot(untrusted)
+  ]);
+  assert.deepEqual(trustedResult.manifests.map(item => item.name), ['project']);
+  assert.ok(trustedResult.diagnostics.some(item => item.includes('escape')));
+  assert.deepEqual(untrustedResult.manifests, []);
+  assert.deepEqual(untrustedResult.diagnostics, []);
+  assert.deepEqual(f.discovery.diagnostics, [], 'snapshot reads do not mutate the legacy diagnostic facade');
+  await f.discovery.discover(f.config);
+  assert.deepEqual(f.discovery.diagnostics, trustedResult.diagnostics);
+  assert.deepEqual(untrustedResult.diagnostics, [], 'another read cannot mutate an owned diagnostic snapshot');
+});
 test('installed Codex plugin Skills stay hidden even with the old discovery opt-in while standalone Skills still load', async () => {
   const f = await fixture();
   await f.put('standalone', markdown('standalone'));

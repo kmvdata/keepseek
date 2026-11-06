@@ -10,6 +10,7 @@ import { SubagentSettingsStore } from '../src/accounts/subagentSettingsStore';
 import type { SubagentModelSetting } from '../src/agent/subagents/types';
 import { createLogicalRunBudgetState } from '../src/agent/executionPolicy';
 import { createManualSessionTitleBudget, requestSessionTitle, restoreSessionTitleBudget, mergeSessionTitleTaskBudget } from '../src/provider/sessionTitleRequest';
+import { OneShotTextRequestError } from '../src/agent/oneShotTextRequest';
 import type { UserTaskBudget } from '../src/sessions/userTaskBudget';
 import { normalizeUserTaskBudgets } from '../src/sessions/userTaskBudget';
 import type { ProviderUsageLedgerRecord } from '../src/shared/types';
@@ -157,7 +158,36 @@ test('missing fixed title model never falls back to the completed main source', 
       parentRequest: { model: { id: 'main', label: 'Main', provider: 'openai-compatible' },
         sourceConfig: { sourceId: 'main', provider: 'openai-compatible', apiKey: 'test', baseUrl: 'https://main.invalid', supportsBilling: false } },
       language: 'en', sessionId: 'session', taskId: 'root', userPrompt: '{}', token: 'token', signal: new AbortController().signal,
-      taskBudget: budget(), onUsageLedgerRecord: () => undefined }), /missing, disabled, or unavailable/u);
+      taskBudget: budget(), onUsageLedgerRecord: () => undefined }), (error: unknown) =>
+        error instanceof OneShotTextRequestError && error.reason === 'unavailable' && /missing, disabled, or unavailable/u.test(error.message));
     assert.equal(calls, 0);
+  } finally { globalThis.fetch = originalFetch; rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('a captured explicit subagent setting cannot be replaced by later settings or picker changes', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'keepseek-title-setting-snapshot-'));
+  const storageUri = vscode.Uri.file(directory);
+  const settingsStore = new SubagentSettingsStore(storageUri, 'workspace:title');
+  const sourceStore = new ModelSourceStore(storageUri);
+  let settingsReads = 0, calls = 0;
+  settingsStore.load = async () => { settingsReads++; throw new Error('the click setting must already be frozen'); };
+  const setting: Pick<SubagentModelSetting, 'mode' | 'sourceId' | 'modelId'> = { mode: 'follow-main' };
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = (async (_url, init) => {
+      calls++;
+      assert.equal(JSON.parse(String(init?.body)).model, 'captured-main');
+      return new Response('data: ' + JSON.stringify({ choices: [{ delta: { content: '{"decision":"set","title":"模型选择快照"}' }, finish_reason: 'stop' }] })
+        + '\n\ndata: [DONE]\n\n');
+    }) as typeof fetch;
+    const pending = requestSessionTitle({ globalStorageUri: storageUri, workspaceKey: 'workspace:title', sourceStore, settingsStore,
+      setting, parentRequest: { model: { id: 'captured-main', label: 'Main', provider: 'openai-compatible' },
+        sourceConfig: { sourceId: 'captured-source', provider: 'openai-compatible', apiKey: 'test', baseUrl: 'https://captured.invalid/v1', supportsBilling: false } },
+      language: 'en', sessionId: 'session', taskId: 'root', userPrompt: '{}', token: 'snapshot-token', signal: new AbortController().signal,
+      taskBudget: budget(), onUsageLedgerRecord: () => undefined });
+    setting.mode = 'fixed'; setting.sourceId = 'missing'; setting.modelId = 'missing';
+    assert.equal(await pending, '{"decision":"set","title":"模型选择快照"}');
+    assert.equal(settingsReads, 0);
+    assert.equal(calls, 1);
   } finally { globalThis.fetch = originalFetch; rmSync(directory, { recursive: true, force: true }); }
 });

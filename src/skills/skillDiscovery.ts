@@ -21,6 +21,10 @@ export interface SkillDiscoveryOptions {
   includeAdminSkills?: boolean;
   includeCodexPlugins?: boolean;
 }
+export interface SkillDiscoverySnapshot {
+  manifests: SkillManifest[];
+  diagnostics: string[];
+}
 interface SkillBase { source: SkillSource; uri: vscode.Uri; boundary: vscode.Uri; plugin?: CodexPluginInstallation }
 const MAX_DEPTH = 6;
 const MAX_DIRECTORIES = 2000;
@@ -31,8 +35,16 @@ export class SkillDiscovery {
   public constructor(private readonly options: SkillDiscoveryOptions = {}) {}
 
   public async discover(config?: SharedCodexConfigSnapshot): Promise<SkillManifest[]> {
+    const result = await this.discoverSnapshot(config);
+    this.diagnostics = result.diagnostics;
+    return result.manifests;
+  }
+
+  /** Every read owns its diagnostics. Independent source versions can scan
+   * without borrowing another session's mutable discovery state. */
+  public async discoverSnapshot(config?: SharedCodexConfigSnapshot): Promise<SkillDiscoverySnapshot> {
     config ??= await loadSharedCodexConfig();
-    this.diagnostics = [];
+    const diagnostics: string[] = [];
     const bases: SkillBase[] = config.scope?.trusted
       ? [...config.scope.chain].reverse().map(dir => ({ source: 'agentsWorkspace', uri: projectSkillsUri(dir), boundary: config!.scope!.root })) : [];
     if (this.options.includeUserSkills !== false) {
@@ -47,16 +59,16 @@ export class SkillDiscovery {
       if (vscode.workspace.isTrusted) {
         try {
           const installed = await discoverCodexPlugins(config.codexHome, config.scope);
-          this.diagnostics.push(...installed.diagnostics);
+          diagnostics.push(...installed.diagnostics);
           for (const plugin of installed.plugins) {
             bases.push({ source: 'codexPlugin', uri: vscode.Uri.file(plugin.skillsPath),
               boundary: vscode.Uri.file(plugin.realRootPath), plugin });
           }
         } catch {
-          this.diagnostics.push('Codex plugin installation unavailable / 无法读取 Codex 插件安装');
+          diagnostics.push('Codex plugin installation unavailable / 无法读取 Codex 插件安装');
         }
       } else {
-        this.diagnostics.push('Codex plugin Skills require a trusted workspace / Codex 插件 Skill 需要受信任的工作区');
+        diagnostics.push('Codex plugin Skills require a trusted workspace / Codex 插件 Skill 需要受信任的工作区');
       }
     }
     const manifests: SkillManifest[] = [];
@@ -76,7 +88,7 @@ export class SkillDiscovery {
         }
         base.boundary = boundary;
       } catch (error) {
-        if (!isMissingFile(error)) this.diagnostics.push(`${base.uri.toString()}: unsafe source root / 来源根目录不安全`);
+        if (!isMissingFile(error)) diagnostics.push(`${base.uri.toString()}: unsafe source root / 来源根目录不安全`);
         continue;
       }
       const visited = new Set<string>();
@@ -84,7 +96,7 @@ export class SkillDiscovery {
       const walk = async (directory: vscode.Uri, depth: number): Promise<void> => {
         if (depth > MAX_DEPTH || visited.size >= MAX_DIRECTORIES || entriesSeen >= MAX_ENTRIES
           || (base.plugin && pluginEntriesSeen >= MAX_ENTRIES)) {
-          this.diagnostics.push(`${base.uri.toString()}: discovery limit / 扫描达到上限`); return;
+          diagnostics.push(`${base.uri.toString()}: discovery limit / 扫描达到上限`); return;
         }
         try {
           const real = await assertRealPathInside(directory, [base.boundary]);
@@ -108,7 +120,7 @@ export class SkillDiscovery {
             if (entries.length >= MAX_ENTRIES - entriesSeen) break;
           }
           for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-            if (++entriesSeen > MAX_ENTRIES) { this.diagnostics.push(`${base.uri.toString()}: entry limit / 条目达到上限`); break; }
+            if (++entriesSeen > MAX_ENTRIES) { diagnostics.push(`${base.uri.toString()}: entry limit / 条目达到上限`); break; }
             if (base.plugin && ++pluginEntriesSeen > MAX_ENTRIES) break;
             if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
             if (entry.isDirectory() || entry.isSymbolicLink()) {
@@ -116,12 +128,12 @@ export class SkillDiscovery {
             }
           }
         } catch (error) {
-          if (!isMissingFile(error)) this.diagnostics.push(`${directory.toString()}: source unavailable, link outside boundary or unreadable / 来源不可用、链接越界或不可读`);
+          if (!isMissingFile(error)) diagnostics.push(`${directory.toString()}: source unavailable, link outside boundary or unreadable / 来源不可用、链接越界或不可读`);
         }
       };
       await walk(base.uri, 0);
     }
-    return manifests;
+    return { manifests, diagnostics };
   }
 
   private async createManifest(base: SkillBase, rootUri: vscode.Uri, skillUri: vscode.Uri, config: SharedCodexConfigSnapshot): Promise<SkillManifest> {

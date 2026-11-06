@@ -52,7 +52,6 @@ export class SkillStore {
   private readonly sourceSnapshots = new Map<SharedCodexConfigSnapshot, SkillSourceSnapshot>();
   private readonly pendingSources = new Map<SharedCodexConfigSnapshot, Promise<SkillSourceSnapshot>>();
   private refreshSelection = 0;
-  private sourceReadTail = Promise.resolve();
   public readonly sourceDiagnostics = { hits: 0, scans: 0, merged: 0, stale: 0 };
 
   public constructor(
@@ -96,17 +95,12 @@ export class SkillStore {
   }
 
   private async discoverSource(config?: SharedCodexConfigSnapshot): Promise<SkillSourceSnapshot> {
-    // SkillDiscovery owns mutable diagnostics. Different versions cannot borrow that mutable state.
-    const previous = this.sourceReadTail;
-    let release!: () => void;
-    this.sourceReadTail = new Promise<void>(resolve => { release = resolve; });
-    await previous;
-    try {
-      const discovered = await this.discovery.discover(config);
-      const manifests = discovered.filter(manifest => isCodexPluginSkillsEnabled() || !isCodexPluginSkill(manifest));
-      for (const manifest of manifests) freezeSkillSource(manifest);
-      return { manifests, diagnostics: [...(this.discovery.diagnostics ?? [])], loaded: new Map() };
-    } finally { release(); }
+    // Same-version consumers still merge in pendingSources. Different versions
+    // own their scan and diagnostics; an obsolete read cannot hold the new one.
+    const discovered = await this.discovery.discoverSnapshot(config);
+    const manifests = discovered.manifests.filter(manifest => isCodexPluginSkillsEnabled() || !isCodexPluginSkill(manifest));
+    for (const manifest of manifests) freezeSkillSource(manifest);
+    return { manifests, diagnostics: [...discovered.diagnostics], loaded: new Map() };
   }
 
   public getStateView(session: ChatSession): SkillStateView {

@@ -25,9 +25,11 @@ test('background title events patch known session labels without rerendering edi
     const rows = [{ dataset: { sessionId: 'a', sessionOrigin: 'current' }, querySelector: () => label }];
     const menu = { querySelectorAll: () => rows };
     const originalMessages = state.messages;
-    const env = { state, currentSessionTitle: title, sessionMenu: menu, t: () => 'New session' };
+    const env = { state, currentSessionTitle: title, sessionMenu: menu, t: () => 'New session',
+      getActiveVisibleSessions: () => state.sessionSummaries, getSessionMenuRenderKey: () => 'patched' };
     const api = new Function(...Object.keys(env), `
       var sessionMenuOpen = true;
+      var sessionMenuRenderKey = '';
       var editingSessionTitleId = ${JSON.stringify(editingId)};
       ${between('renderCurrentSessionTitle()', 'applyStaticTranslations()')}
       ${between('handleKeepseekHostMessage(event)', 'applyAgentRunStreamPatch(message)')}
@@ -138,7 +140,8 @@ function titleView(language = 'en') {
     type: 'state', revision: ++revision, state: {
       activeSessionId: sessionId, sessionSummaries: summaries,
       messages: [{ id: sessionId + '-answer', role: 'assistant', content: 'Visible answer', createdAt: '' }],
-      language, isBusy: false, startup: { interactiveReady: true, sideEffectsReady: true }, ...patch
+      language, isBusy: false, startup: { interactiveReady: true, sideEffectsReady: true },
+      titleRegenerationCapability: { available: true }, ...patch
     }
   });
   publish();
@@ -219,12 +222,15 @@ test('history refresh is before edit and spins once without selecting a session 
   assert.equal(view.requests().length, 2, 'a later explicit refresh can run again');
 });
 
-test('history refresh guards startup, main/background runs and preserves its pending spinner across menu and state refreshes', () => {
+test('history refresh consumes Host conflict capability and preserves its pending spinner across menu and state refreshes', () => {
   const view = titleView('zh-CN');
   assert.match(view.refreshButton().title, /重新生成会话标题/u);
   for (const patch of [
-    { startup: { interactiveReady: false } }, { isBusy: true },
-    ...['running', 'waiting_for_apply', 'waiting_for_authorization'].map(status => ({ backgroundRun: { status } }))
+    { startup: { interactiveReady: false }, titleRegenerationCapability: { available: false, reason: 'loading_sessions' } },
+    { isBusy: true, titleRegenerationCapability: { available: false, reason: 'busy' } },
+    ...['running', 'waiting_for_apply', 'waiting_for_authorization'].map(status => ({
+      backgroundRun: { status }, titleRegenerationCapability: { available: false, reason: 'busy' }
+    }))
   ]) {
     view.publish('a', { backgroundRun: undefined, ...patch });
     assert.equal(view.refreshButton().disabled, true);
@@ -309,7 +315,8 @@ test('a newly mounted webview restores the Host in-flight title request before s
   view.receive({ type: 'state', revision: 1, state: {
     activeSessionId: 'a', sessionSummaries: [{ id: 'a', title: 'Manual before reload', customTitle: 'Manual before reload',
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }],
-    messages: [], language: 'en', isBusy: false, startup: { interactiveReady: true, sideEffectsReady: true }
+    messages: [], language: 'en', isBusy: false, startup: { interactiveReady: true, sideEffectsReady: true },
+    titleRegenerationCapability: { available: true }
   } });
   const title = view.element('currentSessionTitle');
   assert.equal(title.textContent, 'Manual before reload');
@@ -328,4 +335,172 @@ test('a newly mounted webview restores the Host in-flight title request before s
   assert.equal(button.classList.contains('is-regenerating'), false);
   assert.equal(prompt.textContent, 'Draft after reload');
   assert.equal(view.document.activeElement, prompt);
+});
+
+test('startupSettings alone updates history title capability in place without losing a draft or scroll', () => {
+  const view = titleView();
+  view.publish('a', {
+    startup: { interactiveReady: false },
+    titleRegenerationCapability: { available: false, reason: 'loading_sessions' }
+  });
+  const button = view.refreshButton();
+  assert.equal(button.disabled, true);
+  const prompt = view.element('promptInput');
+  prompt.textContent = 'Keep this draft';
+  prompt.focus();
+  const menu = view.element('sessionMenu');
+  menu.scrollTop = 87;
+  view.receive({ type: 'statePatch', scope: 'startupSettings', revision: 100, state: {
+    startup: { interactiveReady: true },
+    interaction: { sessionId: 'a', phase: 'idle', canSubmit: true },
+    titleRegenerationCapability: { available: true }
+  } });
+  assert.equal(button.disabled, false, 'ready patch must update an already open history control');
+  assert.equal(view.refreshButton(), button, 'capability-only updates must not rebuild history rows');
+  assert.equal(menu.scrollTop, 87);
+  assert.equal(prompt.textContent, 'Keep this draft');
+  assert.equal(view.document.activeElement, prompt);
+  view.refresh();
+  assert.equal(view.requests().length, 1);
+});
+
+test('title refresh capability is independent of the current composer context and explains Host restrictions', () => {
+  const view = titleView();
+  view.publish('a', {
+    startup: { interactiveReady: false },
+    interaction: { sessionId: 'a', phase: 'preparing_context', waitingReason: 'context',
+      canEditDraft: true, canSubmit: false, canNavigate: true },
+    titleRegenerationCapability: { available: true }
+  });
+  const button = view.refreshButton('b');
+  assert.equal(button.disabled, false, 'current Skills readiness is not the historical title capability');
+  const svg = button.querySelector('svg')!;
+  view.element('sessionMenu').dispatchEvent({ type: 'click', target: svg });
+  assert.equal(view.requests().length, 1, 'clicking the SVG resolves the native refresh button');
+  const requestId = view.requests()[0].requestId;
+  view.receive({ type: 'sessionTitleRegeneration', sessionId: 'b', requestId, running: false,
+    outcome: 'unavailable', reason: 'Select an available title model.' });
+  const feedback = button.closest('.session-menu-item')!.querySelector('.session-menu-title-result')!;
+  assert.equal(feedback.textContent, 'Select an available title model.');
+  assert.equal(feedback.getAttribute('role'), 'status');
+  assert.equal(feedback.getAttribute('aria-live'), 'polite');
+  view.receive({ type: 'statePatch', scope: 'startupSettings', revision: 100, state: {
+    titleRegenerationCapability: { available: false, reason: 'model_unavailable' }
+  } });
+  assert.equal(button.disabled, true);
+  assert.equal(button.getAttribute('aria-disabled'), 'true');
+  assert.match(button.title, /model/i);
+  assert.match(button.getAttribute('aria-label')!, /model/i);
+  assert.equal(feedback.textContent, 'Select an available title model.', 'capability changes retain the explicit request result');
+  assert.equal(view.state.activeSessionId, 'a');
+});
+
+test('explicit title outcomes are visible, request scoped and retryable without accepting late results', () => {
+  for (const outcome of ['updated', 'unchanged', 'no_material', 'unavailable', 'busy', 'rejected',
+    'cancelled', 'stale', 'invalid', 'timeout', 'failed', 'save_failed']) {
+    const view = titleView();
+    const button = view.refreshButton();
+    // Native buttons produce this click for Enter/Space activation; the DOM
+    // harness intentionally does not emulate the browser's default key action.
+    view.element('sessionMenu').dispatchEvent({ type: 'click', target: button, detail: 0 });
+    const requestId = view.requests()[0].requestId;
+    const feedback = button.closest('.session-menu-item')!.querySelector('.session-menu-title-result')!;
+    assert.match(feedback.textContent, /Regenerating/u);
+    view.receive({ type: 'sessionTitleRegeneration', sessionId: 'a', requestId, running: true, accepted: true });
+    view.receive({ type: 'sessionTitleRegeneration', sessionId: 'a', requestId: 'other', running: false,
+      outcome: 'failed', reason: 'wrong result' });
+    assert.equal(button.classList.contains('is-regenerating'), true);
+    view.receive({ type: 'sessionTitleRegeneration', sessionId: 'a', requestId, running: false,
+      outcome, reason: outcome + ' <safe text>' });
+    assert.equal(button.classList.contains('is-regenerating'), false);
+    assert.equal(button.disabled, false);
+    assert.equal(feedback.textContent, outcome + ' <safe text>');
+    assert.equal(feedback.classList.contains('hidden'), false);
+    assert.equal(view.state.sessionSummaries[0].title, 'A', 'a result never substitutes for the durable title event');
+    view.receive({ type: 'sessionTitleRegeneration', sessionId: 'a', requestId, running: true, restored: true });
+    assert.equal(button.classList.contains('is-regenerating'), false, 'completed requests cannot be resurrected');
+    view.refresh();
+    assert.equal(view.requests().length, 2);
+    assert.match(feedback.textContent, /Regenerating/u);
+    view.receive({ type: 'sessionTitleRegeneration', sessionId: 'a', requestId, running: false,
+      outcome: 'failed', reason: 'late result' });
+    assert.equal(button.classList.contains('is-regenerating'), true, 'old completion cannot finish a new request');
+    assert.notEqual(feedback.textContent, 'late result');
+  }
+});
+
+test('capability updates preserve an open manual title editor through patches and unchanged full state', () => {
+  const view = titleView();
+  view.openHistory();
+  const menu = view.element('sessionMenu');
+  const rename = menu.querySelector('[data-session-id="b"] button[data-session-action="startRename"]')!;
+  menu.dispatchEvent({ type: 'click', target: rename });
+  const editor = menu.querySelector('input[data-session-title="true"]')!;
+  assert.ok(editor);
+  editor.value = 'My unfinished title';
+  editor.selectionStart = 4;
+  editor.selectionEnd = 7;
+  editor.focus();
+  const button = view.refreshButton('a');
+  menu.scrollTop = 61;
+  view.publish('a', { titleRegenerationCapability: { available: false, reason: 'saving' } });
+  assert.equal(menu.querySelector('input[data-session-title="true"]'), editor);
+  assert.equal(view.refreshButton('a'), button);
+  assert.equal(editor.value, 'My unfinished title');
+  assert.equal(editor.selectionStart, 4);
+  assert.equal(editor.selectionEnd, 7);
+  assert.equal(view.document.activeElement, editor);
+  assert.equal(menu.scrollTop, 61);
+  assert.equal(button.disabled, true);
+  view.receive({ type: 'statePatch', scope: 'startupSettings', revision: 100, state: {
+    titleRegenerationCapability: { available: true }
+  } });
+  assert.equal(button.disabled, false);
+  assert.equal(menu.querySelector('input[data-session-title="true"]'), editor);
+  assert.equal(view.document.activeElement, editor);
+});
+
+test('a title commit followed by the same Host snapshot preserves open title editors in any row', () => {
+  for (const editingId of ['a', 'b']) {
+    const view = titleView();
+    view.refresh('a');
+    const requestId = view.requests()[0].requestId;
+    const menu = view.element('sessionMenu');
+    const rename = menu.querySelector('[data-session-id="' + editingId + '"] button[data-session-action="startRename"]')!;
+    menu.dispatchEvent({ type: 'click', target: rename });
+    const editor = menu.querySelector('input[data-session-title="true"]')!;
+    editor.value = 'Keep my unfinished title';
+    editor.selectionStart = 3;
+    editor.selectionEnd = 9;
+    editor.focus();
+    menu.scrollTop = 73;
+    view.receive({ type: 'sessionTitleUpdated', sessionId: 'a', requestId,
+      regenerated: true, title: 'A refreshed title' });
+    view.receive({ type: 'sessionTitleRegeneration', sessionId: 'a', requestId,
+      running: false, outcome: 'updated', reason: 'Title updated.' });
+    view.publish('a');
+    assert.equal(view.state.sessionSummaries[0].title, 'A refreshed title');
+    assert.equal(menu.querySelector('input[data-session-title="true"]'), editor,
+      'the matching full snapshot must not rebuild an editor after a local title patch');
+    assert.equal(editor.value, 'Keep my unfinished title');
+    assert.equal(editor.selectionStart, 3);
+    assert.equal(editor.selectionEnd, 9);
+    assert.equal(view.document.activeElement, editor);
+    assert.equal(menu.scrollTop, 73);
+    assert.equal(view.posted.some(message => message.type === 'renameSession'), false,
+      'a background title commit cannot submit the unfinished manual name');
+  }
+});
+
+test('the displayed wait follows the Host reason rather than calling model or recovery waits Skills loading', () => {
+  const view = titleView();
+  for (const [waitingReason, expected] of [
+    ['model', /model/i], ['session', /conversation/i], ['recovery', /restor/i], ['context', /Skills/u], ['saving', /sav/i]
+  ] as const) {
+    view.publish('a', { interaction: { sessionId: 'a', phase: 'preparing_context', waitingReason,
+      canEditDraft: true, canSubmit: false, canNavigate: true } });
+    const text = view.element('statusText').textContent;
+    assert.match(text, expected);
+    if (waitingReason !== 'context') assert.doesNotMatch(text, /Skills/u);
+  }
 });

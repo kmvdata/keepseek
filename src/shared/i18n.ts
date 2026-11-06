@@ -112,6 +112,53 @@ const TASK_APPROVAL_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> =
   }
 };
 
+const SESSION_TITLE_REFRESH_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> = {
+  'zh-CN': {
+    titleRefreshEditing: '请先结束标题编辑。',
+    titleRefreshUnavailable: '暂时无法刷新标题。',
+    titleRefreshReason_loading_sessions: '会话尚未加载完成。',
+    titleRefreshReason_recovering: '正在恢复会话记录，请稍候。',
+    titleRefreshReason_model_unavailable: '标题模型尚未就绪，请检查模型来源。',
+    titleRefreshReason_untrusted: '请先信任当前工作区。',
+    titleRefreshReason_busy: '请等待当前任务或操作结束。',
+    titleRefreshReason_saving: '正在保存必要状态，请稍候。',
+    titleRefreshReason_unavailable: '暂时无法刷新标题。',
+    titleRefreshOutcome_updated: '标题已更新。',
+    titleRefreshOutcome_unchanged: '标题未变化。',
+    titleRefreshOutcome_no_material: '没有可用于命名的会话内容。',
+    titleRefreshOutcome_unavailable: '标题模型或预算不可用，请检查设置。',
+    titleRefreshOutcome_busy: '该会话正在生成标题，请稍候。',
+    titleRefreshOutcome_cancelled: '标题刷新已取消。',
+    titleRefreshOutcome_stale: '会话已变化，本次标题结果未采用。',
+    titleRefreshOutcome_invalid: '模型未返回有效标题，请重试。',
+    titleRefreshOutcome_timeout: '标题生成超时，请重试。',
+    titleRefreshOutcome_failed: '标题生成失败，请重试。',
+    titleRefreshOutcome_save_failed: '标题保存失败，已保留旧标题。',
+  },
+  en: {
+    titleRefreshEditing: 'Finish editing this title first.',
+    titleRefreshUnavailable: 'Title refresh is unavailable.',
+    titleRefreshReason_loading_sessions: 'Conversations are still loading.',
+    titleRefreshReason_recovering: 'Restoring session records. Please wait.',
+    titleRefreshReason_model_unavailable: 'The title model is not ready. Check its source.',
+    titleRefreshReason_untrusted: 'Trust the current workspace first.',
+    titleRefreshReason_busy: 'Wait for the current task or operation to finish.',
+    titleRefreshReason_saving: 'Saving required state. Please wait.',
+    titleRefreshReason_unavailable: 'Title refresh is unavailable.',
+    titleRefreshOutcome_updated: 'Title updated.',
+    titleRefreshOutcome_unchanged: 'The title is unchanged.',
+    titleRefreshOutcome_no_material: 'This conversation has no content to name.',
+    titleRefreshOutcome_unavailable: 'The title model or budget is unavailable. Check settings.',
+    titleRefreshOutcome_busy: 'A title is already being generated for this conversation.',
+    titleRefreshOutcome_cancelled: 'Title refresh cancelled.',
+    titleRefreshOutcome_stale: 'The conversation changed. This title result was not applied.',
+    titleRefreshOutcome_invalid: 'The model did not return a valid title. Try again.',
+    titleRefreshOutcome_timeout: 'Title generation timed out. Try again.',
+    titleRefreshOutcome_failed: 'Title generation failed. Try again.',
+    titleRefreshOutcome_save_failed: 'The title could not be saved. The previous title was kept.',
+  }
+};
+
 export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> = {
   'zh-CN': {
     executionMode: '执行方式',
@@ -142,6 +189,9 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
     startupLoadingSessions: '正在加载会话…',
     startupRestoringSafetyState: '正在恢复会话与安全状态…',
     startupLoadingRequestContext: '正在加载项目指令与 Skills…',
+    startupLoadingModel: '正在准备模型…',
+    startupRecoveringSession: '正在恢复会话操作记录…',
+    startupSavingSession: '正在保存必要状态…',
     startupLoadFailed: '部分启动数据加载失败，请重新加载窗口。',
     mainModelLoading: '正在加载主模型…',
     mainModelLoadFailed: '主模型加载失败，请重新加载窗口。',
@@ -624,6 +674,7 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
     usageSessionMetricsTitle: '会话指标',
     usageAverageHit: '平均命中',
     ...TASK_APPROVAL_TRANSLATIONS['zh-CN'],
+    ...SESSION_TITLE_REFRESH_TRANSLATIONS['zh-CN'],
     usageEffectiveRuntime: '本次时间',
     usageSessionTotalTime: '会话累计时间',
     usageDurationDay: '{days} 天',
@@ -1113,6 +1164,9 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
     startupLoadingSessions: 'Loading conversations…',
     startupRestoringSafetyState: 'Restoring conversations and safety state…',
     startupLoadingRequestContext: 'Loading project instructions and Skills…',
+    startupLoadingModel: 'Preparing model…',
+    startupRecoveringSession: 'Restoring session operations…',
+    startupSavingSession: 'Saving required state…',
     startupLoadFailed: 'Some startup data failed to load. Reload the window to retry.',
     mainModelLoading: 'Loading main model…',
     mainModelLoadFailed: 'Main model failed to load. Reload the window to retry.',
@@ -1595,6 +1649,7 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
     usageSessionMetricsTitle: 'Session metrics',
     usageAverageHit: 'Average hit rate',
     ...TASK_APPROVAL_TRANSLATIONS.en,
+    ...SESSION_TITLE_REFRESH_TRANSLATIONS.en,
     usageEffectiveRuntime: 'Current run time',
     usageSessionTotalTime: 'Session total time',
     usageDurationDay: '{days} day',
@@ -2060,6 +2115,7 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
 const EXTENSION_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> = {
   'zh-CN': {
     ...TASK_APPROVAL_TRANSLATIONS['zh-CN'],
+    ...SESSION_TITLE_REFRESH_TRANSLATIONS['zh-CN'],
     sessionMigrationTitle: 'KeepSeek：正在迁移已保存会话（取消会保留原数据）',
     planDecisionBusy: '当前任务仍在运行，请结束后再处理计划。',
     planDecisionInvalid: '该计划已失效、已处理、内容不匹配或不属于当前会话，不能执行。',
@@ -2221,6 +2277,7 @@ const EXTENSION_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> = {
   },
   en: {
     ...TASK_APPROVAL_TRANSLATIONS.en,
+    ...SESSION_TITLE_REFRESH_TRANSLATIONS.en,
     sessionMigrationTitle: 'KeepSeek: migrating saved session (cancel keeps the original)',
     planDecisionBusy: 'A task is still running. Finish or stop it before deciding this plan.',
     planDecisionInvalid: 'This plan is stale, already resolved, content-mismatched, or belongs to another conversation, so it cannot execute.',

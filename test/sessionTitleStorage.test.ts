@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { ChatSessionStore, createEmptySession, normalizeStoredSessions,
   type ChatSessionStorageAdapter, type StoredWorkspaceSessionState } from '../src/sessions/chatSessionStore';
 import { SessionTitleCoordinator } from '../src/sessions/sessionTitleCoordinator';
+import { OneShotTextRequestError } from '../src/agent/oneShotTextRequest';
 import { buildSessionTitleMaterial, buildSessionTitleRegenerationMaterial } from '../src/sessions/sessionTitle';
 import { createHistoryTruncationPlan, executeHistoryTruncation } from '../src/sessions/historyTruncation';
 import type { ChatMessage, ChatSession } from '../src/shared/types';
@@ -15,6 +16,13 @@ import { GlobalSessionStorage, getWorkspaceHash } from '../src/sessions/globalSe
 import * as vscode from './stubs/vscode';
 
 const scope = { key: 'workspace:title', name: 'Title', folderUris: [] };
+
+async function removeStorageRoot(root: string): Promise<void> {
+  // Reconciliation can defer a derived manifest write. Drain that real storage
+  // barrier before removing the temporary tree, rather than racing its timer.
+  await new GlobalSessionStorage(vscode.Uri.file(root) as never).flush();
+  await rm(root, { recursive: true, force: true });
+}
 function pair(taskId: string, prompt = '分析 KeepSeek 审批失败原因'): ChatMessage[] {
   const userTask = { version: 1 as const, id: taskId, originMessageId: taskId, reason: 'user' as const };
   return [
@@ -57,6 +65,92 @@ async function fixture(messages = pair('turn-1')) {
   return { store, storage, session: store.getActiveSession(), coordinator: new SessionTitleCoordinator(store) };
 }
 const set = JSON.stringify({ decision: 'set', title: '审批失败排查' });
+
+test('explicit title results distinguish committed same title, no topic and invalid output', async () => {
+  const { session, coordinator } = await fixture();
+  const material = buildSessionTitleRegenerationMaterial(session.messages, 'turn-1')!;
+  assert.deepEqual(await coordinator.regenerateResult(session.id, 'turn-1', async () => set, material), { outcome: 'updated' });
+  assert.deepEqual(await coordinator.regenerateResult(session.id, 'turn-1', async () => set, material), { outcome: 'unchanged' });
+  assert.deepEqual(await coordinator.regenerateResult(session.id, 'turn-1', async () => '{"decision":"defer","title":null}', material), { outcome: 'no_material' });
+  assert.deepEqual(await coordinator.regenerateResult(session.id, 'turn-1', async () => 'bad output', material), { outcome: 'invalid' });
+  assert.equal(session.title, '审批失败排查');
+});
+
+test('manual outcome waits for the actual commit barrier and never reports a failed claim as provider success', async () => {
+  const { session, coordinator, storage } = await fixture();
+  const material = buildSessionTitleRegenerationMaterial(session.messages, 'turn-1')!;
+  const started = deferred<void>(), release = deferred<void>();
+  storage.beforeSave = async state => {
+    if (state.sessions[0].title === '审批失败排查') { started.resolve(); await release.promise; }
+  };
+  let settled = false;
+  const pending = coordinator.regenerateResult(session.id, 'turn-1', async () => set, material).then(result => { settled = true; return result; });
+  await started.promise;
+  assert.equal(settled, false);
+  assert.equal(session.title, 'Temporary title');
+  release.resolve();
+  assert.deepEqual(await pending, { outcome: 'updated' });
+  storage.beforeSave = () => { throw new Error('private disk failure'); };
+  let calls = 0;
+  assert.deepEqual(await coordinator.regenerateResult(session.id, 'turn-1', async () => { calls++; return set; }, material), { outcome: 'save_failed' });
+  assert.equal(calls, 0);
+  assert.equal(session.title, '审批失败排查');
+});
+
+for (const reason of ['timeout', 'unavailable', 'cancelled', 'invalid'] as const) {
+  test(`explicit title request exposes safe ${reason} result and preserves the previous title`, async () => {
+    const { session, coordinator } = await fixture();
+    const result = await coordinator.regenerateResult(session.id, 'turn-1', async () => {
+      throw new OneShotTextRequestError(reason, 'secret provider response that must not reach the UI');
+    }, buildSessionTitleRegenerationMaterial(session.messages, 'turn-1')!);
+    assert.deepEqual(result, { outcome: reason });
+    assert.equal(session.title, 'Temporary title');
+    assert.equal(session.autoTitle?.manualAttempt, undefined);
+  });
+}
+
+test('manual request slots distinguish duplicate busy and late cancelled responses', async () => {
+  const { session, coordinator } = await fixture();
+  const material = buildSessionTitleRegenerationMaterial(session.messages, 'turn-1')!;
+  const started = deferred<void>(), release = deferred<string>();
+  const first = coordinator.regenerateResult(session.id, 'turn-1', async () => { started.resolve(); return release.promise; }, material);
+  await started.promise;
+  assert.deepEqual(await coordinator.regenerateResult(session.id, 'turn-1', async () => { throw new Error('duplicate dispatch'); }, material), { outcome: 'busy' });
+  coordinator.cancel(session.id);
+  release.resolve(set);
+  assert.deepEqual(await first, { outcome: 'cancelled' });
+  assert.equal(session.title, 'Temporary title');
+});
+
+test('a durable title survives notification failure without reissuing the model request', async () => {
+  const { store, session, storage } = await fixture();
+  const coordinator = new SessionTitleCoordinator(store, { onCommitted: () => { throw new Error('webview gone'); } });
+  assert.deepEqual(await coordinator.regenerateResult(session.id, 'turn-1', async () => set,
+    buildSessionTitleRegenerationMaterial(session.messages, 'turn-1')!), { outcome: 'updated' });
+  assert.equal(session.title, '审批失败排查');
+  assert.equal(storage.state.sessions[0].title, '审批失败排查');
+});
+
+test('an intent retiring a settled commit before coordinator delivery suppresses the old title notification', async () => {
+  const { store, session, storage } = await fixture();
+  let notifications = 0;
+  const coordinator = new SessionTitleCoordinator(store, { onCommitted: () => { notifications++; } });
+  const finish = store.finishSessionTitleResult.bind(store);
+  store.finishSessionTitleResult = async (...args: Parameters<typeof finish>) => {
+    const saved = await finish(...args);
+    assert.equal(saved, 'committed');
+    coordinator.cancel(session.id);
+    await store.renameSession(session.id, 'Newer user title');
+    return saved;
+  };
+  const result = await coordinator.regenerateResult(session.id, 'turn-1', async () => set,
+    buildSessionTitleRegenerationMaterial(session.messages, 'turn-1')!);
+  assert.deepEqual(result, { outcome: 'cancelled' });
+  assert.equal(notifications, 0);
+  assert.equal(session.title, 'Newer user title');
+  assert.equal(session.customTitle, 'Newer user title');
+  assert.equal(storage.state.sessions[0].title, 'Newer user title');
+});
 
 test('automatic title commits once to session and history without changing messages or activity time', async () => {
   const { store, storage, session, coordinator } = await fixture();
@@ -297,7 +391,7 @@ test('copy retains completed display with remapped title evidence and no attempt
 for (const originalTitle of ['Temporary title', '审批失败排查']) {
   test(`failed real index commit rejects persisted title shard even when title ${originalTitle === '审批失败排查' ? 'text matches' : 'changes'}`, async t => {
     const root = await mkdtemp(join(tmpdir(), 'keepseek-title-index-failure-'));
-    t.after(() => rm(root, { recursive: true, force: true }));
+    t.after(() => removeStorageRoot(root));
     const uri = vscode.Uri.file(root) as never;
     const storage = new GlobalSessionStorage(uri);
     const store = new ChatSessionStore(storage, 'en', scope);
@@ -347,7 +441,7 @@ for (const originalTitle of ['Temporary title', '审批失败排查']) {
 
 test('saving only loaded B preserves the committed title marker of unloaded A', async t => {
   const root = await mkdtemp(join(tmpdir(), 'keepseek-title-index-preserve-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => removeStorageRoot(root));
   const uri = vscode.Uri.file(root) as never;
   const storage = new GlobalSessionStorage(uri);
   const store = new ChatSessionStore(storage, 'en', scope);
@@ -371,7 +465,7 @@ test('saving only loaded B preserves the committed title marker of unloaded A', 
 
 test('orphan index reconciliation cannot promote an unconfirmed completed shard', async t => {
   const root = await mkdtemp(join(tmpdir(), 'keepseek-title-orphan-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => removeStorageRoot(root));
   const uri = vscode.Uri.file(root) as never;
   const storage = new GlobalSessionStorage(uri);
   const store = new ChatSessionStore(storage, 'en', scope);
@@ -560,7 +654,7 @@ for (const invalidation of ['rename', 'new-turn', 'delete'] as const) {
 for (const previousKind of ['automatic', 'custom'] as const) {
   test(`failed real manual index commit restores a ${previousKind} title and stop semantics on restart`, async t => {
     const root = await mkdtemp(join(tmpdir(), 'keepseek-manual-title-index-'));
-    t.after(() => rm(root, { recursive: true, force: true }));
+    t.after(() => removeStorageRoot(root));
     const uri = vscode.Uri.file(root) as never;
     const storage = new GlobalSessionStorage(uri);
     const store = new ChatSessionStore(storage, 'en', scope);
@@ -614,7 +708,7 @@ test('manual regeneration names legacy conversations without rewriting their tas
 for (const previousKind of ['automatic', 'custom'] as const) {
   test(`a failed manual claim index write preserves the ${previousKind} title before provider dispatch`, async t => {
     const root = await mkdtemp(join(tmpdir(), 'keepseek-manual-title-claim-'));
-    t.after(() => rm(root, { recursive: true, force: true }));
+    t.after(() => removeStorageRoot(root));
     const uri = vscode.Uri.file(root) as never;
     const storage = new GlobalSessionStorage(uri);
     const store = new ChatSessionStore(storage, 'en', scope);
@@ -672,7 +766,7 @@ test('a retired manual callback cannot cancel or invalidate a newer in-flight re
 
 test('a cancelled manual claim keeps its committed automatic revision if the correction index write fails', async t => {
   const root = await mkdtemp(join(tmpdir(), 'keepseek-manual-title-cancel-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => removeStorageRoot(root));
   const uri = vscode.Uri.file(root) as never;
   const store = new ChatSessionStore(new GlobalSessionStorage(uri), 'en', scope);
   await store.initialize();

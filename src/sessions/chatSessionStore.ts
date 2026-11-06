@@ -11,7 +11,7 @@ import { isResumableToolBudgetCheckpoint, normalizeRunCheckpoint, recoveryBlocke
 import { normalizeHistoryWorkFacts } from '../agent/historyProtection';
 import { snapshotSession } from './persistenceSnapshot';
 import { recordLocalPerformance } from '../agent/logging/performanceTrace';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import {
   AgentToolCall,
@@ -180,15 +180,27 @@ export class ChatSessionStore {
   public async finishSessionTitle(sessionId: string, token: string, result: {
     title?: string; outcome: SessionTitleMetadata['lastOutcome'];
   }): Promise<boolean> {
+    return await this.finishSessionTitleResult(sessionId, token, result) === 'committed';
+  }
+
+  /** A valid no-title decision and a stale candidate both used to return false.
+   * Keep their durable outcomes distinct for explicit user actions. */
+  public async finishSessionTitleResult(sessionId: string, token: string, result: {
+    title?: string; outcome: SessionTitleMetadata['lastOutcome'];
+  }): Promise<'committed' | 'recorded' | 'stale' | 'save_failed'> {
     const session = this.getSessionById(sessionId);
     const manual = session?.autoTitle?.manualAttempt?.token === token;
     const attempt = manual ? session?.autoTitle?.manualAttempt : session?.autoTitle?.attempt;
-    if (!session || !attempt || !this.matchesTitleAttempt(sessionId, token, session.autoTitle!.revision)) return false;
+    if (!session || !attempt || !this.matchesTitleAttempt(sessionId, token, session.autoTitle!.revision)) return 'stale';
     if (!result.title) {
-      session.autoTitle = manual ? { ...session.autoTitle!, manualAttempt: undefined, lastOutcome: result.outcome }
+      const settled = session.autoTitle = manual ? { ...session.autoTitle!, manualAttempt: undefined, lastOutcome: result.outcome }
         : { ...session.autoTitle!, status: 'pending', attempt: undefined, lastOutcome: result.outcome };
-      await this.persist('session_title_result');
-      return false;
+      try { await this.persist('session_title_result'); }
+      catch {
+        if (session.autoTitle === settled) session.autoTitle = { ...settled, lastOutcome: 'save_failed' };
+        return 'save_failed';
+      }
+      return this.getSessionById(sessionId) === session && session.autoTitle === settled ? 'recorded' : 'stale';
     }
     const revision = session.autoTitle!.revision;
     const prior = session.autoTitle!;
@@ -201,19 +213,20 @@ export class ChatSessionStore {
       regenerationPrevious: manual ? { title: session.title, customTitle: session.customTitle, metadata: priorMetadata } : undefined
     } };
     for (let save = 0; save < 2; save += 1) {
-      if (!this.matchesTitleAttempt(sessionId, token, revision)) return false;
+      if (!this.matchesTitleAttempt(sessionId, token, revision)) return 'stale';
       this.stagedTitles.set(sessionId, candidate);
       try {
         await this.persist('session_title_commit');
-        return this.getSessionById(sessionId)?.autoTitle === candidate.metadata;
+        return this.getSessionById(sessionId)?.autoTitle === candidate.metadata ? 'committed' : 'stale';
       } catch {
         this.stagedTitles.delete(sessionId);
       }
     }
-    if (this.matchesTitleAttempt(sessionId, token, revision)) session.autoTitle = manual
+    if (!this.matchesTitleAttempt(sessionId, token, revision)) return 'stale';
+    session.autoTitle = manual
       ? { ...session.autoTitle!, manualAttempt: undefined, lastOutcome: 'save_failed' }
       : { ...session.autoTitle!, status: 'pending', attempt: undefined, lastOutcome: 'save_failed' };
-    return false;
+    return 'save_failed';
   }
 
   private matchesTitleAttempt(sessionId: string, token: string, revision: number): boolean {
@@ -273,11 +286,12 @@ export class ChatSessionStore {
     return this.ensureActiveSession();
   }
 
-  public async createNewSession(language: KeepseekLanguage = this.language): Promise<ChatSession> {
+  public async createNewSession(language: KeepseekLanguage = this.language, onSaving?: (sessionId: string) => void): Promise<ChatSession> {
     this.language = language;
     const session = createEmptySession(language, this.workspaceScope, this.approvalModeValue, 'normal');
     this.sessions.unshift(session);
     this.setActiveSessionId(session.id);
+    onSaving?.(session.id);
     await this.persist();
     return session;
   }
@@ -306,8 +320,8 @@ export class ChatSessionStore {
     return true;
   }
 
-  public async selectSession(sessionId: string): Promise<ChatSession | undefined> {
-    const session = await this.loadSessionById(sessionId);
+  public async selectSession(sessionId: string, onSaving?: (sessionId: string) => void): Promise<ChatSession | undefined> {
+    const session = await measureSessionSelection('session-body', sessionId, () => this.loadSessionById(sessionId));
     if (!session) {
       return undefined;
     }
@@ -316,7 +330,8 @@ export class ChatSessionStore {
     session.approvalMode = this.approvalModeValue;
     session.executionMode = normalizeExecutionMode(session.executionMode);
     this.setActiveSessionId(session.id);
-    await this.persist();
+    onSaving?.(session.id);
+    await measureSessionSelection('active-selection-save', session.id, () => this.persist());
     return session;
   }
 
@@ -1822,4 +1837,18 @@ function normalizeProjectScopeUri(value: unknown): string | undefined {
   if (typeof value !== 'string' || value.length > 8192) return undefined;
   try { const uri = vscode.Uri.parse(value); return uri.scheme === 'file' && uri.path.startsWith('/') ? uri.toString() : undefined; }
   catch { return undefined; }
+}
+
+async function measureSessionSelection<T>(stage: string, sessionId: string, work: () => Promise<T>): Promise<T> {
+  const started = performance.now();
+  const session = createHash('sha256').update(sessionId).digest('hex').slice(0, 12);
+  console.info('[KeepSeek] interaction_stage', { stage, session, event: 'begin' });
+  try {
+    const result = await work();
+    console.info('[KeepSeek] interaction_stage', { stage, session, event: 'end', elapsedMs: Math.max(0, performance.now() - started) });
+    return result;
+  } catch (error) {
+    console.info('[KeepSeek] interaction_stage', { stage, session, event: 'failed', elapsedMs: Math.max(0, performance.now() - started) });
+    throw error;
+  }
 }

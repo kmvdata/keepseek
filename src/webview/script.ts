@@ -100,6 +100,8 @@ export function getScript(): string {
       authorizedExternalReferenceUris: [],
       isBusy: false,
       sessionTitleRegenerations: {},
+      sessionTitleRegenerationResults: {},
+      titleRegenerationCapability: { available: false, reason: 'loading_sessions' },
       agentActivity: {
         base: 'idle',
         phase: 'idle',
@@ -572,6 +574,7 @@ export function getScript(): string {
     let backgroundRunDialogOpen = false;
     let dismissedBackgroundRunId = '';
     let sessionMenuOpen = false;
+    let sessionMenuRenderKey = '';
     let sessionMultiSelectMode = false;
     let sessionRangeDays = 1;
     let sessionFavoritesOnly = false;
@@ -1389,6 +1392,7 @@ export function getScript(): string {
             window.keepseekInputControls.render();
           }
           syncSendButtonAvailability();
+          syncSessionTitleRefreshButtons();
           return;
         }
         pendingDraftRunApprovals.clear();
@@ -1667,12 +1671,21 @@ export function getScript(): string {
     }
 
     function canRegenerateSessionTitle(sessionId) {
-      var background = state.backgroundRun?.status;
-      return !!sessionId && state.startup?.interactiveReady === true && !state.isBusy
+      return !!sessionId && state.titleRegenerationCapability?.available === true
         && (Array.isArray(state.sessionSummaries) ? state.sessionSummaries : []).some(function(session) { return session.id === sessionId; })
         && !state.sessionTitleRegenerations?.[sessionId]
-        && editingSessionTitleId !== sessionId
-        && background !== 'running' && background !== 'waiting_for_apply' && background !== 'waiting_for_authorization';
+        && editingSessionTitleId !== sessionId;
+    }
+
+    function sessionTitleRefreshDisabledReason(sessionId) {
+      if (state.sessionTitleRegenerations?.[sessionId]) return t('regeneratingSessionTitle');
+      if (editingSessionTitleId === sessionId) return t('titleRefreshEditing');
+      if (state.titleRegenerationCapability?.available !== true) {
+        var reason = state.titleRegenerationCapability?.reason;
+        return t(['loading_sessions', 'recovering', 'model_unavailable', 'untrusted', 'busy', 'saving', 'unavailable'].includes(reason)
+          ? 'titleRefreshReason_' + reason : 'titleRefreshUnavailable');
+      }
+      return '';
     }
 
     function syncSessionTitleRefreshButton(button) {
@@ -1681,8 +1694,18 @@ export function getScript(): string {
       button.disabled = !canRegenerateSessionTitle(sessionId);
       button.classList.toggle('is-regenerating', pending);
       button.setAttribute('aria-busy', pending ? 'true' : 'false');
-      button.setAttribute('aria-label', t(pending ? 'regeneratingSessionTitle' : 'regenerateSessionTitle'));
-      button.title = t(pending ? 'regeneratingSessionTitle' : 'regenerateSessionTitle');
+      button.setAttribute('aria-disabled', button.disabled ? 'true' : 'false');
+      var label = t(pending ? 'regeneratingSessionTitle' : 'regenerateSessionTitle');
+      var reason = button.disabled ? sessionTitleRefreshDisabledReason(sessionId) : '';
+      var description = reason && reason !== label ? label + ': ' + reason : label;
+      button.setAttribute('aria-label', description);
+      button.title = description;
+      var result = button.closest('.session-menu-item')?.querySelector('.session-menu-title-result');
+      if (result) {
+        var feedback = state.sessionTitleRegenerationResults?.[sessionId];
+        result.textContent = pending ? t('regeneratingSessionTitle') : feedback?.reason || '';
+        result.classList.toggle('hidden', !result.textContent);
+      }
     }
 
     function syncSessionTitleRefreshButtons(sessionId) {
@@ -1698,6 +1721,7 @@ export function getScript(): string {
       var requestId = Date.now().toString(36) + '_' + Math.random().toString(36).slice(2);
       if (!state.sessionTitleRegenerations) state.sessionTitleRegenerations = {};
       state.sessionTitleRegenerations[sessionId] = requestId;
+      delete state.sessionTitleRegenerationResults?.[sessionId];
       syncSessionTitleRefreshButtons(sessionId);
       vscode.postMessage({ type: 'regenerateSessionTitle', sessionId: sessionId, requestId: requestId });
     }
@@ -1714,7 +1738,16 @@ export function getScript(): string {
         state.sessionTitleRegenerations[message.sessionId] = message.requestId;
       }
       if (state.sessionTitleRegenerations?.[message.sessionId] !== message.requestId) return;
-      if (message.running === false) delete state.sessionTitleRegenerations[message.sessionId];
+      if (message.running === false) {
+        delete state.sessionTitleRegenerations[message.sessionId];
+        if (!state.sessionTitleRegenerationResults) state.sessionTitleRegenerationResults = {};
+        state.sessionTitleRegenerationResults[message.sessionId] = {
+          requestId: message.requestId, outcome: message.outcome,
+          reason: typeof message.reason === 'string' && message.reason.trim() ? message.reason : t('titleRefreshUnavailable')
+        };
+        if (!state.retiredSessionTitleRegenerations) state.retiredSessionTitleRegenerations = {};
+        state.retiredSessionTitleRegenerations[retiredKey] = true;
+      }
       syncSessionTitleRefreshButtons(message.sessionId);
     }
 
@@ -1735,12 +1768,18 @@ export function getScript(): string {
       });
       if (!known) return;
       if (state.activeSessionId === message.sessionId) renderCurrentSessionTitle();
-      if (!sessionMenu || !sessionMenuOpen || editingSessionTitleId === message.sessionId) return;
-      sessionMenu.querySelectorAll('.session-menu-item').forEach(function(row) {
-        if (row.dataset.sessionOrigin !== 'current' || row.dataset.sessionId !== message.sessionId) return;
-        var label = row.querySelector('span.session-menu-item-title');
-        if (label) { label.textContent = message.title; label.title = message.title; }
-      });
+      if (!sessionMenu || !sessionMenuOpen) return;
+      if (editingSessionTitleId !== message.sessionId) {
+        sessionMenu.querySelectorAll('.session-menu-item').forEach(function(row) {
+          if (row.dataset.sessionOrigin !== 'current' || row.dataset.sessionId !== message.sessionId) return;
+          var label = row.querySelector('span.session-menu-item-title');
+          if (label) { label.textContent = message.title; label.title = message.title; }
+        });
+      }
+      // A title patch changes neither history membership nor date sorting.
+      // Advance the rendered snapshot too, so its matching Host full state does
+      // not rebuild this row or another row's unfinished title editor.
+      sessionMenuRenderKey = getSessionMenuRenderKey(getActiveVisibleSessions());
     }
 
     function applySessionTitleUsageUpdate(message) {
@@ -2020,16 +2059,31 @@ export function getScript(): string {
       renderSessionControls();
     }
 
+    function getSessionMenuRenderKey(sessions) {
+      return JSON.stringify([getLanguage(), state.activeSessionId, activeWorkspaceTab,
+        sessionMultiSelectMode, sessionRangeDays, sessionFavoritesOnly, Array.from(selectedSessionIds),
+        editingSessionTitleId, sessions, otherWorkspaces, otherWorkspacesError,
+        otherWorkspaceSessionErrors[activeWorkspaceTab], hasOtherWorkspaceSessionsCache(activeWorkspaceTab)]);
+    }
+
     function renderSessionMenu() {
       if (!sessionMenu) return;
       sessionMenu.classList.toggle('hidden', !sessionMenuOpen);
       if (!sessionMenuOpen) return;
       sessionMenu.classList.toggle('is-multi-select', sessionMultiSelectMode);
       sessionMenu.classList.toggle('is-other-workspace', !isCurrentWorkspaceTab());
-      sessionMenu.innerHTML = '';
-
       var sessions = getActiveVisibleSessions();
       pruneSelectedSessionIds(sessions);
+      // Readiness and auxiliary result patches only affect the row controls.
+      // Preserve the existing editor, focus and scroll when history itself has
+      // not changed, including full Host snapshots after Webview ready.
+      var renderKey = getSessionMenuRenderKey(sessions);
+      if (renderKey === sessionMenuRenderKey) {
+        syncSessionTitleRefreshButtons();
+        return;
+      }
+      sessionMenuRenderKey = renderKey;
+      sessionMenu.innerHTML = '';
       var allVisibleSelected = sessions.length > 0 && sessions.every(function(session) {
         return selectedSessionIds.has(session.id);
       });
@@ -2188,6 +2242,13 @@ export function getScript(): string {
         meta.textContent = formatSessionMeta(session);
 
         main.append(itemTitle, meta);
+        if (currentTab) {
+          var titleResult = document.createElement('span');
+          titleResult.className = 'session-menu-item-meta session-menu-title-result hidden';
+          titleResult.setAttribute('role', 'status');
+          titleResult.setAttribute('aria-live', 'polite');
+          main.append(titleResult);
+        }
         if (sessionMultiSelectMode) {
           var checkbox = document.createElement('input');
           checkbox.type = 'checkbox';
@@ -2227,8 +2288,8 @@ export function getScript(): string {
           refreshButton.dataset.sessionAction = 'regenerateTitle';
           refreshButton.dataset.sessionId = session.id;
           refreshButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5"/><path d="M4 17v-5h5"/><path d="M6.1 7a7 7 0 0 1 11.6-2.2L20 7M4 17l2.3 2.2A7 7 0 0 0 17.9 17"/></svg>';
-          syncSessionTitleRefreshButton(refreshButton);
           item.append(refreshButton);
+          syncSessionTitleRefreshButton(refreshButton);
           var renameButton = document.createElement('button');
           renameButton.type = 'button';
           renameButton.className = 'session-menu-rename';
@@ -2528,6 +2589,7 @@ export function getScript(): string {
         state.retiredSessionTitleRegenerations[sessionId + ':' + pendingTitleRequest] = true;
         delete state.sessionTitleRegenerations[sessionId];
       }
+      delete state.sessionTitleRegenerationResults?.[sessionId];
       updateLocalSessionTitle(sessionId, title);
       renderCurrentSessionTitle();
       vscode.postMessage({ type: 'renameSession', sessionId: sessionId, title: title });
@@ -2584,12 +2646,17 @@ export function getScript(): string {
       if (interactionRetry) interactionRetry.classList.toggle('hidden', phase !== 'failed');
       if (interaction && phase !== 'running') {
         stopAgentStatusRotation(); agentStatusRotationKey = ''; reconnectStatusActive = false;
-        var key = phase === 'loading_session' ? 'startupLoadingSessions'
+        var waitingKey = interaction.waitingReason === 'model' ? 'startupLoadingModel'
+          : interaction.waitingReason === 'session' ? 'startupLoadingSessions'
+          : interaction.waitingReason === 'recovery' ? 'startupRecoveringSession'
+          : interaction.waitingReason === 'context' ? 'startupLoadingRequestContext'
+          : interaction.waitingReason === 'saving' ? 'startupSavingSession' : '';
+        var key = waitingKey || (phase === 'loading_session' ? 'startupLoadingSessions'
           : phase === 'preparing_context' ? 'startupLoadingRequestContext'
           : phase === 'preparing_task' ? 'agentStatusPreparingRequest'
           : phase === 'saving' ? 'runSavingState'
           : phase === 'action' ? 'interactionApplyingAction'
-          : phase === 'failed' ? 'interactionPreparationFailed' : '';
+          : phase === 'failed' ? 'interactionPreparationFailed' : '');
         setOperationStatus(phase === 'failed' && interaction.blockingReason ? interaction.blockingReason : key ? t(key) : '', [interaction.sessionId, interaction.operationId, phase].join('|'));
         return;
       }

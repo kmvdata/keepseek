@@ -1,6 +1,6 @@
 import type { AgentRequest } from '../shared/types';
-import { InteractionCoordinator, type InteractionOperation, type InteractionPhase } from './interactionState';
-import { SessionTitleCoordinator, type SessionTitleRequest } from '../sessions/sessionTitleCoordinator';
+import { InteractionCoordinator, deriveSessionTitleCapability, type InteractionOperation, type InteractionPhase } from './interactionState';
+import { SessionTitleCoordinator, type SessionTitleRequest, type SessionTitleRegenerationOutcome } from '../sessions/sessionTitleCoordinator';
 import { buildSessionTitleRegenerationMaterial, getSessionTitleRegenerationTaskId } from '../sessions/sessionTitle';
 import { captureSessionTitleCompletion, checkSessionTitleCompletion, type SessionTitleCompletion } from './sessionTitleCompletion';
 import { requestSessionTitle, mergeSessionTitleTaskBudget, createManualSessionTitleBudget } from './sessionTitleRequest';
@@ -274,6 +274,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }>();
   private titleLifecycleDisposed = false;
   private readonly manualSessionTitleRequests = new Map<string, string>();
+  /** Process-local duplicate delivery protection; never restores paid requests. */
+  private readonly sessionTitleResults = new Map<string, { outcome: SessionTitleRegenerationOutcome; reason: string }>();
   private readonly agentRunner: AgentRunner;
   private readonly agentRequestCoordinator: AgentRequestCoordinator;
   private readonly sourceStore: ModelSourceStore;
@@ -341,6 +343,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const sessionId = this.sessionReady ? this.sessionStore.activeSessionId : '';
     return this.interactions.snapshot({ sessionId, revision, sessionReady: this.sessionReady,
       requestContextReady: this.requestContextReady, approvalDataReady: this.approvalDataReady,
+      modelReady: this.commandSettingsReadiness?.mainModel === 'ready',
+      contextReady: this.runContextReadiness === 'ready',
+      sessionRecoveryReady: this.sessionRecoveryReady,
       mainRunning: this.isBusy, contextRefreshing: this.runContextRefreshInFlight,
       actionRunning: Boolean(this.activeDraftRunId || this.activeChangeActions?.size || this.delegatedApprovalInFlight || this.draftRunBatches?.locked || this.delegatedApprovals?.hasPending(sessionId)),
       backgroundRunning: this.hasActiveBackgroundRun(),
@@ -490,7 +495,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private readonly visibleMessageLimits = new Map<string, number>();
   private sessionReady = false;
   private approvalDataReady = false;
+  private sessionRecoveryReady = false;
   private requestContextReady = false;
+  private sessionContextGeneration = 0;
   private runContextReadiness: StartupLoadState = 'loading';
   private commandSettingsReadiness: CommandSettingsReadiness = {
     mainModel: 'loading',
@@ -500,7 +507,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   };
   private readonly startupTraceStages = new Set<string>();
   private startupInitializationPromise: Promise<void> | undefined;
+  private startupNavigationReadyPromise: Promise<void> | undefined;
   private stateRevision = 0;
+  private lastInteractionPublicationKey?: string;
+  private lastBodyPublicationKey?: string;
   private fullStateSent = false;
   private postStateTimer: ReturnType<typeof setTimeout> | undefined;
   private pendingPostStateForceFull = false;
@@ -546,7 +556,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         if (session) this.postToWebview({ type: 'sessionTitleUpdated', sessionId, title: session.title,
           ...(requestId ? { regenerated: true, requestId } : {}) });
       },
-      onDiagnostic: (sessionId, taskId, outcome, elapsedMs) => console.info('[KeepSeek] session_title', { sessionId, taskId, outcome, elapsedMs })
+      onDiagnostic: (sessionId, _taskId, outcome, elapsedMs) => console.info('[KeepSeek] session_title', {
+        session: createHash('sha256').update(sessionId).digest('hex').slice(0, 12), outcome, elapsedMs })
     });
     this.usageLedgerStore = new UsageLedgerStore(this.globalStorageUri);
     this.traceLogService = new InteractionTraceLogService(this.globalStorageUri);
@@ -690,7 +701,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.draftRunBatches?.cancel();
     this.currentRunAbortController?.abort();
     this.changeActionAbortController?.abort();
-    await this.startupInitializationPromise;
+    await this.ensureSessionNavigationReady();
     await this.activeRunSettled;
     let operation: InteractionOperation | undefined;
     // Await the current owner, then reserve synchronously before touching the
@@ -715,8 +726,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.slimToolNamesBySession.clear();
       this.sharedProjectSources.dirty = true;
       this.publishSessionChanged();
-      await Promise.all([this.refreshModelSourceState(), this.changeSets.loadSession?.(session.id), this.draftRuns.loadSession?.(session.id)]);
-      await this.recoverHistoryTruncation(session);
+      await Promise.all([this.refreshModelSourceState(), this.prepareSessionRecovery(session)]);
       await this.refreshSessionSkills(session);
       this.interactions.update(operation, 'saving');
       this.postState({ immediate: true });
@@ -1133,13 +1143,18 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private async retryInteraction(): Promise<void> {
     if (this.isBusy || this.isStartingRun || this.activeDraftRunId || this.activeChangeActions.size || this.hasActiveBackgroundRun()) return;
     const session = this.sessionStore.getActiveSession();
-    const operation = this.interactions.begin('recovery', session.id, 'saving');
+    const operation = this.interactions.begin('recovery', session.id, 'loading_session');
     if (!operation) return;
+    this.sessionContextGeneration = (this.sessionContextGeneration ?? 0) + 1;
+    this.runContextReadiness = 'loading';
+    this.updateRequestContextReadiness();
     this.postState({ immediate: true });
     try {
       await this.ensureSessionNavigationReady();
       if (!this.approvalDataReady) throw new Error(this.language === 'en' ? 'Safety recovery failed. Reload the window to retry.' : '操作记录恢复失败，请重新加载窗口重试。');
-      await this.recoverHistoryTruncation(session);
+      this.interactions.update(operation, 'preparing_context');
+      await this.prepareSessionRecovery(session);
+      this.setInteractionPhase('saving', operation);
       await this.sessionStore.persist();
       this.interactions.update(operation, 'preparing_context');
       this.postState({ immediate: true });
@@ -2058,6 +2073,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private clearSessionTransientState(): void {
+    this.sessionContextGeneration = (this.sessionContextGeneration ?? 0) + 1;
+    this.runContextReadiness = 'loading';
+    this.sessionRecoveryReady = false;
+    this.updateRequestContextReadiness();
     this.externalAuthorizationEpoch = (this.externalAuthorizationEpoch ?? 0) + 1;
     this.manualToolApproval?.decide(false);
     this.changeActionAbortController?.abort();
@@ -2556,30 +2575,36 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const operation = this.interactions.begin('navigation', this.sessionStore.activeSessionId, 'loading_session');
     if (!operation) return;
     this.postState({ immediate: true });
-    let sessionChanged = false;
     try {
       await this.ensureSessionNavigationReady();
       if (this.isBusy || this.hasActiveBackgroundRun()) return;
       this.clearSessionTransientState();
-      const session = await this.sessionStore.createNewSession(this.language);
-      sessionChanged = true;
+      const session = await this.sessionStore.createNewSession(this.language, sessionId => {
+        this.interactions.update(operation, 'saving', sessionId);
+        this.postState({ immediate: true });
+      });
+      this.sessionRecoveryReady = true;
       this.interactionFailure = undefined;
       this.interactions.update(operation, 'preparing_context', session.id);
       this.publishSessionChanged();
-      await this.refreshSessionSkills(session);
+      await this.prepareNavigatedSessionContext(operation, session, true);
     } catch (error) {
-      this.interactionFailure = { sessionId: this.sessionStore.activeSessionId, message: (this.language === 'en' ? 'Session preparation failed: ' : '会话准备失败：') + getErrorMessage(error) };
-      vscode.window.showErrorMessage(this.interactionFailure.message);
+      if (this.interactions.owns(operation)) this.reportSessionPreparationFailure(this.sessionStore.activeSessionId, error);
     } finally {
-      this.interactions.finish(operation);
-      if (sessionChanged) this.publishSessionChanged();
-      else this.postState({ immediate: true, forceFull: true });
+      if (this.interactions.owns(operation)) {
+        this.interactions.finish(operation);
+        this.postState({ immediate: true, forceFull: true });
+      }
     }
   }
 
   private async ensureSessionNavigationReady(): Promise<void> {
+    if (!this.startupInitializationPromise) void this.initializeAfterWebviewReady();
     if (this.startupInitializationPromise) {
-      await this.startupInitializationPromise;
+      // Store initialization can replace in-memory history. Model, context and
+      // display work are deliberately outside this navigation barrier.
+      if (!this.startupNavigationReadyPromise && !this.sessionReady) await this.sessionInitialization;
+      await this.startupNavigationReadyPromise;
       if (!this.approvalDataReady) throw new Error(this.language === 'en'
         ? 'Safety recovery failed. Reload the window before changing sessions.'
         : '操作记录恢复失败，请重新加载窗口后再切换会话。');
@@ -2600,35 +2625,32 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const operation = this.interactions.begin('navigation', this.sessionStore.activeSessionId, 'loading_session');
     if (!operation) return;
     this.postState({ immediate: true });
-    let sessionChanged = false;
     try {
       await this.ensureSessionNavigationReady();
       if (this.isBusy || this.hasActiveBackgroundRun()) return;
       const wasActiveSession = sessionId === this.sessionStore.activeSessionId;
-      const session = await this.sessionStore.selectSession(sessionId);
+      const session = await this.sessionStore.selectSession(sessionId, targetId => {
+        this.interactions.update(operation, 'saving', targetId);
+        this.postState({ immediate: true });
+      });
       if (!session) return;
 
       if (!wasActiveSession) {
-        sessionChanged = true;
         this.interactionFailure = undefined;
         this.clearSessionTransientState();
         this.interactions.update(operation, 'preparing_context', session.id);
         this.publishSessionChanged();
         this.loadUsageDisplay(session);
-        await Promise.all([
-          this.changeSets.loadSession?.(session.id),
-          this.draftRuns.loadSession?.(session.id)
-        ]);
-        await this.recoverHistoryTruncation(session);
-        await this.refreshCurrentRunContext(session, '');
+        await this.prepareSessionRecovery(session);
+        await this.prepareNavigatedSessionContext(operation, session);
       }
     } catch (error) {
-      this.interactionFailure = { sessionId: this.sessionStore.activeSessionId, message: (this.language === 'en' ? 'Session preparation failed: ' : '会话准备失败：') + getErrorMessage(error) };
-      vscode.window.showErrorMessage(this.interactionFailure.message);
+      if (this.interactions.owns(operation)) this.reportSessionPreparationFailure(this.sessionStore.activeSessionId, error);
     } finally {
-      this.interactions.finish(operation);
-      if (sessionChanged) this.publishSessionChanged();
-      else this.postState({ immediate: true, forceFull: true });
+      if (this.interactions.owns(operation)) {
+        this.interactions.finish(operation);
+        this.postState({ immediate: true, forceFull: true });
+      }
     }
   }
 
@@ -2645,17 +2667,45 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.interactionFailure = undefined;
       this.interactions.update(operation, 'preparing_context', session.id);
       this.publishSessionChanged();
-      await Promise.all([this.changeSets.loadSession?.(session.id), this.draftRuns.loadSession?.(session.id)]);
-      await this.recoverHistoryTruncation(session);
-      await this.refreshCurrentRunContext(session, '');
+      await this.prepareSessionRecovery(session);
       this.loadUsageDisplay(session);
+      await this.prepareNavigatedSessionContext(operation, session);
     } catch (error) {
-      this.interactionFailure = { sessionId: this.sessionStore.activeSessionId, message: (this.language === 'en' ? 'Session preparation failed: ' : '会话准备失败：') + getErrorMessage(error) };
-      vscode.window.showErrorMessage(this.interactionFailure.message);
+      if (this.interactions.owns(operation)) this.reportSessionPreparationFailure(this.sessionStore.activeSessionId, error);
     } finally {
-      this.interactions.finish(operation);
-      this.publishSessionChanged();
+      if (this.interactions.owns(operation)) {
+        this.interactions.finish(operation);
+        this.postState({ immediate: true, forceFull: true });
+      }
     }
+  }
+
+  /** Selection, operation recovery and their writes have settled. Context reads
+   * retain a session/generation identity but no longer reserve navigation. */
+  private async prepareNavigatedSessionContext(operation: InteractionOperation, session: ChatSession, refreshSkills = false): Promise<void> {
+    const generation = this.sessionContextGeneration ?? 0;
+    this.assertSessionContextOwner(session, generation);
+    if (!this.sessionRecoveryReady || !this.interactions.owns(operation)) return;
+    this.interactions.finish(operation);
+    this.postState({ immediate: true, omitMessages: true });
+    const current = () => this.sessionStore.activeSessionId === session.id && (this.sessionContextGeneration ?? 0) === generation;
+    try {
+      if (refreshSkills) await this.refreshSessionSkills(session);
+      else await this.refreshCurrentRunContext(session, '');
+    } catch (error) {
+      if (current()) {
+        this.runContextReadiness = 'error';
+        this.updateRequestContextReadiness();
+        this.reportSessionPreparationFailure(session.id, error);
+      }
+    } finally {
+      if (current()) this.postState({ immediate: true, forceFull: true });
+    }
+  }
+
+  private reportSessionPreparationFailure(sessionId: string, error: unknown): void {
+    this.interactionFailure = { sessionId, message: (this.language === 'en' ? 'Session preparation failed: ' : '会话准备失败：') + getErrorMessage(error) };
+    vscode.window.showErrorMessage(this.interactionFailure.message);
   }
 
   private async deleteSessions(sessionIds: string[]): Promise<void> {
@@ -2704,8 +2754,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         this.interactions.update(operation, 'preparing_context', session.id);
         this.interactionFailure = undefined;
         this.publishSessionChanged();
-        await Promise.all([this.changeSets.loadSession?.(session.id), this.draftRuns.loadSession?.(session.id)]);
-        await this.recoverHistoryTruncation(session);
+        await this.prepareSessionRecovery(session);
         await this.refreshCurrentRunContext(session, '');
         this.loadUsageDisplay(session);
       }
@@ -2922,6 +2971,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const session = this.sessionStore.getActiveSession();
     const operation = this.interactions.begin('recovery', session.id, 'preparing_context');
     if (!operation) return;
+    this.sessionContextGeneration = (this.sessionContextGeneration ?? 0) + 1;
+    this.runContextReadiness = 'loading';
+    this.updateRequestContextReadiness();
     this.postState({ immediate: true, omitMessages: true });
     try { await this.refreshSessionSkills(session); }
     catch (error) {
@@ -2935,14 +2987,16 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   /** Navigation already owns the host lock; external refreshes retain their guard. */
   private async refreshSessionSkills(session: ChatSession): Promise<void> {
-    const snapshot = await this.sharedProjectSources.refresh(session.id, session.projectScopeUri);
+    const generation = this.sessionContextGeneration ?? 0;
+    const snapshot = await this.measureInteractionStage('project-sources', session.id,
+      () => this.sharedProjectSources.refresh(session.id, session.projectScopeUri));
+    this.assertSessionContextOwner(session, generation);
     if (!session.projectScopeUri && snapshot.scope) session.projectScopeUri = snapshot.scope.cwd.toString();
-    await this.skillStore.refresh(snapshot);
+    await this.measureInteractionStage('skill-catalog', session.id, () => this.skillStore.refresh(snapshot));
+    this.assertSessionContextOwner(session, generation);
     // Navigation reuses source bytes, and never reselects a hot session's
     // frozen implicit activation. Explicit source refresh owns invalidation.
     await this.refreshCurrentRunContext(session, '');
-    console.info('[KeepSeek] interaction_sources', { session: createHash('sha256').update(session.id).digest('hex').slice(0, 12),
-      source: this.sharedProjectSources.diagnostics, skills: this.skillStore.sourceDiagnostics });
   }
 
   private scheduleRunContextRefresh(uris: readonly string[]): void {
@@ -3005,12 +3059,16 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     pluginTools?: PluginSkillToolContext,
     inheritedPluginSkills?: readonly ActivatedSkill[]
   ): Promise<{ context: CurrentRunContext; failures: Array<{ id: string; name: string; error: string }> }> {
-    const snapshot = await this.sharedProjectSources.refresh(session.id, session.projectScopeUri);
+    const generation = this.sessionContextGeneration ?? 0;
+    const snapshot = await this.measureInteractionStage('project-sources', session.id,
+      () => this.sharedProjectSources.refresh(session.id, session.projectScopeUri));
+    this.assertSessionContextOwner(session, generation);
     const projectInstructions = this.sharedProjectSources.getInstructions(snapshot);
-    await this.skillStore.refresh(snapshot);
-    const activeSkillResult = await this.skillStore.resolveAndLoadSkills({
-      session, prompt, explicitSkillIds, pluginTools, inheritedPluginSkills
-    });
+    await this.measureInteractionStage('skill-catalog', session.id, () => this.skillStore.refresh(snapshot));
+    this.assertSessionContextOwner(session, generation);
+    const activeSkillResult = await this.measureInteractionStage('skill-bodies', session.id,
+      () => this.skillStore.resolveAndLoadSkills({ session, prompt, explicitSkillIds, pluginTools, inheritedPluginSkills }));
+    this.assertSessionContextOwner(session, generation);
     const context = buildCurrentRunContext({
       projectInstructions,
       skills: activeSkillResult.skills,
@@ -3018,7 +3076,68 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       skillCharacterBudget: getConfiguredSkillContextBudgetChars()
     });
     this.currentRunContextsBySession.set(session.id, context);
+    this.runContextReadiness = 'ready';
+    this.updateRequestContextReadiness();
+    console.info('[KeepSeek] interaction_sources', { session: createHash('sha256').update(session.id).digest('hex').slice(0, 12),
+      generation, source: { ...this.sharedProjectSources.diagnostics }, skills: { ...this.skillStore.sourceDiagnostics } });
     return { context, failures: activeSkillResult.failures };
+  }
+
+  private assertSessionContextOwner(session: ChatSession, generation: number): void {
+    if (this.sessionStore.activeSessionId !== session.id || (this.sessionContextGeneration ?? 0) !== generation) {
+      throw new Error('Session preparation superseded / 会话准备已被后续操作替代');
+    }
+  }
+
+  private async prepareSessionRecovery(session: ChatSession): Promise<void> {
+    this.sessionRecoveryReady = false;
+    this.postState({ immediate: true, omitMessages: true });
+    const generation = this.sessionContextGeneration ?? 0;
+    await this.measureInteractionStage('operation-records', session.id, () => Promise.all([
+      this.changeSets.loadSession?.(session.id), this.draftRuns.loadSession?.(session.id)
+    ]));
+    this.assertSessionContextOwner(session, generation);
+    await this.measureInteractionStage('history-recovery', session.id, () => this.recoverHistoryTruncation(session));
+    this.assertSessionContextOwner(session, generation);
+    this.sessionRecoveryReady = true;
+    this.postState({ immediate: true, omitMessages: true });
+  }
+
+  /** Stage names and hashed identities only; no paths, prompts or credentials. */
+  private async measureInteractionStage<T>(stage: string, sessionId: string, work: () => Promise<T>): Promise<T> {
+    const started = performance.now();
+    const session = createHash('sha256').update(sessionId).digest('hex').slice(0, 12);
+    const generation = this.sessionContextGeneration ?? 0;
+    const operationId = this.interactionCoordinator?.current?.operationId;
+    const modelGeneration = this.modelSourceStateRefreshGeneration ?? 0;
+    console.info('[KeepSeek] interaction_stage', { stage, session, generation, operationId, modelGeneration, event: 'begin' });
+    try {
+      const value = await work();
+      console.info('[KeepSeek] interaction_stage', { stage, session, generation, operationId, modelGeneration,
+        event: this.sessionStore?.activeSessionId === sessionId && (this.sessionContextGeneration ?? 0) === generation ? 'end' : 'stale',
+        elapsedMs: Math.max(0, performance.now() - started) });
+      return value;
+    } catch (error) {
+      console.info('[KeepSeek] interaction_stage', { stage, session, generation, operationId, modelGeneration, event: 'failed', elapsedMs: Math.max(0, performance.now() - started) });
+      throw error;
+    }
+  }
+
+  private recordInteractionPublication(bodyIncluded: boolean): void {
+    const state = this.interactionSnapshot(this.stateRevision);
+    const entry = `${state.sessionId}:${this.sessionContextGeneration ?? 0}`;
+    const firstBody = bodyIncluded && this.lastBodyPublicationKey !== entry;
+    if (bodyIncluded) this.lastBodyPublicationKey = entry;
+    const key = `${entry}:${state.operationId ?? ''}:${state.phase}:${state.waitingReason ?? ''}:${state.canEdit}:${state.canSubmit}`;
+    if (!firstBody && key === this.lastInteractionPublicationKey) return;
+    this.lastInteractionPublicationKey = key;
+    console.info('[KeepSeek] interaction_publication', {
+      session: createHash('sha256').update(state.sessionId).digest('hex').slice(0, 12),
+      operationId: state.operationId,
+      generation: this.sessionContextGeneration ?? 0, revision: this.stateRevision,
+      bodyPublished: this.lastBodyPublicationKey === entry, canEdit: state.canEdit, canSubmit: state.canSubmit,
+      phase: state.phase, waitingReason: state.waitingReason, atMs: performance.now()
+    });
   }
 
   public async refreshBackgroundRunAvailability(options: { post?: boolean } = {}): Promise<void> {
@@ -3250,7 +3369,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       if (generation !== this.modelSourceStateRefreshGeneration) {
         return;
       }
-      const { modelSources, availableModels, defaultModel } = await this.defaultModelStore.refresh();
+      const { modelSources, availableModels, defaultModel } = await this.measureInteractionStage('model-catalog', this.sessionStore?.activeSessionId ?? '',
+        () => this.defaultModelStore.refresh());
       if (generation !== this.modelSourceStateRefreshGeneration) {
         return;
       }
@@ -3262,9 +3382,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         ? { sourceId: this.selectedSourceId, modelId: this.selectedModelId }
         : savedSelection;
       const selectedModel = resolveProjectModel(availableModels, selection, defaultSelection);
-      if (selectedModel?.sourceId && selectedModel.supportsBilling) {
-        await this.balanceStore.refreshFromDisk(this.getBalanceSourceScope(selectedModel.sourceId));
-      }
       if (generation !== this.modelSourceStateRefreshGeneration) {
         return;
       }
@@ -3280,6 +3397,17 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       if (selectedModel?.sourceId) {
         this.balanceStore.selectSource(this.getBalanceSourceScope(selectedModel.sourceId));
       }
+      if (selectedModel?.sourceId && selectedModel.supportsBilling) {
+        const sourceId = selectedModel.sourceId;
+        const scope = this.getBalanceSourceScope(sourceId);
+        // Display-only disk hydration cannot hold catalog publication or model
+        // selection persistence. The balance store caches by exact source scope.
+        void this.measureInteractionStage('balance-display', this.sessionStore?.activeSessionId ?? '', () => this.balanceStore.refreshFromDisk(scope)).then(() => {
+          if (generation === this.modelSourceStateRefreshGeneration && this.selectedSourceId === sourceId) this.postState();
+        }).catch(() => {
+          console.info('[KeepSeek] interaction_stage', { stage: 'balance-display', event: 'failed', generation });
+        });
+      }
       // Publish the resolved catalog immediately. A new workspace may still be
       // persisting its adopted default selection, but the command menu no longer
       // needs to stay blank while those two workspace configuration writes finish.
@@ -3289,7 +3417,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       // disabled until this completes, so a failed adoption can safely roll back.
       if (selectedModel?.sourceId && (savedSelection.sourceId !== selectedModel.sourceId
         || savedSelection.modelId !== selectedModel.id) && vscode.workspace.workspaceFolders?.length) {
-        await this.persistModelSelection(selectedModel.sourceId, selectedModel.id, previousSelection);
+        await this.measureInteractionStage('model-selection-save', this.sessionStore?.activeSessionId ?? '',
+          () => this.persistModelSelection(selectedModel.sourceId!, selectedModel.id, previousSelection));
         if (generation !== this.modelSourceStateRefreshGeneration) {
           return;
         }
@@ -6589,8 +6718,20 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   private initializeAfterWebviewReady(): Promise<void> {
     if (this.startupInitializationPromise) return this.startupInitializationPromise;
+    let navigationReady!: () => void;
+    let navigationFailed!: (error: unknown) => void;
+    this.startupNavigationReadyPromise = new Promise<void>((resolve, reject) => {
+      navigationReady = resolve; navigationFailed = reject;
+    });
+    // Rejection remains observable by navigation; startup may fail before a
+    // navigation request exists, so also attach a non-mutating rejection sink.
+    void this.startupNavigationReadyPromise.catch(() => undefined);
     this.startupInitializationPromise = (async () => {
-      const sessionResult = await Promise.allSettled([this.sessionInitialization]);
+      const sessionResult = await Promise.allSettled([this.measureStartup('session-store-loaded', () => this.sessionInitialization)]);
+      if (sessionResult[0]?.status === 'rejected') {
+        this.commandSettingsReadiness.executionMode = 'error';
+        throw sessionResult[0].reason;
+      }
       if (sessionResult[0]?.status === 'fulfilled' && this.usageLedgerStore && this.usageLedgerFlushes) {
         const session = this.sessionStore.getActiveSession();
         this.loadUsageDisplay(session);
@@ -6628,9 +6769,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           }
         }
         this.approvalDataReady = ready;
+        this.sessionRecoveryReady = ready;
         this.commandSettingsReadiness.approvalMode = ready ? 'ready' : 'error';
         this.postStartupSettingsPatch();
+        if (ready) navigationReady();
+        else navigationFailed(new Error(this.language === 'en' ? 'Safety recovery failed. Reload the window to retry.' : '操作记录恢复失败，请重新加载窗口重试。'));
       })();
+      void safetyTask.catch(navigationFailed);
 
       const modelTask = (async () => {
         try {
@@ -6641,9 +6786,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
             }
           }));
           this.commandSettingsReadiness.mainModel = 'ready';
-        } catch (error) {
+        } catch {
           this.commandSettingsReadiness.mainModel = 'error';
-          console.warn('KeepSeek: model source initialization failed.', error);
+          console.warn('[KeepSeek] startup_stage', { stage: 'model-sources', event: 'failed' });
         } finally {
           this.updateRequestContextReadiness();
           this.postStartupSettingsPatch();
@@ -6657,26 +6802,34 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           });
           this.commandSettingsReadiness.subagentModel = 'ready';
           this.markStartupStageOnce('subagent-model-visible', { entries: 1 });
-        } catch (error) {
+        } catch {
           this.commandSettingsReadiness.subagentModel = 'error';
-          console.warn('KeepSeek: subagent settings initialization failed.', error);
+          console.warn('[KeepSeek] startup_stage', { stage: 'subagent-settings', event: 'failed' });
         } finally {
           this.postStartupSettingsPatch();
         }
       })();
+      const startupSession = this.sessionStore.getActiveSession();
+      const startupContextGeneration = this.sessionContextGeneration ?? 0;
+      const ownsStartupContext = () => this.sessionStore.activeSessionId === startupSession.id
+        && (this.sessionContextGeneration ?? 0) === startupContextGeneration;
       const runContextTask = (async () => {
         try {
           await this.measureStartup(
             'skills-and-project-instructions-loaded',
-            () => this.refreshSessionSkills(this.sessionStore.getActiveSession())
+            () => this.refreshSessionSkills(startupSession)
           );
-          this.runContextReadiness = 'ready';
-        } catch (error) {
-          this.runContextReadiness = 'error';
-          console.warn('KeepSeek: project instructions or Skills initialization failed.', error);
+          if (ownsStartupContext()) this.runContextReadiness = 'ready';
+        } catch {
+          if (ownsStartupContext()) {
+            this.runContextReadiness = 'error';
+            console.warn('[KeepSeek] startup_stage', { stage: 'project-context', event: 'failed' });
+          }
         } finally {
-          this.updateRequestContextReadiness();
-          this.postStartupSettingsPatch();
+          if (ownsStartupContext()) {
+            this.updateRequestContextReadiness();
+            this.postStartupSettingsPatch();
+          }
         }
       })();
       const validationTask = (async () => {
@@ -6685,8 +6838,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
             'validation-scripts-loaded',
             () => this.refreshBackgroundRunAvailability({ post: false })
           );
-        } catch (error) {
-          console.warn('KeepSeek: validation script discovery failed.', error);
+        } catch {
+          console.warn('[KeepSeek] startup_stage', { stage: 'validation-scripts', event: 'failed' });
         } finally {
           this.postStartupSettingsPatch();
         }
@@ -6702,11 +6855,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       if (this.approvalDataReady) void this.cleanupExpiredSessions().catch(() => undefined);
       void this.refreshBalance();
       void Promise.all([subagentTask, validationTask]);
-      if (sessionResult[0]?.status === 'rejected') {
-        console.warn('KeepSeek: session initialization failed; showing a recoverable empty session.', sessionResult[0].reason);
-      }
     })().catch((error: unknown) => {
-      console.warn('KeepSeek: startup initialization failed; keeping the panel responsive.', error);
+      navigationFailed(error);
+      console.warn('[KeepSeek] startup_stage', { stage: 'initialization', event: 'failed' });
       this.postLightweightState();
     });
     return this.startupInitializationPromise;
@@ -6779,11 +6930,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         commandSettingsReadiness: { ...this.commandSettingsReadiness },
         activeSessionId: this.sessionStore.activeSessionId,
         interaction: this.interactionSnapshot(revision),
+        titleRegenerationCapability: this.sessionTitleCapability(),
         isBusy: this.isBusy && !this.activeDraftRunId,
         startup: this.getStartupState(),
         backgroundAvailableScripts: this.backgroundAvailableScripts
       }
     });
+    this.recordInteractionPublication(false);
     this.startupStatePostCount += 1;
     if (Object.values(this.commandSettingsReadiness).every((state) => state === 'ready')) {
       this.markStartupStageOnce('command-menu-settings-ready', { revision });
@@ -6812,6 +6965,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       state: {
         activeSessionId: activeSession?.id ?? '',
         interaction: this.interactionSnapshot(revision),
+        titleRegenerationCapability: this.sessionTitleCapability(),
         isBusy: this.isBusy && !this.activeDraftRunId,
         sessionSummaries: hasSession ? this.sessionStore.getSessionSummaries() : [],
         messages,
@@ -7038,6 +7192,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         authorizedExternalReferenceUris: [...this.authorizedExternalReferenceUris],
         authorizedExternalExecutionUris: [...this.authorizedExternalExecutionUris],
         interaction: this.interactionSnapshot(revision),
+        titleRegenerationCapability: this.sessionTitleCapability(),
         isBusy: this.isBusy && !this.activeDraftRunId,
         agentActivity: this.agentActivity,
         maxFileBytes: getConfiguredMaxFileBytes(),
@@ -7055,6 +7210,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     });
     this.startupStatePostCount += 1;
     this.fullStateSent = true;
+    this.recordInteractionPublication(Boolean(visibleMessages));
     this.scheduleDraftRunAutoContinuation();
   }
 
@@ -7109,7 +7265,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const requestId = this.manualSessionTitleRequests?.get(sessionId);
     if (requestId) {
       this.manualSessionTitleRequests.delete(sessionId);
-      this.postToWebview({ type: 'sessionTitleRegeneration', sessionId, requestId, running: false });
+      this.finishSessionTitleRequest(sessionId, requestId, 'cancelled');
     }
     this.sessionTitles?.cancel(sessionId);
     this.sessionTitleCandidates?.delete(sessionId);
@@ -7117,59 +7273,115 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   private cancelAllSessionTitleWork(): void {
     for (const [sessionId, requestId] of this.manualSessionTitleRequests ?? []) {
-      this.postToWebview({ type: 'sessionTitleRegeneration', sessionId, requestId, running: false });
+      this.finishSessionTitleRequest(sessionId, requestId, 'cancelled');
     }
     this.manualSessionTitleRequests?.clear();
     this.sessionTitles?.cancelAll();
     this.sessionTitleCandidates?.clear();
   }
 
-  private canRegenerateSessionTitle(): boolean {
-    return !this.titleLifecycleDisposed && vscode.workspace.isTrusted && this.sessionReady
-      && this.approvalDataReady && this.requestContextReady && !this.isBusy && !this.isStartingRun
-      && !this.activeDraftRunId && !this.activeChangeActions?.size && !this.hasActiveBackgroundRun();
+  private sessionTitleCapability(capturedModel?: KeepseekModel) {
+    const foreground = this.interactionCoordinator?.current;
+    const phase = foreground ? this.interactionSnapshot(this.stateRevision).phase : undefined;
+    return deriveSessionTitleCapability({
+      disposed: this.titleLifecycleDisposed, trusted: vscode.workspace.isTrusted,
+      sessionReady: this.sessionReady, approvalDataReady: this.approvalDataReady,
+      // Accepted work keeps its captured model/settings. Picker mutations may
+      // affect a new click, never retarget or veto an already-owned request.
+      // The resolver still revalidates the exact source and credentials.
+      modelReady: capturedModel ? capturedModel.agentCompatible !== false
+        : this.commandSettingsReadiness?.mainModel === 'ready' && Boolean(this.selectedSessionTitleModel()),
+      subagentModelReady: capturedModel ? true : this.commandSettingsReadiness?.subagentModel === 'ready',
+      mainRunning: this.isBusy,
+      actionRunning: Boolean(this.activeDraftRunId || this.activeChangeActions?.size || this.delegatedApprovalInFlight
+        || this.draftRunBatches?.locked || this.delegatedApprovals?.hasPending(this.sessionStore.activeSessionId)),
+      backgroundRunning: this.hasActiveBackgroundRun(),
+      foregroundKind: foreground?.kind, foregroundPhase: phase
+    });
+  }
+
+  private selectedSessionTitleModel(): KeepseekModel | undefined {
+    const setting = this.subagentModelSetting;
+    const selection = setting?.mode === 'fixed' ? { sourceId: setting.sourceId ?? '', modelId: setting.modelId ?? '' }
+      : { sourceId: this.selectedSourceId, modelId: this.selectedModelId };
+    const model = findModelBySelection(this.availableModels ?? [], selection);
+    return model?.agentCompatible === false ? undefined : model;
+  }
+
+  private finishSessionTitleRequest(sessionId: string, requestId: string, outcome: SessionTitleRegenerationOutcome,
+    reason = this.t('titleRefreshOutcome_' + outcome)): void {
+    const result = { outcome, reason };
+    this.sessionTitleResults?.set(JSON.stringify([sessionId, requestId]), result);
+    // Bounded process-local replay, independent of session durability and budgets.
+    if (this.sessionTitleResults?.size > 128) this.sessionTitleResults.delete(this.sessionTitleResults.keys().next().value!);
+    this.postToWebview({ type: 'sessionTitleRegeneration', sessionId, requestId, running: false, ...result });
   }
 
   /** A history-row action owns only its request slot, never the main run lock.
    * Capture the model before loading that row without selecting its session. */
   private async regenerateSessionTitle(sessionId: string, requestId: string): Promise<void> {
     if (typeof sessionId !== 'string' || typeof requestId !== 'string' || !requestId || requestId.length > 128) return;
-    const status = (running: boolean) => this.postToWebview({ type: 'sessionTitleRegeneration', sessionId, requestId, running });
-    if (!this.canRegenerateSessionTitle() || this.manualSessionTitleRequests.has(sessionId)) {
-      status(false); return;
+    const previous = this.sessionTitleResults?.get(JSON.stringify([sessionId, requestId]));
+    if (previous) {
+      this.postToWebview({ type: 'sessionTitleRegeneration', sessionId, requestId, running: false, ...previous });
+      return;
     }
-    const model = findModelBySelection(this.availableModels, { sourceId: this.selectedSourceId, modelId: this.selectedModelId });
-    if (!model) { status(false); return; }
+    const running = this.manualSessionTitleRequests.get(sessionId);
+    if (running === requestId) {
+      this.postToWebview({ type: 'sessionTitleRegeneration', sessionId, requestId, running: true });
+      return;
+    }
+    const capability = this.sessionTitleCapability();
+    if (!capability.available || running) {
+      const reason = running ? 'busy' : capability.reason;
+      this.finishSessionTitleRequest(sessionId, requestId, reason === 'busy' || reason === 'saving' || reason === 'recovering' ? 'busy' : 'unavailable',
+        this.t('titleRefreshReason_' + (reason ?? 'unavailable')));
+      return;
+    }
+    const model = this.selectedSessionTitleModel();
+    if (!model) { this.finishSessionTitleRequest(sessionId, requestId, 'unavailable'); return; }
     const parentRequest = { model: { ...model } };
+    const setting = structuredClone(this.subagentModelSetting);
     const workspaceKey = this.sessionStore.workspaceKey;
     // Occupy synchronously, including the asynchronous history-loading phase.
     this.manualSessionTitleRequests.set(sessionId, requestId);
     this.sessionTitleCandidates.delete(sessionId);
-    status(true);
+    this.postToWebview({ type: 'sessionTitleRegeneration', sessionId, requestId, running: true });
+    let outcome: SessionTitleRegenerationOutcome = 'stale';
+    let terminalReason: string | undefined;
     try {
-      await this.sessionStore.withSessionForTitle(sessionId, async session => {
-        if (this.manualSessionTitleRequests.get(sessionId) !== requestId || !this.canRegenerateSessionTitle()
-          || this.sessionStore.workspaceKey !== workspaceKey || session.pendingHistoryTruncation) return;
+      const result = await this.sessionStore.withSessionForTitle(sessionId, async session => {
+        if (this.manualSessionTitleRequests.get(sessionId) !== requestId || this.sessionStore.workspaceKey !== workspaceKey) return { outcome: 'stale' as const };
+        const current = this.sessionTitleCapability(parentRequest.model);
+        if (!current.available) return {
+          outcome: current.reason === 'busy' || current.reason === 'saving' || current.reason === 'recovering' ? 'busy' as const : 'unavailable' as const,
+          reason: this.t('titleRefreshReason_' + (current.reason ?? 'unavailable'))
+        };
+        if (session.pendingHistoryTruncation) return { outcome: 'busy' as const, reason: this.t('titleRefreshReason_recovering') };
         const taskId = getSessionTitleRegenerationTaskId(session.messages);
-        if (!taskId) return;
+        if (!taskId) return { outcome: 'no_material' as const };
         const material = buildSessionTitleRegenerationMaterial(session.messages, taskId, { historyStartKnown: true });
-        if (!material) {
-          console.info('[KeepSeek] session_title', { sessionId, outcome: 'material_unavailable' }); return;
-        }
-        await this.sessionTitles.regenerate(sessionId, taskId,
-          request => this.requestManualSessionTitle(sessionId, request, parentRequest), material);
+        if (!material) return { outcome: 'no_material' as const };
+        return this.sessionTitles.regenerateResult(sessionId, taskId,
+          request => this.requestManualSessionTitle(sessionId, request, parentRequest, setting), material);
       });
+      outcome = result?.outcome ?? 'stale';
+      if (result && 'reason' in result && typeof result.reason === 'string') terminalReason = result.reason;
     } catch {
       // An explicit auxiliary failure leaves the existing title and input alone.
-      console.info('[KeepSeek] session_title', { sessionId, outcome: 'failed' });
+      outcome = 'failed';
     } finally {
-      if (this.manualSessionTitleRequests.get(sessionId) === requestId) this.manualSessionTitleRequests.delete(sessionId);
-      status(false);
+      // Cancellation already reports its terminal. An old finally cannot finish
+      // a new gesture or clear the replacement request's spinner.
+      if (this.manualSessionTitleRequests.get(sessionId) === requestId) {
+        this.manualSessionTitleRequests.delete(sessionId);
+        this.finishSessionTitleRequest(sessionId, requestId, outcome, terminalReason);
+      }
     }
   }
 
   private async requestManualSessionTitle(sessionId: string, request: SessionTitleRequest,
-    parentRequest: Pick<AgentRequest, 'model'>): Promise<string> {
+    parentRequest: Pick<AgentRequest, 'model'>, setting: SubagentModelSetting): Promise<string> {
     const session = this.sessionStore.getSessionById(sessionId);
     if (!session || request.signal.aborted) throw new Error('stale');
     // This new, explicitly requested auxiliary operation does not revive or
@@ -7180,13 +7392,17 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const budgets = session.userTaskBudgets ??= Object.create(null);
     for (const key of Object.keys(budgets)) if (key.startsWith('session_title_manual_')) delete budgets[key];
     budgets[taskId] = budget;
-    await this.sessionStore.persist('session_title_manual_budget');
+    const persistBudget = async () => {
+      try { await this.sessionStore.persist('session_title_manual_budget'); }
+      catch { throw Object.assign(new Error('Session title budget could not be saved'), { reason: 'save_failed' }); }
+    };
+    await persistBudget();
     if (request.signal.aborted) throw new Error('stale');
     let previousBudget = structuredClone(budget);
     return requestSessionTitle({
       globalStorageUri: this.globalStorageUri, workspaceKey: this.sessionStore.workspaceKey,
       sourceStore: this.sourceStore, settingsStore: this.subagentSettingsStore,
-      parentRequest, language: this.language, sessionId, taskId, userPrompt: request.userPrompt,
+      parentRequest, setting, language: this.language, sessionId, taskId, userPrompt: request.userPrompt,
       token: request.token, signal: request.signal, taskBudget: structuredClone(budget),
       onUsageLedgerRecord: async record => {
         const latest = this.sessionStore.getSessionById(sessionId);
@@ -7201,7 +7417,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         if (!latest || !current) return;
         latest.userTaskBudgets![taskId] = mergeSessionTitleTaskBudget(current, previousBudget, next);
         previousBudget = structuredClone(next);
-        await this.sessionStore.persist('session_title_manual_budget');
+        await persistBudget();
       }
     });
   }

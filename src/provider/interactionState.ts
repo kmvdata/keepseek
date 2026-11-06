@@ -3,6 +3,47 @@ import { createHash, randomUUID } from 'node:crypto';
 export type InteractionPhase = 'idle' | 'loading_session' | 'preparing_context' | 'preparing_task'
   | 'running' | 'saving' | 'action' | 'failed';
 export type InteractionOperationKind = 'navigation' | 'task' | 'continuation' | 'recovery';
+export type InteractionWaitingReason = 'model' | 'session' | 'recovery' | 'context' | 'saving';
+
+export type SessionTitleCapabilityReason = 'loading_sessions' | 'recovering' | 'model_unavailable'
+  | 'untrusted' | 'busy' | 'saving' | 'unavailable';
+
+export interface SessionTitleCapability {
+  available: boolean;
+  reason?: SessionTitleCapabilityReason;
+}
+
+/** Naming has its own dependencies; current project instructions are not one of them. */
+export interface SessionTitleCapabilityFacts {
+  sessionReady: boolean;
+  approvalDataReady: boolean;
+  modelReady: boolean;
+  subagentModelReady?: boolean;
+  trusted: boolean;
+  disposed?: boolean;
+  mainRunning?: boolean;
+  actionRunning?: boolean;
+  backgroundRunning?: boolean;
+  foregroundKind?: InteractionOperationKind;
+  foregroundPhase?: InteractionPhase;
+  saving?: boolean;
+}
+
+/** Host advertises this capability and still rechecks target/model identity before work. */
+export function deriveSessionTitleCapability(facts: SessionTitleCapabilityFacts): SessionTitleCapability {
+  let reason: SessionTitleCapabilityReason | undefined;
+  if (facts.disposed) reason = 'unavailable';
+  else if (!facts.trusted) reason = 'untrusted';
+  else if (!facts.sessionReady) reason = 'loading_sessions';
+  else if (!facts.approvalDataReady) reason = 'recovering';
+  else if (facts.saving || facts.foregroundPhase === 'saving') reason = 'saving';
+  else if (facts.mainRunning || facts.actionRunning || facts.backgroundRunning
+    || (facts.foregroundKind && facts.foregroundKind !== 'navigation'
+      && !(facts.foregroundKind === 'recovery' && facts.foregroundPhase === 'preparing_context'))) reason = 'busy';
+  else if (facts.foregroundPhase === 'loading_session') reason = 'recovering';
+  else if (!facts.modelReady || facts.subagentModelReady === false) reason = 'model_unavailable';
+  return reason ? { available: false, reason } : { available: true };
+}
 
 /** A process-local ownership token. It is never persisted or sent to a model. */
 export interface InteractionOperation {
@@ -21,6 +62,10 @@ export interface InteractionFacts {
   sessionReady: boolean;
   requestContextReady: boolean;
   approvalDataReady: boolean;
+  /** Optional detailed readiness; old callers retain the aggregate readiness contract. */
+  modelReady?: boolean;
+  contextReady?: boolean;
+  sessionRecoveryReady?: boolean;
   /** Compatibility runtime facts, never a combined UI busy flag. */
   mainRunning?: boolean;
   starting?: boolean;
@@ -47,11 +92,14 @@ export interface InteractionSnapshot {
   canCancel: boolean;
   cancelOperationId?: string;
   blockingReason?: string;
+  waitingReason?: InteractionWaitingReason;
 }
 
 export interface InteractionDiagnostic {
   event: 'begin' | 'phase' | 'finish' | 'stale';
   kind: InteractionOperationKind;
+  operationId: string;
+  generation: number;
   /** Non-reversible short identifier, never a path or user content. */
   session: string;
   phase: InteractionPhase;
@@ -145,7 +193,8 @@ export class InteractionCoordinator {
     if (!this.onDiagnostic) return;
     // Diagnostics must not be able to interrupt ownership release or execution.
     try {
-      this.onDiagnostic({ event, kind: operation.token.kind,
+      this.onDiagnostic({ event, kind: operation.token.kind, operationId: operation.token.operationId,
+        generation: operation.token.generation,
         session: createHash('sha256').update(operation.sessionId).digest('hex').slice(0, 12),
         phase: operation.phase, elapsedMs: Math.max(0, this.now() - operation.startedAt) });
     } catch { /* observability is not a durability or execution boundary */ }
@@ -161,7 +210,8 @@ export function deriveInteractionState(facts: InteractionFacts, operation?: {
   const owned = operation?.sessionId === facts.sessionId ? operation : undefined;
   const pending = Boolean(operation || facts.mainRunning || facts.starting || facts.contextRefreshing
     || facts.actionRunning || facts.backgroundRunning);
-  const ready = facts.sessionReady && facts.requestContextReady && facts.approvalDataReady;
+  const ready = facts.sessionReady && facts.requestContextReady && facts.approvalDataReady
+    && facts.modelReady !== false && facts.contextReady !== false && facts.sessionRecoveryReady !== false;
   let phase: InteractionPhase = owned?.phase ?? 'idle';
   if (!owned) {
     if (facts.mainRunning) phase = 'running';
@@ -169,12 +219,20 @@ export function deriveInteractionState(facts: InteractionFacts, operation?: {
     else if (facts.starting) phase = 'preparing_task';
     else if (facts.failure) phase = 'failed';
     else if (!facts.sessionReady || operation) phase = 'loading_session';
-    else if (facts.contextRefreshing || !facts.requestContextReady || !facts.approvalDataReady) phase = 'preparing_context';
+    else if (facts.contextRefreshing || !ready) phase = 'preparing_context';
   } else if (facts.mainRunning && phase === 'preparing_task') phase = 'running';
   const cancelOperationId = owned?.operationId ?? facts.cancelOperationId;
   const canCancel = Boolean(facts.cancellable && cancelOperationId
     && (phase === 'running' || phase === 'preparing_task' || phase === 'action'));
   const blockingReason = facts.failure ?? (phase === 'idle' ? undefined : phase);
+  let waitingReason: InteractionWaitingReason | undefined;
+  if (phase === 'saving') waitingReason = 'saving';
+  else if (phase === 'loading_session') waitingReason = 'session';
+  else if (phase === 'preparing_context') {
+    if (!facts.approvalDataReady || facts.sessionRecoveryReady === false) waitingReason = 'recovery';
+    else if (facts.modelReady === false) waitingReason = 'model';
+    else waitingReason = 'context';
+  }
   return {
     sessionId: facts.sessionId,
     revision: facts.revision,
@@ -187,6 +245,7 @@ export function deriveInteractionState(facts: InteractionFacts, operation?: {
     canNavigate: facts.sessionReady && !pending,
     canCancel,
     ...(canCancel ? { cancelOperationId } : {}),
+    ...(waitingReason ? { waitingReason } : {}),
     ...(blockingReason ? { blockingReason } : {})
   };
 }

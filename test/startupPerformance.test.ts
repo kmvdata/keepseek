@@ -19,6 +19,41 @@ import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvid
 import type { AgentActivityInput } from '../src/shared/types';
 import { withStorageCoordinator } from '../src/shared/atomicStorage';
 
+test('navigation does not wait for the unrelated startup context once safety stores are ready', async () => {
+  let release!: () => void;
+  const background = new Promise<void>(resolve => { release = resolve; });
+  const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
+    startupInitializationPromise: background, sessionInitialization: Promise.resolve(),
+    sessionReady: true, approvalDataReady: true,
+    commandSettingsReadiness: { executionMode: 'ready' }, language: 'en'
+  }) as { ensureSessionNavigationReady(): Promise<void> };
+  let finished = false;
+  const navigation = host.ensureSessionNavigationReady().then(() => { finished = true; });
+  await Promise.resolve(); await Promise.resolve();
+  const crossedWithoutBackground = finished;
+  release(); await navigation;
+  assert.equal(crossedWithoutBackground, true, 'model/context startup is not a navigation barrier');
+});
+
+test('resolved model catalog is published without waiting for balance display disk reads', async () => {
+  let release!: () => void;
+  const balance = new Promise<void>(resolve => { release = resolve; });
+  const model = { id: 'model', sourceId: 'source', supportsBilling: true };
+  const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
+    modelSourceStateRefreshGeneration: 0, selectedSourceId: '', selectedModelId: '',
+    modelSources: [], availableModels: [],
+    defaultModelStore: { refresh: async () => ({ modelSources: [{ id: 'source', provider: 'deepseek' }], availableModels: [model], defaultModel: model }) },
+    balanceStore: { refreshFromDisk: async () => balance, selectSource() {} }, postState() {}
+  }) as { refreshModelSourceState(options: { onResolved(): void }): Promise<void>; availableModels: unknown[] };
+  let resolved = false; let finished = false;
+  const refreshing = host.refreshModelSourceState({ onResolved: () => { resolved = true; } }).then(() => { finished = true; });
+  // Drain bounded microtasks; do not sleep or release the display dependency.
+  for (let index = 0; index < 12; index++) await Promise.resolve();
+  const beforeRelease = { resolved, finished, models: host.availableModels.length };
+  release(); await refreshing;
+  assert.deepEqual(beforeRelease, { resolved: true, finished: true, models: 1 });
+});
+
 test('storage flush waits for an already transferred commit even when its pending index list is empty', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-flush-barrier-'));
   const uri = vscode.Uri.file(root);
@@ -366,12 +401,16 @@ test('webview bootstrap uses monotonic revisions, early ready, paging, and fail-
   assert.match(html, /script-src 'nonce-[A-Za-z0-9]+'/u);
 });
 
-test('startup settings patches expose values independently while keeping unsafe controls fail closed', () => {
+test('startup settings patches expose values independently while keeping unsafe controls fail closed', t => {
+  const previousTrust = vscode.workspace.isTrusted;
+  Object.assign(vscode.workspace, { isTrusted: true });
+  t.after(() => Object.assign(vscode.workspace, { isTrusted: previousTrust }));
   const posted: Array<{ type: string; scope?: string; revision: number; state: Record<string, unknown> }> = [];
-  const activeSession = { approvalMode: 'delegate' };
+  const activeSession = { id: 'startup-session', approvalMode: 'delegate' };
   const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
     sessionReady: true,
     approvalDataReady: false,
+    sessionRecoveryReady: false,
     requestContextReady: false,
     runContextReadiness: 'loading',
     commandSettingsReadiness: {
@@ -385,7 +424,7 @@ test('startup settings patches expose values independently while keeping unsafe 
     subagentModelSetting: { version: 1, mode: 'follow-main', updatedAt: new Date(0).toISOString() },
     modelSelectionTransactions: { getSnapshot: () => ({ generation: 0 }) },
     backgroundRunCoordinator: { getActiveRun: () => undefined },
-    sessionStore: { getActiveSession: () => activeSession },
+    sessionStore: { activeSessionId: activeSession.id, getActiveSession: () => activeSession },
     startupTraceStages: new Set<string>(),
     postToWebview: (message: { type: string; scope?: string; revision: number; state: Record<string, unknown> }) => posted.push(message)
   });
@@ -401,8 +440,11 @@ test('startup settings patches expose values independently while keeping unsafe 
   assert.deepEqual(posted[0]?.state.commandSettingsReadiness, {
     mainModel: 'ready', subagentModel: 'loading', approvalMode: 'loading'
   });
+  assert.deepEqual(posted[0]?.state.titleRegenerationCapability, { available: false, reason: 'recovering' });
+  assert.equal((posted[0]?.state.interaction as { canSubmit: boolean }).canSubmit, false);
 
   host.approvalDataReady = true;
+  host.sessionRecoveryReady = true;
   host.requestContextReady = true;
   host.runContextReadiness = 'ready';
   host.commandSettingsReadiness = {
@@ -413,6 +455,8 @@ test('startup settings patches expose values independently while keeping unsafe 
   assert.deepEqual(posted[1]?.state.startup, {
     phase: 'ready', interactiveReady: true, sideEffectsReady: true
   });
+  assert.deepEqual(posted[1]?.state.titleRegenerationCapability, { available: true });
+  assert.equal((posted[1]?.state.interaction as { canSubmit: boolean }).canSubmit, true);
 });
 
 test('command settings become ready without waiting for project context or the first full state', async () => {

@@ -6,12 +6,12 @@
 
 真实事实分别表示：主任务/准备/内部续跑、导航事务、当前会话上下文就绪、必要持久化、文件/命令/审批操作。标题、余额和展示统计等后台工作有独立生命周期。可见阶段用于解释当前阻塞，不能取代这些可并存的事实。
 
-统一派生结果 `interaction` 包含 `sessionId/revision/operationId/phase`、`canEdit/canSubmit/canNavigate/canCancel/canChangeContext`、`cancelOperationId` 与 `blockingReason`。导航、上下文准备和必要保存不表示模型正在生成；草稿在这些阶段保持可编辑，提交仍等待正确会话的必要条件。停止仅在宿主有实际可用的取消入口时出现。
+统一派生结果 `interaction` 包含 `sessionId/revision/operationId/phase`、`canEdit/canSubmit/canNavigate/canCancel/canChangeContext`、`cancelOperationId`、`blockingReason` 与 `waitingReason`。`waitingReason` 区分模型、会话、操作恢复、项目上下文和必要保存；不能再把模型或恢复等待统一显示为 Skills 加载。导航、上下文准备和必要保存不表示模型正在生成；草稿在这些阶段保持可编辑，提交仍等待正确会话的必要条件。停止仅在宿主有实际可用的取消入口时出现。
 
 | 事实或兼容字段 | 所有权与用途 |
 | --- | --- |
 | Coordinator 操作 token | 在首个 await 前同步预占，绑定 operation/session/generation；只有匹配拥有者能变更阶段、交接、完成或释放 |
-| 导航事务 | 保持串行/重复点击去重；不引入运行中任意切换或多会话任务并发 |
+| 导航事务 | 正文/选择保存/必要恢复期间保持串行与重复点击去重；安全屏障后释放导航 owner，上下文继续按会话/generation 准备，不引入多会话主任务并发 |
 | `isStartingRun` | 只读派生冲突互斥；不能由分支各自写入，也不能当作“模型运行中” |
 | `isBusy` | 兼容真实运行消费者；输入框和导航按统一能力判断，不把各种工作重新 OR 后作为 UI 权威 |
 | 上下文/安全就绪 | 当前会话必须恢复正确操作、历史与请求上下文；失败不默认为 ready |
@@ -54,6 +54,8 @@ Webview → Host 消息唯一入口仍是 `provider/webviewMessages.ts`；Host �
 | 工作 | 安全展示正文 | 接收/继续任务 | 分类依据 |
 | --- | --- | --- | --- |
 | 初始 session 初始化 / lazy session load | 必须完成 | 必须完成 | 加载可替换内存 store，未跨屏障不能保存占位会话覆盖旧历史 |
+| 全局审批/ChangeSet/DraftRun 初始化及初始必要恢复 | 导航须等待该屏障 | 必须完成 | 独立 `startupNavigationReadyPromise`，失败不把历史当空白或安全就绪 |
+| 模型目录、来源及必要选择保存 | 不阻止导航和正文 | 必须完成 | 模型解析与保存决定实际请求来源；余额磁盘展示不属于此屏障 |
 | 内存选择与持久化 activeSessionId | 选择已确定后可显示 | 必须完成 | 页面、内存及持久化选择一致，旧导航不可回写 |
 | ChangeSet/DraftRun session load | 可先显示正文，操作入口保持禁用 | 必须完成 | 旧提案、执行结果与历史归属需要复核 |
 | pending history truncation 恢复及操作失效 flush | 可显示安全正文/恢复状态 | 必须完成 | 无效操作不得执行，不能丢失截断意图或重复副作用 |
@@ -61,7 +63,11 @@ Webview → Host 消息唯一入口仍是 `provider/webviewMessages.ts`；Host �
 | `userTaskBudgets` / 完整 checkpoint 读取 | 不必挡正文 | 相应继续/恢复前必须完成 | 安全时间、费用、逻辑调用量、委派树与恢复键权威 |
 | Usage Ledger 展示重建、参考费用/缓存观测 | 不阻塞 | 不阻塞 | 请求级原始记录单独耐久；这些汇总不是安全预算 |
 | 子代理摘要、活动展示恢复 | 不阻塞 | 不阻塞 | `restoreUsage()` 只读 summaries/activities，不恢复 scheduler 预算或调度任务 |
-| 标题生成/手动刷新、余额 | 不阻塞 | 不因展示占主任务 | 有独立 session/request 所有权；标题真实成本仍合并其所属任务预算 |
+| 标题生成/手动刷新、余额 | 不阻塞 | 不因展示占主任务 | 有独立 session/request 所有权；自动命名继承原任务剩余额度，手动刷新使用独立小预算，真实用量归目标会话 |
+
+导航不等待整个 `startupInitializationPromise`。会话及必要安全存储跨过初始化屏障后，即使旧活动会话项目上下文、模型目录或展示工作仍在加载，也可开始目标会话事务。create/select/copy 的目标正文、安全选择保存、操作记录恢复及截断失效 flush 完成后，同步释放导航 owner。项目上下文继续按目标 session/generation 准备，此时 canEdit=true、canNavigate=true、canSubmit=false；上下文和其它执行必要条件满足后在同次状态更新开放提交。导航方法返回的 Promise 仍可等待上下文完成供调用方收口，但 UI 导航能力不依赖这个 Promise 结算。会话/上下文 generation 变化使旧启动或导航上下文工作的 ready、error 和 finally 失效，A→B→A 也不能把第一次进入 A 的结果赋给第二次 A；旧 finally 不释放新 owner、不重复发布 sessionChanged 抬高新入口 revision 下界。不可取消的读取可继续完成缓存，但不能回写新会话状态。
+
+余额 `refreshFromDisk()` 是按来源读取磁盘展示快照，不是每次启动在线查询。它在模型目录发布与必要选择保存之外完成；结果只在来源与模型刷新 generation 仍匹配时发布，读取失败只影响余额展示，不能锁回输入或回滚新模型选择。来源隔离和原刷新限流继续由现有余额 store 负责。
 
 原始 Provider usage 记录在传输推进前单独持久化。`usageMetrics.displayReadiness` 使用 `loading/ready/incomplete` 表达展示恢复状态。展示重建失败保留内联迁移来源和不完整标记；不能把缺失统计当作 0。后台结果核验所属会话与数据版本，不能选择回旧会话或把展示完成误标为运行就绪。
 
@@ -73,7 +79,7 @@ Webview → Host 消息唯一入口仍是 `provider/webviewMessages.ts`；Host �
 
 `SharedProjectSources` 复用有界的读取快照，并合并同一来源版本的并发读取。身份考虑真实任务 root/cwd、信任与相关配置/来源版本及受控刷新边界；命中不先完整扫描文件来证明命中。
 
-复用内容限于配置、项目指令和 Skill 清单/读取结果。会话激活、冻结 implicit 集合、外部授权和可变错误不共享。`SkillStore` 的会话选择在读取结果之外处理；普通导航不无故失效热会话的 frozen implicit，也不重写 `contextInstructions`。
+复用内容限于配置、项目指令和 Skill 清单/读取结果。会话激活、冻结 implicit 集合、外部授权和可变错误不共享。`SkillStore` 的会话选择在读取结果之外处理；普通导航不无故失效热会话的 frozen implicit，也不重写 `contextInstructions`。不同来源版本通过无共享可变结果的 `discoverSnapshot()` 独立扫描并保留各自 diagnostics；旧来源 A 的慢扫描不能让来源 B 排在它后面，A 迟到也不能替换 B 的清单或错误。同一来源版本仍使用现有 cache 和 pending 合并，不新增另一套全局缓存。
 
 创建/删除/修改 AGENTS、配置、Skill 及相关资源通过 watcher dirty 或明确变更通知失效；目录/信任/配置变化重新核验；显式刷新强制新版本。重启从新实例开始。无法证实来源仍有效时不复用旧授权；共享来源始终只读。
 
@@ -93,9 +99,45 @@ Webview → Host 消息唯一入口仍是 `provider/webviewMessages.ts`；Host �
 | 迟到结果 | 如何证明不会覆盖其他会话或释放新拥有者？ |
 | 诊断 | 关键路径或后台耗时如何区分，怎样观测命中/失效和过期丢弃？ |
 
-`InteractionCoordinator` 的诊断事件为 `begin/phase/finish/stale`，记录操作种类、会话 SHA-256 短标识、阶段和累计耗时。`SharedProjectSources.diagnostics` 与 `SkillStore.sourceDiagnostics` 提供命中、未命中/扫描、合并读取及过期丢弃计数。`interaction_display` 单独记录后台统计恢复的耗时及 ready/incomplete，和前台操作阶段耗时分开。诊断区分关键路径阶段与后台展示状态，阻塞原因来自同一交互快照。不得记录密钥、完整 prompt 或文件正文，不按 token 打日志。慢操作记录不授予继续执行的权限。
+`InteractionCoordinator` 的诊断事件为 `begin/phase/finish/stale`，记录操作种类、会话 SHA-256 短标识、阶段和累计耗时。`SharedProjectSources.diagnostics` 与 `SkillStore.sourceDiagnostics` 提供命中、未命中/扫描、合并读取及过期丢弃计数。`interaction_display` 单独记录后台统计恢复的耗时及 ready/incomplete，和前台操作阶段耗时分开。诊断区分关键路径阶段与后台展示状态，阻塞原因来自同一交互快照。`interaction_stage` 分别记录 `source-identity`、`shared-config`、`project-instructions`、`session-body`、`active-selection-save`、`operation-records`、`history-recovery`、`model-catalog`、`model-selection-save`、`balance-display`、`skill-catalog` 和 `skill-bodies`，包含 begin/end/failed/stale、耗时及脱敏身份；来源 cache hit/miss/merged/stale 沿用领域计数。`interaction_publication` 在 Host 发布时记录 bodyPublished、canEdit、canSubmit、phase、waitingReason、atMs，绑定会话/generation/revision；它证明状态已发布，不证明 Webview 已绘制或用户已看见。原生现场的实际可见时间需另采集。不得记录密钥、完整路径、prompt 或文件正文，不按 token 打日志。慢操作记录不授予继续执行的权限。
 
 ## 7. 自动化与时序证据
+
+### 2026-11-07：首次历史与标题刷新修复
+
+本次基线为 `ce12f6ec1339b71cf52b94fb258ed70f6bfb4480`（0.5.2）。修前 deferred 回归确认：安全及会话 ready 后，导航仍等待无关启动 promise；余额磁盘读取暂停会使模型目录尚未发布；保持历史展开、仅发送 `startupSettings` 就绪补丁时刷新按钮仍禁用。这些是依赖与渲染证据，不是原生 VS Code 的现场总耗时归因。
+
+本轮另从该 HEAD 导出到临时目录编译，并重新比较安装目录 0.5.2 的六个关键 JS：Provider、interactionState、Webview script、SharedProjectSources、SkillStore、SessionTitleCoordinator，SHA-256 全部一致。因此本轮不能将这六处的故障归因为旧安装包；该检查只描述此次修前基线，不表示本次工作树修复已安装，也不替代原生复验。
+
+本次新增受控证据如下；测试通过总数与命令结果在本次交付报告中记录，下面 2026-11-06 的数字只保留其当时范围。
+
+| 场景 | 修改前失败与修改后证据 |
+| --- | --- |
+| 旧启动上下文暂停 | 修前导航仍等待无关 startup；修后目标正文/能力已发布、canSubmit=true，旧 A 的失败随后解除仍不能改掉目标就绪；来源计数 hit=1、miss=1 |
+| 目标上下文暂停 | 同一依赖替身分别运行修前基线和修后实际编译方法：canEdit 均为 true、canSubmit 均为 false，canNavigate 从 false 变为 true。正式回归另验证后续导航、新建/复制、A→B→A、旧失败、新恢复拥有者与进入 revision 下界 |
+| 余额磁盘暂停 | 修前 onResolved=false、models=0；修后不解除余额 gate，onResolved=true、models=1，模型刷新方法已完成 |
+| 跨来源 Skill 扫描 | 修前新来源 B 排队等待暂停的 A；修后 B 先完成，A 迟到只计 stale，不替换 B diagnostics；同版本扫描仍合并 |
+| 目标上下文暂停与再次导航 | 安全屏障后 create/select/copy 释放导航 owner，草稿和再次导航可用、提交仍禁用；契约回归核对旧上下文成功/失败及 A→B→A 不污染新状态，旧 finally 不释放新 owner 或重复提高入口下界 |
+| 必要恢复失败与重试 | 重试重新加载目标操作记录，再恢复历史并开放提交，load 调用总计 2；不把失败降级 ready，不重复执行副作用 |
+| 工作区切换及删除活动会话 | 与普通导航相同地恢复新目标操作记录，期间可编辑、不能提交；解除真实屏障后开放 |
+| 历史按钮就绪与终态 | 保持列表展开，仅 startupSettings 补丁即可恢复原按钮；当前与非当前目标的 accepted/终态按 requestId 闭环，拒绝和保存失败有可见原因 |
+
+这些依赖、调用次数和状态发布证据来自真实 Host、完整生成脚本、临时存储及 deferred，不是用户设备上的原生性能测量。现场仍须分别记录正文可见、可编辑、可提交与后台完成时间，不能把受控 promise 释放或 Host publication 当 Webview 绘制时刻。尚未获得现场完整分阶段耗时，不能据此宣称用户全部长等待已解释。
+
+本轮实际验证结果：
+
+| 检查 | 结果 |
+| --- | --- |
+| `bun run compile` / `bun run lint` / `bun run build:test` | 最终代码全部成功，退出码均为 0 |
+| 导航、状态、启动、标题、来源缓存、持久化、Apply 与请求字节专项 | 215 项通过、0 失败、0 跳过，约 37.4 秒；使用真实编译方法/完整生成脚本、临时磁盘与受控依赖 |
+| `bun run test` 全仓 | 收集 1,332 项：1,331 通过、0 失败、1 环境跳过，约 667.5 秒；跳过原因是当前沙箱不能绑定本地 fault server |
+| 安装目录基线核验 | 六个指定 JS 与修前 HEAD 临时编译结果 SHA-256 全部一致；未安装本次修复 |
+| `git diff --check` | 通过；未改版本、package.json、CHANGELOG.md，未打包、安装、提交或发布 |
+| 原生 VS Code、真实模型、远程扩展宿主、Windows/Linux | 未执行，按下一节现场验收；不以 stub 结果替代 |
+
+全仓收集后又细化了“历史读取期间出现新运行冲突”的终态原因，并新增 1 项测试；最终编译、lint、测试构建及上面的 215 项专项覆盖该末次变更，全仓统计不重复计入这 1 项。实施中发现的旧替身未声明就绪字段、标题测试删除临时目录时与派生 manifest 写入竞态，均已补齐真实状态或等待 storage flush；未用长 sleep、放宽性能阈值或删减断言解决。最终全仓的 10K ledger 性能检查在原 15 秒阈值内通过。
+
+### 2026-11-06：交互生命周期治理历史证据
 
 调查及实现基线为 `f83e9815bc6577c1e7128e520f07b55e0dcc356d`，工作树开始时干净。以下时序来自真实 Host/生成 Webview 脚本、临时存储与 deferred/假时钟；不是原生 VS Code 性能测量。普通通知的 8 秒是代码计时合同，不是用户现场精确等待时间。
 
@@ -124,13 +166,13 @@ Webview → Host 消息唯一入口仍是 `provider/webviewMessages.ts`；Host �
 
 本节是可执行步骤，未在本次受控测试中冒充现场通过。使用开发宿主 F5 和隔离测试 workspace/session 存储；不要读取、破坏或改写真实会话来制造证据。记录平台、扩展基线、场景、阶段、首次安全可见/可编辑/可提交时间与诊断。模型场景仅在另行允许真实模型调用的环境进行。
 
-1. **空白/首次打开**：打开 KeepSeek，在初始化中输入多行草稿。检查加载/准备文案准确、没有虚假 Stop；必要恢复结束后可提交，草稿保留。
-2. **新建与长历史**：准备隔离的空白及长历史会话，多次点击新建、重复选同一项并 A→B→A。检查正文/内存/持久化选择一致，旧提示当次消失，原有任务运行时导航限制不变。
+1. **冷启动立即进入历史**：F5 打开 KeepSeek，立即展开历史并选择一条目标会话，输入多行草稿。记录会话初始化、目标正文、安全恢复、模型、上下文及后台各阶段时间，以及正文可见/可编辑/可提交时间。仅模型暂停时显示模型等待，操作恢复与保存也有对应文案；目标条件满足后不再等待旧活动会话上下文或通知 timer。
+2. **新建与长历史**：准备隔离的空白及长历史会话，多次点击新建、重复选同一项并 A→B→A。检查正文/内存/持久化选择一致；暂停目标上下文，在安全恢复/保存完成后无需等上下文即可再次导航，期间仍不能提交。分别放行旧成功/失败并 A→B→A，确认只有当前 generation 可改变就绪及错误，旧 finally 不重复触发切换或清新 owner。原有主任务运行时导航限制不变。
 3. **慢展示与慢安全读取**：开发替身分别暂停 ledger/subagent 展示读取、ChangeSet/DraftRun、历史恢复和项目上下文。前两项显示统计加载中但不阻止就绪；后几项可编辑草稿、不可执行过期动作，解除后无需等待 8 秒通知。
 4. **提交竞态与草稿**：在受控来源准备屏障重复 Enter/点击发送，同时触发导航；最多接收一个冲突请求。注入拒绝/失败/迟到反馈，检查不丢草稿、不跨会话发送、不自动重试；编辑重发保留历史截断与缓存前缀合同。
 5. **任务结束、错误、取消**：在可控 Runner 替身中验证正常返回、错误和中止，检查持续提示立即结束；慢必要保存显示保存阶段且无虚假 Stop；普通错误/完成通知保留合理时长。
 6. **保存失败与恢复**：向临时存储注入确定性保存失败。检查未持久化数据保留、依赖能力保持阻塞、原因与重试范围明确；解除故障后仅重试必要保存，不重跑副作用。
-7. **后台标题与余额**：暂停标题自动生成、历史刷新标题和余额替身，继续新建/选择空闲会话。检查无主运行状态、旧结果不选回旧会话，标题按钮防重复状态独立结束。
+7. **历史展开等待就绪与辅助任务**：保持历史列表展开，只用 `startupSettings` 将标题能力从不可用改为可用；无需重开列表即可点击编辑按钮左侧刷新。分别刷新当前与另一历史行，检查立即旋转、相同标题/无材料/失败反馈及可重试。暂停余额磁盘或标题替身时，已就绪输入及导航继续可用；标题不选回目标、不重开主计时。
 8. **关闭重开与重启**：任务运行和等待人工两种状态下分别关闭/重新打开页面，确认重新 ready 获取真实宿主状态；重启仅恢复说明，不复活旧 token/批准/permit/执行队列。
 9. **输入与操作冒烟**：中英文切换，发送/停止、Enter/快捷键、输入法、焦点、拖拽、@、引用、编辑重发、设置与 Apply/Discard；确认统一能力未绕过宿主硬检查。
 10. **来源复用与失效**：同作用域往返导航，记录命中与扫描次数；创建/修改/删除 AGENTS/Skill、切换信任/目录、显式刷新，确认正确失效。热会话保留冻结集合及旧请求字节，新任务在受控边界读取新来源。
@@ -140,6 +182,6 @@ Webview → Host 消息唯一入口仍是 `provider/webviewMessages.ts`；Host �
 - 领域规则在 `provider/interactionState.ts`；Provider 将导航、提交、继续、计划/审批/DraftRun/repair 交接、文件操作、来源变更及必要保存接入同一拥有者。来源刷新错误的迟到完成不得改写较新刷新。
 - `webviewMessages.ts` 集中增加可选 request/session/revision 与取消身份，增加显式 retry；Host 反馈独立。旧消息仍经宿主检查；新运行状态全部为进程内瞬态，无会话磁盘 schema 迁移、无旧运行租约恢复。
 - `sharedProjectSources.ts/skillStore.ts` 只缓存来源读取；`webview/**`、`shared/i18n.ts` 管呈现和中英文。`GlobalSessionStorage.flush()` 即使 pending 为空也跨已有 coordinator 屏障，等待已转移的在途提交。
-- `isBusy` 剩余消费者是实际模型用量/流、模型切换策略、运行审计和旧 Webview 兼容回退。`isStartingRun` 是 Coordinator 的只读互斥投影，供来源修改、设置、标题/续跑门禁使用；两者均不负责重新拼装输入框能力。
+- `isBusy` 剩余消费者是实际模型用量/流、模型切换策略、运行审计和旧 Webview 兼容回退。`isStartingRun` 是 Coordinator 的只读互斥投影，供来源修改、设置和续跑门禁使用。标题另由 `deriveSessionTitleCapability()` 区分导航上下文准备与真实运行/保存冲突；两者均不负责重新拼装输入框能力。
 - `dispose()` 仍同步发出取消；突然退出依赖现有 checkpoint、prepared journal 与逐项耐久记录恢复，不能将页面关闭或进程退出解释成所有工作已成功保存。本次未做原生退出现场验证。
 - 本次未改审批模式、权限、预算口径、三协议请求合同、package.json、CHANGELOG.md、依赖与设置；改动留在工作树，未提交或发布。

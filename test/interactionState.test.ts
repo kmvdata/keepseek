@@ -1,11 +1,30 @@
+import './registerVscodeStub';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { InteractionCoordinator, deriveInteractionState, type InteractionFacts, type InteractionDiagnostic } from '../src/provider/interactionState';
+import { InteractionCoordinator, deriveInteractionState, deriveSessionTitleCapability,
+  type InteractionFacts, type InteractionDiagnostic, type SessionTitleCapabilityFacts } from '../src/provider/interactionState';
+import { localize, WEBVIEW_TRANSLATIONS } from '../src/shared/i18n';
 
 function ready(overrides: Partial<InteractionFacts> = {}): InteractionFacts {
   return { sessionId: 'A', revision: 1, sessionReady: true, requestContextReady: true,
     approvalDataReady: true, ...overrides };
 }
+
+test('Host title feedback and Webview disabled reasons use the same real bilingual catalog', () => {
+  const outcomes = ['updated', 'unchanged', 'no_material', 'unavailable', 'busy', 'cancelled', 'stale', 'invalid', 'timeout', 'failed', 'save_failed'];
+  const reasons = ['loading_sessions', 'recovering', 'model_unavailable', 'untrusted', 'busy', 'saving', 'unavailable'];
+  for (const language of ['zh-CN', 'en'] as const) {
+    for (const key of [...outcomes.map(value => `titleRefreshOutcome_${value}`), ...reasons.map(value => `titleRefreshReason_${value}`)]) {
+      const host = localize(language, key);
+      assert.notEqual(host, key, `${language} Host must not expose a translation key`);
+      assert.equal(host, WEBVIEW_TRANSLATIONS[language][key]);
+    }
+  }
+  assert.equal(localize('zh-CN', 'titleRefreshOutcome_updated'), '标题已更新。');
+  assert.equal(localize('en', 'titleRefreshOutcome_updated'), 'Title updated.');
+  assert.match(localize('zh-CN', 'titleRefreshOutcome_save_failed'), /保留旧标题/u);
+  assert.match(localize('en', 'titleRefreshOutcome_save_failed'), /previous title was kept/u);
+});
 
 test('navigation owns its reservation before I/O but does not offer task cancellation', () => {
   const coordinator = new InteractionCoordinator();
@@ -139,8 +158,71 @@ test('diagnostics record phases, safe session identity and elapsed time without 
   coordinator.finish(owner);
   assert.deepEqual(events.map(event => [event.event, event.elapsedMs]), [['begin', 0], ['phase', 20], ['finish', 60]]);
   assert.ok(events.every(event => /^[a-f0-9]{12}$/u.test(event.session)));
+  assert.ok(events.every(event => event.operationId === owner.operationId && event.generation === owner.generation));
   const broken = new InteractionCoordinator({ onDiagnostic: () => { throw new Error('diagnostic failure'); } });
   const token = broken.begin('task', 'A', 'preparing_task')!;
   assert.equal(broken.finish(token), true);
   assert.equal(broken.current, undefined);
+});
+
+test('model, operation recovery, context and persistence waits remain distinct without fake readiness', () => {
+  const model = deriveInteractionState(ready({ requestContextReady: false, modelReady: false, contextReady: true }));
+  assert.equal(model.waitingReason, 'model');
+  assert.equal(model.canSubmit, false);
+  assert.equal(model.canEdit, true);
+  const recovery = deriveInteractionState(ready({ sessionRecoveryReady: false, modelReady: true, contextReady: true }));
+  assert.equal(recovery.waitingReason, 'recovery');
+  assert.equal(recovery.canSubmit, false);
+  const context = deriveInteractionState(ready({ contextReady: false, modelReady: true }));
+  assert.equal(context.waitingReason, 'context');
+  assert.equal(context.canSubmit, false, 'detailed context facts cannot be bypassed by the old aggregate');
+  const complete = deriveInteractionState(ready({ contextReady: true, modelReady: true, sessionRecoveryReady: true }));
+  assert.equal(complete.phase, 'idle');
+  assert.equal(complete.waitingReason, undefined);
+  assert.equal(complete.canSubmit, true);
+
+  const coordinator = new InteractionCoordinator();
+  const owner = coordinator.begin('navigation', 'A', 'saving')!;
+  assert.equal(coordinator.snapshot(ready()).waitingReason, 'saving');
+  coordinator.update(owner, 'preparing_context');
+  assert.equal(coordinator.snapshot(ready({ modelReady: false, contextReady: true })).waitingReason, 'model');
+  coordinator.finish(owner);
+  assert.equal(coordinator.snapshot(ready()).canSubmit, true);
+});
+
+function titleReady(overrides: Partial<SessionTitleCapabilityFacts> = {}): SessionTitleCapabilityFacts {
+  return { sessionReady: true, approvalDataReady: true, modelReady: true, trusted: true, ...overrides };
+}
+
+test('title refresh is independent of project context preparation but preserves exact safety conflicts', () => {
+  const preparing = titleReady({ foregroundKind: 'navigation', foregroundPhase: 'preparing_context' });
+  assert.deepEqual(deriveSessionTitleCapability(preparing), { available: true });
+  assert.deepEqual(deriveSessionTitleCapability(titleReady({ foregroundKind: 'recovery', foregroundPhase: 'preparing_context' })),
+    { available: true }, 'a context-only retry/refresh does not own the naming model or material');
+  assert.equal(deriveInteractionState(ready({ contextReady: false })).canSubmit, false,
+    'submission and auxiliary naming have separate dependencies');
+  assert.deepEqual(deriveSessionTitleCapability(titleReady({ foregroundKind: 'navigation', foregroundPhase: 'loading_session' })),
+    { available: false, reason: 'recovering' });
+  assert.deepEqual(deriveSessionTitleCapability(titleReady({ foregroundKind: 'navigation', foregroundPhase: 'saving' })),
+    { available: false, reason: 'saving' });
+  for (const overrides of [{ mainRunning: true }, { actionRunning: true }, { backgroundRunning: true },
+    { foregroundKind: 'task' as const }, { foregroundKind: 'recovery' as const }]) {
+    assert.deepEqual(deriveSessionTitleCapability(titleReady(overrides)), { available: false, reason: 'busy' });
+  }
+});
+
+test('title capability explains missing initialization, trust and model without granting authority', () => {
+  const cases: Array<[Partial<SessionTitleCapabilityFacts>, string]> = [
+    [{ sessionReady: false }, 'loading_sessions'],
+    [{ approvalDataReady: false }, 'recovering'],
+    [{ trusted: false }, 'untrusted'],
+    [{ modelReady: false }, 'model_unavailable'],
+    [{ subagentModelReady: false }, 'model_unavailable'],
+    [{ saving: true }, 'saving'],
+    [{ disposed: true }, 'unavailable']
+  ];
+  for (const [facts, reason] of cases) {
+    assert.deepEqual(deriveSessionTitleCapability(titleReady(facts)), { available: false, reason });
+  }
+  assert.deepEqual(deriveSessionTitleCapability(titleReady()), { available: true });
 });
