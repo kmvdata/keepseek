@@ -102,3 +102,4 @@ import './sessionTitleCompletion.test';
 import './sessionTitleRequest.test';
 import './sessionTitleWebview.test';
 import './sessionTitleIntegration.test';
+import './sessionTitleRegeneration.test';

@@ -1,5 +1,5 @@
 import type { ChatSessionStore } from './chatSessionStore';
-import { buildSessionTitleMaterial, parseSessionTitleResult, SESSION_TITLE_SYSTEM_PROMPT } from './sessionTitle';
+import { buildSessionTitleMaterial, parseSessionTitleResult, sessionTitleTaskBasisMatches, SESSION_TITLE_SYSTEM_PROMPT, type SessionTitleBasis } from './sessionTitle';
 
 export interface SessionTitleRequest {
   systemPrompt: string;
@@ -15,7 +15,7 @@ export class SessionTitleCoordinator {
   private disposed = false;
 
   public constructor(private readonly store: ChatSessionStore, private readonly options: {
-    onCommitted?: (sessionId: string) => void | Promise<void>;
+    onCommitted?: (sessionId: string, mode: 'automatic' | 'manual') => void | Promise<void>;
     canCommit?: () => boolean;
     onDiagnostic?: (sessionId: string, taskId: string, outcome: string, elapsedMs: number) => void;
   } = {}) {}
@@ -35,16 +35,30 @@ export class SessionTitleCoordinator {
     for (const sessionId of [...this.running.keys()]) this.cancel(sessionId);
   }
 
-  public async complete(sessionId: string, taskId: string,
+  public complete(sessionId: string, taskId: string,
     request: (input: SessionTitleRequest) => Promise<string>): Promise<boolean> {
+    return this.run(sessionId, taskId, request, 'automatic');
+  }
+
+  /** Explicit user intent may replace an automatic or custom title. A failed
+   * request keeps that title and its previous automatic-stop/manual-lock state. */
+  public regenerate(sessionId: string, taskId: string,
+    request: (input: SessionTitleRequest) => Promise<string>,
+    material: { userPrompt: string; basis: SessionTitleBasis }): Promise<boolean> {
+    return this.run(sessionId, taskId, request, 'manual', material);
+  }
+
+  private async run(sessionId: string, taskId: string,
+    request: (input: SessionTitleRequest) => Promise<string>, mode: 'automatic' | 'manual',
+    suppliedMaterial?: { userPrompt: string; basis: SessionTitleBasis }): Promise<boolean> {
     if (this.disposed || this.running.has(sessionId) || this.options.canCommit?.() === false) return false;
     const session = this.store.getSessionById(sessionId);
-    if (!session || session.customTitle || session.autoTitle?.status === 'completed') return false;
+    if (!session || (mode === 'automatic' && (session.customTitle || session.autoTitle?.status === 'completed'))) return false;
     // Late/duplicate completion events cannot name an earlier logical turn.
     const tail = [...session.messages].reverse().find(message => message.userTask);
-    if (tail?.role !== 'assistant' || tail.userTask?.id !== taskId || tail.isStreaming) return false;
-    const material = buildSessionTitleMaterial(session.messages, taskId);
-    if (!material) return false;
+    if (mode === 'automatic' && (tail?.role !== 'assistant' || tail.userTask?.id !== taskId || tail.isStreaming)) return false;
+    const material = suppliedMaterial ?? buildSessionTitleMaterial(session.messages, taskId);
+    if (!material || (mode === 'manual' && !sessionTitleTaskBasisMatches(session.messages, taskId, material.basis))) return false;
     const controller = new AbortController();
     this.running.set(sessionId, controller);
     const startedAt = performance.now();
@@ -52,16 +66,18 @@ export class SessionTitleCoordinator {
       Math.max(0, Math.round(performance.now() - startedAt)));
     let token: string | undefined;
     try {
-      const claim = await this.store.claimSessionTitle(sessionId, taskId, material.basis);
+      const claim = await this.store.claimSessionTitle(sessionId, taskId, material.basis, mode);
       if (!claim) return false;
       if (controller.signal.aborted || this.disposed || this.options.canCommit?.() === false) {
-        this.cancel(sessionId); diagnose('stale'); return false;
+        if (this.running.get(sessionId) === controller) this.cancel(sessionId);
+        diagnose('stale'); return false;
       }
       token = claim.token;
       const text = await request({ systemPrompt: SESSION_TITLE_SYSTEM_PROMPT, userPrompt: material.userPrompt,
         signal: controller.signal, token });
       if (controller.signal.aborted || this.disposed || this.options.canCommit?.() === false) {
-        this.cancel(sessionId); diagnose('stale'); return false;
+        if (this.running.get(sessionId) === controller) this.cancel(sessionId);
+        diagnose('stale'); return false;
       }
       const result = parseSessionTitleResult(text);
       const outcome = result?.decision ?? 'invalid';
@@ -70,8 +86,8 @@ export class SessionTitleCoordinator {
       const state = this.store.getSessionById(sessionId)?.autoTitle;
       diagnose(committed ? 'set' : result?.decision === 'set'
         ? state?.lastOutcome === 'save_failed' ? 'save_failed' : 'stale'
-        : state?.lastOutcome === outcome ? outcome : 'stale');
-      if (committed) await this.options.onCommitted?.(sessionId);
+        : mode === 'manual' || state?.lastOutcome === outcome ? outcome : 'stale');
+      if (committed) await this.options.onCommitted?.(sessionId, mode);
       return committed;
     } catch (error) {
       // The caller accounts for physical usage even when this result is stale.

@@ -99,6 +99,7 @@ export function getScript(): string {
       },
       authorizedExternalReferenceUris: [],
       isBusy: false,
+      sessionTitleRegenerations: {},
       agentActivity: {
         base: 'idle',
         phase: 'idle',
@@ -421,6 +422,17 @@ export function getScript(): string {
     }
 
     const currentSessionTitle = document.getElementById('currentSessionTitle');
+    if (currentSessionTitle) {
+      currentSessionTitle.addEventListener('dblclick', function(event) {
+        event.preventDefault();
+        requestCurrentSessionTitleRegeneration();
+      });
+      currentSessionTitle.addEventListener('keydown', function(event) {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        if (!event.repeat) requestCurrentSessionTitleRegeneration();
+      });
+    }
     const historyTab = document.getElementById('historyTab');
     const newChatTab = document.getElementById('newChatTab');
     const settingsTab = document.getElementById('settingsTab');
@@ -1257,6 +1269,10 @@ export function getScript(): string {
 
     function handleKeepseekHostMessage(event) {
       var message = event.data;
+      if (message.type === 'sessionTitleRegeneration') {
+        applySessionTitleRegeneration(message);
+        return;
+      }
       if (message.type === 'sessionTitleUpdated') {
         applySessionTitleUpdate(message);
         return;
@@ -1565,18 +1581,62 @@ export function getScript(): string {
       }
       if (currentSessionTitle) {
         currentSessionTitle.textContent = title;
-        currentSessionTitle.title = title;
+        var pending = state.sessionTitleRegenerations?.[state.activeSessionId];
+        var hint = t(pending ? 'regeneratingSessionTitle' : 'regenerateSessionTitle');
+        currentSessionTitle.title = title + ' · ' + hint;
+        currentSessionTitle.setAttribute?.('aria-label', title + ' · ' + hint);
+        currentSessionTitle.setAttribute?.('aria-disabled', canRegenerateCurrentSessionTitle() ? 'false' : 'true');
+        currentSessionTitle.setAttribute?.('aria-busy', pending ? 'true' : 'false');
       }
+    }
+
+    function canRegenerateCurrentSessionTitle() {
+      var background = state.backgroundRun?.status;
+      return !!state.activeSessionId && state.startup?.interactiveReady === true && !state.isBusy
+        && !state.sessionTitleRegenerations?.[state.activeSessionId]
+        && editingSessionTitleId !== state.activeSessionId
+        && background !== 'running' && background !== 'waiting_for_apply' && background !== 'waiting_for_authorization';
+    }
+
+    function requestCurrentSessionTitleRegeneration() {
+      if (!canRegenerateCurrentSessionTitle()) return;
+      var sessionId = state.activeSessionId;
+      // This UI correlation ID never enters model input or the main request.
+      var requestId = Date.now().toString(36) + '_' + Math.random().toString(36).slice(2);
+      if (!state.sessionTitleRegenerations) state.sessionTitleRegenerations = {};
+      state.sessionTitleRegenerations[sessionId] = requestId;
+      renderCurrentSessionTitle();
+      vscode.postMessage({ type: 'regenerateSessionTitle', sessionId: sessionId, requestId: requestId });
+    }
+
+    function applySessionTitleRegeneration(message) {
+      if (typeof message.sessionId !== 'string' || typeof message.requestId !== 'string' || !message.requestId) return;
+      var retiredKey = message.sessionId + ':' + message.requestId;
+      if (state.retiredSessionTitleRegenerations?.[retiredKey]) return;
+      // A newly mounted Webview learns Host-owned in-flight requests before
+      // receiving its first session state. Ordinary status events cannot create
+      // or replace a locally correlated request.
+      if (message.restored === true && message.running === true && !state.sessionTitleRegenerations?.[message.sessionId]) {
+        if (!state.sessionTitleRegenerations) state.sessionTitleRegenerations = {};
+        state.sessionTitleRegenerations[message.sessionId] = message.requestId;
+      }
+      if (state.sessionTitleRegenerations?.[message.sessionId] !== message.requestId) return;
+      if (message.running === false) delete state.sessionTitleRegenerations[message.sessionId];
+      if (state.activeSessionId === message.sessionId) renderCurrentSessionTitle();
     }
 
     // A background title must leave the composer, open title editor, and
     // transcript intact. Patch only already-known session labels in place.
     function applySessionTitleUpdate(message) {
       if (typeof message.sessionId !== 'string' || typeof message.title !== 'string' || !message.title.trim()) return;
+      var regenerated = message.regenerated === true;
+      if (regenerated && (typeof message.requestId !== 'string'
+        || state.sessionTitleRegenerations?.[message.sessionId] !== message.requestId)) return;
       var known = false;
       (Array.isArray(state.sessionSummaries) ? state.sessionSummaries : []).forEach(function(session) {
-        if (session.id === message.sessionId && !session.customTitle) {
+        if (session.id === message.sessionId && (!session.customTitle || regenerated)) {
           session.title = message.title;
+          if (regenerated) session.customTitle = undefined;
           known = true;
         }
       });
@@ -2356,6 +2416,12 @@ export function getScript(): string {
         return;
       }
       input.dataset.originalTitle = title;
+      var pendingTitleRequest = state.sessionTitleRegenerations?.[sessionId];
+      if (pendingTitleRequest) {
+        if (!state.retiredSessionTitleRegenerations) state.retiredSessionTitleRegenerations = {};
+        state.retiredSessionTitleRegenerations[sessionId + ':' + pendingTitleRequest] = true;
+        delete state.sessionTitleRegenerations[sessionId];
+      }
       updateLocalSessionTitle(sessionId, title);
       renderCurrentSessionTitle();
       vscode.postMessage({ type: 'renameSession', sessionId: sessionId, title: title });

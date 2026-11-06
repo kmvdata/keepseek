@@ -104,7 +104,7 @@ export class ChatSessionStore {
   private activeSessionIdValue = '';
   private approvalModeValue: ApprovalMode = 'ask';
   private readonly stagedTitles = new Map<string, {
-    token: string; revision: number; title: string; metadata: SessionTitleMetadata;
+    token: string; revision: number; title: string; metadata: SessionTitleMetadata; clearCustomTitle?: boolean;
   }>();
 
   /** Loaded sessions only: background naming must never load an entire old history. */
@@ -118,28 +118,40 @@ export class ChatSessionStore {
     if (!session) return;
     const state = normalizeSessionTitle(session.autoTitle, session.customTitle, { preserveRunning: true });
     this.stagedTitles.delete(sessionId);
-    if (state.status !== 'running') return;
-    session.autoTitle = { ...state, status: 'pending', revision: state.revision + 1,
-      attempt: undefined, lastOutcome: 'stale' };
+    if (state.status !== 'running' && !state.manualAttempt) return;
+    session.autoTitle = { ...state, status: state.status === 'running' ? 'pending' : state.status,
+      revision: state.status === 'running' ? state.revision + 1 : state.revision,
+      manualAttempt: undefined, attempt: undefined,
+      lastOutcome: state.manualAttempt ? state.lastOutcome : 'stale' };
     // A completed candidate may already be in an adapter write. Queue its
     // invalidation behind that write even when no subsequent user turn saves.
     void this.persist('session_title_invalidated').catch(() => { /* next normal barrier / load normalization */ });
   }
 
-  public async claimSessionTitle(sessionId: string, taskId: string, basis: SessionTitleBasis): Promise<{
+  public async claimSessionTitle(sessionId: string, taskId: string, basis: SessionTitleBasis,
+    mode: 'automatic' | 'manual' = 'automatic'): Promise<{
     token: string; revision: number;
   } | undefined> {
     const session = this.getSessionById(sessionId);
-    if (!session || session.customTitle || session.pendingHistoryTruncation) return undefined;
+    if (!session || (session.customTitle && mode === 'automatic') || session.pendingHistoryTruncation) return undefined;
     const state = normalizeSessionTitle(session.autoTitle, session.customTitle, { preserveRunning: true });
-    if (state.status !== 'pending' || state.lastAttemptTaskId === taskId || !sessionTitleBasisMatches(session.messages, basis)) return undefined;
+    if (state.manualAttempt || state.status === 'running'
+      || (mode === 'automatic' && (state.status !== 'pending' || state.lastAttemptTaskId === taskId))
+      || !sessionTitleBasisMatches(session.messages, basis)) return undefined;
     const token = randomUUID();
-    const revision = state.revision + 1;
-    session.autoTitle = { ...state, status: 'running', revision, lastAttemptTaskId: taskId,
-      attempt: { token, taskId, basis }, completed: undefined };
+    // A manual claim keeps the committed revision intact. Its token provides
+    // isolation; only a successful new title advances the revision. Otherwise a
+    // failed claim-index write could invalidate the previously committed title.
+    const revision = mode === 'manual' ? state.revision : state.revision + 1;
+    session.autoTitle = mode === 'manual'
+      ? { ...state, revision, manualAttempt: { token, taskId, basis } }
+      : { ...state, status: 'running', revision, lastAttemptTaskId: taskId,
+        attempt: { token, taskId, basis }, completed: undefined };
     try { await this.persist('session_title_claim'); }
     catch (error) {
-      if (session.autoTitle?.attempt?.token === token) session.autoTitle = {
+      if (session.autoTitle?.manualAttempt?.token === token) session.autoTitle = {
+        ...session.autoTitle, manualAttempt: undefined };
+      else if (session.autoTitle?.attempt?.token === token) session.autoTitle = {
         ...session.autoTitle, status: 'pending', attempt: undefined, lastOutcome: 'save_failed' };
       throw error;
     }
@@ -151,17 +163,24 @@ export class ChatSessionStore {
     title?: string; outcome: SessionTitleMetadata['lastOutcome'];
   }): Promise<boolean> {
     const session = this.getSessionById(sessionId);
-    const attempt = session?.autoTitle?.attempt;
+    const manual = session?.autoTitle?.manualAttempt?.token === token;
+    const attempt = manual ? session?.autoTitle?.manualAttempt : session?.autoTitle?.attempt;
     if (!session || !attempt || !this.matchesTitleAttempt(sessionId, token, session.autoTitle!.revision)) return false;
     if (!result.title) {
-      session.autoTitle = { ...session.autoTitle!, status: 'pending', attempt: undefined, lastOutcome: result.outcome };
+      session.autoTitle = manual ? { ...session.autoTitle!, manualAttempt: undefined, lastOutcome: result.outcome }
+        : { ...session.autoTitle!, status: 'pending', attempt: undefined, lastOutcome: result.outcome };
       await this.persist('session_title_result');
       return false;
     }
     const revision = session.autoTitle!.revision;
-    const candidate = { token, revision, title: result.title, metadata: {
-      ...session.autoTitle!, status: 'completed' as const, attempt: undefined,
-      completed: { taskId: attempt.taskId, basis: attempt.basis }, lastOutcome: result.outcome
+    const prior = session.autoTitle!;
+    const priorMetadata = { version: prior.version, status: prior.status, revision: prior.revision,
+      lastAttemptTaskId: prior.lastAttemptTaskId, lastOutcome: prior.lastOutcome, completed: prior.completed };
+    const candidate = { token, revision, title: result.title, clearCustomTitle: manual, metadata: {
+      ...session.autoTitle!, status: 'completed' as const, attempt: undefined, manualAttempt: undefined,
+      revision: manual ? revision + 1 : revision,
+      completed: { taskId: attempt.taskId, basis: attempt.basis }, lastOutcome: result.outcome,
+      regenerationPrevious: manual ? { title: session.title, customTitle: session.customTitle, metadata: priorMetadata } : undefined
     } };
     for (let save = 0; save < 2; save += 1) {
       if (!this.matchesTitleAttempt(sessionId, token, revision)) return false;
@@ -173,17 +192,19 @@ export class ChatSessionStore {
         this.stagedTitles.delete(sessionId);
       }
     }
-    if (this.matchesTitleAttempt(sessionId, token, revision)) session.autoTitle = {
-      ...session.autoTitle!, status: 'pending', attempt: undefined, lastOutcome: 'save_failed' };
+    if (this.matchesTitleAttempt(sessionId, token, revision)) session.autoTitle = manual
+      ? { ...session.autoTitle!, manualAttempt: undefined, lastOutcome: 'save_failed' }
+      : { ...session.autoTitle!, status: 'pending', attempt: undefined, lastOutcome: 'save_failed' };
     return false;
   }
 
   private matchesTitleAttempt(sessionId: string, token: string, revision: number): boolean {
     const session = this.getSessionById(sessionId);
-    return !!session && !session.customTitle && !session.pendingHistoryTruncation
-      && session.autoTitle?.status === 'running' && session.autoTitle.revision === revision
-      && session.autoTitle.attempt?.token === token
-      && sessionTitleBasisMatches(session.messages, session.autoTitle.attempt.basis);
+    const manual = session?.autoTitle?.manualAttempt?.token === token;
+    const attempt = manual ? session?.autoTitle?.manualAttempt : session?.autoTitle?.attempt;
+    return !!session && !!attempt && (manual || !session.customTitle) && !session.pendingHistoryTruncation
+      && (manual || session.autoTitle?.status === 'running') && session.autoTitle?.revision === revision
+      && attempt.token === token && sessionTitleBasisMatches(session.messages, attempt.basis);
   }
 
   public constructor(
@@ -526,10 +547,10 @@ export class ChatSessionStore {
           const staged = this.stagedTitles.get(saved.id);
           const valid = staged && this.matchesTitleAttempt(saved.id, staged.token, staged.revision);
           saved.title = valid ? staged.title : live.title;
-          saved.customTitle = live.customTitle;
+          saved.customTitle = valid && staged.clearCustomTitle ? undefined : live.customTitle;
           saved.autoTitle = structuredClone(valid ? staged.metadata : live.autoTitle);
           const summary = next.snapshot.sessionSummaries?.find(item => item.id === saved.id);
-          if (summary) { summary.title = saved.title; summary.customTitle = live.customTitle; }
+          if (summary) { summary.title = saved.title; summary.customTitle = saved.customTitle; }
         }
         await this.sessionStorage.saveWorkspace(next.scope, next.snapshot);
         for (const saved of next.snapshot.sessions) {
@@ -540,6 +561,7 @@ export class ChatSessionStore {
             && this.matchesTitleAttempt(saved.id, staged.token, staged.revision)) {
             const live = this.getSessionById(saved.id)!;
             live.title = staged.title;
+            if (staged.clearCustomTitle) live.customTitle = undefined;
             live.autoTitle = staged.metadata;
             this.sessionSummaries.set(live.id, toSessionSummary(live, this.language));
             this.stagedTitles.delete(live.id);

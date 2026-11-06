@@ -9,8 +9,9 @@ import { ModelSourceStore } from '../src/accounts/accountStore';
 import { SubagentSettingsStore } from '../src/accounts/subagentSettingsStore';
 import type { SubagentModelSetting } from '../src/agent/subagents/types';
 import { createLogicalRunBudgetState } from '../src/agent/executionPolicy';
-import { requestSessionTitle, restoreSessionTitleBudget, mergeSessionTitleTaskBudget } from '../src/provider/sessionTitleRequest';
+import { createManualSessionTitleBudget, requestSessionTitle, restoreSessionTitleBudget, mergeSessionTitleTaskBudget } from '../src/provider/sessionTitleRequest';
 import type { UserTaskBudget } from '../src/sessions/userTaskBudget';
+import { normalizeUserTaskBudgets } from '../src/sessions/userTaskBudget';
 import type { ProviderUsageLedgerRecord } from '../src/shared/types';
 
 function budget(): UserTaskBudget {
@@ -20,6 +21,44 @@ function budget(): UserTaskBudget {
       maxContextEpochRollovers: 0, maxUpstreamTokens: 100_000, maxTreeUpstreamTokens: 100_000,
       maxContinuationOutputTokens: 0, maxContinuationOutputChars: 0 } };
 }
+
+test('explicit title regeneration has one small serializable allowance independent of an old task deadline', () => {
+  const now = Date.now();
+  const oldTask = budget();
+  oldTask.runBudget!.deadlineAt = new Date(now - 1).toISOString();
+  assert.throws(() => restoreSessionTitleBudget(oldTask, now), /time budget is exhausted/u);
+  const manual = createManualSessionTitleBudget(now);
+  assert.equal(manual.maxExecutionMs, 20_000);
+  assert.equal(manual.usedMs, 0);
+  assert.equal(manual.runBudget!.deadlineAt, new Date(now + 20_000).toISOString());
+  assert.equal(manual.budgetLimits!.maxModelRequests, 1);
+  assert.equal(manual.budgetLimits!.maxUpstreamTokens, 32_768);
+  assert.deepEqual(JSON.parse(JSON.stringify(normalizeUserTaskBudgets(JSON.parse(JSON.stringify({ manual }))).manual)), manual);
+  const restored = restoreSessionTitleBudget(manual, now);
+  restored.run.reservePhysicalRequest(100, 256);
+  assert.throws(() => restored.run.reservePhysicalRequest(100, 256), /model_request_budget_exhausted/u);
+  assert.equal(oldTask.runBudget!.modelRequests, 3, 'explicit regeneration never resets the original task counters');
+});
+
+test('explicit title regeneration keeps stricter configured time, token and cost limits', () => {
+  const original = vscode.workspace.getConfiguration;
+  const overrides: Record<string, number> = {
+    'agent.maxExecutionMs': 5_000, 'agent.subagentMaxExecutionMs': 10_000,
+    'agent.subagentMaxUpstreamTokens': 15_000, 'agent.maxTreeUpstreamTokens': 12_000, 'agent.maxCost': 0.25
+  };
+  vscode.workspace.getConfiguration = ((...args: Parameters<typeof original>) => {
+    const config = original(...args);
+    return { ...config, get: <T>(key: string, fallback: T): T => (overrides[key] ?? config.get(key, fallback)) as T };
+  }) as typeof original;
+  try {
+    const manual = createManualSessionTitleBudget();
+    assert.equal(manual.maxExecutionMs, 5_000);
+    assert.equal(manual.budgetLimits!.maxUpstreamTokens, 12_000);
+    assert.equal(manual.budgetLimits!.maxTreeUpstreamTokens, 12_000);
+    assert.equal(manual.maxCost, 0.25);
+    assert.equal(restoreSessionTitleBudget(manual).cost.limit, 0.25);
+  } finally { vscode.workspace.getConfiguration = original; }
+});
 
 test('title restores remaining task allowance and the stricter execution/deadline limit', () => {
   const now = Date.now();

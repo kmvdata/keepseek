@@ -18,7 +18,7 @@
 | 引用语法、授权与打开 | [文件引用规范](keepseek-file-reference-spec.md) | `context/references/`；`fileReference`、`fileReferenceOpener`、`referenceResources` |
 | 输入、fragment、消息、快捷键 | [架构地图的 Host/Webview 入口](keepseek-code-architecture.md#2-宿主与-webview) | `webview/input/composition.ts`、`richTextShortcuts.ts`；`inputComposition`、`richTextShortcuts` |
 | 本次任务与会话累计有效计时 | [计时口径](execution-time-statistics.md) | `sessions/executionTimeStats.ts`、`userTask.ts`；`executionTimeStats`、`usageStats` |
-| 会话自动短标题、并发提交与验收 | [自动标题](keepseek-session-title-verification.md) | `sessions/sessionTitle*`、`provider/sessionTitle*`；`sessionTitle`、`sessionTitleStorage`、`sessionTitleCompletion`、`sessionTitleRequest`、`sessionTitleWebview` |
+| 会话自动短标题、双击重建与并发提交 | [会话标题](keepseek-session-title-verification.md) | `sessions/sessionTitle*`、`provider/sessionTitle*`；`sessionTitle`、`sessionTitleStorage`、`sessionTitleCompletion`、`sessionTitleRequest`、`sessionTitleWebview`、`sessionTitleRegeneration` |
 
 表中的测试名对应 `test/<name>.test.ts`，默认入口是 [test/runTests.ts](../test/runTests.ts)。独立脚本是否需要执行由任务决定，不以未接入默认 runner 判定其无效。共享配置与插件专题内的版本探测、已通过项和限制保留其原始核验日期。[Composer 复刻规格](keepseek-composer-spec.md) 和 [移植骨架](keepseek-composer-porting-guide.md) 是面向其他技术栈的参考设计，不是当前 KeepSeek 的源码目录或 Host 消息规范。
 

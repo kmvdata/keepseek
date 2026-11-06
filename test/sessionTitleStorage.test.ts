@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { ChatSessionStore, createEmptySession, normalizeStoredSessions,
   type ChatSessionStorageAdapter, type StoredWorkspaceSessionState } from '../src/sessions/chatSessionStore';
 import { SessionTitleCoordinator } from '../src/sessions/sessionTitleCoordinator';
-import { buildSessionTitleMaterial } from '../src/sessions/sessionTitle';
+import { buildSessionTitleMaterial, buildSessionTitleRegenerationMaterial } from '../src/sessions/sessionTitle';
 import { createHistoryTruncationPlan, executeHistoryTruncation } from '../src/sessions/historyTruncation';
 import type { ChatMessage, ChatSession } from '../src/shared/types';
 import { GlobalSessionStorage, getWorkspaceHash } from '../src/sessions/globalSessionStorage';
@@ -447,4 +447,254 @@ test('a committed title preserves exact main request projections and native repl
     assert.equal(before.includes('autoTitle'), false);
     assert.equal(session.autoTitle?.status, 'completed');
   }
+});
+
+for (const previousKind of ['automatic', 'custom'] as const) {
+  test(`explicit regeneration replaces a ${previousKind} title, while automatic naming stays stopped`, async () => {
+    const { store, storage, session } = await fixture();
+    const commits: string[] = [];
+    const coordinator = new SessionTitleCoordinator(store, { onCommitted: (_id, mode) => { commits.push(mode); } });
+    if (previousKind === 'custom') await store.renameSession(session.id, 'My title');
+    else await coordinator.complete(session.id, 'turn-1', async () => set);
+    const material = buildSessionTitleRegenerationMaterial(session.messages, 'turn-1')!;
+    let calls = 0;
+    const regenerate = () => coordinator.regenerate(session.id, 'turn-1', async () => {
+      calls++; return '{"decision":"set","title":"会话审批边界"}';
+    }, material);
+    assert.equal(await regenerate(), true);
+    assert.equal(session.title, '会话审批边界');
+    assert.equal(session.customTitle, undefined);
+    assert.equal(storage.state.sessions[0].customTitle, undefined);
+    assert.equal(store.getSessionSummaries()[0].title, session.title);
+    assert.equal(session.autoTitle?.status, 'completed');
+    assert.equal(commits.at(-1), 'manual');
+    assert.equal(await coordinator.complete(session.id, 'turn-1', async () => { throw new Error('automatic repeat'); }), false);
+    assert.equal(await regenerate(), true, 'a later explicit double-click can regenerate the same conversation again');
+    assert.equal(calls, 2);
+    assert.equal(Object.hasOwn(session.autoTitle!.regenerationPrevious!.metadata, 'regenerationPrevious'), false);
+  });
+
+  for (const response of ['defer', 'invalid', 'failed'] as const) {
+    test(`manual ${response} preserves a ${previousKind} title and its lock across restart`, async () => {
+      const { store, storage, session, coordinator } = await fixture();
+      if (previousKind === 'custom') await store.renameSession(session.id, 'My title');
+      else await coordinator.complete(session.id, 'turn-1', async () => set);
+      const priorTitle = session.title, priorCustom = session.customTitle, priorStatus = session.autoTitle!.status;
+      const result = await coordinator.regenerate(session.id, 'turn-1', async () => {
+        if (response === 'failed') throw new Error('provider unavailable');
+        return response === 'defer' ? '{"decision":"defer","title":null}' : 'malformed response';
+      }, buildSessionTitleRegenerationMaterial(session.messages, 'turn-1')!);
+      assert.equal(result, false);
+      assert.equal(session.title, priorTitle);
+      assert.equal(session.customTitle, priorCustom);
+      assert.equal(session.autoTitle?.status, priorStatus);
+      assert.equal(session.autoTitle?.manualAttempt, undefined);
+      const restart = new ChatSessionStore(storage, 'en', scope);
+      await restart.initialize();
+      assert.equal(restart.getActiveSession().title, priorTitle);
+      assert.equal(restart.getActiveSession().customTitle, priorCustom);
+      assert.equal(restart.getActiveSession().autoTitle?.status, priorStatus);
+    });
+  }
+
+  test(`manual claim restart retires the request and retains the ${previousKind} title`, async () => {
+    const { store, storage, session, coordinator } = await fixture();
+    if (previousKind === 'custom') await store.renameSession(session.id, 'My title');
+    else await coordinator.complete(session.id, 'turn-1', async () => set);
+    const priorTitle = session.title, priorCustom = session.customTitle, priorStatus = session.autoTitle!.status;
+    assert.ok(await store.claimSessionTitle(session.id, 'turn-1', buildSessionTitleRegenerationMaterial(session.messages, 'turn-1')!.basis, 'manual'));
+    const restart = new ChatSessionStore(storage, 'en', scope);
+    await restart.initialize();
+    const recovered = restart.getActiveSession();
+    assert.equal(recovered.title, priorTitle);
+    assert.equal(recovered.customTitle, priorCustom);
+    assert.equal(recovered.autoTitle?.status, priorStatus);
+    assert.equal(recovered.autoTitle?.manualAttempt, undefined);
+    let requests = 0;
+    assert.equal(await new SessionTitleCoordinator(restart).complete(recovered.id, 'turn-1', async () => { requests++; return set; }), false);
+    assert.equal(requests, 0);
+  });
+
+  test(`manual candidate save failure retains a ${previousKind} title with no false success or model retry`, async () => {
+    const { store, storage, session, coordinator } = await fixture();
+    if (previousKind === 'custom') await store.renameSession(session.id, 'My title');
+    else await coordinator.complete(session.id, 'turn-1', async () => set);
+    const priorTitle = session.title, priorCustom = session.customTitle, priorStatus = session.autoTitle!.status;
+    let calls = 0, saves = 0;
+    storage.beforeSave = state => {
+      if (state.sessions[0].title === '会话审批边界') { saves++; throw new Error('disk unavailable'); }
+    };
+    assert.equal(await coordinator.regenerate(session.id, 'turn-1', async () => {
+      calls++; return '{"decision":"set","title":"会话审批边界"}';
+    }, buildSessionTitleRegenerationMaterial(session.messages, 'turn-1')!), false);
+    assert.equal(calls, 1); assert.equal(saves, 2);
+    assert.equal(session.title, priorTitle);
+    assert.equal(session.customTitle, priorCustom);
+    assert.equal(session.autoTitle?.status, priorStatus);
+    const restart = new ChatSessionStore(storage, 'en', scope);
+    await restart.initialize();
+    assert.equal(restart.getActiveSession().title, priorTitle);
+    assert.equal(restart.getActiveSession().autoTitle?.status, priorStatus);
+  });
+}
+
+for (const invalidation of ['rename', 'new-turn', 'delete'] as const) {
+  test(`manual response cannot overwrite ${invalidation} and concurrent explicit requests dispatch once`, async () => {
+    const { store, session, coordinator } = await fixture();
+    await store.renameSession(session.id, 'Manual');
+    const started = deferred<void>(), response = deferred<string>();
+    const material = buildSessionTitleRegenerationMaterial(session.messages, 'turn-1')!;
+    const work = coordinator.regenerate(session.id, 'turn-1', async () => { started.resolve(); return response.promise; }, material);
+    await started.promise;
+    assert.equal(await coordinator.regenerate(session.id, 'turn-1', async () => { throw new Error('duplicate'); }, material), false);
+    if (invalidation === 'rename') await store.renameSession(session.id, 'Manual');
+    if (invalidation === 'new-turn') { coordinator.cancel(session.id); session.messages.push(...pair('turn-2')); await store.persist(); }
+    if (invalidation === 'delete') await store.deleteSessions([session.id]);
+    response.resolve(set);
+    assert.equal(await work, false);
+    if (invalidation === 'delete') assert.equal(store.getSessionById(session.id), undefined);
+    else { assert.equal(session.title, 'Manual'); assert.equal(session.customTitle, 'Manual'); }
+  });
+}
+
+for (const previousKind of ['automatic', 'custom'] as const) {
+  test(`failed real manual index commit restores a ${previousKind} title and stop semantics on restart`, async t => {
+    const root = await mkdtemp(join(tmpdir(), 'keepseek-manual-title-index-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const uri = vscode.Uri.file(root) as never;
+    const storage = new GlobalSessionStorage(uri);
+    const store = new ChatSessionStore(storage, 'en', scope);
+    await store.initialize();
+    const session = store.getActiveSession();
+    session.messages = pair('turn-1'); await store.persist();
+    const coordinator = new SessionTitleCoordinator(store);
+    if (previousKind === 'custom') await store.renameSession(session.id, 'Manual title');
+    else assert.equal(await coordinator.complete(session.id, 'turn-1', async () => set), true);
+    const priorTitle = session.title, priorCustom = session.customTitle, priorStatus = session.autoTitle!.status;
+    const originalRename = vscode.workspace.fs.rename;
+    let rejected = 0, requests = 0;
+    vscode.workspace.fs.rename = async (...args) => {
+      if (args[1].fsPath.endsWith('/index.json')) {
+        const candidate = JSON.parse(await readFile(args[0].fsPath, 'utf8'));
+        if (candidate.sessions.some((entry: { title: string }) => entry.title === '会话审批边界')) {
+          rejected++; throw Object.assign(new Error('index unavailable'), { code: 'EACCES' });
+        }
+      }
+      return originalRename(...args);
+    };
+    try {
+      assert.equal(await coordinator.regenerate(session.id, 'turn-1', async () => {
+        requests++; return '{"decision":"set","title":"会话审批边界"}';
+      }, buildSessionTitleRegenerationMaterial(session.messages, 'turn-1')!), false);
+    } finally { vscode.workspace.fs.rename = originalRename; }
+    assert.equal(requests, 1); assert.equal(rejected, 2);
+    assert.equal(session.title, priorTitle);
+    const restart = new ChatSessionStore(new GlobalSessionStorage(uri), 'en', scope);
+    await restart.initialize();
+    const recovered = restart.getActiveSession();
+    assert.equal(recovered.title, priorTitle);
+    assert.equal(recovered.customTitle, priorCustom);
+    assert.equal(recovered.autoTitle?.status, priorStatus);
+    assert.equal(recovered.autoTitle?.manualAttempt, undefined);
+  });
+}
+
+test('manual regeneration names legacy conversations without rewriting their task links or request bytes', async () => {
+  const legacy = pair('legacy');
+  for (const message of legacy) delete message.userTask;
+  const { store, session, coordinator } = await fixture(legacy);
+  const before = JSON.stringify(session.messages);
+  assert.equal(await coordinator.regenerate(session.id, 'legacy', async () => set,
+    buildSessionTitleRegenerationMaterial(session.messages, 'legacy')!), true);
+  assert.equal(JSON.stringify(session.messages), before);
+  assert.equal(session.autoTitle?.status, 'completed');
+  await store.persist();
+});
+
+for (const previousKind of ['automatic', 'custom'] as const) {
+  test(`a failed manual claim index write preserves the ${previousKind} title before provider dispatch`, async t => {
+    const root = await mkdtemp(join(tmpdir(), 'keepseek-manual-title-claim-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const uri = vscode.Uri.file(root) as never;
+    const storage = new GlobalSessionStorage(uri);
+    const store = new ChatSessionStore(storage, 'en', scope);
+    await store.initialize();
+    const session = store.getActiveSession();
+    session.messages = pair('turn-1'); await store.persist();
+    const coordinator = new SessionTitleCoordinator(store);
+    if (previousKind === 'custom') await store.renameSession(session.id, 'Manual title');
+    else assert.equal(await coordinator.complete(session.id, 'turn-1', async () => set), true);
+    const priorTitle = session.title, priorCustom = session.customTitle, priorStatus = session.autoTitle!.status;
+    const originalRename = vscode.workspace.fs.rename;
+    let requests = 0;
+    vscode.workspace.fs.rename = async (...args) => {
+      if (args[1].fsPath.endsWith('/index.json')) throw Object.assign(new Error('claim index unavailable'), { code: 'EACCES' });
+      return originalRename(...args);
+    };
+    try {
+      assert.equal(await coordinator.regenerate(session.id, 'turn-1', async () => { requests++; return set; },
+        buildSessionTitleRegenerationMaterial(session.messages, 'turn-1')!), false);
+    } finally { vscode.workspace.fs.rename = originalRename; }
+    assert.equal(requests, 0);
+    const restart = new ChatSessionStore(new GlobalSessionStorage(uri), 'en', scope);
+    await restart.initialize();
+    const recovered = restart.getActiveSession();
+    assert.equal(recovered.title, priorTitle);
+    assert.equal(recovered.customTitle, priorCustom);
+    assert.equal(recovered.autoTitle?.status, priorStatus);
+    assert.equal(recovered.autoTitle?.manualAttempt, undefined);
+  });
+}
+
+test('a retired manual callback cannot cancel or invalidate a newer in-flight regeneration', async () => {
+  const { store, session, coordinator } = await fixture();
+  await store.renameSession(session.id, 'Manual');
+  const material = buildSessionTitleRegenerationMaterial(session.messages, 'turn-1')!;
+  const oldStarted = deferred<void>(), newStarted = deferred<void>();
+  const oldResponse = deferred<string>(), newResponse = deferred<string>();
+  const old = coordinator.regenerate(session.id, 'turn-1', async () => { oldStarted.resolve(); return oldResponse.promise; }, material);
+  await oldStarted.promise;
+  coordinator.cancel(session.id);
+  let newSignal: AbortSignal | undefined;
+  const current = coordinator.regenerate(session.id, 'turn-1', async input => {
+    newSignal = input.signal; newStarted.resolve(); return newResponse.promise;
+  }, material);
+  await newStarted.promise;
+  const token = session.autoTitle!.manualAttempt!.token;
+  oldResponse.resolve(set);
+  assert.equal(await old, false);
+  assert.equal(newSignal?.aborted, false);
+  assert.equal(session.autoTitle?.manualAttempt?.token, token);
+  newResponse.resolve('{"decision":"set","title":"会话审批边界"}');
+  assert.equal(await current, true);
+  assert.equal(session.title, '会话审批边界');
+});
+
+test('a cancelled manual claim keeps its committed automatic revision if the correction index write fails', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'keepseek-manual-title-cancel-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const uri = vscode.Uri.file(root) as never;
+  const store = new ChatSessionStore(new GlobalSessionStorage(uri), 'en', scope);
+  await store.initialize();
+  const session = store.getActiveSession();
+  session.messages = pair('turn-1'); await store.persist();
+  assert.equal(await new SessionTitleCoordinator(store).complete(session.id, 'turn-1', async () => set), true);
+  const revision = session.autoTitle!.revision;
+  assert.ok(await store.claimSessionTitle(session.id, 'turn-1', buildSessionTitleRegenerationMaterial(session.messages, 'turn-1')!.basis, 'manual'));
+  const originalRename = vscode.workspace.fs.rename;
+  vscode.workspace.fs.rename = async (...args) => {
+    if (args[1].fsPath.endsWith('/index.json')) throw Object.assign(new Error('cancel index unavailable'), { code: 'EACCES' });
+    return originalRename(...args);
+  };
+  try {
+    store.invalidateSessionTitle(session.id);
+    await assert.rejects(store.persist(), /cancel index unavailable/);
+  } finally { vscode.workspace.fs.rename = originalRename; }
+  assert.equal(session.autoTitle?.revision, revision);
+  const restart = new ChatSessionStore(new GlobalSessionStorage(uri), 'en', scope);
+  await restart.initialize();
+  const recovered = restart.getActiveSession();
+  assert.equal(recovered.title, '审批失败排查');
+  assert.equal(recovered.autoTitle?.status, 'completed');
+  assert.equal(recovered.autoTitle?.manualAttempt, undefined);
 });

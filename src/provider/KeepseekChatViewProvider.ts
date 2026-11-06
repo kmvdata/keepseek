@@ -1,7 +1,8 @@
 import type { AgentRequest } from '../shared/types';
-import { SessionTitleCoordinator } from '../sessions/sessionTitleCoordinator';
+import { SessionTitleCoordinator, type SessionTitleRequest } from '../sessions/sessionTitleCoordinator';
+import { buildSessionTitleRegenerationMaterial, getSessionTitleRegenerationTaskId } from '../sessions/sessionTitle';
 import { captureSessionTitleCompletion, checkSessionTitleCompletion, type SessionTitleCompletion } from './sessionTitleCompletion';
-import { requestSessionTitle, mergeSessionTitleTaskBudget } from './sessionTitleRequest';
+import { requestSessionTitle, mergeSessionTitleTaskBudget, createManualSessionTitleBudget } from './sessionTitleRequest';
 import { approvalDisposition } from '../approvals/approvalReviewTypes';
 import { getAutoApprovalReviewerSetting } from '../shared/config';
 import { ExecutionClock, ExecutionCostBudget, LogicalBudgetExceededError, LogicalRunBudget, SharedUpstreamTokenBudget } from '../agent/executionPolicy';
@@ -271,6 +272,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     parentRequest: Pick<AgentRequest, 'model' | 'sourceConfig'>;
   }>();
   private titleLifecycleDisposed = false;
+  private readonly manualSessionTitleRequests = new Map<string, string>();
   private readonly agentRunner: AgentRunner;
   private readonly agentRequestCoordinator: AgentRequestCoordinator;
   private readonly sourceStore: ModelSourceStore;
@@ -499,9 +501,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   ) {
     this.sessionTitles = new SessionTitleCoordinator(this.sessionStore, {
       canCommit: () => vscode.workspace.isTrusted && !this.titleLifecycleDisposed,
-      onCommitted: sessionId => {
+      onCommitted: (sessionId, mode) => {
         const session = this.sessionStore.getSessionById(sessionId);
-        if (session) this.postToWebview({ type: 'sessionTitleUpdated', sessionId, title: session.title });
+        const requestId = mode === 'manual' ? this.manualSessionTitleRequests.get(sessionId) : undefined;
+        if (session) this.postToWebview({ type: 'sessionTitleUpdated', sessionId, title: session.title,
+          ...(requestId ? { regenerated: true, requestId } : {}) });
       },
       onDiagnostic: (sessionId, taskId, outcome, elapsedMs) => console.info('[KeepSeek] session_title', { sessionId, taskId, outcome, elapsedMs })
     });
@@ -1055,6 +1059,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     switch (message.type) {
       case 'ready':
         this.startupTrace?.mark('webview-ready');
+        for (const [sessionId, requestId] of this.manualSessionTitleRequests) {
+          this.postToWebview({ type: 'sessionTitleRegeneration', sessionId, requestId, running: true, restored: true });
+        }
         this.postLightweightState();
         if (this.approvalDataReady) {
           this.postState({ immediate: true, forceFull: true });
@@ -1196,6 +1203,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         if (await this.sessionStore.renameSession(message.sessionId, message.title)) {
           this.postState();
         }
+        return;
+      case 'regenerateSessionTitle':
+        await this.regenerateSessionTitle(message.sessionId, message.requestId);
         return;
       case 'deleteSessions':
         await this.deleteSessions(message.sessionIds);
@@ -6773,6 +6783,81 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.sessionTitleCandidates?.set(session.id, { completion, durable: false, parentRequest: {
       model: { ...parentRequest.model }, sourceConfig: parentRequest.sourceConfig && { ...parentRequest.sourceConfig }
     } });
+  }
+
+  /** An explicit title action owns only its local request slot, never the main
+   * run lock. Capture the selected model and visible conversation before awaits. */
+  private async regenerateSessionTitle(sessionId: string, requestId: string): Promise<void> {
+    if (typeof sessionId !== 'string' || typeof requestId !== 'string' || !requestId || requestId.length > 128) return;
+    const status = (running: boolean) => this.postToWebview({ type: 'sessionTitleRegeneration', sessionId, requestId, running });
+    if (this.titleLifecycleDisposed || !vscode.workspace.isTrusted || !this.sessionReady
+      || !this.approvalDataReady || !this.requestContextReady || this.isBusy || this.isStartingRun
+      || this.activeDraftRunId || this.activeChangeActions?.size || this.hasActiveBackgroundRun()
+      || this.manualSessionTitleRequests.has(sessionId) || this.sessionStore.activeSessionId !== sessionId) {
+      status(false); return;
+    }
+    const session = this.sessionStore.getSessionById(sessionId);
+    const model = findModelBySelection(this.availableModels, { sourceId: this.selectedSourceId, modelId: this.selectedModelId });
+    if (!session || session.pendingHistoryTruncation || !model) { status(false); return; }
+    const taskId = getSessionTitleRegenerationTaskId(session.messages);
+    if (!taskId) { status(false); return; }
+    const material = buildSessionTitleRegenerationMaterial(session.messages, taskId, { historyStartKnown: true });
+    if (!material) {
+      console.info('[KeepSeek] session_title', { sessionId, outcome: 'material_unavailable' });
+      status(false); return;
+    }
+    const parentRequest = { model: { ...model } };
+    this.manualSessionTitleRequests.set(sessionId, requestId);
+    this.sessionTitleCandidates.delete(sessionId);
+    status(true);
+    try {
+      await this.sessionTitles.regenerate(sessionId, taskId,
+        request => this.requestManualSessionTitle(sessionId, request, parentRequest), material);
+    } catch {
+      // An explicit auxiliary failure leaves the existing title and input alone.
+      console.info('[KeepSeek] session_title', { sessionId, outcome: 'failed' });
+    } finally {
+      if (this.manualSessionTitleRequests.get(sessionId) === requestId) this.manualSessionTitleRequests.delete(sessionId);
+      status(false);
+    }
+  }
+
+  private async requestManualSessionTitle(sessionId: string, request: SessionTitleRequest,
+    parentRequest: Pick<AgentRequest, 'model'>): Promise<string> {
+    const session = this.sessionStore.getSessionById(sessionId);
+    if (!session || request.signal.aborted) throw new Error('stale');
+    // This new, explicitly requested auxiliary operation does not revive or
+    // reset a finished user's task allowance. Keep only its latest safety record;
+    // all physical attempts and settled usage remain in the ordinary ledger.
+    const taskId = `session_title_manual_${request.token}`;
+    const budget = createManualSessionTitleBudget();
+    const budgets = session.userTaskBudgets ??= Object.create(null);
+    for (const key of Object.keys(budgets)) if (key.startsWith('session_title_manual_')) delete budgets[key];
+    budgets[taskId] = budget;
+    await this.sessionStore.persist('session_title_manual_budget');
+    if (request.signal.aborted) throw new Error('stale');
+    let previousBudget = structuredClone(budget);
+    return requestSessionTitle({
+      globalStorageUri: this.globalStorageUri, workspaceKey: this.sessionStore.workspaceKey,
+      sourceStore: this.sourceStore, settingsStore: this.subagentSettingsStore,
+      parentRequest, language: this.language, sessionId, taskId, userPrompt: request.userPrompt,
+      token: request.token, signal: request.signal, taskBudget: structuredClone(budget),
+      onUsageLedgerRecord: async record => {
+        const latest = this.sessionStore.getSessionById(sessionId);
+        if (latest) await this.applyUsageLedgerRecord(latest, record);
+      },
+      onBudgetChanged: async next => {
+        if (!vscode.workspace.isTrusted || this.titleLifecycleDisposed) {
+          this.sessionTitles.cancel(sessionId); throw new Error('stale');
+        }
+        const latest = this.sessionStore.getSessionById(sessionId);
+        const current = latest?.userTaskBudgets?.[taskId];
+        if (!latest || !current) return;
+        latest.userTaskBudgets![taskId] = mergeSessionTitleTaskBudget(current, previousBudget, next);
+        previousBudget = structuredClone(next);
+        await this.sessionStore.persist('session_title_manual_budget');
+      }
+    });
   }
 
   /** Only explicit response candidates reach this convergence point. UI refreshes

@@ -6,7 +6,7 @@ import { applyProviderRequestBudget, loadProviderRequestBudget } from './request
 import { getAgentRuntimeProfile } from '../shared/modelProfiles';
 import { randomUUID } from 'node:crypto';
 import type { ModelSourceConfigSnapshot } from '../accounts/types';
-import { requiresModelSourceApiKey } from '../accounts/sourceCapabilities';
+import { isOfficialAnthropicSource, requiresModelSourceApiKey } from '../accounts/sourceCapabilities';
 import type { KeepseekLanguage } from '../shared/i18n';
 import type { KeepseekModel, ProviderCacheObservation, ProviderUsageLedgerRecord, UsageEvent, UsagePriceSnapshot } from '../shared/types';
 import type { DeepSeekChatRequestBody } from './deepseek/types';
@@ -27,6 +27,7 @@ export function buildOneShotTextProviderBody(input: {
   systemPrompt: string;
   userPrompt: string;
   maxOutputTokens?: number;
+  cacheControl?: AnthropicMessagesRequestBody['cache_control'];
 }): DeepSeekChatRequestBody | OpenAiResponsesRequestBody | AnthropicMessagesRequestBody {
   const modelMaxTokens = getAgentRuntimeProfile(input.model ?? { id: input.modelId, label: input.modelId, provider: input.provider },
     { thinkingEnabled: false, reasoningEffort: 'high' }).maxTokens;
@@ -53,7 +54,8 @@ export function buildOneShotTextProviderBody(input: {
       messages: [{ role: 'user', content: [{ type: 'text', text: input.userPrompt }] }],
       stream: true,
       max_tokens: maxTokens,
-      temperature: 0
+      temperature: 0,
+      ...(input.cacheControl ? { cache_control: input.cacheControl } : {})
     };
   }
   return {
@@ -130,7 +132,10 @@ export async function requestOneShotText(input: OneShotTextRequestInput): Promis
   const maxOutputTokens = isTitle ? Math.min(input.maxOutputTokens ?? 256, 256) : input.maxOutputTokens;
   const body = buildOneShotTextProviderBody({
     modelId: input.model.id, model: input.model, provider: input.sourceConfig.provider,
-    systemPrompt: input.systemPrompt, userPrompt: input.userPrompt, maxOutputTokens
+    systemPrompt: input.systemPrompt, userPrompt: input.userPrompt, maxOutputTokens,
+    // Match the existing main/summary policy only on the canonical Anthropic
+    // endpoint. Compatible gateways and approval reviewer bytes stay unchanged.
+    cacheControl: isTitle && isOfficialAnthropicSource(input.sourceConfig) ? { type: 'ephemeral' } : undefined
   });
   // Use the same admission estimator/calibration as all other Provider requests,
   // while respecting this auxiliary request's smaller output cap.

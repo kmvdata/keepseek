@@ -286,7 +286,11 @@ export function getStyles(): string {
       text-overflow: ellipsis;
       white-space: nowrap;
       margin-right: 8px;
+      cursor: pointer;
     }
+
+    .header-title[aria-disabled="true"] { cursor: default; }
+    .header-title:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
 
     .header-actions {
       display: flex;

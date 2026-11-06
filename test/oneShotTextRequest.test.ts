@@ -88,6 +88,30 @@ test('title output limit never exceeds model capabilities or the auxiliary cap',
   assert.equal('max_tokens' in body && body.max_tokens, 128);
 });
 
+test('title caching reuses the official Anthropic policy without changing compatible or approval payloads', async () => {
+  const original = globalThis.fetch;
+  const bodies: string[] = [];
+  try {
+    globalThis.fetch = (async (_url, init) => { bodies.push(String(init?.body)); return reply('anthropic-compatible'); }) as typeof fetch;
+    const official = input('anthropic-compatible');
+    official.sourceConfig = { ...official.sourceConfig, baseUrl: 'https://api.anthropic.com' };
+    await requestOneShotText(official);
+    await requestOneShotText(input('anthropic-compatible'));
+    const repeat = input('anthropic-compatible');
+    repeat.sourceConfig = { ...repeat.sourceConfig, baseUrl: 'https://api.anthropic.com' };
+    repeat.requestId = 'another_host_token';
+    await requestOneShotText(repeat);
+    const approval = input('anthropic-compatible');
+    approval.sourceConfig = { ...approval.sourceConfig, baseUrl: 'https://api.anthropic.com' };
+    approval.purpose = 'approval_review';
+    await requestOneShotText(approval);
+    assert.deepEqual(JSON.parse(bodies[0]).cache_control, { type: 'ephemeral' });
+    assert.equal(JSON.parse(bodies[1]).cache_control, undefined, 'unknown compatible gateways receive no unsupported cache hint');
+    assert.equal(bodies[0], bodies[2], 'host request identities are absent from the model body and do not spoil a stable prefix');
+    assert.equal(JSON.parse(bodies[3]).cache_control, undefined, 'existing approval reviewer payloads retain their previous policy');
+  } finally { globalThis.fetch = original; }
+});
+
 test('title failures make no network retry and retain unknown attempt usage and budget', async () => {
   const original = globalThis.fetch;
   try {

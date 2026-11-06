@@ -2,9 +2,10 @@ import type * as vscode from 'vscode';
 import type { ModelSourceStore } from '../accounts/accountStore';
 import type { SubagentSettingsStore } from '../accounts/subagentSettingsStore';
 import { resolveConfiguredSubagentModel } from '../accounts/subagentModelResolver';
-import { ExecutionCostBudget, LogicalRunBudget, SharedUpstreamTokenBudget } from '../agent/executionPolicy';
+import { createLogicalRunBudgetState, ExecutionCostBudget, LogicalRunBudget, SharedUpstreamTokenBudget } from '../agent/executionPolicy';
 import { OneShotTextRequestError, requestOneShotText } from '../agent/oneShotTextRequest';
-import { getConfiguredModelRequestTimeoutMs } from '../shared/config';
+import { getConfiguredAgentMaxCost, getConfiguredAgentMaxExecutionMs, getConfiguredAgentMaxTreeUpstreamTokens,
+  getConfiguredModelRequestTimeoutMs, getConfiguredSubagentMaxExecutionMs, getConfiguredSubagentMaxUpstreamTokens } from '../shared/config';
 import type { KeepseekLanguage } from '../shared/i18n';
 import type { AgentRequest, ProviderUsageLedgerRecord } from '../shared/types';
 import { SESSION_TITLE_SYSTEM_PROMPT } from '../sessions/sessionTitle';
@@ -15,7 +16,7 @@ export interface SessionTitleRequestInput {
   workspaceKey: string;
   sourceStore: ModelSourceStore;
   settingsStore: SubagentSettingsStore;
-  /** Captured from the completed execution segment, never the current picker. */
+  /** Captured from the execution segment or explicit click, never re-read from the picker. */
   parentRequest: Pick<AgentRequest, 'model'> & Partial<Pick<AgentRequest, 'sourceConfig'>>;
   language: KeepseekLanguage;
   sessionId: string;
@@ -27,6 +28,24 @@ export interface SessionTitleRequestInput {
   onUsageLedgerRecord: (record: ProviderUsageLedgerRecord) => Promise<void> | void;
   /** Persist only this task's counters, before dispatch and after settlement. */
   onBudgetChanged?: (next: UserTaskBudget) => Promise<void> | void;
+}
+
+/** An explicit user regeneration is a new, narrowly bounded auxiliary action,
+ * not another segment of the old task. Its allowance must not restore an old
+ * deadline or grant a full main/child run; the host persists this separate
+ * record before dispatch and keeps it out of the main task clock. */
+export function createManualSessionTitleBudget(now = Date.now()): UserTaskBudget {
+  const maxExecutionMs = Math.min(20_000, getConfiguredModelRequestTimeoutMs(),
+    ...[getConfiguredAgentMaxExecutionMs(), getConfiguredSubagentMaxExecutionMs()].filter(value => value > 0));
+  const maxTokens = Math.min(32_768, getConfiguredSubagentMaxUpstreamTokens(),
+    ...[getConfiguredAgentMaxTreeUpstreamTokens()].filter(value => value > 0));
+  return {
+    version: 1, usedMs: 0, maxExecutionMs, maxCost: getConfiguredAgentMaxCost(), usedCostByCurrency: {},
+    runBudget: createLogicalRunBudgetState({ deadlineAt: new Date(now + maxExecutionMs).toISOString() }),
+    budgetLimits: { maxModelRequests: 1, maxToolRounds: 0, maxToolCalls: 0, maxContinuations: 0,
+      maxContextEpochRollovers: 0, maxUpstreamTokens: maxTokens, maxTreeUpstreamTokens: maxTokens,
+      maxContinuationOutputTokens: 0, maxContinuationOutputChars: 0 }
+  };
 }
 
 /** Restores the spent root allowance. No fresh task allowance or UI clock is

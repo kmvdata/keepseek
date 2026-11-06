@@ -502,6 +502,22 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
       // must not turn a rejected title into success on restart or orphan repair.
       if (!entry?.autoTitleCommit || entry.autoTitleCommit !== automaticTitleCommit(session)) {
         const state = session.autoTitle;
+        const previous = state.regenerationPrevious;
+        if (previous && entry) {
+          const priorSession = { ...session, title: previous.title, customTitle: previous.customTitle,
+            autoTitle: previous.metadata };
+          const confirmedPrevious = previous.customTitle
+            ? entry.customTitle === previous.customTitle && entry.title === previous.title
+            : previous.metadata.status === 'completed'
+              ? !!entry.autoTitleCommit && entry.autoTitleCommit === automaticTitleCommit(priorSession)
+              : !entry.autoTitleCommit && entry.title === previous.title;
+          if (confirmedPrevious) {
+            session.title = previous.title;
+            session.customTitle = previous.customTitle;
+            session.autoTitle = previous.metadata;
+            return session.workspaceKey === index.workspaceKey ? session : undefined;
+          }
+        }
         session.autoTitle = { version: 1, status: 'pending', revision: state.revision + 1,
           lastAttemptTaskId: state.lastAttemptTaskId ?? state.completed?.taskId,
           lastOutcome: entry?.customTitle ? 'manual' : 'save_failed' };
@@ -778,7 +794,8 @@ function automaticTitleCommit(session: ChatSession): string | undefined {
   if (session.customTitle || state?.status !== 'completed' || !state.completed) return undefined;
   return createHash('sha256').update(JSON.stringify([
     session.id, session.title, state.revision, state.completed.taskId,
-    state.completed.basis.messages.map(ref => [ref.id, ref.hash]), state.completed.basis.lastMessageId
+    state.completed.basis.messages.map(ref => [ref.id, ref.hash]), state.completed.basis.lastMessageId,
+    ...(state.completed.basis.conversation ? [state.completed.basis.conversation] : [])
   ]), 'utf8').digest('hex');
 }
 
