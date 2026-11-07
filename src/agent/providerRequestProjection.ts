@@ -7,7 +7,8 @@ import type {
   ContextCompressionState,
   ContextFile,
   CurrentRunContext,
-  KeepseekModel
+  KeepseekModel,
+  ProjectRouterRole
 } from '../shared/types';
 import { getConfiguredSlimToolModeEnabled } from '../shared/config';
 import {
@@ -33,6 +34,7 @@ import {
   getAgentToolNamesForPrompt,
   getAgentTools
 } from './protocol';
+import { getProjectRouterSystemPrompt, normalizeProjectRouterRole, PROJECT_ROUTER_TOOL_NAMES } from './taskRouter';
 
 export { PLUGIN_SKILL_REQUEST_PROTOCOL_VERSION } from './protocol';
 export const CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION = 15;
@@ -70,6 +72,7 @@ export function buildProviderPayloadProjection(input: {
 }
 
 export interface ProviderRequestProjectionInput {
+  agentRole?: ProjectRouterRole;
   model: KeepseekModel;
   agentSettings: AgentSettings;
   contextFiles: ContextFile[];
@@ -186,6 +189,7 @@ export function buildProviderRequestProjection(
   input: ProviderRequestProjectionInput
 ): ProviderRequestProjection {
   const profile = getAgentRuntimeProfile(input.model, input.agentSettings);
+  const agentRole = normalizeProjectRouterRole(input.agentRole);
   const requestProtocolVersion = normalizeRequestProtocolVersion(input.requestProtocolVersion);
   const provider = input.provider ?? input.model.provider;
   const lane = getProviderRequestLane({ provider: input.provider ?? (provider === 'openai-responses' || provider === 'anthropic-compatible' ? provider : 'openai-compatible'),
@@ -219,19 +223,19 @@ export function buildProviderRequestProjection(
     language: input.language,
     projection: historyProjection,
     requestProtocolVersion,
-    systemPrompt: input.systemPrompt
+    systemPrompt: agentRole ? getProjectRouterSystemPrompt(input.language) : input.systemPrompt
   }), provider);
   // Tool exposure is an execution capability, not a model capability or a
   // budget sentinel. Callers that need a no-tools lane must say so explicitly.
   const includeTools = input.includeTools ?? true;
   const toolNames = includeTools
-    ? [...(input.slimToolNames ?? getAgentToolNamesForPrompt(
+    ? [...(agentRole ? PROJECT_ROUTER_TOOL_NAMES : input.slimToolNames ?? getAgentToolNamesForPrompt(
         input.prompt,
         getConfiguredSlimToolModeEnabled(),
         requestProtocolVersion
       ))]
     : [];
-  const tools = includeTools ? getAgentTools({ toolNames, requestProtocolVersion }) : [];
+  const tools = includeTools ? getAgentTools({ toolNames, requestProtocolVersion, agentRole }) : [];
   const responses = provider === 'openai-responses'
     ? buildOpenAiResponsesRequestProjection({
         messages,

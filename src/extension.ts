@@ -7,6 +7,10 @@ import { getConfiguredKeepseekLanguage } from './shared/i18n';
 import type { KeepseekExtensionInfo } from './shared/types';
 import { StartupPerformanceTrace } from './shared/startupPerformance';
 import { getRuntimeIdentity, initializeRuntimeIdentity } from './shared/runtimeIdentity';
+import { ProjectExecutionOwner } from './tasks/projectOwner';
+import { ProjectResourceCoordinator, configureProjectExecutionEnforcement } from './tasks/projectResources';
+import { ProjectRequestAdmission } from './tasks/requestAdmission';
+import { createHash, randomUUID } from 'node:crypto';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const startupTrace = new StartupPerformanceTrace();
@@ -16,12 +20,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   const globalSessionStorage = new GlobalSessionStorage(context.globalStorageUri, startupTrace);
   const workspaceScope = getCurrentWorkspaceSessionScope();
+  const projectUri = vscode.workspace.workspaceFolders?.[0]?.uri;
+  const owner = projectUri ? await ProjectExecutionOwner.acquire({ projectUri }) : undefined;
+  const savedViewId = context.workspaceState.get<string>('keepseek.taskViewWindowId') ?? randomUUID();
+  const observerViewId = `${savedViewId}-${createHash('sha256').update(`${vscode.env.sessionId}:${process.pid}`).digest('hex').slice(0, 12)}`;
+  const projectOptions = owner ? { owner, resources: new ProjectResourceCoordinator(owner.projectId),
+    admission: new ProjectRequestAdmission({ rootConcurrency: 2 }),
+    windowId: owner.isOwner ? savedViewId : observerViewId } : undefined;
+  if (projectOptions) {
+    if (owner?.isOwner) await context.workspaceState.update('keepseek.taskViewWindowId', savedViewId);
+    configureProjectExecutionEnforcement(true);
+    globalSessionStorage.setReadOnly(!projectOptions.owner.isOwner);
+  }
   const sessionStore = new ChatSessionStore(globalSessionStorage, getConfiguredKeepseekLanguage(), workspaceScope);
+  if (owner) sessionStore.setReadOnly(!owner.isOwner);
   let startSessionInitialization: (() => void) | undefined;
   const sessionInitialization = new Promise<void>((resolve, reject) => {
     startSessionInitialization = () => {
       void startupTrace.measure('current-workspace-sessions-loaded', async () => {
-        await globalSessionStorage.migrateLegacyWorkspaceState(context.workspaceState, workspaceScope);
+        if (owner?.isOwner !== false) await globalSessionStorage.migrateLegacyWorkspaceState(context.workspaceState, workspaceScope);
         await sessionStore.initialize();
       }, () => ({ entries: sessionStore.getSessionSummaries().length })).then(resolve, reject);
     };
@@ -34,7 +51,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.globalState,
     createExtensionInfo(context),
     sessionInitialization,
-    startupTrace
+    startupTrace,
+    projectOptions
   );
   const webviewProvider = vscode.window.registerWebviewViewProvider(KeepseekChatViewProvider.viewType, provider, {
     webviewOptions: {

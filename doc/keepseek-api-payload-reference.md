@@ -2,6 +2,10 @@
 
 本文档面向希望理解 KeepSeek Agent 底层工作方式的开发者和高级用户。文档说明引用、上下文、项目指令和 Skill 如何进入权威请求投影，以及 Chat Completions、OpenAI Responses、Anthropic Messages 三种独立协议的真实 payload。Anthropic 是原生 Messages 客户端。当前导航与独立版本维度见 [文档索引](README.md)，字节稳定与缓存边界见 [缓存与投影](cache_keepseek.md)。本文 JSON、目录清单和代码片段用于说明字段与数据流，省略号和示例工具子集不能作为真实请求或冻结 fixture；实际字节以源码 projection 及 `test/p1ProtocolDelivery.test.ts` 等回归为准。
 
+项目 Router 是独立 session 的显式 `agentRole`，role/toolset 为 1；Worker request/schema 仍为 15，child 仍为 11。Router 的固定任务工具、persona、容量估计及三种 transport 均由同一 projection 选择，不修改 Worker 热工具表。`includeTools:false` 才是明确无工具；空名称列表不能作为无工具开关。任务身份、查看目标、进度和 draft revision 不加入旧静态前缀。
+
+请求账本逐物理 attempt 记录 Router、Worker、child、reviewer、摘要和标题；逻辑输入幂等不等于物理重试免费。Anthropic 未提供 native cache read/write 字段时为 unavailable，只有部分字段时为 partial；明确的 0 才是已报告零。缓存写入数量另存 `cacheWriteTokens`，仍包含于相应输入口径，不把缺失 cache 计量推算成 0 命中。受控实际传输与账本证据见 [请求证据](benchmarks/keepseek-project-request-evidence-20261107.json)，不是供应商缓存或真实账单证据。
+
 ## 1. 总体数据流
 
 引用展开得到用户正文，AGENTS/Skills/Context Files 形成稳定 `contextInstructions`，两者分别持久化。它们经过同一权威 projection，按实际 lane 序列化；工具完整结果先保存 Evidence，Provider 只接收已固定的可见信封。

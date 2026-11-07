@@ -3,7 +3,7 @@ import { open, unlink } from 'node:fs/promises';
 import * as vscode from 'vscode';
 import { writeBytesAtomic, writeJsonAtomic } from '../shared/atomicStorage';
 import type { ChatMessage, ChatSession } from '../shared/types';
-import { getVisibleMessages } from './chatSessionStore';
+import { getVisibleMessages, sessionViewPageBounds, type SessionViewPageOptions } from './chatSessionStore';
 import { freezeTree, isFrozenTree, isPackedPersistenceTree, persistenceMessageBody } from './persistenceSnapshot';
 import { recordLocalPerformance } from '../agent/logging/performanceTrace';
 import { getConfiguredKeepseekLanguage, localize } from '../shared/i18n';
@@ -18,7 +18,7 @@ interface SessionManifest {
   revision: number;
   header: string;
   headerInline?: ObjectNode;
-  messages: Array<{ body: string; checkpoint?: string; pendingTool?: boolean; summary?: NonNullable<ChatMessage['runState']> }>;
+  messages: Array<{ body: string; messageId?: string; checkpoint?: string; pendingTool?: boolean; summary?: NonNullable<ChatMessage['runState']> }>;
   /** Optional content-free lifecycle index committed with the graph. */
   summary?: unknown;
   summaryHash?: string;
@@ -195,6 +195,45 @@ export class SessionObjectStore {
     return current && typeof current === 'object'
       ? this.decodeNode((await nodeFor(current))!, new Map(), visited) : current;
   }
+  /** Recent display projection. Checkpoint/replay authority remains in load().
+   * This type carries no writable ChatSession and never advances writer revision. */
+  public async loadViewPage(manifest: unknown, options: SessionViewPageOptions = {}): Promise<{
+    sessionId: string; workspaceKey: string; revision: number; totalMessages: number; startIndex: number; hasOlder: boolean; hasNewer: boolean; anchorFound?: boolean; messages: ChatMessage[];
+  }> {
+    const m = manifest as SessionManifest;
+    if (![3, 4].includes(m?.version) || !Number.isSafeInteger(m.revision) || !Array.isArray(m.messages)
+      || typeof m.sessionId !== 'string' || typeof m.workspaceKey !== 'string') throw new Error('Invalid session manifest');
+    const id = await this.loadField(m, ['id']);
+    const workspaceKey = await this.loadField(m, ['workspaceKey']);
+    if (id !== m.sessionId || workspaceKey !== m.workspaceKey) throw new Error('Session scope mismatch');
+    let anchorIndex: number | undefined;
+    if (options.anchorMessageId !== undefined) {
+      anchorIndex = m.messages.findIndex(entry => entry.messageId === options.anchorMessageId);
+      // Old V3/V4 manifests have no content-free message ID index. Read only
+      // their top-level id field, never nested bodies/replay/checkpoints; the
+      // next ordinary save adds IDs without a view-triggered migration write.
+      if (anchorIndex < 0 && m.messages.some(entry => entry.messageId === undefined)) {
+        for (let index = 0; index < m.messages.length; index++) {
+          const entry = m.messages[index];
+          if (entry.messageId !== undefined) continue;
+          const messageId = await this.loadField({ ...m, header: entry.body, headerInline: undefined }, ['id']);
+          if (messageId === options.anchorMessageId) { anchorIndex = index; break; }
+        }
+      }
+    }
+    const { startIndex, endIndex, hasOlder, hasNewer } = sessionViewPageBounds(m.messages.length, { ...options, anchorIndex });
+    const cache = new Map<string, unknown>(), messages: ChatMessage[] = [];
+    for (const entry of m.messages.slice(startIndex, endIndex)) {
+      const body = await this.decode(entry.body, cache) as ChatMessage;
+      if (entry.messageId !== undefined && body.id !== entry.messageId) throw new Error('Session message index mismatch');
+      const message = { ...body, ...(entry.summary ? { runState: { ...entry.summary, canResume: false } } : {}) };
+      messages.push(...getVisibleMessages([message]));
+    }
+    return { sessionId: m.sessionId, workspaceKey: m.workspaceKey, revision: m.revision,
+      totalMessages: m.messages.length, startIndex, hasOlder, hasNewer,
+      ...(anchorIndex === undefined ? {} : { anchorFound: anchorIndex >= 0 }), messages };
+  }
+
   public async load(manifest: unknown): Promise<ChatSession> {
     const m = manifest as SessionManifest;
     if (![3, 4].includes(m?.version) || !Number.isSafeInteger(m.revision) || !Array.isArray(m.messages)) throw new Error('Invalid session manifest');
@@ -275,7 +314,7 @@ export class SessionObjectStore {
           if (digest(new TextDecoder().decode(bytes)) !== hash) throw new Error('Archived checkpoint integrity mismatch');
           this.written.add(hash);
         }
-        entries[index] = { body: await this.object(persistenceMessageBody(message, body)),
+        entries[index] = { body: await this.object(persistenceMessageBody(message, body)), messageId: message.id,
           checkpoint: runCheckpoint ? await this.object(runCheckpoint) : runCheckpointArchive?.objectHash,
           pendingTool: runCheckpoint ? Boolean(runCheckpoint.state?.pending) : runCheckpointArchive?.pendingTool,
           summary: runCheckpoint ? getVisibleMessages([message])[0].runState : runCheckpointArchive?.summary };

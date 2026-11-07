@@ -101,6 +101,8 @@ export interface Usage {
   totalTokens: number;
   cacheHitTokens: number;
   cacheMissTokens: number;
+  /** Explicit native cache creation tokens, included in cacheMissTokens. Missing means unknown. */
+  cacheWriteTokens?: number;
   reasoningTokens?: number;
   /** Whether cache token fields were actually returned by the provider. */
   cacheDataStatus?: UsageCacheDataStatus;
@@ -972,7 +974,15 @@ export interface PlanWorkflowView extends Omit<PlanWorkflowRecord, 'contentHash'
   status: PlanWorkflowStatus | 'invalid';
 }
 
+/** Router has a separate, frozen capability lane. Absence means the legacy Worker role. */
+export interface ProjectRouterRole {
+  kind: 'project-router';
+  version: 1;
+  toolSchemaVersion: 1;
+}
+
 export interface ChatSession {
+  agentRole?: ProjectRouterRole;
   /** Host-only automatic naming state; never part of Provider history. */
   autoTitle?: import('../sessions/sessionTitle').SessionTitleMetadata;
   /** Durable edit/resend intent; actions stay blocked until it is reconciled. */
@@ -1583,6 +1593,14 @@ export interface ReferenceResource {
 }
 
 export interface AgentRequest {
+  agentRole?: ProjectRouterRole;
+  /** Persisted execution identity, excluded from Provider-visible history. */
+  projectTaskIdentity?: { projectId: string; taskCardId: string; rootTaskId: string; segmentId: string; generation: number };
+  /** Host-only task authority; never serialized into Provider/checkpoint bytes. */
+  taskRouter?: import('../agent/taskRouter').ProjectTaskRouterHost;
+  taskRouterContext?: import('../agent/taskRouter').ProjectTaskRouterContext;
+  /** Durable mailbox probe. It is checked only at complete Provider/tool boundaries. */
+  hasPendingSupplement?: () => boolean;
   /** Host-observed slash command; no authorization or child history is implied. */
   explicitSubagentSelection?: { kind: 'single' | 'parallel'; profile: 'research' | 'review' | 'proposal' };
   approvalMode?: ApprovalMode;
@@ -1695,6 +1713,8 @@ export interface ActivatedSkill {
 }
 
 export interface AgentResponse {
+  /** Current assistant segment is fully paired and durable; a real supplement may now append. */
+  supplementBoundaryRequired?: boolean;
   runId: string;
   message: string;
   reasoningContent?: string;

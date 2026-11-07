@@ -86,6 +86,7 @@ import type {
 } from './types';
 import type { SubagentToolCategory } from './types';
 import { freezeTree } from '../../sessions/persistenceSnapshot';
+import { withoutProjectChildSlot } from '../../tasks/requestAdmission';
 import { createSubagentHostContext, resolveInheritedSubagentHostContext, type SubagentHostContextV1 } from './contextCapsule';
 
 const SUBAGENT_PROTOCOL_VERSION = 11;
@@ -160,6 +161,10 @@ export class SubagentRuntime implements SubagentToolAdapter {
   }
 
   public async delegateTask(input: DelegateTaskInput, context: SubagentInvocationContext): Promise<SubagentToolExecution> {
+    return withoutProjectChildSlot(() => this.delegateTaskWithReleasedParent(input, context));
+  }
+
+  private async delegateTaskWithReleasedParent(input: DelegateTaskInput, context: SubagentInvocationContext): Promise<SubagentToolExecution> {
     const task = input.task?.trim();
     if (!task) {
       return toolError('invalid_subagent_task', 'A self-contained non-empty subagent task is required.');
@@ -172,6 +177,10 @@ export class SubagentRuntime implements SubagentToolAdapter {
   }
 
   public async delegateParallel(input: DelegateParallelInput, context: SubagentInvocationContext): Promise<SubagentToolExecution> {
+    return withoutProjectChildSlot(() => this.delegateParallelWithReleasedParent(input, context));
+  }
+
+  private async delegateParallelWithReleasedParent(input: DelegateParallelInput, context: SubagentInvocationContext): Promise<SubagentToolExecution> {
     if (!Array.isArray(input.tasks) || !input.tasks.length) {
       return toolError('invalid_subagent_batch', 'At least one subagent task is required.');
     }
@@ -293,7 +302,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
       if (live?.parentSessionId === parentSessionId && (live.status === 'queued' || live.status === 'running')) {
         // A verified live host operation is a wait, not new evidence or a model
         // polling loop. No polling requests, fabricated progress or fresh budget.
-        await this.waitForResult(live.id, context.signal ?? context.parentRequest.signal);
+        await withoutProjectChildSlot(() => this.waitForResult(live.id, context.signal ?? context.parentRequest.signal));
         if (this.unavailableResults.has(live.id)) return terminalDeliveryUnavailable();
         result = await this.store.readResultPage(pageInput); // recheck scope and integrity
       }

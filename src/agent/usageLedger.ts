@@ -42,6 +42,7 @@ export interface UsageLedgerSummary {
   totalTokens: number;
   cacheHitTokens: number;
   cacheMissTokens: number;
+  cacheWriteTokens?: number;
   cacheDataRequestCount: number;
   cacheDataMissingRequestCount: number;
   costByCurrency: Record<string, number>;
@@ -271,6 +272,7 @@ export function summarizeUsageLedger(ledger: ProviderUsageLedger | undefined): U
     summary.totalTokens += record.usage.totalTokens;
     summary.cacheHitTokens += record.usage.cacheHitTokens;
     summary.cacheMissTokens += record.usage.cacheMissTokens;
+    if (record.usage.cacheWriteTokens !== undefined) summary.cacheWriteTokens = (summary.cacheWriteTokens ?? 0) + record.usage.cacheWriteTokens;
     if (record.providerCacheDataStatus === 'reported') summary.cacheDataRequestCount += 1;
     else summary.cacheDataMissingRequestCount += 1;
     if (record.pricingStatus === 'priced') summary.pricedRequestCount += 1;
@@ -696,6 +698,8 @@ function normalizeUsage(value: unknown): Usage | undefined {
     totalTokens: nonNegativeInteger(value.totalTokens),
     cacheHitTokens: nonNegativeInteger(value.cacheHitTokens),
     cacheMissTokens: nonNegativeInteger(value.cacheMissTokens),
+    ...(typeof value.cacheWriteTokens === 'number' && Number.isSafeInteger(value.cacheWriteTokens) && value.cacheWriteTokens >= 0
+      ? { cacheWriteTokens: value.cacheWriteTokens } : {}),
     cacheDataStatus: value.cacheDataStatus === 'reported' || value.cacheDataStatus === 'partial'
       ? value.cacheDataStatus : 'unavailable',
     ...(Number.isFinite(Number(value.reasoningTokens))

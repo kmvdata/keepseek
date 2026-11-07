@@ -42,7 +42,7 @@ export const composerSubmitBindingsFragment: WebviewFragment = {
         closeCommandMenu();
         closeExecutionModeMenu(false);
         closeReferenceMenu(false);
-        vscode.postMessage({
+        postPromptMessage({
           type: 'sendPrompt',
           requestId: requestId,
           sessionId: state.activeSessionId,
@@ -80,7 +80,7 @@ export const composerRenderFragment: WebviewFragment = {
   source: `
       function renderInputControls() {
         var interaction = currentInteraction();
-        promptInput.setAttribute('contenteditable', interaction?.canEdit === false ? 'false' : 'true');
+        promptInput.setAttribute('contenteditable', !projectTaskUiActive() && interaction?.canEdit === false ? 'false' : 'true');
         refreshPromptFileLinkLabels();
         refreshPromptSkillLinkLabels();
         renderActiveSkillsBar();

@@ -514,8 +514,8 @@ test('rapid history navigation drops concurrent targets and persists the same fi
   const entered = deferred();
   const release = deferred();
   t.after(() => release.resolve());
-  const save = storage.saveWorkspace.bind(storage);
-  storage.saveWorkspace = async (...args) => { entered.resolve(); await release.promise; return save(...args); };
+  const save = storage.saveSessionChanges.bind(storage);
+  storage.saveSessionChanges = async (...args) => { entered.resolve(); await release.promise; return save(...args); };
   const navigating = host.handleMessage({ type: 'selectSession', sessionId: second.id });
   await entered.promise;
   try {
@@ -697,8 +697,8 @@ for (const type of ['newSession', 'selectSession'] as const) {
   test(`session navigation ${type} waits for the initial persisted session load`, async t => {
     const { host, store, storage, first, second, releaseLoad, initialization, publish, posts } = await fixture(t, { delayLoad: true });
     let writes = 0;
-    const originalSave = storage.saveWorkspace.bind(storage);
-    storage.saveWorkspace = async (scope, state) => { writes++; await originalSave(scope, state); };
+    const originalSave = storage.saveSessionChanges.bind(storage);
+    storage.saveSessionChanges = async (...args) => { writes++; await originalSave(...args); };
     const navigation = host.handleMessage(type === 'newSession' ? { type } : { type, sessionId: second.id });
     const writesBeforeLoad = writes;
     releaseLoad.resolve();
@@ -714,8 +714,8 @@ for (const type of ['newSession', 'selectSession'] as const) {
 test('failed initial session loading leaves navigation unlocked without saving a replacement', async t => {
   const { host, storage, releaseLoad, initialization, errors } = await fixture(t, { delayLoad: true, loadFailure: true });
   let writes = 0;
-  const originalSave = storage.saveWorkspace.bind(storage);
-  storage.saveWorkspace = async (scope, state) => { writes++; await originalSave(scope, state); };
+  const originalSave = storage.saveSessionChanges.bind(storage);
+  storage.saveSessionChanges = async (...args) => { writes++; await originalSave(...args); };
   const navigation = host.handleMessage({ type: 'newSession' });
   releaseLoad.resolve();
   await navigation;
@@ -732,12 +732,12 @@ test('repeated new-session clicks create one persisted session while navigation 
   const releaseSave = deferred();
   t.after(() => releaseSave.resolve());
   const states: StoredWorkspaceSessionState[] = [];
-  const originalSave = storage.saveWorkspace.bind(storage);
-  storage.saveWorkspace = async (scope, state) => {
-    states.push(state);
+  const originalSave = storage.saveSessionChanges.bind(storage);
+  storage.saveSessionChanges = async (...args) => {
+    states.push(args[1]);
     saveStarted.resolve();
     await releaseSave.promise;
-    await originalSave(scope, state);
+    await originalSave(...args);
   };
   const firstClick = host.handleMessage({ type: 'newSession' });
   const secondClick = host.handleMessage({ type: 'newSession' });

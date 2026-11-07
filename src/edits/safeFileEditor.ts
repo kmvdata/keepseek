@@ -13,6 +13,7 @@ import type { ChangeCheckpoint, DraftEdit, FileContentIdentity, TextPatchV1 } fr
 import { ChangeArtifactStore } from './changeArtifactStore';
 import { getDraftEditBase, getDraftEditFullText, getDraftEditKind, getDraftEditResult } from './draftEdit';
 import { applyTextPatchToBytes, createInverseTextPatch, hashBytes, validateCanonicalTextPatch } from './textPatch';
+import { assertProjectMutationLease, markProjectOperationUncertain, withProjectMutationPhase } from '../tasks/projectResources';
 
 type Translator = (key: string, values?: Record<string, string | number>) => string;
 
@@ -89,6 +90,17 @@ export class SafeFileEditor {
     approval?: DelegatedEditApproval,
     journal?: ChangeCheckpointJournal
   ): Promise<ChangeCheckpoint> {
+    return withProjectMutationPhase(async (lease) => {
+      lease?.recordMutation();
+      try { return await this.applyDraftEditOwned(edit, changeSetId, approval, journal); }
+      catch (error) {
+        if (error instanceof SafeFileEditError && error.checkpoint?.state === 'uncertain') markProjectOperationUncertain(edit.id);
+        throw error;
+      }
+    });
+  }
+
+  private async applyDraftEditOwned(edit: DraftEdit, changeSetId: string, approval?: DelegatedEditApproval, journal?: ChangeCheckpointJournal): Promise<ChangeCheckpoint> {
     const uri = vscode.Uri.parse(edit.uri);
     let checkpoint: ChangeCheckpoint | undefined;
     let mutationStarted = false;
@@ -114,6 +126,8 @@ export class SafeFileEditor {
       await this.assertCommonPreconditions(uri, edit, approval);
       await approval?.verifyScope?.();
       this.checkApproval(edit, approval);
+      await assertProjectMutationLease();
+      this.checkApproval(edit, approval);
       mutationStarted = true;
 
       await this.applyMutation(edit, uri);
@@ -133,6 +147,17 @@ export class SafeFileEditor {
   }
 
   public async revertCheckpoint(checkpoint: ChangeCheckpoint, journal?: ChangeCheckpointJournal, skillScaffold = false): Promise<ChangeCheckpoint> {
+    return withProjectMutationPhase(async (lease) => {
+      lease?.recordMutation();
+      try { return await this.revertCheckpointOwned(checkpoint, journal, skillScaffold); }
+      catch (error) {
+        if (checkpoint.state === 'uncertain') markProjectOperationUncertain(checkpoint.id);
+        throw error;
+      }
+    });
+  }
+
+  private async revertCheckpointOwned(checkpoint: ChangeCheckpoint, journal?: ChangeCheckpointJournal, skillScaffold = false): Promise<ChangeCheckpoint> {
     const uri = vscode.Uri.parse(checkpoint.uri);
     await this.assertCheckpointTarget(uri, checkpoint, skillScaffold && !checkpoint.originalExists);
     this.assertNoDirtyOpenEditor(uri, checkpoint.label);
@@ -144,6 +169,7 @@ export class SafeFileEditor {
     checkpoint.applyingAt = new Date().toISOString();
     await journal?.persist(checkpoint);
     try {
+      await assertProjectMutationLease();
       if (checkpoint.draftKind === 'text_patch_v1' && checkpoint.inversePatch) {
         await this.writePatchedFile(uri, checkpoint.inversePatch);
       } else if (checkpoint.draftKind === 'move_v1' && checkpoint.targetUri) {

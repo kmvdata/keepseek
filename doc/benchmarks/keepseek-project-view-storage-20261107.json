@@ -1,0 +1,72 @@
+{
+  "measuredAt": "2026-11-07T01:25:13.492Z",
+  "platform": {
+    "platform": "darwin",
+    "arch": "x64",
+    "node": "v24.15.0",
+    "cpu": "Intel(R) Core(TM) i9-9880H CPU @ 2.30GHz"
+  },
+  "baseline": {
+    "head": "87ee2bbc29546e575556f2e49aae67136f781e00",
+    "storeSha256": "d4327c09d53efd7eea1b132e75ebc02d81e274231de6336e53cd35a93c485a92"
+  },
+  "currentCompiledStoreSha256": "3c9ee9f98326c9dd2e3cb2efad6a691de4be3cb95982eb532961aab078dd9d33",
+  "fixture": {
+    "sessions": 2,
+    "messagesPerSession": 100,
+    "contentBytesPerMessage": 1152,
+    "concurrentWorkers": 0
+  },
+  "definitions": {
+    "hot": "Both authority sessions resident; alternate A/B. Baseline actual selectSession includes required selection persistence; new pure viewSessionPage has no writes.",
+    "cold": "New JS store and object-store instances; OS filesystem cache warm. Baseline selects cold target authority and persists; new projection decodes only final 30 display bodies.",
+    "sharedBackend": "Both variants use current GlobalSessionStorage/object storage. Only ChatSessionStore and the select/view path vary; this is not a full old-extension release benchmark.",
+    "scope": "Host read/publication preparation only. No actual Webview paint, cursor, durable input or Worker start measurements."
+  },
+  "milliseconds": {
+    "baselineHot": {
+      "samples": 30,
+      "p50": 92.73253099999965,
+      "p95": 144.0182050000003,
+      "p99": 144.20296000000053
+    },
+    "currentHot": {
+      "samples": 30,
+      "p50": 0.18179199999940465,
+      "p95": 0.2316529999989143,
+      "p99": 0.9154830000006768
+    },
+    "baselineCold": {
+      "samples": 30,
+      "p50": 119.30615100000068,
+      "p95": 158.05458399999952,
+      "p99": 161.8825160000015
+    },
+    "currentCold": {
+      "samples": 30,
+      "p50": 7.850995999997394,
+      "p95": 14.961733000000095,
+      "p99": 18.0477069999979
+    }
+  },
+  "modelCalls": 0,
+  "memory": {
+    "rss": 219029504,
+    "heapTotal": 107905024,
+    "heapUsed": 46529488,
+    "external": 2900778,
+    "arrayBuffers": 789114
+  },
+  "processPeakRssBytes": 219693056,
+  "memoryScope": "End-of-run sample and lifetime peak of the same benchmark process, including baseline/current fixtures; not separate runtime or concurrent Worker peaks.",
+  "thresholds": {
+    "hotHostPreparationP95Under200ms": true,
+    "coldHostPreparationP95Under1000ms": true
+  },
+  "limitations": [
+    "No native VS Code/Webview paint measurement.",
+    "No true cold OS disk cache.",
+    "Memory includes baseline/current fixtures in one process, not isolated Worker peak.",
+    "No Provider usage or paid cache/fee measurement."
+  ]
+}

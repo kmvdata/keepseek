@@ -11,6 +11,47 @@ interface SourceSnapshot {
   instructions: ProjectInstructionsResolution;
 }
 
+/** Project-local immutable read backend. It contains no selected session,
+ * Skill activation, authorization, credential or mutable execution state. */
+export class SharedProjectSourceCache {
+  public revision = 0;
+  public readonly snapshots = new Map<string, SourceSnapshot>();
+  public readonly pending = new Map<string, Promise<SourceSnapshot>>();
+  public readonly instructionSnapshots = new WeakMap<SharedCodexConfigSnapshot, ProjectInstructionsResolution>();
+  private watchers: vscode.FileSystemWatcher[] = [];
+  private readers = 0;
+  public retain(): void { this.readers++; }
+  public release(): void {
+    if (--this.readers > 0) return;
+    this.revision++; this.disposeWatchers(); this.snapshots.clear(); this.pending.clear();
+  }
+  public invalidate(): void { this.revision++; this.snapshots.clear(); }
+  public watch(): void {
+    this.disposeWatchers();
+    if (!vscode.workspace.createFileSystemWatcher) return;
+    const specs: Array<{ base: vscode.Uri; pattern: string }> = [];
+    for (const { config } of this.snapshots.values()) {
+      specs.push(...config.watchedUris.map(uri => ({ base: vscode.Uri.joinPath(vscode.Uri.parse(uri), '..'), pattern: vscode.Uri.parse(uri).path.split('/').at(-1)! })));
+      for (const directory of config.scope?.chain ?? []) specs.push({ base: directory, pattern: '.git' });
+      for (const directory of [config.codexHome, ...(config.scope?.chain ?? [])]) {
+        for (const pattern of ['.codex', '.agents', '.agents/skills']) specs.push({ base: directory, pattern });
+      }
+      specs.push({ base: vscode.Uri.joinPath(config.codexHome, '..'), pattern: config.codexHome.path.split('/').at(-1)! });
+      for (const root of [userSkillsUri(), ...(config.scope?.trusted ? config.scope.chain.map(projectSkillsUri) : []),
+        ...(process.platform !== 'win32' ? [vscode.Uri.file('/etc/codex/skills')] : [])]) specs.push({ base: root, pattern: '**/*' });
+    }
+    const seen = new Set<string>();
+    for (const spec of specs) {
+      const key = `${spec.base.toString()}\0${spec.pattern}`;
+      if (seen.has(key)) continue; seen.add(key);
+      const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(spec.base, spec.pattern));
+      const dirty = () => { this.invalidate(); };
+      watcher.onDidChange(dirty); watcher.onDidCreate(dirty); watcher.onDidDelete(dirty); this.watchers.push(watcher);
+    }
+  }
+  private disposeWatchers(): void { for (const watcher of this.watchers) watcher.dispose(); this.watchers = []; }
+}
+
 /** Only immutable source reads are shared. Session activation and authorization never enter this cache. */
 export class SharedProjectSources implements vscode.Disposable {
   public snapshot?: SharedCodexConfigSnapshot;
@@ -18,20 +59,21 @@ export class SharedProjectSources implements vscode.Disposable {
   public sessionId?: string;
   public readonly diagnostics = { hits: 0, misses: 0, merged: 0, stale: 0 };
   private invalidated = true;
-  private sourceRevision = 0;
+  private publishedRevision = -1;
+  private get sourceRevision(): number { return this.cache.revision; }
   private selection = 0;
   private disposed = false;
-  private watchers: vscode.FileSystemWatcher[] = [];
-  private readonly snapshots = new Map<string, SourceSnapshot>();
-  private readonly pending = new Map<string, Promise<SourceSnapshot>>();
-  private readonly instructionSnapshots = new WeakMap<SharedCodexConfigSnapshot, ProjectInstructionsResolution>();
+  public constructor(private readonly cache = new SharedProjectSourceCache()) { this.cache.retain(); }
+  public createSibling(): SharedProjectSources {
+    if (this.disposed) throw new Error('Project sources facade is disposed');
+    return new SharedProjectSources(this.cache);
+  }
 
-  public get dirty(): boolean { return this.invalidated; }
+  public get dirty(): boolean { return this.invalidated || this.publishedRevision !== this.sourceRevision; }
   public set dirty(value: boolean) {
     if (!value) return;
     this.invalidated = true;
-    this.sourceRevision++;
-    this.snapshots.clear();
+    this.cache.invalidate();
     // Existing readers may finish, but their revision can no longer be published or cached.
   }
 
@@ -41,17 +83,17 @@ export class SharedProjectSources implements vscode.Disposable {
     const revision = this.sourceRevision;
     const identity = await this.measure('source-identity', sessionId, () => this.identity(cwd));
     const key = `${revision}:${identity}`;
-    let entry = this.snapshots.get(key);
+    let entry = this.cache.snapshots.get(key);
     if (entry) {
       this.diagnostics.hits++;
-      this.snapshots.delete(key); this.snapshots.set(key, entry);
+      this.cache.snapshots.delete(key); this.cache.snapshots.set(key, entry);
     } else {
-      let task = this.pending.get(key);
+      let task = this.cache.pending.get(key);
       if (task) this.diagnostics.merged++;
       else {
         this.diagnostics.misses++;
         task = this.read(cwd, sessionId);
-        this.pending.set(key, task);
+        this.cache.pending.set(key, task);
       }
       try {
         entry = await task;
@@ -59,18 +101,18 @@ export class SharedProjectSources implements vscode.Disposable {
           this.diagnostics.stale++;
           throw new Error('Project sources changed while loading; refresh to retry / 项目来源在加载期间变化，请刷新重试');
         }
-        if (!this.disposed && revision === this.sourceRevision && !this.snapshots.has(key)) {
-          this.snapshots.set(key, entry);
-          while (this.snapshots.size > MAX_SOURCE_SNAPSHOTS) this.snapshots.delete(this.snapshots.keys().next().value!);
-          this.watch();
+        if (!this.disposed && revision === this.sourceRevision && !this.cache.snapshots.has(key)) {
+          this.cache.snapshots.set(key, entry);
+          while (this.cache.snapshots.size > MAX_SOURCE_SNAPSHOTS) this.cache.snapshots.delete(this.cache.snapshots.keys().next().value!);
+          this.cache.watch();
         }
-      } finally { if (this.pending.get(key) === task) this.pending.delete(key); }
+      } finally { if (this.cache.pending.get(key) === task) this.cache.pending.delete(key); }
     }
     if (!this.disposed && revision === this.sourceRevision && selection === this.selection) {
       this.snapshot = entry.config;
       this.instructions = entry.instructions;
       this.sessionId = sessionId;
-      this.invalidated = false;
+      this.invalidated = false; this.publishedRevision = revision;
     } else this.diagnostics.stale++;
     return entry.config;
   }
@@ -96,7 +138,7 @@ export class SharedProjectSources implements vscode.Disposable {
     const instructions = await this.measure('project-instructions', sessionId, () => new ProjectInstructionsResolver().resolve({ snapshot: config }));
     // Resolution adds all candidate filenames, including missing overrides/fallbacks, before freezing.
     const result = freezeSourceData({ config, instructions });
-    this.instructionSnapshots.set(config, instructions);
+    this.cache.instructionSnapshots.set(config, instructions);
     return result;
   }
 
@@ -118,39 +160,9 @@ export class SharedProjectSources implements vscode.Disposable {
 
   /** Bind consumers to their owned read result rather than the mutable selected-session facade. */
   public getInstructions(snapshot: SharedCodexConfigSnapshot): ProjectInstructionsResolution {
-    const instructions = this.instructionSnapshots.get(snapshot);
+    const instructions = this.cache.instructionSnapshots.get(snapshot);
     if (!instructions) throw new Error('Project source snapshot unavailable / 项目来源快照不可用');
     return instructions;
-  }
-
-  private watch(): void {
-    this.disposeWatchers();
-    if (!vscode.workspace.createFileSystemWatcher) return;
-    const specs: Array<{ base: vscode.Uri; pattern: string }> = [];
-    for (const { config } of this.snapshots.values()) {
-      specs.push(...config.watchedUris.map(uri => ({ base: vscode.Uri.joinPath(vscode.Uri.parse(uri), '..'), pattern: vscode.Uri.parse(uri).path.split('/').at(-1)! })));
-      // Root-marker changes alter instruction ancestry, even if no document changed.
-      for (const directory of config.scope?.chain ?? []) specs.push({ base: directory, pattern: '.git' });
-      for (const directory of [config.codexHome, ...(config.scope?.chain ?? [])]) {
-        // Also watch containers: a previously absent .codex/.agents tree may be created atomically.
-        for (const pattern of ['.codex', '.agents', '.agents/skills']) specs.push({ base: directory, pattern });
-      }
-      specs.push({ base: vscode.Uri.joinPath(config.codexHome, '..'), pattern: config.codexHome.path.split('/').at(-1)! });
-      for (const root of [userSkillsUri(), ...(config.scope?.trusted ? config.scope.chain.map(projectSkillsUri) : []),
-        ...(process.platform !== 'win32' ? [vscode.Uri.file('/etc/codex/skills')] : [])]) {
-        specs.push({ base: root, pattern: '**/*' });
-      }
-    }
-    const seen = new Set<string>();
-    for (const spec of specs) {
-      const key = `${spec.base.toString()}\0${spec.pattern}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(spec.base, spec.pattern));
-      const dirty = () => { this.dirty = true; };
-      watcher.onDidChange(dirty); watcher.onDidCreate(dirty); watcher.onDidDelete(dirty);
-      this.watchers.push(watcher);
-    }
   }
 
   public matches(uri: string): boolean {
@@ -159,10 +171,9 @@ export class SharedProjectSources implements vscode.Disposable {
       || path.includes('/.agents/skills/');
   }
 
-  private disposeWatchers(): void { for (const watcher of this.watchers) watcher.dispose(); this.watchers = []; }
   public dispose(): void {
-    this.disposed = true; this.selection++; this.sourceRevision++;
-    this.disposeWatchers(); this.snapshots.clear(); this.pending.clear();
+    if (this.disposed) return;
+    this.disposed = true; this.selection++; this.cache.release();
   }
 }
 

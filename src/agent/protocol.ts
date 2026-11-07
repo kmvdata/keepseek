@@ -10,6 +10,8 @@ import {
   CurrentRunContext,
 } from '../shared/types';
 import type { HistoryProjectionResult } from './historyProjection';
+import type { ProjectRouterRole } from '../shared/types';
+import { getProjectRouterTools, normalizeProjectRouterRole } from './taskRouter';
 
 export const CREATE_DRAFT_EDIT_TOOL_NAME = 'keepseek_create_draft_edit';
 export const CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME = 'keepseek_create_incremental_draft_edit';
@@ -697,7 +699,12 @@ export function getAgentToolNamesForPrompt(
 export function getAgentTools(options: {
   toolNames?: readonly string[];
   requestProtocolVersion?: number;
+  agentRole?: ProjectRouterRole;
 } = {}): DeepSeekFunctionTool[] {
+  if (options.agentRole) {
+    normalizeProjectRouterRole(options.agentRole);
+    return getProjectRouterTools().map(canonicalizeDeepSeekTool);
+  }
   const allowedNames = options.toolNames?.length ? new Set(options.toolNames) : undefined;
   if (allowedNames && (options.requestProtocolVersion ?? 5) >= 8) {
     // Evidence access is protocol infrastructure. A v8 session cannot freeze

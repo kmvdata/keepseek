@@ -19,7 +19,55 @@ export interface DroppedFileReferenceInput {
   dataBase64: string;
 }
 
-export type WebviewMessage =
+/** Every task action carries its emission-time target, never the later selected view. */
+export interface TaskMessageTarget {
+  projectId?: string;
+  taskCardId?: string | null;
+  sessionId?: string;
+  rootTaskId?: string;
+  viewGeneration?: number;
+}
+
+export interface ProjectTaskPromptInput {
+  projectId: string;
+  requestId: string;
+  targetId: string;
+  prompt: string;
+  sourceId: string;
+  modelId: string;
+  draftRevision: number;
+  settings?: Partial<AgentSettings>;
+  references?: PromptReferenceInput[];
+  skillIds?: string[];
+}
+
+export interface ProjectTaskDraftInput {
+  projectId: string;
+  targetId: string;
+  revision: number;
+  markup: string;
+  skillIds?: string[];
+  cursor?: { start: number; end: number } | null;
+  scrollTop?: number;
+  scrollAnchor?: { messageId: string; offset: number } | null;
+  expanded?: boolean;
+}
+
+export type WebviewMessage = WebviewMessagePayload & TaskMessageTarget;
+
+type WebviewMessagePayload =
+  | ({ type: 'projectTaskCreate' | 'projectAssistantSubmit' } & ProjectTaskPromptInput)
+  | ({ type: 'projectTaskSubmit'; taskCardId: string; inputKind?: 'supplement' | 'followup' } & ProjectTaskPromptInput)
+  | { type: 'projectTaskView'; projectId: string; taskCardId: string | null; mode?: 'project' | 'new' | 'task'; viewGeneration: number }
+  | { type: 'projectTaskLatest'; projectId: string; taskCardId: string | null; viewGeneration?: number }
+  | { type: 'projectTaskReconcile'; projectId: string; targetId: string; requestId: string }
+  | { type: 'projectTaskPrefetch'; projectId: string; taskCardId: string }
+  | { type: 'projectTaskStop' | 'projectTaskResume' | 'projectTaskArchive' | 'projectTaskDelete'; projectId: string; taskCardId: string; archived?: boolean }
+  | { type: 'projectTaskStopAll'; projectId: string }
+  | { type: 'projectTaskAssociate'; projectId: string; sessionId: string }
+  | ({ type: 'projectTaskDraft' } & ProjectTaskDraftInput)
+  | { type: 'projectTaskPainted'; projectId: string; taskCardId: string | null; targetId?: string; viewGeneration: number; revision: number; paintedAt: number }
+
   | { type: 'resumeApprovalProcessing'; authorizeTargetId?: string; confirmTargetId?: string }
   | { type: 'resolveValidationApproval'; id: string; approve: boolean }
   | { type: 'setApprovalMode'; mode: ApprovalMode }

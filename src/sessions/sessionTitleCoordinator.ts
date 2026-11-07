@@ -20,6 +20,7 @@ export interface SessionTitleRegenerationResult {
  * turn; this module never starts a main task or owns UI busy/clock state. */
 export class SessionTitleCoordinator {
   private readonly running = new Map<string, AbortController>();
+  private readonly pending = new Set<Promise<SessionTitleRegenerationResult>>();
   private disposed = false;
 
   public constructor(private readonly store: ChatSessionStore, private readonly options: {
@@ -43,9 +44,15 @@ export class SessionTitleCoordinator {
     for (const sessionId of [...this.running.keys()]) this.cancel(sessionId);
   }
 
+  /** Cancellation is a request, not evidence that already incurred usage has
+   * finished committing. Project shutdown crosses this durability barrier. */
+  public async flush(): Promise<void> {
+    while (this.pending.size) await Promise.allSettled([...this.pending]);
+  }
+
   public async complete(sessionId: string, taskId: string,
     request: (input: SessionTitleRequest) => Promise<string>): Promise<boolean> {
-    const result = await this.run(sessionId, taskId, request, 'automatic');
+    const result = await this.track(this.run(sessionId, taskId, request, 'automatic'));
     return result.outcome === 'updated' || result.outcome === 'unchanged';
   }
 
@@ -61,7 +68,13 @@ export class SessionTitleCoordinator {
   public regenerateResult(sessionId: string, taskId: string,
     request: (input: SessionTitleRequest) => Promise<string>,
     material: { userPrompt: string; basis: SessionTitleBasis }): Promise<SessionTitleRegenerationResult> {
-    return this.run(sessionId, taskId, request, 'manual', material);
+    return this.track(this.run(sessionId, taskId, request, 'manual', material));
+  }
+
+  private track(promise: Promise<SessionTitleRegenerationResult>): Promise<SessionTitleRegenerationResult> {
+    this.pending.add(promise);
+    void promise.finally(() => this.pending.delete(promise)).catch(() => undefined);
+    return promise;
   }
 
   private async run(sessionId: string, taskId: string,

@@ -11,7 +11,7 @@
 | 事实或兼容字段 | 所有权与用途 |
 | --- | --- |
 | Coordinator 操作 token | 在首个 await 前同步预占，绑定 operation/session/generation；只有匹配拥有者能变更阶段、交接、完成或释放 |
-| 导航事务 | 正文/选择保存/必要恢复期间保持串行与重复点击去重；安全屏障后释放导航 owner，上下文继续按会话/generation 准备，不引入多会话主任务并发 |
+| 导航事务 | 普通会话门面内，正文/选择保存/必要恢复期间保持串行与重复点击去重；安全屏障后释放导航 owner，上下文按会话/generation 准备。项目任务各有独立门面和 owner，查看不经过执行选择链 |
 | `isStartingRun` | 只读派生冲突互斥；不能由分支各自写入，也不能当作“模型运行中” |
 | `isBusy` | 兼容真实运行消费者；输入框和导航按统一能力判断，不把各种工作重新 OR 后作为 UI 权威 |
 | 上下文/安全就绪 | 当前会话必须恢复正确操作、历史与请求上下文；失败不默认为 ready |
@@ -34,6 +34,8 @@ Webview → Host 消息唯一入口仍是 `provider/webviewMessages.ts`；Host �
 轻量状态、完整 `state`、`statePatch` 和重新 ready 使用相同会话/revision 规则。导航提交记录进入该会话的 revision 下界；A→B→A 后来自旧一次进入的提交被拒绝，普通同会话状态更新不要求 revision 完全相等。过期快照不覆盖新状态，缺字段 patch 不继承另一个会话的运行提示；流式更新按所属会话和消息接收。`sessionChanged` 清理旧会话的持续提示/轮播/重连计时器，随后显示当前权威快照。
 
 关闭 Webview 不是任务终态。重新 ready 获取宿主实际状态；扩展重启不从旧 `isStreaming/running` 标记恢复活进程或旧 token，也不恢复批准、permit 或执行队列。恢复说明与实际运行能力分别表达。
+
+项目助手的 card/viewGeneration/hostId 与每个 Worker 的 stateRevision 分别校验。每目标草稿、引用、光标、消息锚点及查看位置独立保存；先发布小型标题/草稿，再读取有界页，旧宿主和旧页面不能覆盖新目标。深历史使用锚点页与“最新消息”入口；加载更早历史为纯视图读取。ACK 丢失只按原 requestId 查询耐久收据，不重发任务。详见 [项目助手](keepseek-project-assistant.md)。
 
 ## 3. 持续状态与短通知
 

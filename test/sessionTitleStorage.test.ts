@@ -66,6 +66,28 @@ async function fixture(messages = pair('turn-1')) {
 }
 const set = JSON.stringify({ decision: 'set', title: '审批失败排查' });
 
+test('project shutdown cancels title presentation but flush waits for incurred usage durability', async () => {
+  const { store, storage, session, coordinator } = await fixture();
+  const requested = deferred<void>(), releaseUsage = deferred<void>();
+  const pending = coordinator.complete(session.id, 'turn-1', async input => {
+    requested.resolve(); await releaseUsage.promise;
+    assert.equal(input.signal.aborted, true);
+    session.userTaskBudgets = { 'turn-1': { version: 1, usedMs: 7, maxExecutionMs: 0, usedCostByCurrency: { USD: 0.01 } } };
+    await store.persist(); // A physical request's already incurred usage remains durable after cancellation.
+    return set;
+  });
+  await requested.promise;
+  coordinator.dispose();
+  let flushed = false;
+  const flush = coordinator.flush().then(() => { flushed = true; });
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(flushed, false);
+  releaseUsage.resolve();
+  await Promise.all([pending, flush]);
+  assert.equal(session.title, 'Temporary title');
+  assert.deepEqual(storage.state.sessions[0].userTaskBudgets?.['turn-1'].usedCostByCurrency, { USD: 0.01 });
+});
+
 test('explicit title results distinguish committed same title, no topic and invalid output', async () => {
   const { session, coordinator } = await fixture();
   const material = buildSessionTitleRegenerationMaterial(session.messages, 'turn-1')!;

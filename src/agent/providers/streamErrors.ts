@@ -156,7 +156,7 @@ export class ProviderStreamTextDecoder {
 
 const usageCountFields = new Set([
   'prompt_tokens', 'completion_tokens', 'total_tokens', 'prompt_cache_hit_tokens',
-  'prompt_cache_miss_tokens', 'cached_tokens'
+  'prompt_cache_miss_tokens', 'prompt_cache_write_tokens', 'cached_tokens'
 ]);
 
 /** Usage events are cumulative observations for one physical attempt. */

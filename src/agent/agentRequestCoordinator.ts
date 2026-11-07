@@ -18,6 +18,11 @@ import { getConfiguredPromptCacheTtlMs } from '../shared/config';
 import { getAgentContextCompressionSettings } from '../shared/modelProfiles';
 
 export interface AgentRequestCoordinatorInput {
+  agentRole?: AgentRequest['agentRole'];
+  projectTaskIdentity?: AgentRequest['projectTaskIdentity'];
+  taskRouter?: AgentRequest['taskRouter'];
+  taskRouterContext?: AgentRequest['taskRouterContext'];
+  hasPendingSupplement?: AgentRequest['hasPendingSupplement'];
   approvalMode?: AgentRequest['approvalMode'];
   executionMode?: AgentRequest['executionMode'];
   approvalRootTaskId?: AgentRequest['approvalRootTaskId'];
@@ -63,6 +68,11 @@ export class AgentRequestCoordinator {
 
   public createAgentRequest(input: AgentRequestCoordinatorInput): AgentRequest {
     return {
+      agentRole: input.agentRole ? { ...input.agentRole } : undefined,
+      projectTaskIdentity: input.projectTaskIdentity ? { ...input.projectTaskIdentity } : undefined,
+      taskRouter: input.taskRouter,
+      taskRouterContext: input.taskRouterContext,
+      hasPendingSupplement: input.hasPendingSupplement,
       approvalMode: input.approvalMode,
       executionMode: input.executionMode,
       approvalRootTaskId: input.approvalRootTaskId,

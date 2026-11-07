@@ -18,6 +18,7 @@ import {
 import { createRunCheckpoint, checkpointCopy, type RunCheckpoint, AgentInterruptedError, recoveryBlocker, endpointHash, isCostLimitExhausted, migrateLegacyCapacityCheckpoint } from './runCheckpoint';
 import { restorePluginSkillProgress, type PluginSkillProgress } from './runCheckpoint';
 import { assertPluginSkillsCurrent, executePluginSkillRead } from './pluginSkillRuntime';
+import { executeTaskRouterTool, isProjectRouterToolName } from './taskRouter';
 import {
   getConfiguredAgentMaxContextEpochRollovers,
   getConfiguredAgentMaxContinuations,
@@ -396,7 +397,7 @@ export class AgentLoop {
     // suspended functionality. Check before reconciliation or any dispatch.
     await assertPluginSkillsCurrent(request.currentRunContext?.skills ?? [], []);
     if (request.checkpoint) await assertPluginSkillsCurrent(request.checkpoint.request.currentRunContext?.skills ?? [], [], request.checkpoint);
-    if (!request.persona && request.sessionId && !request.checkpoint && normalizeApprovalMode(request.approvalMode) !== 'ask') {
+    if (!request.persona && !request.agentRole && request.sessionId && !request.checkpoint && normalizeApprovalMode(request.approvalMode) !== 'ask') {
       const key = this.validationTaskKey(request);
       if (!this.validationBaselines.has(key)) {
         this.validationBaselines.set(key, await captureValidationBaseline());
@@ -405,6 +406,10 @@ export class AgentLoop {
     }
     if (request.checkpoint) {
       const requestCheckpoint = migrateLegacyCapacityCheckpoint(request.checkpoint);
+      if (JSON.stringify(request.agentRole ?? null) !== JSON.stringify(requestCheckpoint.request.agentRole ?? null)
+        || JSON.stringify(request.projectTaskIdentity ?? null) !== JSON.stringify(requestCheckpoint.request.projectTaskIdentity ?? null)) {
+        throw new Error('Recovery task identity/role mismatch / 恢复任务身份或角色不匹配');
+      }
       request = { ...request, checkpoint: requestCheckpoint };
       await this.reconcilePersistedEvidence(requestCheckpoint, request.sessionId ?? request.subagentContext?.parentSessionId ?? requestCheckpoint.taskId);
       if (requestCheckpoint.state?.pending?.executing) {
@@ -508,10 +513,11 @@ export class AgentLoop {
         }
       }, (budget) => { activeRunBudget = budget; });
       cp.finalResponse = response;
-      cp.status = response.runDetails.budgetPause?.resumable
+      cp.status = response.supplementBoundaryRequired || response.runDetails.budgetPause?.resumable
         ? 'interrupted'
         : response.runDetails.budgetStopReason ? 'blocked' : 'completed';
-      cp.stopReason = response.runDetails.budgetPause?.resumable
+      cp.stopReason = response.supplementBoundaryRequired ? 'supplement_boundary'
+        : response.runDetails.budgetPause?.resumable
         ? 'budget_pause'
         : response.runDetails.budgetStopReason ? 'budget_exhausted'
         : response.runDetails.status === 'waiting' || response.repairLoop.status === 'waiting_for_apply'
@@ -545,6 +551,7 @@ export class AgentLoop {
     this.workspaceTools.setAuthorizedExternalReferenceUris(request.authorizedExternalReferenceUris);
     this.workspaceTools.setDelegatedFileAuthorization?.(request.approvalMode === 'delegate' && !request.persona);
     const checkpoint = request.checkpoint!;
+    const evidenceTaskId = request.projectTaskIdentity?.rootTaskId ?? checkpoint.taskId;
     const restored = checkpoint.state;
     let saveStep: (() => Promise<void>) | undefined;
     const runDetailsBuilderRef: { current?: RunDetailsBuilder } = {};
@@ -585,7 +592,7 @@ export class AgentLoop {
     runDetailsBuilderRef.current.setRunContext(request.currentRunContext?.metadata);
     const latestUser = request.history.at(-1);
     const goal = request.approvalRootTaskId && latestUser?.userTask?.id === request.approvalRootTaskId
-      && latestUser.userTask.reason === 'approval'
+      && ['approval', 'supplement'].includes(latestUser.userTask.reason)
       ? taskGoal(request.history, request.approvalRootTaskId) : request.prompt;
     const taskPlan = new TaskPlanTracker({
       runId: trace.runId,
@@ -602,14 +609,15 @@ export class AgentLoop {
     const repairLoop = new RepairLoopTracker(
       normalizeRepairIterationLimit(request.executionLimits?.maxRepairIterations),
       (event) => trace.record(event),
-      restored?.repairLoop ?? request.repairLoop
+      restored?.repairLoop ?? request.repairLoop ?? checkpoint.continuationState?.repairLoop
     );
     const validationState = new RunValidationStateTracker(
       request.repairLoop?.status === 'running_validation' && request.repairLoop.iteration > 0
         ? 'post_apply'
         : 'workspace_baseline',
-      restored?.validationState?.pendingDraftEditIds ?? request.repairLoop?.pendingDraftEditIds,
-      restored?.validationState?.validations
+      restored?.validationState?.pendingDraftEditIds ?? request.repairLoop?.pendingDraftEditIds
+        ?? checkpoint.continuationState?.validationState?.pendingDraftEditIds,
+      restored?.validationState?.validations ?? checkpoint.continuationState?.validationState?.validations
     );
     const runAuthorizationPolicy = this.toolAuthorization.createRunPolicy(trace.runId);
     runAuthorizationPolicy.approvalMode = request.persona ? 'ask' : request.approvalMode;
@@ -733,7 +741,8 @@ export class AgentLoop {
         taskPlan.addBlocker(detail);
         finalMessage = `${finalMessage}\n\n${detail}`;
       }
-      const completedPlan = budgetPause
+      const supplementBoundaryRequired = request.hasPendingSupplement?.() === true;
+      const completedPlan = budgetPause || supplementBoundaryRequired
         ? taskPlan.stop(finalMessage)
         : taskPlan.complete(finalMessage, isBlocked || Boolean(delegationStatus?.pending || delegationStatus?.explicitUnfulfilled));
       const changeSet = createChangeSet({
@@ -747,6 +756,7 @@ export class AgentLoop {
       const responseWithUsage = {
         runId: trace.runId,
         ...response,
+        ...(supplementBoundaryRequired ? { supplementBoundaryRequired: true } : {}),
         draftRuns: response.draftRuns ?? [],
         message: finalMessage,
         taskPlan: completedPlan,
@@ -847,7 +857,8 @@ export class AgentLoop {
       ...callbacks,
       onStatus: emitStatus
     };
-    const draftEdit = request.subagentContext && request.subagentContext.lane !== 'proposal'
+    const draftEdit = request.agentRole || request.hasPendingSupplement?.()
+      || (request.subagentContext && request.subagentContext.lane !== 'proposal')
       ? undefined
       : await this.tryCreateDraftEdit(request.prompt, request.language);
     this.throwIfAborted(request.signal, request.language);
@@ -932,6 +943,7 @@ export class AgentLoop {
       prompt: request.prompt,
       slimToolNames: request.slimToolNames,
       requestProtocolVersion: request.requestProtocolVersion,
+      agentRole: request.agentRole,
       includeTools: runtimeConfig.toolsEnabled,
       maxProjectionTokens: runtimeConfig.contextWindowTokens
         * runtimeConfig.contextCompression.forceRatio,
@@ -1084,10 +1096,14 @@ export class AgentLoop {
       decision = admission.decide(input);
       return decision;
     };
-    const epoch = restored?.epoch
-      ? { ...restored.epoch, failures: [...(restored.epoch.failures ?? [])] }
+    const savedEpoch = restored?.epoch ?? checkpoint.inheritedEpoch;
+    const epoch = savedEpoch
+      ? { ...savedEpoch, failures: [...(savedEpoch.failures ?? [])] }
       : createContextEpochState(admission.state);
     const refreshModelBudget = async (continuingText = false) => {
+      // Project tasks and Router own a frozen creation snapshot. Editing project
+      // defaults cannot mutate a live task's lane or generation parameters.
+      if (request.projectTaskIdentity || request.agentRole) return;
       // A transport retry/restart must keep the already-frozen request. Only a
       // new model round may observe edits to this exact source/model's limits.
       if (checkpoint.modelStepRequestHash || (pending && !continuingText) || !this.globalStorageUri) return;
@@ -1136,6 +1152,7 @@ export class AgentLoop {
         safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS,
         slimToolNames: request.slimToolNames,
         requestProtocolVersion: request.requestProtocolVersion,
+        agentRole: request.agentRole,
         provider: runtimeConfig.provider,
         sourceId: runtimeConfig.sourceId,
         baseUrl: runtimeConfig.baseUrl
@@ -1189,7 +1206,7 @@ export class AgentLoop {
           }));
     };
     let toolCallCount = restored?.toolCallCount ?? 0;
-    let validationRunCount = restored?.validationRunCount ?? 0;
+    let validationRunCount = restored?.validationRunCount ?? checkpoint.continuationState?.validationRunCount ?? 0;
     let toolResultTokens = restored?.toolResultTokens ?? 0;
     let approvalReviewStopReason: string | undefined;
     let approvalReviewBoundaryReached = false;
@@ -1265,7 +1282,7 @@ export class AgentLoop {
         await saveStep!();
         estimated = this.estimateCurrentProviderInputTokens(request, messages, tools, providerRunState);
         if (!epoch.baseHistoryEvidenceRef) {
-          let archive = await evidenceStore.ensureIntent({ sessionId: evidenceSessionId, taskId: checkpoint.taskId,
+          let archive = await evidenceStore.ensureIntent({ sessionId: evidenceSessionId, taskId: evidenceTaskId,
             toolCallId: '__base_history', toolName: 'keepseek_context_history', argumentsHash: hashText(stableStringify(request.history)), effectKind: 'read' });
           archive = await evidenceStore.complete(archive, stableStringify({ history: request.history, summaries: request.contextCompression?.summaries }), { contentType: 'json' });
           epoch.baseHistoryEvidenceRef = archive.evidenceRef;
@@ -1319,7 +1336,7 @@ export class AgentLoop {
         const hostCheckpoint = createEpochHostCheckpoint(epochCheckpointInput);
         let hostCheckpointEvidence = await evidenceStore.ensureIntent({
           sessionId: evidenceSessionId,
-          taskId: checkpoint.taskId,
+          taskId: evidenceTaskId,
           epochIndex: epoch.index,
           toolCallId: `__keepseek_context_epoch_host_state_${epoch.index}`,
           toolName: 'keepseek_context_epoch_host_state',
@@ -1338,7 +1355,7 @@ export class AgentLoop {
             totalBytes: hostCheckpointEvidence.totalBytes!
           }
         });
-        archiveName = await evidenceStore.saveEpochSnapshot(evidenceSessionId, checkpoint.taskId, epoch.index, {
+        archiveName = await evidenceStore.saveEpochSnapshot(evidenceSessionId, evidenceTaskId, epoch.index, {
           version: 1, index: epoch.index, messages, provider: providerRunState, seed,
           messageHash: hashText(stableStringify(messages)), providerHash: hashText(stableStringify(providerRunState))
         });
@@ -1486,6 +1503,13 @@ export class AgentLoop {
 
     for (let turn = nextTurn; ; turn += 1) {
       this.throwIfAborted(request.signal, request.language);
+      // A durable real input is incorporated by the host only after this
+      // assistant segment has settled. Never interleave a user with a mutable
+      // tool/native round or manufacture a hidden continuation request.
+      if (!pending && request.hasPendingSupplement?.()) {
+        return finishRun({ message: '', reasoningContent: this.formatReasoning(reasoningParts), draftEdits, draftRuns },
+          { finishReason: 'supplement_boundary' });
+      }
       const runTimeStopReason = this.getRunTimeStopReason(runDeadlineAt);
       if (runTimeStopReason) {
         emitStatus({
@@ -1554,7 +1578,7 @@ export class AgentLoop {
         remainingBatchResults: 1
       });
       try {
-        const deliveryRecords = await this.getPendingEvidenceDeliveryRecords(evidenceStore, evidenceSessionId, checkpoint.taskId, epoch.evidenceRefs);
+        const deliveryRecords = await this.getPendingEvidenceDeliveryRecords(evidenceStore, evidenceSessionId, evidenceTaskId, epoch.evidenceRefs);
         for (const record of deliveryRecords) await evidenceStore.markSending(record);
         response = pending?.response ?? await this.createModelResponse(
           request,
@@ -1569,7 +1593,7 @@ export class AgentLoop {
           trace,
           usageTotals: upstreamUsageTotals,
           usageSource: request.subagentContext ? 'subagent'
-            : request.backgroundRunId ? 'background' : 'executor',
+            : request.agentRole ? 'router' : request.backgroundRunId ? 'background' : 'executor',
           toolChoice: allowToolCalls ? 'auto' : 'none',
           providerRunState,
           contextEpochIndex: epoch.index,
@@ -1717,6 +1741,10 @@ export class AgentLoop {
         pending ??= { response: { message: assistant, finishReason: response.finishReason, usage: response.usage }, results: {} };
         committedProvider = structuredClone(providerRunState);
         await saveStep();
+        if (request.hasPendingSupplement?.()) {
+          return finishRun({ message: assistant.content ?? '', reasoningContent: this.formatReasoning(reasoningParts), draftEdits, draftRuns },
+            { finishReason: 'supplement_boundary' });
+        }
         if (isBudgetFinalization) {
           const finalizationContent = response.finishReason === 'length' || response.finishReason === 'pause_turn'
             ? this.appendBudgetTruncationNotice(assistant.content ?? '', request.language)
@@ -1864,9 +1892,12 @@ export class AgentLoop {
         const argumentsHash = hashText(toolCall.function.arguments || '{}');
         let evidenceRecord = await evidenceStore.ensureIntent({
           sessionId: evidenceSessionId,
-          taskId: checkpoint.taskId,
+          taskId: evidenceTaskId,
           epochIndex: epoch.index,
-          toolCallId: toolCall.id,
+          // Provider call IDs need only be unique within their own response.
+          // A new segment shares root evidence scope but must not collide with
+          // an earlier segment's call ID or reuse its completed operation.
+          toolCallId: request.projectTaskIdentity ? `${checkpoint.taskId}:${toolCall.id}` : toolCall.id,
           toolName: toolCall.function.name,
           argumentsHash,
           effectKind: this.getEvidenceEffectKind(toolCall.function.name)
@@ -1929,7 +1960,9 @@ export class AgentLoop {
                 language: request.language
               })
             : undefined;
-          if (planPhaseBlockReason) {
+          if (request.hasPendingSupplement?.()) {
+            rawToolResult = this.supplementDeferredToolResult();
+          } else if (planPhaseBlockReason) {
             rawToolResult = createPlanPhaseBlockedToolResult(toolCall.function.name, planPhaseBlockReason);
           } else if (pendingValidationChanges) {
             rawToolResult = validationState.createBlockedValidationResult(request.language);
@@ -1965,7 +1998,7 @@ export class AgentLoop {
             });
           } else {
             const authorizationMetadata = getToolAuthorizationMetadata(toolCall.function.name, toolArgs);
-            if (authorizationMetadata.riskLevel !== 'low') {
+            if (!request.agentRole && authorizationMetadata.riskLevel !== 'low') {
               const automatic = runAuthorizationPolicy.approvalMode === 'delegate';
               emitStatus({
                 base: automatic ? 'thinking' : 'waiting',
@@ -1974,7 +2007,10 @@ export class AgentLoop {
                 detail: authorizationMetadata.scope
               });
             }
-            authorizationDecision = await this.reviewSideEffectTool({
+            authorizationDecision = request.agentRole?.kind === 'project-router'
+              ? { allowed: isProjectRouterToolName(toolCall.function.name), toolName: toolCall.function.name,
+                  riskLevel: 'low', scope: 'workspace_read', source: 'low_risk', requiresExplicitConfirmation: false }
+              : await this.reviewSideEffectTool({
               toolCall,
               args: toolArgs,
               request,
@@ -2066,7 +2102,9 @@ export class AgentLoop {
               evidenceRecord = await evidenceStore.markExecuting(evidenceRecord);
               this.throwIfAborted(request.signal, request.language);
               if (getSubagentHandoffKind(toolCall.function.name)) emitStatus({ base: 'waiting', phase: 'waiting_for_subagent', toolName: toolCall.function.name });
-              const execution = this.handleToolCall(toolCall, draftEdits, draftRuns, request.language, {
+              const execution = request.hasPendingSupplement?.()
+                ? Promise.resolve(this.supplementDeferredToolResult())
+                : this.handleToolCall(toolCall, draftEdits, draftRuns, request.language, {
                 signal: request.signal,
                 runDeadlineAt,
                 authorization: authorizationDecision,
@@ -2076,12 +2114,13 @@ export class AgentLoop {
                 commandRecoveryBatchId,
                 parentRunId: trace.runId,
                 onUsage: runCallbacks.onUsage,
+                onStatus: emitStatus,
                 onUsageLedgerRecord: runCallbacks.onUsageLedgerRecord,
                 getCacheObservationCandidates: runCallbacks.getCacheObservationCandidates,
                 onSubagentRunSummary: runCallbacks.onSubagentRunSummary,
                 evidenceStore,
                 evidenceSessionId,
-                evidenceTaskId: checkpoint.taskId,
+                evidenceTaskId,
                 exposedToolNames,
                 onPluginSkillRead: (progress) => { pluginSkillProgress = progress; },
                 delegation
@@ -2089,6 +2128,7 @@ export class AgentLoop {
               const cancellableRead = !isDraftEditPreparationTool(toolCall.function.name)
                 && !isDraftRunPreparationTool(toolCall.function.name)
                 && toolCall.function.name !== RUN_VALIDATION_TOOL_NAME
+                && !request.agentRole
                 && !getSubagentHandoffKind(toolCall.function.name);
               try { rawToolResult = await (cancellableRead ? abortable(execution, request.signal) : execution); }
               catch (error) {
@@ -2500,6 +2540,10 @@ export class AgentLoop {
       committedProvider = structuredClone(providerRunState);
       checkpoint.lastStepAt = new Date().toISOString();
       await saveStep();
+      if (request.hasPendingSupplement?.()) {
+        return finishRun({ message: assistant.content ?? '', reasoningContent: this.formatReasoning(reasoningParts), draftEdits, draftRuns },
+          { finishReason: 'supplement_boundary' });
+      }
       if (checkpoint.commandRecoveryExhausted) {
         throw new AgentInterruptedError('no_progress_loop', 'Command correction stopped: the same root cause repeated or the task correction budget was exhausted. Diagnostics and successful work are saved. / 命令纠错已停止：同根因重复或任务纠错预算耗尽，诊断及已完成工作已保存。');
       }
@@ -2730,7 +2774,7 @@ export class AgentLoop {
     applyProviderRequestBudget(body, budget);
     runtimeConfig = { ...runtimeConfig, maxTokens: budget.actualMaxOutputTokens };
     callbacks.onUsageEstimate?.(createRequestBudgetUsage(budget));
-    trace.record({ type: 'request_output_budget', ...budget, usageSource: options.usageSource ?? 'executor' });
+    trace.record({ type: 'request_output_budget', ...budget, usageSource: options.usageSource ?? (request.agentRole ? 'router' : 'executor') });
     if (request.checkpoint && options.usageSource !== 'summary') request.checkpoint.lastRequestBudget = budget;
     const upstreamRequestId = randomUUID();
     const requestProtocol = getProviderRequestLane({
@@ -2753,7 +2797,7 @@ export class AgentLoop {
     const fallbackSnapshot = createAttemptSnapshot(new Date().toISOString());
     const attemptSnapshots: UsagePriceSnapshot[] = [];
     const attemptCacheObservations: ProviderCacheObservation[] = [];
-    const usageSource = options.usageSource ?? 'executor';
+    const usageSource = options.usageSource ?? (request.agentRole ? 'router' : 'executor');
     const observationTaskId = request.checkpoint?.taskId
       ?? (usageSource === 'background' ? request.backgroundRunId : undefined);
     const cacheScope = [
@@ -3605,6 +3649,11 @@ export class AgentLoop {
     return JSON.stringify([request.sessionId, request.approvalRootTaskId ?? request.checkpoint?.taskId ?? request.history.at(-1)?.id]);
   }
 
+  private supplementDeferredToolResult(): string {
+    return JSON.stringify({ ok: false, errorType: 'supplement_pending', executed: false,
+      message: 'A durable user supplement is waiting. This undispatched call was not executed; the host will append the real input after this complete tool round.' });
+  }
+
   private async reviewSideEffectTool(input: {
     toolCall: DeepSeekToolCall;
     args: Record<string, unknown>;
@@ -3626,6 +3675,10 @@ export class AgentLoop {
       approvalReview: outcome && toApprovalReviewDisplay(outcome.record),
       approvalCircuitBreakReason: outcome?.circuitBreakReason
     });
+    const supplementDenied = () => deny(language === 'en'
+      ? 'A new user supplement invalidated this segment approval. Nothing executed.'
+      : '新的用户补充已使本执行段的审批失效，尚未执行。', undefined, 'supplement_pending');
+    if (input.request.hasPendingSupplement?.()) return supplementDenied();
 
     let reviewRequest: ApprovalReviewRequest;
     let snapshot: string;
@@ -3678,6 +3731,7 @@ ${launch.evidence.content}`;
     const signal = input.request.signal;
     let outcome = route === 'host_policy' ? await reviewer.createHostPolicyApproval(reviewRequest)
       : route !== 'user_click' ? await reviewer.review(reviewRequest, toReviewerModelContext(input.request), signal) : undefined;
+    if (input.request.hasPendingSupplement?.()) return supplementDenied();
     const prior = outcome;
     if (mode === 'delegate' && ((requiredUserScope && outcome?.record.decision === 'approve') || !outcome || approvalDisposition(outcome.record) === 'request_user')
       && reviewer.createUserApproval && this.requestManualToolApproval && !signal?.aborted) {
@@ -3686,6 +3740,7 @@ ${launch.evidence.content}`;
       input.emitStatus({ base: 'waiting', phase: 'awaiting_manual_approval', detail: reason });
       const manual: ManualToolApproval = { id: input.toolCall.id, sessionId: reviewRequest.sessionId, label, reason, request: reviewRequest, priorReviewId: outcome?.record.reviewId };
       const approved = await this.requestManualToolApproval(manual, signal);
+      if (input.request.hasPendingSupplement?.()) return supplementDenied();
       if (!approved || signal?.aborted || !vscode.workspace.isTrusted) {
         if (manual.status === 'rejected' && reviewer.createUserRejection) {
           const rejection = await reviewer.createUserRejection(reviewRequest, { priorReviewId: prior?.record.reviewId, userRequestId: manual.id });
@@ -3716,6 +3771,7 @@ ${launch.evidence.content}`;
     }
     try {
       this.throwIfAborted(signal, language);
+      if (input.request.hasPendingSupplement?.()) return supplementDenied();
       if (route === 'auto_approval_review') {
         await reviewer.assertReviewerConfiguration?.(reviewRequest, toReviewerModelContext(input.request), outcome.record);
         this.throwIfAborted(signal, language);
@@ -3745,6 +3801,7 @@ ${launch.evidence.content}`;
       parentRequest?: AgentRequest;
       parentRunId?: string;
       onUsage?: AgentRunCallbacks['onUsage'];
+      onStatus?: AgentRunCallbacks['onStatus'];
       onUsageLedgerRecord?: AgentRunCallbacks['onUsageLedgerRecord'];
       getCacheObservationCandidates?: AgentRunCallbacks['getCacheObservationCandidates'];
       onSubagentRunSummary?: AgentRunCallbacks['onSubagentRunSummary'];
@@ -3760,6 +3817,15 @@ ${launch.evidence.content}`;
   ): Promise<string> {
     try {
       const args = this.parseToolArguments(toolCall.function.arguments);
+      if (options.parentRequest?.agentRole?.kind === 'project-router') {
+        const originalContext = options.parentRequest.taskRouterContext;
+        return executeTaskRouterTool(toolCall, options.parentRequest.taskRouter,
+          originalContext && { ...originalContext, onWaiting: waiting => {
+            originalContext.onWaiting?.(waiting);
+            options.onStatus?.({ base: waiting ? 'waiting' : 'thinking',
+              phase: waiting ? 'awaiting_manual_approval' : 'planning_tool', toolName: toolCall.function.name });
+          } });
+      }
       options.delegation?.observeScope(toolCall.function.name, toolCall.function.arguments);
       switch (toolCall.function.name) {
         case READ_PLUGIN_SKILL_TOOL_NAME: {
@@ -5171,9 +5237,12 @@ ${launch.evidence.content}`;
     const executing = checkpoint.state?.pending?.executing;
     if (!executing || !checkpoint.state?.pending) return;
     const store = this.getEvidenceStore();
+    const evidenceTaskId = checkpoint.request.projectTaskIdentity?.rootTaskId ?? checkpoint.taskId;
     const evidence = executing.evidenceRef
-      ? await store.findByRef(executing.evidenceRef, sessionId, checkpoint.taskId)
-      : await store.findByToolCall(sessionId, checkpoint.taskId, executing.id, checkpoint.state.epoch?.index ?? 0);
+      ? await store.findByRef(executing.evidenceRef, sessionId, evidenceTaskId)
+      : await store.findByToolCall(sessionId, evidenceTaskId,
+        checkpoint.request.projectTaskIdentity ? `${checkpoint.taskId}:${executing.id}` : executing.id,
+        checkpoint.state.epoch?.index ?? 0);
     if (!evidence) return;
     if (evidence.executionStatus === 'pending') {
       // The durable intent exists but execution never started.
@@ -5249,6 +5318,7 @@ ${launch.evidence.content}`;
   }
 
   private getEvidenceEffectKind(toolName: string): ToolEvidence['effectKind'] {
+    if (isProjectRouterToolName(toolName)) return ['keepseek_tasks_list', 'keepseek_tasks_read'].includes(toolName) ? 'read' : 'proposal';
     if (isDraftEditPreparationTool(toolName) || isDraftRunPreparationTool(toolName)) return 'proposal';
     if (toolName === RUN_VALIDATION_TOOL_NAME) return 'validation';
     if (getSubagentHandoffKind(toolName)) return 'delegation';

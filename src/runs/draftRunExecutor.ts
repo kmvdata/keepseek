@@ -8,6 +8,7 @@ import * as vscode from 'vscode';
 import type { DraftRun, ExecutionPermit } from '../shared/types';
 import { analyzeCommand } from '../approvals/authorization/commandSemantics';
 import { interpretGitQueryResult, type GitQueryResult } from './gitQueryResult';
+import { assertProjectMutationLease, markProjectOperationUncertain, withProjectMutationPhase } from '../tasks/projectResources';
 
 const RESTRICTED_OUTPUT_LIMIT_BYTES = 8_192;
 const EXIT_STREAM_CLOSE_GRACE_MS = 1_500;
@@ -80,6 +81,15 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
     signal?: AbortSignal;
     onOutput: (chunk: DraftRunOutputChunk) => void;
   }): Promise<DraftRunExecutionOutcome> {
+    return withProjectMutationPhase(async (lease) => {
+      lease?.recordMutation();
+      const outcome = await this.executeOwned(input);
+      if (outcome.phase === 'result_unknown' || outcome.error === OUTPUT_STREAM_CLOSE_ERROR) markProjectOperationUncertain(input.draftRun.id);
+      return outcome;
+    }, input.signal);
+  }
+
+  private async executeOwned(input: Parameters<SpawnDraftRunExecutor['execute']>[0]): Promise<DraftRunExecutionOutcome> {
     validatePermit(input.draftRun, input.permit);
     const restricted = input.restrictedLaunch;
     const gitRemote = input.verifiedLaunch?.gitRemote;
@@ -109,6 +119,12 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
     this.runTerminalSessions.set(input.draftRun.id, input.draftRun.sessionId);
     pty.write(formatTerminalHeader(input.draftRun));
 
+    await assertProjectMutationLease();
+    // The lease may have queued behind another task. Validate the expiring
+    // one-use permit again at the actual dispatch boundary.
+    validatePermit(input.draftRun, input.permit);
+    if (!vscode.workspace.isTrusted) throw new Error('DraftRun cannot execute in an untrusted workspace.');
+    if (input.signal?.aborted) return { started: false, phase: 'not_dispatched', timedOut: false, cancelled: true };
     const child = spawn(restricted?.executable ?? input.verifiedLaunch?.executable ?? input.draftRun.spec.executable, input.draftRun.spec.args, {
       cwd: restricted?.cwd ?? input.verifiedLaunch?.cwd ?? vscode.Uri.parse(input.draftRun.spec.cwdUri).fsPath,
       env: restricted ? {} : input.verifiedLaunch?.env ?? createControlledEnvironment(input.draftRun.spec.env),

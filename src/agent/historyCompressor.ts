@@ -631,7 +631,7 @@ class HistorySummaryRequestError extends Error {
 }
 
 export function measureCompressionProjection(input: HistoryCompressionRefreshInput, state?: ContextCompressionState) {
-  const p = buildProviderRequestProjection({ model: input.model, agentSettings: input.agentSettings,
+  const p = buildProviderRequestProjection({ agentRole: input.session.agentRole, model: input.model, agentSettings: input.agentSettings,
     contextFiles: input.contextFiles, currentRunContext: input.currentRunContext, contextInstructions: input.contextInstructions,
     history: input.session.messages, contextCompression: state, language: input.language, prompt: input.prompt,
     slimToolNames: input.slimToolNames, requestProtocolVersion: input.requestProtocolVersion,

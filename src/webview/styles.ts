@@ -1,4 +1,5 @@
 import { getInputStyles } from './input/styles';
+import { getProjectTasksStyles } from './projectTasks';
 
 export function getStyles(): string {
   return `
@@ -189,6 +190,7 @@ export function getStyles(): string {
     }
 
     ${getInputStyles()}
+    ${getProjectTasksStyles()}
 
     .settings-model-default-slot {
       display: inline-grid;

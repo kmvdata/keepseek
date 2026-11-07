@@ -1,3 +1,4 @@
+import { normalizeProjectRouterRole } from '../agent/taskRouter';
 import { normalizeProviderReplay } from './providerReplayNormalization';
 import { normalizePendingHistoryTruncation } from './historyTruncation';
 import { normalizeManualApproval } from '../approvals/manualApproval';
@@ -72,6 +73,11 @@ export interface ChatSessionStorageAdapter {
   loadMessageCheckpoint?(workspaceKey: string, sessionId: string, messageId: string): Promise<unknown>;
   loadWorkspace(workspaceScope: WorkspaceSessionScope): Promise<StoredWorkspaceSessionState>;
   saveWorkspace(workspaceScope: WorkspaceSessionScope, state: StoredWorkspaceSessionState): Promise<void>;
+  /** Incremental shard commit. An absent selection leaves the global viewing selection untouched. */
+  saveSessionChanges?(workspaceScope: WorkspaceSessionScope, state: StoredWorkspaceSessionState, preserveSelection?: boolean): Promise<void>;
+  loadSessionPage?(workspaceKey: string, sessionId: string, options?: SessionViewPageOptions): Promise<SessionViewPage | undefined>;
+  setReadOnly?(readOnly: boolean): void;
+  findSessionScope?(sessionId: string): Promise<WorkspaceSessionScope | undefined>;
   listAllWorkspaceSummaries(): Promise<WorkspaceSummary[]>;
   loadWorkspaceSessions(workspaceKey: string): Promise<ChatSession[]>;
   loadSession?(workspaceKey: string, sessionId: string): Promise<ChatSession | undefined>;
@@ -85,6 +91,39 @@ export interface ChatSessionStorageAdapter {
     now?: number;
     force?: boolean;
   }): Promise<boolean>;
+}
+
+export interface SessionViewPageOptions { before?: number; limit?: number; anchorMessageId?: string }
+
+/** Presentation projection only. It cannot be passed to any execution/save API. */
+export interface SessionViewPage {
+  readonly kind: 'session-view-page';
+  readonly sessionId: string;
+  readonly revision: number;
+  readonly title: string;
+  readonly totalMessages: number;
+  readonly startIndex: number;
+  readonly hasOlder?: boolean;
+  readonly hasNewer?: boolean;
+  readonly anchorFound?: boolean;
+  readonly messages: readonly ChatMessage[];
+}
+
+/** Shared host/disk bounds. Missing anchors deliberately restore the latest
+ * bounded page; the caller receives anchorFound=false and keeps its draft. */
+export function sessionViewPageBounds(totalMessages: number,
+  options: SessionViewPageOptions & { anchorIndex?: number } = {}): {
+  startIndex: number; endIndex: number; hasOlder: boolean; hasNewer: boolean;
+} {
+  const total = Math.max(0, Math.trunc(totalMessages));
+  const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(50, Math.trunc(options.limit!))) : 30;
+  let endIndex = Number.isFinite(options.before) ? Math.max(0, Math.min(total, Math.trunc(options.before!))) : total;
+  let startIndex = Math.max(0, endIndex - limit);
+  if (options.anchorIndex !== undefined && options.anchorIndex >= 0 && options.anchorIndex < total) {
+    startIndex = Math.max(0, Math.min(Math.max(0, total - limit), options.anchorIndex - Math.floor(limit / 2)));
+    endIndex = Math.min(total, startIndex + limit);
+  }
+  return { startIndex, endIndex, hasOlder: startIndex > 0, hasNewer: endIndex < total };
 }
 
 export interface WorkspaceSessionScope {
@@ -107,6 +146,182 @@ export class ChatSessionStore {
     token: string; revision: number; title: string; metadata: SessionTitleMetadata; clearCustomTitle?: boolean;
   }>();
   private readonly titleSessionPins = new Map<string, number>();
+  private readonly sessionPins = new Map<string, Map<string, number>>();
+  private readonly dirtySessions = new Map<string, number>();
+  private readonly loadFlights = new Map<string, Promise<ChatSession | undefined>>();
+  private readonly pageFlights = new Map<string, Promise<SessionViewPage | undefined>>();
+  private readonly viewPages = new Map<string, SessionViewPage>();
+  private readonly sessionRevisions = new Map<string, number>();
+  private readOnly = false;
+  private fixedSessionId?: string;
+  private releaseScopePin?: () => void;
+  private sessionCommitted?: (session: ChatSession) => void;
+  private readonly residentBytes = new Map<string, number>();
+  private readonly lastViewed = new Map<string, number>();
+
+  public setReadOnly(readOnly: boolean): void { this.readOnly = readOnly; }
+  private assertWritable(): void { if (this.readOnly) throw new Error('This project is open read-only in this window.'); }
+
+  /** Pins are independent of viewing order, including newly-created empty cards. */
+  public pinSession(sessionId: string, reason = 'runtime'): () => void {
+    const reasons = this.sessionPins.get(sessionId) ?? new Map<string, number>();
+    reasons.set(reason, (reasons.get(reason) ?? 0) + 1); this.sessionPins.set(sessionId, reasons);
+    let released = false;
+    return () => { if (released) return; released = true;
+      const count = (reasons.get(reason) ?? 1) - 1;
+      if (count > 0) reasons.set(reason, count); else reasons.delete(reason);
+      if (!reasons.size) this.sessionPins.delete(sessionId);
+    };
+  }
+
+  public markSessionDirty(sessionId: string): number {
+    const revision = (this.sessionRevisions.get(sessionId) ?? 0) + 1;
+    this.sessionRevisions.set(sessionId, revision); if (sessionId) this.dirtySessions.set(sessionId, revision);
+    this.viewPages.delete(sessionId); return revision;
+  }
+
+  public invalidateSessionView(sessionId: string): void { this.viewPages.delete(sessionId); }
+
+  public async persistSession(sessionId: string, reason = 'session_barrier'): Promise<void> {
+    if (!this.getSessionById(sessionId)) throw new Error('Session is not resident.');
+    this.markSessionDirty(sessionId); await this.queuePersistence(reason, false);
+  }
+
+  public async createWorkspaceScope(scope: WorkspaceSessionScope): Promise<ChatSessionStore> {
+    const store = new ChatSessionStore(this.sessionStorage, this.language, { ...scope, folderUris: [...scope.folderUris] });
+    store.readOnly = this.readOnly; await store.initialize(); return store;
+  }
+
+  public async findSessionScope(sessionId: string): Promise<WorkspaceSessionScope | undefined> {
+    if (this.getSessionById(sessionId) || this.sessionSummaries.has(sessionId)) return { ...this.workspaceScope,
+      folderUris: [...this.workspaceScope.folderUris] };
+    return this.sessionStorage.findSessionScope?.(sessionId);
+  }
+
+  /** A task gets its own execution selection and mutable services. The exact
+   * shared session is pinned, never copied/replayed into a second writer. */
+  public async createSessionScope(sessionId: string): Promise<ChatSessionStore> {
+    const releasePin = this.pinSession(sessionId, 'execution_scope');
+    let session: ChatSession | undefined;
+    try { session = await this.loadSessionById(sessionId); } catch (error) { releasePin(); throw error; }
+    if (!session) { releasePin(); throw new Error('Task session was not found.'); }
+    const scoped = new ChatSessionStore(this.sessionStorage, this.language, { ...this.workspaceScope,
+      folderUris: [...this.workspaceScope.folderUris] });
+    scoped.sessions = [session]; scoped.sessionSummaries.set(sessionId, toSessionSummary(session, this.language));
+    scoped.activeSessionIdValue = sessionId; scoped.fixedSessionId = sessionId;
+    scoped.approvalModeValue = session.approvalMode ?? 'ask'; scoped.readOnly = this.readOnly;
+    scoped.releaseScopePin = releasePin;
+    scoped.sessionCommitted = live => {
+      this.sessionSummaries.set(live.id, toSessionSummary(live, this.language));
+      this.sessionRevisions.set(live.id, (this.sessionRevisions.get(live.id) ?? 0) + 1);
+      this.viewPages.delete(live.id);
+    };
+    return scoped;
+  }
+
+  public disposeSessionScope(): void { this.releaseScopePin?.(); this.releaseScopePin = undefined; }
+
+  /** Atomic task defaults are supplied by the host; creating a card never
+   * changes the legacy conversation being viewed. */
+  public async createDetachedSession(values: Partial<ChatSession> = {}): Promise<ChatSession> {
+    this.assertWritable();
+    const defaults = createEmptySession(this.language, this.workspaceScope,
+      values.approvalMode ?? this.approvalModeValue, values.executionMode ?? 'normal');
+    const session: ChatSession = { ...defaults, ...values,
+      title: values.title ?? defaults.title,
+      approvalMode: values.approvalMode ?? defaults.approvalMode,
+      executionMode: values.executionMode ?? defaults.executionMode,
+      createdAt: values.createdAt ?? defaults.createdAt, updatedAt: values.updatedAt ?? defaults.updatedAt,
+      id: values.id || randomUUID(), messages: values.messages ?? [],
+      workspaceKey: this.workspaceScope.key, workspaceName: this.workspaceScope.name,
+      workspaceFolders: [...this.workspaceScope.folderUris] };
+    if (this.sessionSummaries.has(session.id)) throw new Error('Session already exists.');
+    this.sessions.push(session); this.sessionSummaries.set(session.id, toSessionSummary(session, this.language));
+    const release = this.pinSession(session.id, 'creation');
+    try { await this.persistSession(session.id, 'task_session_create'); } finally { release(); }
+    return session;
+  }
+
+  /** Pure presentation read. No mode/source/date/active selection mutation and
+   * no model, title, context or save work. Cold reads merge by page identity. */
+  public async viewSessionPage(sessionId: string, options: SessionViewPageOptions = {}): Promise<SessionViewPage | undefined> {
+    const limit = Math.max(1, Math.min(50, Math.trunc(options.limit ?? 30)));
+    this.lastViewed.set(sessionId, performance.now());
+    const resident = this.getSessionById(sessionId);
+    if (resident) {
+      const anchorIndex = options.anchorMessageId === undefined ? undefined
+        : resident.messages.findIndex(message => message.id === options.anchorMessageId);
+      const { startIndex, endIndex, hasOlder, hasNewer } = sessionViewPageBounds(resident.messages.length, { ...options, limit, anchorIndex });
+      const page: SessionViewPage = { kind: 'session-view-page', sessionId,
+        revision: this.sessionRevisions.get(sessionId) ?? 0, title: resident.title,
+        totalMessages: resident.messages.length, startIndex, hasOlder, hasNewer,
+        ...(anchorIndex === undefined ? {} : { anchorFound: anchorIndex >= 0 }),
+        messages: getVisibleMessages(resident.messages.slice(startIndex, endIndex)) };
+      if (options.before === undefined && options.anchorMessageId === undefined) this.rememberPage(page); return page;
+    }
+    if (options.before === undefined && options.anchorMessageId === undefined && this.viewPages.has(sessionId)) {
+      const cached = this.viewPages.get(sessionId)!;
+      if (cached.messages.length >= Math.min(limit, cached.totalMessages)) {
+        this.rememberPage(cached);
+        const messages = cached.messages.slice(-limit);
+        return { ...cached, startIndex: cached.totalMessages - messages.length, hasOlder: cached.totalMessages > messages.length, hasNewer: false, messages };
+      }
+    }
+    const key = JSON.stringify([this.workspaceKey, sessionId, options.before, limit, options.anchorMessageId]);
+    const running = this.pageFlights.get(key); if (running) return running;
+    const workspaceKey = this.workspaceKey;
+    const flight = (async () => {
+      const page = this.sessionStorage.loadSessionPage
+        ? await this.sessionStorage.loadSessionPage(workspaceKey, sessionId, { ...options, limit })
+        : await this.loadSessionById(sessionId).then(session => session ? this.viewSessionPage(sessionId, options) : undefined);
+      if (this.workspaceKey !== workspaceKey) return undefined;
+      if (page && options.before === undefined && options.anchorMessageId === undefined) this.rememberPage(page); return page;
+    })();
+    this.pageFlights.set(key, flight);
+    try { return await flight; } finally { if (this.pageFlights.get(key) === flight) this.pageFlights.delete(key); }
+  }
+
+  /** Restore a deep-history work position without selecting an execution
+   * session, loading its full authority graph or changing the latest-page cache. */
+  public async viewSessionPageAtAnchor(sessionId: string, messageId: string,
+    options: { limit?: number } = {}): Promise<SessionViewPage | undefined> {
+    if (!messageId.trim()) return this.viewSessionPage(sessionId, options);
+    return this.viewSessionPage(sessionId, { ...options, anchorMessageId: messageId });
+  }
+
+  private rememberPage(page: SessionViewPage): void {
+    this.viewPages.delete(page.sessionId); this.viewPages.set(page.sessionId, page);
+    // View-only cache is independently evictable and bounded by total bytes.
+    let bytes = 0; const entries = [...this.viewPages.entries()].reverse();
+    for (const [id, value] of entries) {
+      bytes += Buffer.byteLength(JSON.stringify(value));
+      if (bytes > 4 * 1024 * 1024 || this.viewPages.size > 8) this.viewPages.delete(id);
+    }
+  }
+
+  /** Evict only complete, durable idle authority objects. View projections have
+   * their own smaller cache and cannot replace these objects. */
+  public evictIdleSessions(maxBytes = 32 * 1024 * 1024): number {
+    let total = this.sessions.reduce((sum, session) => sum + (this.residentBytes.get(session.id) ?? 0), 0);
+    let removed = 0;
+    const candidates = this.sessions.filter(session => session.id !== this.activeSessionIdValue
+      && !this.sessionPins.has(session.id) && !this.dirtySessions.has(session.id)
+      && !this.titleSessionPins.has(JSON.stringify([session.workspaceKey, session.id]))
+      && !session.pendingApproval && !session.pendingHistoryTruncation
+      && !session.messages.some(message => message.isStreaming || message.runCheckpoint?.status === 'running'))
+      .sort((a, b) => (this.lastViewed.get(a.id) ?? 0) - (this.lastViewed.get(b.id) ?? 0));
+    for (const session of candidates) {
+      if (total <= maxBytes && this.sessions.length <= MAX_STORED_SESSIONS) break;
+      this.sessions = this.sessions.filter(item => item !== session);
+      total -= this.residentBytes.get(session.id) ?? 0; this.residentBytes.delete(session.id); removed++;
+    }
+    return removed;
+  }
+
+  public async prefetchSessionPages(sessionIds: readonly string[]): Promise<void> {
+    for (const id of sessionIds.slice(0, 2)) { if (this.getSessionById(id)) continue;
+      await this.viewSessionPage(id); }
+  }
 
   /** Loaded sessions only: background naming must never load an entire old history. */
   public getSessionById(sessionId: string): ChatSession | undefined {
@@ -120,7 +335,7 @@ export class ChatSessionStore {
     const key = JSON.stringify([workspaceKey, sessionId]);
     this.titleSessionPins.set(key, (this.titleSessionPins.get(key) ?? 0) + 1);
     try {
-      const session = await this.loadSessionById(sessionId);
+      const session = await this.loadSessionById(sessionId, { purpose: 'background_title' });
       if (!session || this.workspaceScope.key !== workspaceKey || this.getSessionById(sessionId) !== session) return undefined;
       return await action(session);
     } finally {
@@ -143,13 +358,14 @@ export class ChatSessionStore {
       lastOutcome: state.manualAttempt ? state.lastOutcome : 'stale' };
     // A completed candidate may already be in an adapter write. Queue its
     // invalidation behind that write even when no subsequent user turn saves.
-    void this.persist('session_title_invalidated').catch(() => { /* next normal barrier / load normalization */ });
+    void this.persistSession(sessionId, 'session_title_invalidated').catch(() => { /* next normal barrier / load normalization */ });
   }
 
   public async claimSessionTitle(sessionId: string, taskId: string, basis: SessionTitleBasis,
     mode: 'automatic' | 'manual' = 'automatic'): Promise<{
     token: string; revision: number;
   } | undefined> {
+    this.assertWritable();
     const session = this.getSessionById(sessionId);
     if (!session || (session.customTitle && mode === 'automatic') || session.pendingHistoryTruncation) return undefined;
     const state = normalizeSessionTitle(session.autoTitle, session.customTitle, { preserveRunning: true });
@@ -165,7 +381,7 @@ export class ChatSessionStore {
       ? { ...state, revision, manualAttempt: { token, taskId, basis } }
       : { ...state, status: 'running', revision, lastAttemptTaskId: taskId,
         attempt: { token, taskId, basis }, completed: undefined };
-    try { await this.persist('session_title_claim'); }
+    try { await this.persistSession(sessionId, 'session_title_claim'); }
     catch (error) {
       if (session.autoTitle?.manualAttempt?.token === token) session.autoTitle = {
         ...session.autoTitle, manualAttempt: undefined };
@@ -195,7 +411,7 @@ export class ChatSessionStore {
     if (!result.title) {
       const settled = session.autoTitle = manual ? { ...session.autoTitle!, manualAttempt: undefined, lastOutcome: result.outcome }
         : { ...session.autoTitle!, status: 'pending', attempt: undefined, lastOutcome: result.outcome };
-      try { await this.persist('session_title_result'); }
+      try { await this.persistSession(sessionId, 'session_title_result'); }
       catch {
         if (session.autoTitle === settled) session.autoTitle = { ...settled, lastOutcome: 'save_failed' };
         return 'save_failed';
@@ -216,7 +432,7 @@ export class ChatSessionStore {
       if (!this.matchesTitleAttempt(sessionId, token, revision)) return 'stale';
       this.stagedTitles.set(sessionId, candidate);
       try {
-        await this.persist('session_title_commit');
+        await this.persistSession(sessionId, 'session_title_commit');
         return this.getSessionById(sessionId)?.autoTitle === candidate.metadata ? 'committed' : 'stale';
       } catch {
         this.stagedTitles.delete(sessionId);
@@ -245,7 +461,7 @@ export class ChatSessionStore {
   ) {}
 
   public async initialize(): Promise<void> {
-    await this.load();
+    if (!this.fixedSessionId) await this.load();
   }
 
   public get activeSessionId(): string {
@@ -273,6 +489,7 @@ export class ChatSessionStore {
   }
 
   public async setWorkspaceScope(workspaceScope: WorkspaceSessionScope): Promise<boolean> {
+    if (this.fixedSessionId) throw new Error('Task execution scope cannot change workspace.');
     if (workspaceScope.key === this.workspaceScope.key) {
       return false;
     }
@@ -287,6 +504,9 @@ export class ChatSessionStore {
   }
 
   public async createNewSession(language: KeepseekLanguage = this.language, onSaving?: (sessionId: string) => void): Promise<ChatSession> {
+    this.assertWritable();
+    if (this.fixedSessionId) throw new Error('Task execution scope cannot create a different session.');
+    this.markSessionDirty(this.activeSessionIdValue);
     this.language = language;
     const session = createEmptySession(language, this.workspaceScope, this.approvalModeValue, 'normal');
     this.sessions.unshift(session);
@@ -297,6 +517,7 @@ export class ChatSessionStore {
   }
 
   public async setApprovalMode(approvalMode: ApprovalMode): Promise<boolean> {
+    this.assertWritable();
     if (approvalMode !== 'ask' && approvalMode !== 'delegate') return false;
     const session = this.getActiveSession();
     if (this.approvalModeValue === approvalMode && session.approvalMode === approvalMode) {
@@ -311,6 +532,7 @@ export class ChatSessionStore {
   }
 
   public async setExecutionMode(executionMode: ExecutionMode): Promise<boolean> {
+    this.assertWritable();
     const session = this.getActiveSession();
     const normalized = normalizeExecutionMode(executionMode);
     if (normalizeExecutionMode(session.executionMode) === normalized) return false;
@@ -321,6 +543,9 @@ export class ChatSessionStore {
   }
 
   public async selectSession(sessionId: string, onSaving?: (sessionId: string) => void): Promise<ChatSession | undefined> {
+    this.assertWritable();
+    if (this.fixedSessionId && sessionId !== this.fixedSessionId) throw new Error('Task execution scope cannot select a different session.');
+    this.markSessionDirty(this.activeSessionIdValue);
     const session = await measureSessionSelection('session-body', sessionId, () => this.loadSessionById(sessionId));
     if (!session) {
       return undefined;
@@ -336,6 +561,7 @@ export class ChatSessionStore {
   }
 
   public async copyOtherWorkspaceSession(workspaceKey: string, sessionId: string): Promise<ChatSession | undefined> {
+    this.assertWritable();
     const normalizedWorkspaceKey = workspaceKey.trim();
     const normalizedSessionId = sessionId.trim();
     if (!normalizedWorkspaceKey || normalizedWorkspaceKey === this.workspaceScope.key || !normalizedSessionId) {
@@ -396,17 +622,19 @@ export class ChatSessionStore {
   }
 
   public async toggleSessionFavorite(sessionId: string): Promise<ChatSession | undefined> {
+    this.assertWritable();
     const session = await this.loadSessionById(sessionId);
     if (!session) {
       return undefined;
     }
 
     session.isFavorite = !session.isFavorite;
-    await this.persist();
+    await this.persistSession(session.id);
     return session;
   }
 
   public async renameSession(sessionId: string, title: string): Promise<ChatSession | undefined> {
+    this.assertWritable();
     const session = await this.loadSessionById(sessionId);
     if (!session) {
       return undefined;
@@ -422,11 +650,12 @@ export class ChatSessionStore {
     session.autoTitle = lockSessionTitleMetadata(session.autoTitle);
     this.stagedTitles.delete(sessionId);
     session.updatedAt = new Date().toISOString();
-    await this.persist();
+    await this.persistSession(session.id);
     return session;
   }
 
   public async deleteSessions(sessionIds: string[]): Promise<DeleteSessionsResult> {
+    this.assertWritable();
     const ids = new Set(sessionIds.filter((id) => typeof id === 'string' && id.trim()));
     if (!ids.size) {
       return { deletedCount: 0, activeSessionChanged: false };
@@ -471,10 +700,13 @@ export class ChatSessionStore {
     protectedSessionIds: readonly string[] = [],
     force = false
   ): Promise<boolean> {
+    // Only the project store knows aggregate pins across every runtime. A
+    // scoped Worker must never clean another Worker's authoritative sessions.
+    if (this.fixedSessionId || this.readOnly) return false;
     const changed = await this.sessionStorage.cleanupExpiredSessions({
       currentWorkspaceKey: this.workspaceScope.key,
       currentActiveSessionId: this.activeSessionIdValue,
-      protectedSessionIds,
+      protectedSessionIds: [...new Set([...protectedSessionIds, ...this.sessionPins.keys(), ...this.dirtySessions.keys()])],
       now,
       force
     });
@@ -493,6 +725,7 @@ export class ChatSessionStore {
     checkpointSources: Map<string, ChatMessage['runCheckpoint']>;
     queuedAt: number;
     reason: string;
+    sessionVersions: Map<string, number>;
   };
   private persistenceDrain?: Promise<void>;
   private readonly persistenceWaiters: Array<{
@@ -502,26 +735,37 @@ export class ChatSessionStore {
   }> = [];
 
   public async persist(reason = 'session_barrier'): Promise<void> {
+    this.markSessionDirty(this.activeSessionIdValue);
+    await this.queuePersistence(reason, !this.fixedSessionId);
+  }
+
+  public async flush(): Promise<void> {
+    if (this.dirtySessions.size) await this.queuePersistence('session_flush', !this.fixedSessionId);
+    await this.persistenceDrain;
+  }
+
+  private async queuePersistence(reason: string, _selectionChanged: boolean): Promise<void> {
+    this.assertWritable();
     const started = performance.now();
-    for (const session of this.sessions) session.executionTime = reconcileExecutionTime(session.executionTime, session.messages);
-    this.compact();
+    const incremental = !!this.sessionStorage.saveSessionChanges;
+    const dirty = incremental ? this.sessions.filter(session => this.dirtySessions.has(session.id)) : this.sessions;
+    for (const session of dirty) {
+      session.executionTime = reconcileExecutionTime(session.executionTime, session.messages);
+      this.sessionSummaries.set(session.id, toSessionSummary(session, this.language));
+    }
     const revision = ++this.persistRevision;
     const snapshot: StoredWorkspaceSessionState = {
-      activeSessionId: this.activeSessionIdValue,
-      approvalMode: this.approvalModeValue,
-      sessions: this.sessions.map(snapshotSession),
-      sessionSummaries: this.getSessionSummaries()
+      activeSessionId: this.activeSessionIdValue, approvalMode: this.approvalModeValue,
+      sessions: dirty.map(snapshotSession),
+      sessionSummaries: dirty.map(session => this.sessionSummaries.get(session.id)!)
     };
-    const checkpointSources = new Map(this.sessions.flatMap(session => session.messages.map(message => [message.id, message.runCheckpoint] as const)));
+    const checkpointSources = new Map(dirty.flatMap(session => session.messages.map(message => [message.id, message.runCheckpoint] as const)));
     this.pendingPersistence = { revision, scope: { ...this.workspaceScope, folderUris: [...this.workspaceScope.folderUris] }, snapshot, checkpointSources,
-      queuedAt: performance.now(), reason };
-    for (const session of this.sessions) recordLocalPerformance({ type: 'checkpoint_snapshot', sessionId: session.id,
+      sessionVersions: new Map(this.dirtySessions), queuedAt: performance.now(), reason };
+    for (const session of dirty) recordLocalPerformance({ type: 'checkpoint_snapshot', sessionId: session.id,
       snapshotMs: performance.now() - started, reason, queueDepth: Number(Boolean(this.persistenceDrain)) + 1 });
-    const completed = new Promise<void>((resolve, reject) => {
-      this.persistenceWaiters.push({ revision, resolve, reject });
-    });
-    this.startPersistenceDrain();
-    await completed;
+    const completed = new Promise<void>((resolve, reject) => { this.persistenceWaiters.push({ revision, resolve, reject }); });
+    this.startPersistenceDrain(); await completed;
   }
 
   public async getRecoveryCheckpoint(messageId: string): Promise<import('../agent/runCheckpoint').RunCheckpoint | undefined> {
@@ -585,7 +829,15 @@ export class ChatSessionStore {
           const summary = next.snapshot.sessionSummaries?.find(item => item.id === saved.id);
           if (summary) { summary.title = saved.title; summary.customTitle = saved.customTitle; }
         }
-        await this.sessionStorage.saveWorkspace(next.scope, next.snapshot);
+        if (this.sessionStorage.saveSessionChanges) await this.sessionStorage.saveSessionChanges(next.scope, next.snapshot, !!this.fixedSessionId || next.reason === 'task_session_create');
+        else if (this.fixedSessionId) {
+          // Small legacy/test adapters have replacement semantics. Preserve all
+          // unrelated sessions and the viewing selection in that fallback too.
+          const prior = await this.sessionStorage.loadWorkspace(next.scope);
+          const merged = new Map(prior.sessions.map(session => [session.id, session]));
+          next.snapshot.sessions.forEach(session => merged.set(session.id, session));
+          await this.sessionStorage.saveWorkspace(next.scope, { ...prior, sessions: [...merged.values()] });
+        } else await this.sessionStorage.saveWorkspace(next.scope, next.snapshot);
         for (const saved of next.snapshot.sessions) {
           const staged = this.stagedTitles.get(saved.id);
           if (staged && saved.autoTitle?.status === 'completed'
@@ -621,6 +873,14 @@ export class ChatSessionStore {
         this.rejectPersistenceWaitersThrough(next.revision, error);
         throw error;
       }
+      for (const [id, version] of next.sessionVersions) {
+        if (this.dirtySessions.get(id) === version) this.dirtySessions.delete(id);
+      }
+      for (const saved of next.snapshot.sessions) {
+        this.residentBytes.set(saved.id, Buffer.byteLength(JSON.stringify(saved)));
+        const live = this.getSessionById(saved.id); if (live) this.sessionCommitted?.(live);
+      }
+      this.evictIdleSessions();
       this.persistedRevision = Math.max(this.persistedRevision, next.revision);
       for (const session of next.snapshot.sessions) recordLocalPerformance({ type: 'checkpoint_session_commit', sessionId: session.id,
         reason: next.reason, queueMs: processing - next.queuedAt, processingMs: performance.now() - processing,
@@ -650,6 +910,7 @@ export class ChatSessionStore {
   }
 
   public async relocalizeEmptySessionTitles(language: KeepseekLanguage): Promise<void> {
+    this.assertWritable();
     this.language = language;
     const defaultTitles = new Set([
       localize('zh-CN', 'defaultSessionTitle'),
@@ -659,6 +920,7 @@ export class ChatSessionStore {
     for (const session of this.sessions) {
       if (!session.customTitle && !session.messages.length && defaultTitles.has(session.title)) {
         session.title = localize(language, 'defaultSessionTitle');
+        this.markSessionDirty(session.id);
         changed = true;
       }
     }
@@ -668,8 +930,9 @@ export class ChatSessionStore {
   }
 
   public getSessionSummaries(): ChatSessionSummary[] {
-    for (const session of this.getCurrentWorkspaceSessions()) {
-      this.sessionSummaries.set(session.id, toSessionSummary(session, this.language));
+    for (const session of this.sessions) {
+      if (session.id === this.activeSessionIdValue || this.dirtySessions.has(session.id))
+        this.sessionSummaries.set(session.id, toSessionSummary(session, this.language));
     }
     return Array.from(this.sessionSummaries.values())
       .filter((summary) => summary.workspaceKey === this.workspaceScope.key)
@@ -732,7 +995,9 @@ export class ChatSessionStore {
     const stored = await this.sessionStorage.loadWorkspace(this.workspaceScope);
     const sessions = normalizeStoredSessions({ sessions: stored.sessions }, this.workspaceScope);
 
+    this.dirtySessions.clear(); this.viewPages.clear(); this.residentBytes.clear();
     this.sessions = sessions.filter((session) => this.isInCurrentWorkspace(session));
+    for (const session of this.sessions) this.residentBytes.set(session.id, Buffer.byteLength(JSON.stringify(session)));
     this.sessionSummaries = new Map((stored.sessionSummaries ?? this.sessions.map((session) => toSessionSummary(session, this.language)))
       .filter((summary) => summary.workspaceKey === this.workspaceScope.key)
       .map((summary) => [summary.id, summary]));
@@ -776,7 +1041,7 @@ export class ChatSessionStore {
       }
 
       const isActive = session.id === activeSession.id;
-      if (!isActive && !session.messages.length) {
+      if (!isActive && !session.messages.length && !this.sessionPins.has(session.id) && !this.dirtySessions.has(session.id)) {
         continue;
       }
 
@@ -791,7 +1056,7 @@ export class ChatSessionStore {
       let storedNonFavoriteContentSessions = 0;
       for (const session of sorted) {
         const isActive = session.id === activeSession.id;
-        if (isActive || session.isFavorite || this.titleSessionPins.has(JSON.stringify([session.workspaceKey, session.id]))) {
+        if (isActive || session.isFavorite || this.sessionPins.has(session.id) || this.dirtySessions.has(session.id) || this.titleSessionPins.has(JSON.stringify([session.workspaceKey, session.id]))) {
           compacted.push(session);
           continue;
         }
@@ -810,7 +1075,8 @@ export class ChatSessionStore {
     this.setActiveSessionId(activeSession.id);
   }
 
-  private async loadSessionById(sessionId: string): Promise<ChatSession | undefined> {
+  public async loadSessionById(sessionId: string,
+    options: { purpose?: 'background_title' } = {}): Promise<ChatSession | undefined> {
     const loaded = this.sessions.find((item) => item.id === sessionId && this.isInCurrentWorkspace(item));
     if (loaded) {
       return loaded;
@@ -819,7 +1085,17 @@ export class ChatSessionStore {
       return undefined;
     }
     const workspaceKey = this.workspaceScope.key;
-    const session = await this.sessionStorage.loadSession(workspaceKey, sessionId);
+    // Ordinary cold consumers still share a body read. Auxiliary title loading
+    // must not hold a user rename/navigation behind its paused or obsolete I/O.
+    // Every lane reuses the already-resident winner after await below, so an old
+    // title read cannot replace a renamed object or an in-flight staged commit.
+    const key = JSON.stringify([workspaceKey, sessionId, options.purpose ?? 'interactive']);
+    let flight = this.loadFlights.get(key);
+    if (!flight) {
+      flight = this.sessionStorage.loadSession(workspaceKey, sessionId); this.loadFlights.set(key, flight);
+      void flight.finally(() => { if (this.loadFlights.get(key) === flight) this.loadFlights.delete(key); }).catch(() => {});
+    }
+    const session = await flight;
     if (!session || session.id !== sessionId || workspaceKey !== this.workspaceScope.key
       || !this.sessionSummaries.has(sessionId) || !this.isInCurrentWorkspace(session)) {
       return undefined;
@@ -827,6 +1103,8 @@ export class ChatSessionStore {
     const current = this.getSessionById(sessionId);
     if (current) return current;
     this.sessions.push(session);
+    this.residentBytes.set(session.id, Buffer.byteLength(JSON.stringify(session)));
+    this.lastViewed.set(session.id, performance.now()); this.evictIdleSessions();
     return session;
   }
 
@@ -1018,6 +1296,7 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
 
     sessions.push({
       id: item.id,
+      agentRole: normalizeProjectRouterRole(item.agentRole),
       title,
       autoTitle,
       messages,

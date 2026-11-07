@@ -34,6 +34,9 @@ import {
 } from '../src/agent/providerRequestProjection';
 import { AnthropicMessagesClient, getAnthropicMessagesEndpointUrl } from '../src/agent/providers/anthropicMessagesClient';
 import { AnthropicStreamParser } from '../src/agent/providers/anthropicStreamParser';
+import { normalizeDeepSeekUsage, normalizeSessionUsageStatsValue, rebuildSessionUsageStatsFromLedger } from '../src/agent/usageStats';
+import { createUsageLedgerRecords, createUsagePriceSnapshot, summarizeUsageLedger } from '../src/agent/usageLedger';
+import { UsageLedgerStore } from '../src/agent/usageLedgerStore';
 import type { AnthropicMessagesRequestBody } from '../src/agent/providers/anthropicTypes';
 import { createProviderClient } from '../src/agent/providers/factory';
 import { AgentRunner } from '../src/agent/runner';
@@ -480,8 +483,66 @@ describe('Anthropic Messages compatible protocol', () => {
       total_tokens: 27,
       prompt_cache_hit_tokens: 6,
       prompt_cache_miss_tokens: 14,
+      prompt_cache_write_tokens: 4,
+      prompt_cache_data_status: 'reported',
       prompt_tokens_details: { cached_tokens: 6 }
     });
+  });
+
+  it('keeps absent native cache metrics unknown and preserves only explicitly supplied read/write counters', async () => {
+    const ledgerStore = new UsageLedgerStore(vscode.Uri.file(storageRoot));
+    const samples = [
+      { native: {}, expected: { prompt: 10, hit: 0, miss: 0, status: 'unavailable' } },
+      { native: { cache_creation_input_tokens: 4 }, expected: { prompt: 14, hit: 0, miss: 14, write: 4, status: 'partial' } },
+      { native: { cache_read_input_tokens: 6 }, expected: { prompt: 16, hit: 6, miss: 0, status: 'partial' } },
+      { native: { cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }, expected: { prompt: 10, hit: 0, miss: 10, write: 0, status: 'reported' } }
+    ];
+    for (const [index, sample] of samples.entries()) {
+      const response = await parseAnthropicEvents([
+        { type: 'message_start', message: { usage: { input_tokens: 10, ...sample.native } } },
+        { type: 'content_block_start', index: 0, content_block: { type: 'text', text: 'Complete.' } },
+        { type: 'content_block_stop', index: 0 },
+        { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 7 } },
+        { type: 'message_stop' }
+      ]);
+      const normalized = normalizeDeepSeekUsage(response.usage);
+      assert.equal(normalized?.promptTokens, sample.expected.prompt);
+      assert.equal(normalized?.completionTokens, 7);
+      assert.equal(normalized?.cacheHitTokens, sample.expected.hit);
+      assert.equal(normalized?.cacheMissTokens, sample.expected.miss);
+      assert.equal(normalized?.cacheWriteTokens, 'write' in sample.expected ? sample.expected.write : undefined);
+      assert.equal(normalized?.cacheDataStatus, sample.expected.status);
+      assert.equal('prompt_cache_hit_tokens' in response.usage!, 'cache_read_input_tokens' in sample.native);
+      assert.equal('prompt_cache_write_tokens' in response.usage!, 'cache_creation_input_tokens' in sample.native);
+      const records = createUsageLedgerRecords({ requestId: `native-cache-${index}`, source: 'executor', usage: normalized,
+        attempts: [createUsagePriceSnapshot({ originalModelId: 'native-fixture', sourceId: 'native-source', provider: 'anthropic-compatible',
+          protocol: 'anthropic-messages', supportsBilling: false, requestStartedAt: new Date(index).toISOString() })] });
+      await ledgerStore.appendMany('native-cache-session', records);
+    }
+    const restarted = await new UsageLedgerStore(vscode.Uri.file(storageRoot)).readAll('native-cache-session');
+    assert.equal(restarted.incomplete, false);
+    assert.deepEqual(restarted.records.map(record => record.usage?.cacheDataStatus), ['unavailable', 'partial', 'partial', 'reported']);
+    assert.deepEqual(restarted.records.map(record => record.usage?.cacheWriteTokens), [undefined, 4, undefined, 0]);
+    assert.equal(summarizeUsageLedger({ version: 1, records: restarted.records, incomplete: false, legacyAggregate: false }).cacheWriteTokens, 4);
+    const stats = rebuildSessionUsageStatsFromLedger(restarted.records);
+    assert.equal(stats?.cacheWriteTokens, 4);
+    assert.equal(normalizeSessionUsageStatsValue(JSON.parse(JSON.stringify(stats)))?.cacheWriteTokens, 4);
+  });
+
+  it('upgrades partial native cache counters when the missing read counter arrives later', async () => {
+    const response = await parseAnthropicEvents([
+      { type: 'message_start', message: { usage: { input_tokens: 10, cache_creation_input_tokens: 4 } } },
+      { type: 'content_block_start', index: 0, content_block: { type: 'text', text: 'Complete.' } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 7, cache_read_input_tokens: 6 } },
+      { type: 'message_stop' }
+    ]);
+    const usage = normalizeDeepSeekUsage(response.usage);
+    assert.equal(usage?.cacheDataStatus, 'reported');
+    assert.equal(usage?.promptTokens, 20);
+    assert.equal(usage?.cacheHitTokens, 6);
+    assert.equal(usage?.cacheWriteTokens, 4);
+    assert.equal(usage?.cacheMissTokens, 14);
   });
 
   it('fails closed for stream errors, empty streams, malformed JSON, missing completion and unfinished tool input', async () => {

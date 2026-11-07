@@ -1,4 +1,5 @@
 import { getInputTemplate } from './input/template';
+import { getProjectTasksTemplate } from './projectTasks';
 import type { KeepseekExtensionInfo } from '../shared/types';
 import { DEFAULT_MODEL_REQUEST_TIMEOUT_SECONDS, MODEL_REQUEST_TIMEOUT_PRESETS } from '../shared/config';
 
@@ -121,6 +122,7 @@ export function getTemplate(extensionInfo?: Pick<KeepseekExtensionInfo, 'version
       </div>
     </section>
 
+    ${getProjectTasksTemplate()}
     <section id="transcript" class="transcript">
       <section id="planRegion" class="plan-region hidden" aria-label="计划 / 进度" data-i18n-aria-label="planProgress">
         <button id="planToggle" type="button" class="plan-toggle" aria-expanded="false" aria-controls="planBody">
@@ -155,6 +157,7 @@ export function getTemplate(extensionInfo?: Pick<KeepseekExtensionInfo, 'version
       </aside>
     </section>
 
+    <div id="projectInputTarget" class="project-input-target hidden" role="status" aria-live="polite"></div>
     ${getInputTemplate()}
   </main>`;
 }

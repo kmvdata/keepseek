@@ -16,7 +16,7 @@
 4. proposal 只能产生草案；实际写入和命令仍回到父会话审批管线。
 5. 时间、费用和取消属于同一逻辑任务，不能通过委派重置。
 
-`subagents/runtime.ts` 的私有 `SUBAGENT_PROTOCOL_VERSION` 仍为 **11**；父会话的 request protocol/tool schema 当前为 **13**，两者不能互相替换。child V11 使用结果合同 V2、handoff manifest V3、宿主继承 capsule V1 和独立结果索引 V1；会话对象存储 V4、审批策略及审批交付协议又是不同维度。权威来源与迁移规则见 [文档导航的版本表](doc/README.md#版本维度)。旧热 lane 保持已冻结的 system/schema 字节，在已有新会话或冷边界规则下升级，不为内部移动重录 fixture。
+`subagents/runtime.ts` 的私有 `SUBAGENT_PROTOCOL_VERSION` 仍为 **11**；父会话的 request protocol/tool schema 当前为 **15**，两者不能互相替换。child V11 使用结果合同 V2、handoff manifest V3、宿主继承 capsule V1 和独立结果索引 V1；会话对象存储 V4、审批策略及审批交付协议又是不同维度。权威来源与迁移规则见 [文档导航的版本表](doc/README.md#版本维度)。旧热 lane 保持已冻结的 system/schema 字节，在已有新会话或冷边界规则下升级，不为内部移动重录 fixture。
 
 ## 2. 权威模块
 
@@ -109,14 +109,20 @@ globalStorageUri/subagent-settings/v1/<workspaceHash>.json
 
 | 限制 | 值 |
 | --- | ---: |
-| 全局同时运行 child | 4 |
-| 单 root 同时运行 child | 3 |
-| proposal 同时运行 | 2 |
+| 同物理项目同时准入的 child 合计 | 4（depth 1 为 3；depth 2 保留 1） |
+| 同项目 depth 1 child | 3（所有 Worker 和旧执行入口共享） |
+| 同项目 proposal child | 2（包含在上述 child 名额内） |
 | 最大委派深度 | 2 |
 | 单 parent 的 direct children | 8 |
 | 单任务树 child 总数 | 12 |
 
 每个 child 的 step 上限从父任务派生，通常为父上限的一半，并限制在 1–32；当前默认下限为 5。队列等待不计入执行时间，但取消、停止、工作区失信或预算耗尽会传播到排队和运行中的 child。
+
+每个 Runtime 保留自己树预算、路径声明、工具状态和私有 transcript；其 `SubagentScheduler.run()` 在项目执行上下文中使用同一个 `ProjectRequestAdmission` 的 child 池，不能为每个 Worker 复制完整并发额度。逻辑根 Worker 槽、逻辑 child 槽、实际来源请求 permit 和工作区修改/验证租约是不同资源。实际请求 permit 在响应流清理后释放，不跨工具或 child 等待持有。
+
+child 委派单个/并行 nested child 或等待仍在运行的结果时，先归还自己的逻辑 child/proposal 名额；等待结束后重新排队获取名额，再恢复父模型/工具循环。取消时不重新获取，finally 释放剩余 permit。depth 2 保留名额进一步避免所有 depth 1 父同时等待的死锁；最大深度仍为 2，nested child 不扩大工具。持工作区修改租约进入 child 等待直接拒绝，调用者必须先结清并释放。冻结的 child V11 schema、请求字节、时间/费用/树预算均不因准入变化而重置。
+
+项目共享准入的真实 Runtime/Provider 受控回归见 [协调验收记录](doc/keepseek-project-coordination-verification.md)；独立模块测试未创建项目上下文时仍可使用本地调度器，不能据此推定生产每 Worker 各自拥有全局配额。
 
 并行不改变安全边界：调度器只能决定何时运行，不能扩展工具、路径、预算或批准。
 

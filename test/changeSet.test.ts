@@ -521,12 +521,14 @@ test('journal Apply I/O stays constant with large history and does not run GC be
   assert.ok(target);
   await store.flush();
   vscode.workspace.fs.writeFile = async (uri, content) => {
-    writeCount += 1;
-    if (uri.fsPath.includes(`${path.sep}history${path.sep}`)) historyWriteCount += 1;
+    if (uri.fsPath.startsWith(root + path.sep)) {
+      writeCount += 1;
+      if (uri.fsPath.includes(`${path.sep}history${path.sep}`)) historyWriteCount += 1;
+    }
     await originalWriteFile(uri, content);
   };
   vscode.workspace.fs.readDirectory = async (uri) => {
-    directoryScanCount += 1;
+    if (uri.fsPath === root || uri.fsPath.startsWith(root + path.sep)) directoryScanCount += 1;
     return await originalReadDirectory(uri);
   };
   try {

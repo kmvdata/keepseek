@@ -41,6 +41,7 @@ src/agent/             请求投影、模型/工具循环、压缩、evidence/ep
 src/approvals/         reviewer/host policy、action hash、记录和熔断
 src/edits/             DraftEdit、canonical Patch IR、ChangeSet、SafeFileEditor
 src/runs/              DraftRun、风险、一次性 permit、store、batch、spawn
+src/tasks/             项目 Registry/邮箱、TaskRuntime、owner、资源及请求准入
 src/sessions/          会话、纯 replay 归一化、协议迁移、分片持久化
 src/shared/            跨层 types/config/i18n/文本守卫/原子存储
 test/                  按行为契约组织的回归测试
@@ -94,6 +95,7 @@ test/                  按行为契约组织的回归测试
 - 交互能力只由 `provider/interactionState.ts` 派生；异步拥有者须在首个 await 前取得带会话身份的预占，只有持有者可完成/交接。持续提示随操作终态同次清除；提交接受须有正文持久化屏障。后台功能须声明能力、预算、durability 与失败/恢复依赖，详见 [交互生命周期](doc/keepseek-interaction-lifecycle.md)。
 - `webview/input/composition.ts` 的 fragment 顺序是运行时契约；样式、模板、行为放各自 fragment。共享编辑器快捷键只放 `richTextShortcuts.ts`。
 - 共享文件只读：`.agents/skills`、`~/.agents/skills`、`CODEX_HOME` 配置/指令；任务作用域冻结，变更仅在受控刷新边界生效。标准策略不扩大权限，版本差异见共享配置文档。
+- 项目任务以 project/card/session/root/segment/generation 绑定回调、取消、审批和保存，同 session 单 writer。每 Worker 独立 Provider/Runner；Router 固定专用 role/toolset，不能改 Worker 热 schema。supplement 先耐久、旧原生轮次结清后同 root 新段；只查看用有限页，不改执行选择、不发模型请求。owner/资源/来源准入覆盖旧入口，恢复不复活 permit。详见[项目任务](doc/keepseek-project-assistant.md)。
 - 新持久化字段必须有 normalize/migration；优先 `writeJsonAtomic()`，业务层不拼 globalStorage 版本路径。
 
 ## 4. 改动路由
@@ -109,6 +111,7 @@ test/                  按行为契约组织的回归测试
 - **DraftEdit**：draftEdit/textPatch/artifact + ChangeSet/SafeFileEditor/Diff + approval hash/surface + checkpoint/subagent/UI。
 - **审批/DraftRun**：approvalProcessing 批次规则 + store/reviewer + runs/* + Provider/Runner/authorization + user-tail/usage/UI。
 - **子代理**：subagents runtime/scheduler/store/profile/pathScope + model resolver + protocol/admission/checkpoint/usage。
+- **项目任务/纯视图**：tasks + ProjectAssistantHost + Router/projection + 独立 session scope + Webview；查身份、邮箱/恢复、pin/dirty 保存、owner/资源及三协议旧字节。
 - **会话结构**：`shared/types.ts` + chatSessionStore normalize/migration + GlobalSessionStorage + UI/旧数据测试；原生 replay 归一化由 `sessions/providerReplayNormalization.ts` 负责。
 
 ## 5. 验证与交付
@@ -122,11 +125,7 @@ test/                  按行为契约组织的回归测试
 
 ## 6. 按需阅读
 
-- `doc/README.md`：当前专题、分维度版本权威、历史证据边界
-
-- `doc/keepseek-code-architecture.md`：目录、依赖、调用链、持久化与改动定位
-- `doc/keepseek-agent-runtime-workflow.md`：Agent 运行时、长任务与恢复
-- `doc/cache_keepseek.md`：缓存前缀、投影、压缩与观测
-- `doc/keepseek-api-payload-reference.md`：三协议真实 payload
-- `doc/keepseek-file-reference-spec.md`：引用语法
-- `SUBAGENTS.md`：子代理架构、安全、恢复与用量
+- 专题/版本/证据：`doc/README.md`；架构：`doc/keepseek-code-architecture.md`。
+- 运行/恢复：`doc/keepseek-agent-runtime-workflow.md`；缓存：`doc/cache_keepseek.md`。
+- 三协议：`doc/keepseek-api-payload-reference.md`；引用：`doc/keepseek-file-reference-spec.md`。
+- 子代理：`SUBAGENTS.md`；项目任务：`doc/keepseek-project-assistant.md`。

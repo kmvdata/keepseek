@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { test } from 'node:test';
@@ -15,7 +16,7 @@ import {
   CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION,
   CURRENT_PROVIDER_TOOL_SCHEMA_VERSION
 } from '../src/agent/providerRequestProjection';
-import { GlobalSessionStorage } from '../src/sessions/globalSessionStorage';
+import { GlobalSessionStorage, getWorkspaceHash } from '../src/sessions/globalSessionStorage';
 import { createHistoryTruncationPlan } from '../src/sessions/historyTruncation';
 import type { ChatMessage, ChatSession, WorkspaceSummary } from '../src/shared/types';
 import * as vscode from './stubs/vscode';
@@ -486,4 +487,213 @@ test('execution timing survives persistence, repeated saves, session switches an
   assert.equal(executionTimeView(restarted.getActiveSession()).totalMs, 12345);
   await restarted.selectSession(second.id);
   assert.equal(executionTimeView(restarted.getActiveSession()).totalMs, 0);
+});
+
+test('pure task views preserve execution selection and byte history and scoped commits only save their target', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-task-scope-'));
+  const storage = new GlobalSessionStorage(vscode.Uri.file(root) as never);
+  t.after(async () => { await storage.flush(); await rm(root, { recursive: true, force: true }); });
+  const scope = { key: 'task-scope', name: 'Tasks', folderUris: [] };
+  const store = new ChatSessionStore(storage, 'en', scope); await store.initialize();
+  const legacy = store.getActiveSession(); legacy.messages.push(createMessage(0)); await store.persist();
+  const before = JSON.stringify(legacy), selected = store.activeSessionId;
+  const worker = await store.createDetachedSession({ title: 'Worker A', approvalMode: 'delegate',
+    contextInstructions: ' frozen\n context ', messages: Array.from({ length: 80 }, (_, i) => createMessage(i + 1)) });
+  assert.equal(store.activeSessionId, selected);
+  const page = await store.viewSessionPage(worker.id);
+  assert.equal(page?.kind, 'session-view-page'); assert.equal(page?.messages.length, 30);
+  assert.equal(page?.startIndex, 50); assert.equal(store.activeSessionId, selected);
+  assert.equal(JSON.stringify(legacy), before);
+  const workerScope = await store.createSessionScope(worker.id);
+  assert.equal(workerScope.getActiveSession(), worker);
+  await workerScope.initialize(); assert.equal(workerScope.getActiveSession(), worker);
+  await assert.rejects(workerScope.selectSession(legacy.id), /cannot select/);
+  const writes: string[][] = [];
+  const save = storage.saveSessionChanges.bind(storage);
+  storage.saveSessionChanges = async (workspace, state, preserve) => {
+    writes.push(state.sessions.map(session => session.id)); await save(workspace, state, preserve);
+  };
+  worker.messages.push(createMessage(90)); await workerScope.persist('worker_evidence');
+  assert.deepEqual(writes, [[worker.id]]);
+  assert.equal(store.activeSessionId, selected);
+  const reloaded = await new GlobalSessionStorage(vscode.Uri.file(root) as never).loadWorkspace(scope);
+  assert.equal(reloaded.activeSessionId, selected);
+  assert.equal(JSON.stringify(legacy), before);
+  assert.equal((await storage.loadSession(scope.key, worker.id))?.messages.length, 81);
+  workerScope.disposeSessionScope();
+});
+
+test('cold task page reads merge, remain bounded and never decode or save complete authority sessions', async () => {
+  const scope = { key: 'view-pages', name: 'Views', folderUris: [] };
+  const session = createSession('active', [createMessage(0)], scope);
+  const storage = new MemorySessionStorage({ activeSessionId: session.id, sessions: [session] });
+  let pages = 0, full = 0;
+  const adapter: ChatSessionStorageAdapter = Object.assign(storage, {
+    loadSession: async () => { full++; throw new Error('full history must not be loaded'); },
+    loadSessionPage: async (_workspaceKey: string, sessionId: string) => {
+      pages++; await new Promise(resolve => setTimeout(resolve, 5));
+      return { kind: 'session-view-page' as const, sessionId, revision: 17, title: 'Other task',
+        totalMessages: 8000, startIndex: 7970, messages: Array.from({ length: 30 }, (_, i) => createMessage(i)) };
+    }
+  });
+  const store = new ChatSessionStore(adapter, 'en', scope); await store.initialize();
+  const [a, b] = await Promise.all([store.viewSessionPage('other'), store.viewSessionPage('other')]);
+  assert.equal(a, b); assert.equal(pages, 1); assert.equal(full, 0);
+  assert.equal((await store.viewSessionPage('other'))?.revision, 17); assert.equal(pages, 1);
+  assert.equal(store.activeSessionId, session.id); assert.equal(storage.saved, undefined);
+});
+
+test('display projections read only recent manifest bodies and cannot erase historical authority', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-task-page-'));
+  const storage = new GlobalSessionStorage(vscode.Uri.file(root) as never);
+  t.after(async () => { await storage.flush(); await rm(root, { recursive: true, force: true }); });
+  const scope = { key: 'disk-pages', name: 'Disk Pages', folderUris: [] };
+  const session = createSession('paged-session', Array.from({ length: 140 }, (_, i) => createMessage(i)), scope);
+  await storage.saveWorkspace(scope, { activeSessionId: session.id, sessions: [session] });
+  const page = await storage.loadSessionPage(scope.key, session.id);
+  assert.equal(page?.startIndex, 110); assert.equal(page?.messages.length, 30);
+  assert.equal(page?.totalMessages, 140); assert.equal(page?.messages[0].id, 'm110');
+  const earlier = await storage.loadSessionPage(scope.key, session.id, { before: 110, limit: 50 });
+  assert.equal(earlier?.startIndex, 60); assert.equal(earlier?.messages.length, 50);
+  assert.equal((await storage.loadSession(scope.key, session.id))?.messages.length, 140);
+});
+
+test('pinned empty task sessions survive compaction and idle eviction while read-only observers cannot mutate storage', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-task-pin-'));
+  const storage = new GlobalSessionStorage(vscode.Uri.file(root) as never);
+  t.after(async () => { storage.setReadOnly(false); await storage.flush(); await rm(root, { recursive: true, force: true }); });
+  const scope = { key: 'task-pins', name: 'Pins', folderUris: [] };
+  const store = new ChatSessionStore(storage, 'en', scope); await store.initialize(); await store.persist();
+  const task = await store.createDetachedSession({ title: 'Queued task' });
+  const release = store.pinSession(task.id, 'queued');
+  store.evictIdleSessions(0); assert.equal(store.getSessionById(task.id), task);
+  assert.equal((await storage.loadSession(scope.key, task.id))?.messages.length, 0);
+  storage.setReadOnly(true); store.setReadOnly(true);
+  assert.ok(await store.viewSessionPage(task.id));
+  await assert.rejects(store.createDetachedSession(), /read-only/);
+  await assert.rejects(storage.saveWorkspace(scope, { activeSessionId: task.id, sessions: [task] }), /read-only/);
+  assert.equal(await storage.cleanupExpiredSessions({ currentWorkspaceKey: scope.key, currentActiveSessionId: task.id, force: true }), false);
+  release(); store.evictIdleSessions(0); assert.equal(store.getSessionById(task.id), undefined);
+});
+
+test('canonical project storage scopes preserve legacy workspace sessions and resolve association ownership without copies', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-project-scope-'));
+  const storage = new GlobalSessionStorage(vscode.Uri.file(root) as never);
+  t.after(async () => { await storage.flush(); await rm(root, { recursive: true, force: true }); });
+  const alias = { key: 'workspace-alias-A', name: 'Alias A', folderUris: [] };
+  const legacy = new ChatSessionStore(storage, 'en', alias); await legacy.initialize();
+  const old = legacy.getActiveSession(); old.messages.push(createMessage(0)); await legacy.persist();
+  const canonical = { key: 'project:physical-root-identity', name: 'Canonical Project', folderUris: [] };
+  const tasks = await legacy.createWorkspaceScope(canonical);
+  const task = await tasks.createDetachedSession({ title: 'Physical project task', messages: [createMessage(1)] });
+  assert.equal(task.workspaceKey, canonical.key); assert.equal(old.workspaceKey, alias.key);
+  assert.equal(legacy.activeSessionId, old.id);
+  assert.deepEqual(await tasks.findSessionScope(old.id), alias);
+  const observedScope = await tasks.createWorkspaceScope((await tasks.findSessionScope(old.id))!);
+  assert.equal((await observedScope.loadSessionById(old.id))?.id, old.id);
+  assert.equal((await storage.loadSession(alias.key, old.id))?.messages[0].id, 'm0');
+  assert.equal((await storage.loadSession(canonical.key, task.id))?.messages[0].id, 'm1');
+  await storage.saveWorkspace({ ...canonical, key: 'another-project' }, { activeSessionId: old.id,
+    sessions: [{ ...old, workspaceKey: 'another-project' }] });
+  await assert.rejects(storage.findSessionScope(old.id), /ambiguous/);
+});
+
+test('deep-history anchor views are bounded, preserve execution bytes, and keep latest-page navigation independent', async () => {
+  const scope = { key: 'anchor-resident', name: 'Anchor', folderUris: [] };
+  const source = createSession('anchor-session', Array.from({ length: 200 }, (_, i) => createMessage(i)), scope);
+  const storage = new MemorySessionStorage({ activeSessionId: source.id, sessions: [source] });
+  const store = new ChatSessionStore(storage, 'en', scope); await store.initialize();
+  const before = JSON.stringify(store.getActiveSession());
+  const middle = await store.viewSessionPageAtAnchor(source.id, 'm50');
+  assert.equal(middle?.messages.length, 30); assert.equal(middle?.startIndex, 35);
+  assert.equal(middle?.anchorFound, true); assert.equal(middle?.hasOlder, true); assert.equal(middle?.hasNewer, true);
+  assert.ok(middle?.messages.some(message => message.id === 'm50'));
+  const beginning = await store.viewSessionPageAtAnchor(source.id, 'm0');
+  assert.equal(beginning?.startIndex, 0); assert.equal(beginning?.hasOlder, false); assert.equal(beginning?.hasNewer, true);
+  const latest = await store.viewSessionPage(source.id);
+  assert.equal(latest?.startIndex, 170); assert.equal(latest?.hasNewer, false);
+  const missing = await store.viewSessionPageAtAnchor(source.id, 'deleted-message');
+  assert.equal(missing?.anchorFound, false); assert.equal(missing?.startIndex, 170);
+  assert.equal(JSON.stringify(store.getActiveSession()), before); assert.equal(storage.saved, undefined);
+});
+
+test('cold anchor views use the manifest message ID index and old manifests project IDs without decoding distant history', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-anchor-page-'));
+  const storage = new GlobalSessionStorage(vscode.Uri.file(root) as never);
+  t.after(async () => { await storage.flush(); await rm(root, { recursive: true, force: true }); });
+  const scope = { key: 'anchor-disk', name: 'Anchor Disk', folderUris: [] };
+  const session = createSession('anchor-disk-session', Array.from({ length: 120 }, (_, i) => createMessage(i)), scope);
+  await storage.saveWorkspace(scope, { activeSessionId: session.id, sessions: [session] });
+  const sessionHash = createHash('sha256').update(session.id).digest('hex').slice(0, 32);
+  const shard = path.join(root, 'chat-sessions', 'v2', 'workspaces', getWorkspaceHash(scope.key), 'sessions', `${sessionHash}.json`);
+  const manifest = JSON.parse(await readFile(shard, 'utf8')) as { messages: Array<{ body: string; messageId?: string }> };
+  assert.equal(manifest.messages[50].messageId, 'm50');
+  const excluded = new Set(manifest.messages.filter((_entry, index) => index < 35 || index >= 65).map(entry => `${entry.body}.json`));
+  const originalRead = vscode.workspace.fs.readFile;
+  vscode.workspace.fs.readFile = async uri => {
+    if (uri.fsPath.includes('.objects') && excluded.has(path.basename(uri.fsPath))) throw new Error('Decoded history outside the anchored page');
+    return originalRead(uri);
+  };
+  try {
+    const page = await storage.loadSessionPage(scope.key, session.id, { anchorMessageId: 'm50' });
+    assert.equal(page?.startIndex, 35); assert.equal(page?.messages.length, 30); assert.equal(page?.anchorFound, true);
+    assert.equal(page?.hasOlder, true); assert.equal(page?.hasNewer, true);
+  } finally { vscode.workspace.fs.readFile = originalRead; }
+  // An older manifest can locate IDs without following an unrelated content
+  // reference. A full authority load would have to validate that content.
+  for (const entry of manifest.messages) delete entry.messageId;
+  const distantNode = JSON.stringify({ kind: 'object', entries: [['id', 'm0'], ['content', { ref: 'f'.repeat(64) }]] });
+  const distantHash = createHash('sha256').update(distantNode).digest('hex');
+  await writeFile(path.join(`${shard}.objects`, `${distantHash}.json`), distantNode);
+  manifest.messages[0].body = distantHash; await writeFile(shard, JSON.stringify(manifest));
+  const page = await storage.loadSessionPage(scope.key, session.id, { anchorMessageId: 'm50' });
+  assert.equal(page?.anchorFound, true); assert.equal(page?.startIndex, 35); assert.equal(page?.messages.length, 30);
+  assert.equal(page?.messages.find(message => message.id === 'm50')?.content, 'message 50');
+});
+
+test('ordinary cold session reads coalesce while user metadata and selection bypass an obsolete background title read', async () => {
+  const scope = { key: 'title-read-priority', name: 'Title read priority', folderUris: [] };
+  const make = async () => {
+    const active = createSession('active', [createMessage(0)], scope), historical = createSession('historical', [createMessage(1)], scope);
+    const storage = new MemorySessionStorage({ activeSessionId: active.id, sessions: [active, historical] });
+    const loadWorkspace = storage.loadWorkspace.bind(storage);
+    storage.loadWorkspace = async workspace => {
+      const state = await loadWorkspace(workspace);
+      return { ...state, sessions: state.sessions.filter(session => session.id === active.id),
+        sessionSummaries: state.sessions.map(session => ({ id: session.id, title: session.title, createdAt: session.createdAt,
+          updatedAt: session.updatedAt, messageCount: session.messages.length, workspaceKey: scope.key,
+          workspaceName: scope.name, workspaceFolders: [], isFavorite: false })) };
+    };
+    let ready!: () => void, release!: () => void, reads = 0;
+    const started = new Promise<void>(resolve => { ready = resolve; });
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const adapter: ChatSessionStorageAdapter = Object.assign(storage, { loadSession: async () => {
+      if (++reads === 1) { ready(); await held; }
+      return structuredClone(historical);
+    } });
+    const store = new ChatSessionStore(adapter, 'en', scope); await store.initialize();
+    return { store, storage, started, release, reads: () => reads };
+  };
+  const ordinary = await make();
+  const first = ordinary.store.loadSessionById('historical'); await ordinary.started;
+  const second = ordinary.store.loadSessionById('historical');
+  ordinary.release(); const [one, two] = await Promise.all([first, second]);
+  assert.equal(ordinary.reads(), 1); assert.equal(one, two, 'ordinary same-target cold consumers still share the exact live object');
+
+  const background = await make();
+  let renamed: ChatSession | undefined;
+  const title = background.store.withSessionForTitle('historical', async session => session);
+  await background.started;
+  const rename = background.store.renameSession('historical', 'Chosen by the user').then(session => { renamed = session; return session; });
+  let beforeRelease: { reads: number; title?: string; active: string };
+  try {
+    await new Promise<void>(resolve => setImmediate(resolve));
+    beforeRelease = { reads: background.reads(), title: renamed?.customTitle, active: background.store.activeSessionId };
+  } finally { background.release(); }
+  const [named, lateTitle] = await Promise.all([rename, title]);
+  assert.deepEqual(beforeRelease!, { reads: 2, title: 'Chosen by the user', active: 'active' },
+    'the user rename must finish without waiting for the obsolete title read');
+  assert.equal(lateTitle, named, 'late background delivery reuses the renamed resident winner');
+  assert.equal(background.store.getSessionById('historical')?.customTitle, 'Chosen by the user');
+  assert.equal(background.storage.saved?.sessions.find(session => session.id === 'historical')?.customTitle, 'Chosen by the user');
 });

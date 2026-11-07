@@ -379,7 +379,8 @@ test('context usage cache reuses stable inputs and invalidates model, message, c
 test('webview bootstrap uses monotonic revisions, early ready, paging, and fail-closed startup controls', () => {
   const script = getScript();
   assert.doesNotThrow(() => new Function(script));
-  assert.match(script, /incomingRevision <= lastStateRevision/u);
+  assert.match(script, /incomingRevision <= knownLaneRevision/u);
+  assert.match(script, /projectStateRevisions\.get\(incomingLane\)/u);
   assert.match(script, /type: 'loadOlderMessages'/u);
   assert.match(script, /sideEffectsReady/u);
   assert.match(script, /getCommandSettingReadiness\('mainModel'\)/u);

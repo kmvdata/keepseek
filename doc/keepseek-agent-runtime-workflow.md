@@ -6,6 +6,10 @@
 
 KeepSeek 是 VS Code 扩展，不是独立 Agent 服务。宿主掌握会话、工作区权限、工具执行、审批和持久化；模型只产生文本、工具调用及待审核提议。
 
+项目任务由 `ProjectTaskService → TaskRuntime → 独立 Provider/Runner` 驱动。每个 Worker 固定一个 session，拥有独立上下文门面、来源快照、取消、审批及 checkpoint；查看目标不参与执行归属。默认两个根 Worker 与旧普通运行共用根准入，Router 使用独立有界队列，三者及 child 共用实际来源请求池。完整合同见 [项目助手](keepseek-project-assistant.md)，物理项目锁和资源阶段见 [协调验收](keepseek-project-coordination-verification.md)。
+
+真实补充先耐久入邮箱，当前模型及原生工具配对结清后，同 root 新执行段继续。自动审批、命令和 repair 的新 assistant 也各有真实 segment；卡片保存最新 checkpoint 段，内部调度 generation 与 trace ID 不能代替它。新段沿用剩余时间、费用、请求、委派、Evidence 与纠错状态；Continue 复用原检查点，不恢复旧 permit。停止发生在段绑定/准备等待期间也不能再启动请求。
+
 ```text
 VS Code / Webview
   → KeepseekChatViewProvider

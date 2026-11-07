@@ -11,7 +11,7 @@ import {
   getAgentSystemPrompt
 } from './protocol';
 import type { KeepseekLanguage } from '../shared/i18n';
-import { AgentSettings, ChatMessage, ContextCompressionState, ContextFile, ContextUsageEstimate, CurrentRunContext, KeepseekModel } from '../shared/types';
+import { AgentSettings, ChatMessage, ContextCompressionState, ContextFile, ContextUsageEstimate, CurrentRunContext, KeepseekModel, ProjectRouterRole } from '../shared/types';
 import { buildProviderRequestProjection } from './providerRequestProjection';
 import type { ModelSourceProvider } from '../accounts/types';
 import type { OpenAiResponsesFunctionTool, OpenAiResponsesItem } from './providers/responsesTypes';
@@ -21,6 +21,7 @@ import { estimateTokenCount } from './tokenEstimate';
 type ContextUsageBreakdown = ContextUsageEstimate['breakdown'];
 
 export function createContextUsageEstimate(input: {
+  agentRole?: ProjectRouterRole;
   model: KeepseekModel;
   agentSettings: AgentSettings;
   contextFiles: ContextFile[];
@@ -42,6 +43,7 @@ export function createContextUsageEstimate(input: {
 }): ContextUsageEstimate {
   const prompt = input.prompt?.trim() ?? '';
   const providerProjection = buildProviderRequestProjection({
+    agentRole: input.agentRole,
     model: input.model,
     agentSettings: input.agentSettings,
     prompt,
@@ -145,6 +147,7 @@ export function createContextUsageEstimateFromAnthropic(input: {
 }
 
 export function createDisplayedSessionContextUsageEstimate(input: {
+  agentRole?: ProjectRouterRole;
   model: KeepseekModel;
   agentSettings: AgentSettings;
   contextFiles: ContextFile[];

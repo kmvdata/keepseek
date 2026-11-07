@@ -51,7 +51,7 @@ current user / tool continuation
 
 ### 3.1 协议 lane
 
-新建主会话的 request protocol 与 tool schema 当前均为 **14**，分别由 `providerRequestProjection.ts` 的 `CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION` 与 `CURRENT_PROVIDER_TOOL_SCHEMA_VERSION` 定义。它们不代表 child runtime、结果合同或存储格式的版本；各维度见 [版本权威表](README.md#版本维度)。请求协议的演进边界包括：
+新建主会话的 request protocol 与 tool schema 当前均为 **15**，分别由 `providerRequestProjection.ts` 的 `CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION` 与 `CURRENT_PROVIDER_TOOL_SCHEMA_VERSION` 定义。它们不代表 child runtime、结果合同或存储格式的版本；各维度见 [版本权威表](README.md#版本维度)。请求协议的演进边界包括：
 
 - V5 引入子代理。
 - V8 引入通用 Evidence 与 Context Epoch。
@@ -61,8 +61,26 @@ current user / tool continuation
 - V12 由 `protocol.ts` 的 `PLUGIN_SKILL_REQUEST_PROTOCOL_VERSION` 门控显式 Codex 插件 Skill 读取工具。
 - V13 更新 ask/delegate 审批提示与 DraftRun 工具说明；宿主审批模式不由模型或历史提示切换。
 - V14 隐藏已暂停的插件 Skill 读取工具；V12/V13 保留冻结 schema，旧工具实际调用拒绝，历史字节不改写。
+- V15 增加有界命令计划字段；V1–V14 的工具字节保持冻结。
 
-受支持的 V1–V12 热主会话保持各自 system/schema 字节，只有缓存已冷或受控 rollover 才迁移；`subagents/runtime.ts` 的 child 协议仍独立固定为 11。不同来源、endpoint、wire model、协议版本或原生协议不能共用缓存 lane。旧版三审批模式字节属于冻结协议兼容，不是当前设置入口。
+受支持的旧热主会话保持各自 system/schema 字节，只有缓存已冷或受控 rollover 才迁移；`subagents/runtime.ts` 的 child 协议仍独立固定为 11。不同来源、endpoint、wire model、协议版本或原生协议不能共用缓存 lane。旧版三审批模式字节属于冻结协议兼容，不是当前设置入口。
+
+### 3.2 项目任务与本地缓存
+
+项目任务的四类本地状态与供应商 Prompt Cache 分开：
+
+| 状态 | 权威与边界 |
+| --- | --- |
+| 运行会话 | `ChatSessionStore.createSessionScope()` 固定独立执行选择并 pin 原 session；不会复制历史到新 session，也不改全局正在查看的普通会话 |
+| 有限首屏 | `SessionViewPage` 是只读展示投影，默认最近 30 条、更早最多 50 条；既有对象 manifest 按所需 message body 读取，不解码全部 checkpoint；深历史按 messageId 索引读居中有界页，锚点丢失退回最近页，不能作为完整 session 保存 |
+| 来源快照 | `SharedProjectSources.createSibling()` 共享不可变配置/指令、版本、合并读取和 watcher；各 facade 的 session、选中结果与代际仍独立。`SkillStore.createSibling()` 共享来源 manifest/冻结正文读取，激活、错误与 implicit 集合属于各任务 |
+| 草稿与工作位置 | 属于查看目标，独立于执行 session、审批与预算；丢弃视图缓存不丢运行权威 |
+
+普通查看使用 `viewSessionPage()`，不调用 `selectSession()`，不更新模式、来源、活动时间或选择持久化，不触发模型、标题、摘要或付费预热。冷热视图从本地磁盘恢复并不证明上游已命中。Router 的 `agentRole/toolset=1` 是独立维度；Worker request/schema 仍为 15，旧热 lane 不批量迁移。
+
+保存按 dirty session/revision 提交。`GlobalSessionStorage.saveSessionChanges()` 先保存相关对象图，再短事务合并工作区索引；scoped 保存保留全局查看选择。CoalescedWriter 等待者只在包含本次版本的真实提交后完成，失败保留 dirty 状态，标题 staged commit 屏障继续生效。普通同目标冷正文读取继续合并；辅助标题读取使用独立 flight，前台重命名/会话选择不能等待旧标题 I/O。各读取完成后都先复用已经驻留的对象，因此迟到旧读不能覆盖手动标题或 staged commit。运行、未消费输入、审批/恢复、必要保存的 pin 与有限视图 LRU 分开；空排队卡不会因无消息被过滤。
+
+证据：[本地视图/存储测量](benchmarks/keepseek-project-view-storage-20261107.json)，复现脚本 `scripts/benchmark-project-views.cjs`。测量范围是 Host 读入与发布准备时间；原生 Webview 绘制、输入可编辑、Provider 缓存命中和真实费用需要各自现场证据，不能从这份主机测量推定。
 
 ## 4. 字节冻结规则
 

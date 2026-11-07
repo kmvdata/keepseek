@@ -12,6 +12,8 @@ import type {
 } from '../deepseek/types';
 import type { OpenAiResponsesStreamResult } from './responsesTypes';
 import type { AnthropicMessagesStreamResult } from './anthropicTypes';
+import { withProjectProviderRequest } from '../../tasks/requestAdmission';
+import { assertProjectExecutionOwner } from '../../tasks/projectResources';
 import type {
   ProviderClient,
   ProviderClientConfig,
@@ -85,9 +87,12 @@ export class OpenAICompatibleClient implements ProviderClient {
       const nextBoundary = stopped();
       if (nextBoundary) return nextBoundary;
       request.callbacks?.onActivity?.('request');
-      physicalAttemptCount += 1;
-      const absoluteAttempt = initialAttempts + physicalAttemptCount - 1;
-      const result = await this.createModelResponseAttempt(frozenConfig, request, frozen, localAttempt, absoluteAttempt);
+      const absoluteAttempt = initialAttempts + physicalAttemptCount;
+      const result = await withProjectProviderRequest(frozen.url, request.signal,
+        () => {
+          physicalAttemptCount += 1;
+          return this.createModelResponseAttempt(frozenConfig, request, frozen, localAttempt, absoluteAttempt);
+        });
       lastResult = result;
       if (!result.ok) request.callbacks?.onAttemptReset?.();
       await request.onAttemptResult?.({ attemptIndex: localAttempt, result: finish(result) });
@@ -205,6 +210,7 @@ export class OpenAICompatibleClient implements ProviderClient {
       requestTimeout = setTimeout(() => { abortedByRequestTimeout = true;
         controller.abort(new Error('Model request timed out.'));
       }, frozen.timeoutMs);
+      await assertProjectExecutionOwner();
       const response = await fetch(frozen.url, { method: 'POST', headers: frozen.headers,
         body: frozen.body, signal: controller.signal });
       status = response.status;

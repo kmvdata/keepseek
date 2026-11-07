@@ -202,6 +202,16 @@ export const usageRenderFragment: WebviewFragment = {
         usageDetailsBody.append(createContextWindowSection(metrics));
         usageDetailsBody.append(createSessionMetricsSection(metrics, selected));
         usageDetailsBody.append(createCacheDiagnosticsSection(metrics));
+        var routerUsage = sessionUsage?.bySource?.router;
+        if (routerUsage) {
+          var routerSection = createUsageSection('usageRouterLabel');
+          var routerCost = formatAccountedCosts(routerUsage);
+          routerSection.append(usageNode('p', 'usage-note',
+            t('usageRequestCountValue', { count: routerUsage.requestCount || 0 }) + ' · '
+            + formatMetricInteger(routerUsage.totalTokens || 0) + ' tokens · '
+            + (routerCost.available ? routerCost.amountText : t('usageMetricCostUnavailableValue'))));
+          usageDetailsBody.append(routerSection);
+        }
         usageDetailsBody.append(createUsageAnalysisSection(selected, usageGroups, sessionUsage, details.subagents, details.sessionTitle));
         usageDetailsBody.scrollTop = scrollTop;
       }
@@ -416,7 +426,7 @@ export const usageRenderFragment: WebviewFragment = {
           var list = usageNode('div', 'usage-analysis-list');
           lanes.forEach(function(lane) {
             var card = usageNode('div', 'usage-analysis-card usage-analysis-card-body');
-            card.append(usageNode('strong', '', [lane.source, lane.profile, lane.subagentLane, lane.provider, lane.protocol, lane.originalModelId,
+            card.append(usageNode('strong', '', [lane.source === 'router' ? t('usageRouterLabel') : lane.source, lane.profile, lane.subagentLane, lane.provider, lane.protocol, lane.originalModelId,
               lane.cacheFamilyId ? t('usageCacheFamilyShort', { id: lane.cacheFamilyId }) : '']
               .filter(Boolean).join(' / ')));
             card.append(usageNode('p', '', t('usageRawHitAndReuse', {

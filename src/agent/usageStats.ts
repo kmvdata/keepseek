@@ -37,11 +37,14 @@ export function normalizeDeepSeekUsage(usage: DeepSeekUsage | null | undefined):
   ));
   const returnedHitTokens = directHitTokens ?? compatibleHitTokens ?? detailsHitTokens;
   const directMissTokens = readOptionalNonNegativeInteger(usage.prompt_cache_miss_tokens);
+  const cacheWriteTokens = readOptionalNonNegativeInteger(usage.prompt_cache_write_tokens);
+  const incompleteNativeCache = usage.prompt_cache_data_status === 'partial' || usage.prompt_cache_data_status === 'unavailable';
   const cacheHitTokens = returnedHitTokens
-    ?? (directMissTokens === undefined ? 0 : Math.max(0, promptTokens - directMissTokens));
+    ?? (incompleteNativeCache || directMissTokens === undefined ? 0 : Math.max(0, promptTokens - directMissTokens));
   const cacheMissTokens = directMissTokens
-    ?? (returnedHitTokens === undefined ? 0 : Math.max(0, promptTokens - cacheHitTokens));
-  const cacheDataStatus = returnedHitTokens !== undefined || directMissTokens !== undefined
+    ?? (incompleteNativeCache || returnedHitTokens === undefined ? 0 : Math.max(0, promptTokens - cacheHitTokens));
+  const cacheDataStatus = incompleteNativeCache ? usage.prompt_cache_data_status as 'partial' | 'unavailable'
+    : returnedHitTokens !== undefined || directMissTokens !== undefined
     ? 'reported' as const
     : 'unavailable' as const;
   const reasoningTokens = readOptionalNonNegativeInteger(readNestedUsageNumber(
@@ -55,6 +58,7 @@ export function normalizeDeepSeekUsage(usage: DeepSeekUsage | null | undefined):
     totalTokens,
     cacheHitTokens,
     cacheMissTokens,
+    ...(cacheWriteTokens === undefined ? {} : { cacheWriteTokens }),
     cacheDataStatus,
     ...(reasoningTokens === undefined ? {} : { reasoningTokens })
   };
@@ -722,6 +726,9 @@ function sumUsage<T extends Usage>(left: T, right: Usage): Usage {
     totalTokens: left.totalTokens + right.totalTokens,
     cacheHitTokens: left.cacheHitTokens + right.cacheHitTokens,
     cacheMissTokens: left.cacheMissTokens + right.cacheMissTokens,
+    ...(left.cacheWriteTokens === undefined && right.cacheWriteTokens === undefined ? {} : {
+      cacheWriteTokens: (left.cacheWriteTokens ?? 0) + (right.cacheWriteTokens ?? 0)
+    }),
     cacheDataStatus: mergeCacheDataStatus(left.cacheDataStatus, right.cacheDataStatus),
     ...(reasoningTokens > 0 ? { reasoningTokens } : {})
   };
@@ -882,6 +889,7 @@ function normalizeUsageSourceStatsMap(
 function normalizeUsage(value: unknown): Usage {
   const record = isRecord(value) ? value : {};
   const reasoningTokens = readOptionalNonNegativeInteger(record.reasoningTokens);
+  const cacheWriteTokens = readOptionalNonNegativeInteger(record.cacheWriteTokens);
   const cacheHitTokens = readNonNegativeInteger(record.cacheHitTokens);
   const cacheMissTokens = readNonNegativeInteger(record.cacheMissTokens);
   return {
@@ -890,6 +898,7 @@ function normalizeUsage(value: unknown): Usage {
     totalTokens: readNonNegativeInteger(record.totalTokens),
     cacheHitTokens,
     cacheMissTokens,
+    ...(cacheWriteTokens === undefined ? {} : { cacheWriteTokens }),
     cacheDataStatus: normalizeCacheDataStatus(record.cacheDataStatus)
       ?? (cacheHitTokens + cacheMissTokens > 0 ? 'reported' : 'unavailable'),
     ...(reasoningTokens === undefined ? {} : { reasoningTokens })

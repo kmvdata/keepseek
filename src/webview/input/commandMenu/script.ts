@@ -354,7 +354,7 @@ export const commandMenuRenderFragment: WebviewFragment = {
           commandBackgroundRunSection.classList.add('hidden');
         }
         if (commandBackgroundRunButton) {
-          commandBackgroundRunButton.disabled = state.isBusy || isBackgroundActive();
+          commandBackgroundRunButton.disabled = projectTaskUiActive() || state.isBusy || isBackgroundActive();
         }
         if (commandBackgroundRunValue) {
           commandBackgroundRunValue.textContent = isBackgroundActive()

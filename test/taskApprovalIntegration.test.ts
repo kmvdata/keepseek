@@ -40,6 +40,8 @@ import { executionSegmentId } from '../src/sessions/userTask';
 import type { AgentRequest, AgentResponse, ChatMessage, ChatSession, DraftEdit } from '../src/shared/types';
 import type { RunCheckpoint } from '../src/agent/runCheckpoint';
 import type { DraftRunExecutorAdapter } from '../src/runs/draftRunExecutor';
+import { ProjectExecutionOwner } from '../src/tasks/projectOwner';
+import { getProjectExecutionContext, ProjectResourceCoordinator, runProjectExecution } from '../src/tasks/projectResources';
 
 type Host = {
   saveAgentCheckpoint(s: ChatSession, m: ChatMessage, cp: RunCheckpoint): Promise<void>;
@@ -51,6 +53,75 @@ type Host = {
   abortPrompt(): void;
   handleMessage(message: WebviewMessage): Promise<void>;
 };
+
+test('approved host batch retains its real resource phase across edits and releases before continuation', async () => {
+  await fixture('delegate', async f => {
+    const owner = await ProjectExecutionOwner.acquire({ projectUri: f.workspace, lockRoot: path.join(f.root, 'owners') });
+    if (!owner.isOwner && process.platform === 'win32') return;
+    const resources = new ProjectResourceCoordinator(owner.projectId);
+    const order: string[] = [];
+    const tokens: string[] = [];
+    let intruder: Promise<void> | undefined;
+    const originalApply = f.edits.applyEdit.bind(f.edits);
+    f.edits.applyEdit = async (...args) => {
+      tokens.push(getProjectExecutionContext()!.token!.id);
+      const result = await originalApply(...args);
+      order.push(args[0]);
+      if (order.length === 1) {
+        intruder = resources.withLease({ sessionId: 'other', rootTaskId: 'other-root', segmentId: 'other-segment', runtimeId: 'other-runtime' }, async () => { order.push('other'); });
+        assert.equal(resources.waitingCount, 1);
+      }
+      return result;
+    };
+    let continued = false;
+    Object.assign(f.host, { sendPrompt: async () => { continued = true; assert.equal(resources.activeScope, undefined); } });
+    try {
+      f.response.draftRuns = [];
+      f.response.draftEdits.push({ id: 'second', uri: vscode.Uri.file(path.join(f.workspace, 'second.txt')).toString(),
+        label: 'second.txt', action: 'create', newText: 'second\n', reason: 'Create requested second file' });
+      await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+      f.host.queueResponseApprovals(f.session, f.message, f.response);
+      await runProjectExecution({ owner, resources, scope: { sessionId: f.session.id, rootTaskId: f.message.userTask!.id,
+        segmentId: executionSegmentId(f.message)!, runtimeId: 'fixture-runtime' } }, () => f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!));
+      await intruder;
+      assert.deepEqual(order, ['edit', 'second', 'other']);
+      assert.equal(new Set(tokens).size, 1);
+      assert.equal(await readFile(path.join(f.workspace, 'result.txt'), 'utf8'), 'result\n');
+      assert.equal(await readFile(path.join(f.workspace, 'second.txt'), 'utf8'), 'second\n');
+      assert.equal(continued, true);
+      assert.equal(f.reviews(), 0);
+    } finally { if (owner.isOwner) await owner.dispose(); }
+  });
+});
+
+test('an approval batch releases a previous mutation phase before reviewer and manual waits', async () => {
+  await fixture('delegate', async f => {
+    const owner = await ProjectExecutionOwner.acquire({ projectUri: f.workspace, lockRoot: path.join(f.root, 'owners') });
+    if (!owner.isOwner && process.platform === 'win32') return;
+    const resources = new ProjectResourceCoordinator(owner.projectId);
+    f.setDecision('needs_user'); f.manualDecision('hold');
+    f.response.draftRuns = [];
+    f.response.draftEdits.push({ id: 'outside', uri: vscode.Uri.file(path.join(f.root, 'external.txt')).toString(),
+      label: 'external.txt', action: 'create', newText: 'external\n', reason: 'External fixture requires user decision' });
+    const ready = f.waitForManual();
+    try {
+      await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+      f.host.queueResponseApprovals(f.session, f.message, f.response);
+      const running = runProjectExecution({ owner, resources, scope: { sessionId: f.session.id, rootTaskId: f.message.userTask!.id,
+        segmentId: executionSegmentId(f.message)!, runtimeId: 'fixture-runtime' } }, () => f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!));
+      await ready;
+      assert.equal(resources.activeScope, undefined);
+      const other = await resources.acquire({ sessionId: 'other', rootTaskId: 'other-root', segmentId: 'other-segment', runtimeId: 'other-runtime' });
+      other.release();
+      const requestId = (f.host as unknown as { manualToolApproval: { view: { id: string } } }).manualToolApproval.view.id;
+      await f.host.handleMessage({ type: 'resolveValidationApproval', id: requestId, approve: false });
+      await running;
+      assert.equal(resources.activeScope, undefined);
+      assert.equal(await readFile(path.join(f.workspace, 'result.txt'), 'utf8'), 'result\n');
+      await assert.rejects(readFile(path.join(f.root, 'external.txt')), { code: 'ENOENT' });
+    } finally { if (owner.isOwner) await owner.dispose(); }
+  });
+});
 
 test('continuation carries safety counters without carrying prior tools or approvals; corrupt new limits fail closed', async () => {
   await fixture('delegate', async f => {

@@ -35,6 +35,14 @@ interface SkillSourceSnapshot {
   loaded: Map<string, ActivatedSkill>;
 }
 
+/** Shared source bytes/read coordination only. Activation decisions and errors
+ * stay on each SkillStore facade and on the owning session. */
+export class SkillSourceCache {
+  public readonly snapshots = new Map<SharedCodexConfigSnapshot, SkillSourceSnapshot>();
+  public readonly pending = new Map<SharedCodexConfigSnapshot, Promise<SkillSourceSnapshot>>();
+  public readonly activeReads = new WeakMap<Map<string, ActivatedSkill>, Map<string, Promise<ActivatedSkill>>>();
+}
+
 export interface ActiveSkillLoadResult {
   skills: ActivatedSkill[];
   failures: Array<{ id: string; name: string; error: string }>;
@@ -46,11 +54,11 @@ export class SkillStore {
   private config?: SharedCodexConfigSnapshot;
   private workspaceDefaultSkillRefs = new Map<string, string[]>();
   private cachedActiveSkills = new Map<string, ActivatedSkill>();
-  private readonly activeSkillReads = new WeakMap<Map<string, ActivatedSkill>, Map<string, Promise<ActivatedSkill>>>();
+  private get activeSkillReads() { return this.sourceCache.activeReads; }
   private activeSkillLoadErrors = new Map<string, string>();
   private discoveryDiagnostics: string[] = [];
-  private readonly sourceSnapshots = new Map<SharedCodexConfigSnapshot, SkillSourceSnapshot>();
-  private readonly pendingSources = new Map<SharedCodexConfigSnapshot, Promise<SkillSourceSnapshot>>();
+  private get sourceSnapshots() { return this.sourceCache.snapshots; }
+  private get pendingSources() { return this.sourceCache.pending; }
   private refreshSelection = 0;
   public readonly sourceDiagnostics = { hits: 0, scans: 0, merged: 0, stale: 0 };
 
@@ -59,9 +67,14 @@ export class SkillStore {
     private readonly discovery = new SkillDiscovery(),
     private readonly loader = new SkillLoader(),
     private readonly activationResolver = new SkillActivationResolver(),
-    private readonly getWorkspaceKey = () => getCurrentWorkspaceSessionScope().key
+    private readonly getWorkspaceKey = () => getCurrentWorkspaceSessionScope().key,
+    private readonly sourceCache = new SkillSourceCache()
   ) {
     this.loadStoredState();
+  }
+
+  public createSibling(storage: vscode.Memento = this.storage): SkillStore {
+    return new SkillStore(storage, this.discovery, this.loader, new SkillActivationResolver(), this.getWorkspaceKey, this.sourceCache);
   }
 
   public async refresh(config?: SharedCodexConfigSnapshot): Promise<void> {
@@ -100,7 +113,9 @@ export class SkillStore {
     const discovered = await this.discovery.discoverSnapshot(config);
     const manifests = discovered.manifests.filter(manifest => isCodexPluginSkillsEnabled() || !isCodexPluginSkill(manifest));
     for (const manifest of manifests) freezeSkillSource(manifest);
-    return { manifests, diagnostics: [...discovered.diagnostics], loaded: new Map() };
+    const diagnostics = [...discovered.diagnostics];
+    Object.freeze(manifests); Object.freeze(diagnostics);
+    return Object.freeze({ manifests, diagnostics, loaded: new Map<string, ActivatedSkill>() });
   }
 
   public getStateView(session: ChatSession): SkillStateView {

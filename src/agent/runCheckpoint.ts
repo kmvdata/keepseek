@@ -12,6 +12,8 @@ import { normalizeExecutionMode } from './executionMode';
 import { createLogicalRunBudgetState, grantNextToolBudgetSegment, normalizeLogicalRunBudgetLimits, type LogicalRunBudgetState } from './executionPolicy';
 import { normalizeSubagentHostContext } from './subagents/contextCapsule';
 import { normalizeDelegationState } from './delegation';
+import { normalizeProjectRouterRole } from './taskRouter';
+import { validTaskContinuationState, validTaskEpoch } from '../sessions/userTaskBudget';
 import { normalizeCodexPluginSnapshot, normalizeCodexPluginTraversalState, type CodexPluginSnapshot,
   type CodexPluginTraversalState } from '../skills/codexPluginResources';
 
@@ -23,7 +25,7 @@ export interface PluginSkillProgress {
 
 export type StopReason = 'user_stop' | 'time_budget' | 'tool_timeout' | 'connection_interrupted'
   | 'provider_error' | 'extension_restart' | 'waiting_for_user' | 'budget_pause' | 'budget_exhausted' | 'completed' | 'storage_failure' | 'resource_limit'
-  | 'output_truncated' | 'cost_limit' | 'no_progress_loop' | 'uncertain_tool_result';
+  | 'output_truncated' | 'cost_limit' | 'no_progress_loop' | 'uncertain_tool_result' | 'supplement_boundary';
 
 /** Deserialization-only values produced by v1 checkpoints. V2 never emits them. */
 export type LegacyCapacityFinishReason = 'tool_iterations_exhausted' | 'tool_call_limit_exhausted'
@@ -59,7 +61,8 @@ export interface RunCheckpoint {
   lastStepAt?: string;
   updatedAt: string;
   /** Exact original projection input; credentials and runtime handles excluded. */
-  request: Omit<AgentRequest, 'sourceConfig' | 'signal' | 'checkpoint' | 'taskClock' | 'taskCostBudget'>;
+  request: Omit<AgentRequest, 'sourceConfig' | 'signal' | 'checkpoint' | 'taskClock' | 'taskCostBudget'
+    | 'taskRunBudget' | 'taskRouter' | 'taskRouterContext' | 'hasPendingSupplement'>;
   source: { sourceId: string; modelId: string; provider: string; endpointHash: string };
   workspaceFolders: string[];
   requestStartedAt?: string;
@@ -85,6 +88,14 @@ export interface RunCheckpoint {
   }>;
   taskPlan?: import('../shared/types').TaskPlan;
   delegationBudget?: import('./subagents/types').SubagentTreeBudget;
+  /** Same-root project continuation state, without copying a prior transcript. */
+  inheritedEpoch?: ContextEpochState;
+  /** Same-root semantic guards; never prior assistant/tool replay or permits. */
+  continuationState?: {
+    validationState?: import('./repairLoop').RunValidationState;
+    validationRunCount: number;
+    repairLoop: RepairLoopState;
+  };
   pluginSkillProgress?: PluginSkillProgress[];
   state?: {
     continuation?: { content: string; lastSegment?: string; finishReason?: string | null; requests: number; inFlight: boolean };
@@ -135,10 +146,13 @@ export function createRunCheckpoint(
   delete input.taskClock;
   delete input.taskCostBudget;
   delete input.taskRunBudget;
+  delete input.taskRouter;
+  delete input.taskRouterContext;
+  delete input.hasPendingSupplement;
   input.history = input.history.map(({ runCheckpoint: _cp, runCheckpointArchive: _archive, ...message }) => message);
   return {
     outputBudgetPolicyVersion: OUTPUT_BUDGET_POLICY_VERSION,
-    version: 2, taskId: randomUUID(), attempt: 0, attemptIds: [], status: 'running', usedMs: 0,
+    version: 2, taskId: request.projectTaskIdentity?.segmentId ?? randomUUID(), attempt: 0, attemptIds: [], status: 'running', usedMs: 0,
     maxExecutionMs, usedCostByCurrency: {}, maxCost, limitSource: source, modelRequests: 0, retries: 0, updatedAt: new Date().toISOString(),
     request: structuredClone(input),
     source: { sourceId: sourceConfig?.sourceId ?? request.model.sourceId ?? '', modelId: request.model.id,
@@ -220,6 +234,17 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
         || ![m.oldOutputTokens, m.newOutputTokens].every((n) => Number.isSafeInteger(n) && n > 0)))) return undefined;
     if (cp.state?.epoch && !validEpochProgressState(cp.state.epoch)) return undefined;
     const copy = checkpointCopy(cp);
+    copy.request.agentRole = normalizeProjectRouterRole(copy.request.agentRole);
+    if (copy.request.projectTaskIdentity !== undefined) {
+      const identity = copy.request.projectTaskIdentity;
+      if (!identity || !['projectId', 'taskCardId', 'rootTaskId', 'segmentId'].every(key => {
+        const value = identity[key as 'projectId' | 'taskCardId' | 'rootTaskId' | 'segmentId'];
+        return typeof value === 'string' && !!value && value.length <= 256;
+      }) || !Number.isSafeInteger(identity.generation) || identity.generation < 1
+        || identity.segmentId !== copy.taskId) return undefined;
+    }
+    if (copy.inheritedEpoch && (!copy.request.projectTaskIdentity || !validTaskEpoch(copy.inheritedEpoch))) return undefined;
+    if (copy.continuationState && (!copy.request.projectTaskIdentity || !validTaskContinuationState(copy.continuationState))) return undefined;
     if (!normalizeCheckpointPluginSkills(copy)) return undefined;
     copy.budgetLimits = normalizeLogicalRunBudgetLimits(copy.budgetLimits);
     if (copy.request.subagentHostContext !== undefined) {
@@ -541,4 +566,6 @@ export function inheritTaskBudget(cp: RunCheckpoint, budget: import('../sessions
   cp.runBudget = budget.runBudget ? createLogicalRunBudgetState(budget.runBudget) : undefined;
   cp.modelRequests = cp.runBudget?.modelRequests ?? 0;
   cp.delegationBudget = budget.delegationBudget ? structuredClone(budget.delegationBudget) : undefined;
+  if (cp.request.projectTaskIdentity && budget.epoch) cp.inheritedEpoch = structuredClone(budget.epoch);
+  if (cp.request.projectTaskIdentity && budget.continuationState) cp.continuationState = structuredClone(budget.continuationState);
 }

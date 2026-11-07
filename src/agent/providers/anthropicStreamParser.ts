@@ -328,9 +328,20 @@ export class AnthropicStreamParser {
     const usage: DeepSeekUsage = {};
     if (promptTokens !== undefined) {
       usage.prompt_tokens = promptTokens;
-      usage.prompt_cache_hit_tokens = value.cacheReadInputTokens ?? 0;
-      usage.prompt_cache_miss_tokens = value.inputTokens! + (value.cacheCreationInputTokens ?? 0);
-      usage.prompt_tokens_details = { cached_tokens: value.cacheReadInputTokens ?? 0 };
+      // Compatible gateways may omit cache counters. Absence does not report
+      // zero: preserve each supplied counter and label incomplete cache data.
+      const readReported = value.cacheReadInputTokens !== undefined;
+      const writeReported = value.cacheCreationInputTokens !== undefined;
+      usage.prompt_cache_data_status = readReported && writeReported ? 'reported'
+        : readReported || writeReported ? 'partial' : 'unavailable';
+      if (readReported) {
+        usage.prompt_cache_hit_tokens = value.cacheReadInputTokens;
+        usage.prompt_tokens_details = { cached_tokens: value.cacheReadInputTokens };
+      }
+      if (writeReported) {
+        usage.prompt_cache_write_tokens = value.cacheCreationInputTokens;
+        usage.prompt_cache_miss_tokens = value.inputTokens! + value.cacheCreationInputTokens!;
+      }
     }
     if (value.outputTokens !== undefined) usage.completion_tokens = value.outputTokens;
     if (promptTokens !== undefined && value.outputTokens !== undefined) usage.total_tokens = promptTokens + value.outputTokens;

@@ -291,3 +291,33 @@ test('invalidated in-flight source reads cannot publish or repopulate a cache', 
     Object.assign(vscode.workspace, { workspaceFolders: previousFolders, isTrusted: previousTrust });
   }
 });
+
+test('independent Worker source facades share immutable reads and invalidation without sharing selected sessions', async () => {
+  const f = await fixture(); const previousHome = process.env.CODEX_HOME;
+  const previousFolders = vscode.workspace.workspaceFolders, previousTrust = vscode.workspace.isTrusted;
+  process.env.CODEX_HOME = f.home; Object.assign(vscode.workspace, { workspaceFolders: f.folders, isTrusted: true });
+  const project = new SharedProjectSources(), workerA = project.createSibling(), workerB = project.createSibling();
+  const resolve = ProjectInstructionsResolver.prototype.resolve; let reads = 0;
+  ProjectInstructionsResolver.prototype.resolve = async function(options) { reads++; return resolve.call(this, options); };
+  try {
+    await writeFile(path.join(f.repo, 'AGENTS.md'), 'SHARED IMMUTABLE SOURCE');
+    const cwd = vscode.Uri.file(f.cwd).toString();
+    const [a, b] = await Promise.all([workerA.refresh('A', cwd), workerB.refresh('B', cwd)]);
+    assert.equal(a, b); assert.equal(reads, 1);
+    assert.equal(workerA.sessionId, 'A'); assert.equal(workerB.sessionId, 'B'); assert.equal(project.sessionId, undefined);
+    const ownedA = workerA.getInstructions(a);
+    await project.refresh('project', cwd); assert.equal(reads, 1);
+    project.dispose();
+    await workerB.refresh('B2', cwd); assert.equal(reads, 1, 'disposing one facade does not discard live sibling cache');
+    workerB.dirty = true; assert.equal(workerA.dirty, true);
+    await writeFile(path.join(f.repo, 'AGENTS.md'), 'CHANGED SOURCE');
+    const next = await workerB.refresh('B2', cwd); assert.equal(reads, 2); assert.notEqual(next, a);
+    assert.equal(ownedA.instructions[0].content, 'SHARED IMMUTABLE SOURCE');
+    assert.equal(workerA.sessionId, 'A'); assert.equal(workerA.instructions.instructions[0].content, 'SHARED IMMUTABLE SOURCE');
+    await workerA.refresh('A', cwd); assert.equal(reads, 2); assert.equal(workerA.snapshot, next);
+  } finally {
+    ProjectInstructionsResolver.prototype.resolve = resolve; project.dispose(); workerA.dispose(); workerB.dispose();
+    if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome;
+    Object.assign(vscode.workspace, { workspaceFolders: previousFolders, isTrusted: previousTrust });
+  }
+});

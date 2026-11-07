@@ -412,3 +412,25 @@ test('implicit activation freezes the empty set too (no late activation on later
   assert.deepEqual(second.skills, []);
   assert.deepEqual(chatSession.frozenImplicitSkillIds, []);
 });
+
+test('Worker Skill facades share source scans and frozen bytes while activation and errors remain session-owned', async () => {
+  const skill = manifest('shared-worker', 'worker-flow', 'agentsUser', true); let scans = 0, loads = 0;
+  const discovery = fakeDiscovery(async () => { scans++; await new Promise<void>(resolve => setImmediate(resolve)); return [{ ...skill }]; });
+  const loader = { loadSkill: async (item: SkillManifest) => { loads++; return toActivatedSkill(item, 'SHARED FROZEN SKILL BYTES'); } } as SkillLoader;
+  const project = new SkillStore(new MemoryMemento(), discovery, loader, new SkillActivationResolver(), () => 'scope');
+  const workerA = project.createSibling(), workerB = project.createSibling();
+  const config: SharedCodexConfigSnapshot = { codexHome: vscode.Uri.file('/fixture/shared-worker'), projectDocMaxBytes: 32768,
+    fallbackFilenames: [], skillRules: [], origins: {}, diagnostics: [], watchedUris: [], fingerprint: 'worker-version-1' };
+  await Promise.all([workerA.refresh(config), workerB.refresh(config)]); assert.equal(scans, 1);
+  const a = session('Worker A'), b = session('Worker B');
+  const [ar, br] = await Promise.all([
+    workerA.resolveAndLoadSkills({ session: a, prompt: 'Use worker-flow.' }),
+    workerB.resolveAndLoadSkills({ session: b, prompt: 'Explicit use', explicitSkillIds: [skill.id] })
+  ]);
+  assert.equal(loads, 1); assert.equal(ar.skills[0].activation?.source, 'implicit'); assert.equal(br.skills[0].activation?.source, 'explicit');
+  assert.deepEqual(a.frozenImplicitSkillIds, [skill.id]); assert.deepEqual(b.frozenImplicitSkillIds, []);
+  assert.equal(project.getManifests().length, 0, 'shared source cache does not select another facade');
+  await workerA.refresh({ ...config }); assert.equal(scans, 2);
+  assert.equal(br.skills[0].activation?.source, 'explicit');
+  assert.deepEqual(workerB.getStateView(b).activeSkillIds, []);
+});

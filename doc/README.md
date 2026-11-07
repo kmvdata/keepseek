@@ -2,11 +2,14 @@
 
 本文是定位入口。当前行为以源码与契约测试为准，开发要求见 [AGENTS.md](../AGENTS.md)。下表的专题各负责一个范围；历史验收只证明其记录的基线与环境，不代表当前版本已经现场验收。
 
+本次项目助手的命令结果、请求/费用边界和现场限制见 [交付验收](keepseek-project-assistant-verification.md)。
+
 ## 当前专题
 
 | 要解决的问题 | 唯一专题入口 | 首要源码与保护测试 |
 | --- | --- | --- |
 | 从哪里修改、状态由谁负责 | [代码架构地图](keepseek-code-architecture.md) | `src/extension.ts`、`src/provider/`；`startupPerformance`、`contextEntryPoints` |
+| 项目助手、并行任务、补充、所有权和快速切换 | [项目助手与并行任务](keepseek-project-assistant.md) | `tasks/`、`provider/projectAssistantHost.ts`、`agent/taskRouter.ts`、`webview/projectTasks.ts`；`projectTasks`、`projectRouter`、`projectAssistantIntegration`、`projectAssistantViewHost`、`projectTaskWebview`、`projectCoordination`、`supplementBoundary` |
 | 请求、工具、副作用、续跑与恢复的顺序 | [Agent 运行时](keepseek-agent-runtime-workflow.md) | `agentRequestCoordinator.ts`、`runner.ts`、`runCheckpoint.ts`；`longRunningAgent`、`taskApprovalIntegration` |
 | 稳定前缀、投影、压缩、容量与缓存 | [缓存与上下文投影](cache_keepseek.md) | `providerRequestProjection.ts`、`historyProjection.ts`；`cacheByteStability`、`protocolCache`、`modelOutputBudget` |
 | 编辑重发、历史操作归属、持久化恢复与前缀保护 | [编辑重发验收](keepseek-edit-resend-verification.md) | `sessions/historyTruncation*`、DraftRun/ChangeSet Store；`editUserPrompt`、`historyTruncation`、`historyTruncationContext` |
@@ -25,12 +28,13 @@
 
 ## 版本维度
 
-以下是 2026-11-06 源码快照。改动时先查符号，不把一个维度的数字批量替换到其他维度。
+以下是 2026-11-07 源码快照。改动时先查符号，不把一个维度的数字批量替换到其他维度。
 
 | 维度 | 当前写入/选择 | 源码权威 | 兼容与冻结规则 |
 | --- | --- | --- | --- |
-| 父会话 request protocol | 15 | [providerRequestProjection.ts](../src/agent/providerRequestProjection.ts) 的 `CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION` | 会话保存 `requestProtocol`；旧热 lane 不逐轮升级，按既有冷边界迁移 |
-| 父会话 tool schema | 15 | 同文件 `CURRENT_PROVIDER_TOOL_SCHEMA_VERSION`，schema 正文在 [protocol.ts](../src/agent/protocol.ts) | V15 增加有限命令计划字段；V1–V14 schema 冻结，V14 不含插件读取工具 |
+| Worker/旧普通会话 request protocol | 15 | [providerRequestProjection.ts](../src/agent/providerRequestProjection.ts) 的 `CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION` | 会话保存 `requestProtocol`；旧热 lane 不逐轮升级，按既有冷边界迁移 |
+| Worker/旧普通会话 tool schema | 15 | 同文件 `CURRENT_PROVIDER_TOOL_SCHEMA_VERSION`，schema 正文在 [protocol.ts](../src/agent/protocol.ts) | V15 增加有限命令计划字段；V1–V14 schema 冻结，V14 不含插件读取工具 |
+| Router role / toolset | 均为 1 | [taskRouter.ts](../src/agent/taskRouter.ts) 的 `PROJECT_ROUTER_ROLE` | 独立 `project-router` 会话；固定管理工具经同一投影/容量权威，不向 Worker 热 schema 注入 |
 | 插件 Skill 工具历史范围 | 12–13；14 起移除 | [protocol.ts](../src/agent/protocol.ts) 的 `PLUGIN_SKILL_REQUEST_PROTOCOL_VERSION` / `PLUGIN_SKILL_SUSPENSION_PROTOCOL_VERSION` | 功能已暂停；工具列表不反写热会话，历史记录仍可读取 |
 | 委托审批交付协议 | 13 | [approvalMode.ts](../src/agent/approvalMode.ts) 的 `DELEGATED_APPROVAL_PROTOCOL_VERSION` | 当前 ask/delegate；旧 `model_review` 设置转 ask，旧审计和冻结提示仍可读取 |
 | 审批策略 | 通用 2、自动 reviewer 5 | [approvalReviewTypes.ts](../src/approvals/approvalReviewTypes.ts) 的 `APPROVAL_POLICY_VERSION` / `AUTO_APPROVAL_POLICY_VERSION` | 决定绑定各自策略与 runtime；不是 request/schema 版本，旧批准不在重启后复用 |
@@ -39,9 +43,15 @@
 | 宿主 capsule / 结果索引 | 均为 1 | [contextCapsule.ts](../src/agent/subagents/contextCapsule.ts)、[resultIndex.ts](../src/agent/subagents/resultIndex.ts) | capsule hash/scope 核验；索引保存 canonical 结果，不为读取一页解码私有 transcript |
 | workspace 索引、全局 manifest | 均为 2 | [globalSessionStorage.ts](../src/sessions/globalSessionStorage.ts) 的对应接口 | 存储目录 `chat-sessions/v2` 不表示 shard 内容仅为 V2 |
 | session shard / 对象图 | 写入 4、读取 3/4；迁移旧 2 | [sessionObjectStore.ts](../src/sessions/sessionObjectStore.ts) 的 `SessionManifest` 与 `save()` | hash/scope/revision/锁及对象先于 manifest 提交；`SESSION_STORAGE_VERSION = 2` 是旧导入状态格式 |
+| 项目任务 Registry | 物理写入 2；逻辑卡片/输入/事件 1 | [projectTasks.ts](../src/tasks/projectTasks.ts) 的 `TaskRegistryV2` / `TaskRegistry` | 正文和 prepared 输入先写不可变对象，再提交引用 manifest；兼容读取旧内联 1，不升级 Worker 请求协议 |
+| 项目 owner / 窗口草稿 | 均为 1 | [projectOwner.ts](../src/tasks/projectOwner.ts)、[projectAssistantHost.ts](../src/provider/projectAssistantHost.ts) | 长期执行所有权与 session 短锁分开；窗口草稿不授予执行权限 |
 | 请求用量账本存储 | 2 | [usageLedgerStore.ts](../src/agent/usageLedgerStore.ts) 的 `USAGE_LEDGER_STORE_SCHEMA_VERSION` | 请求级幂等，按 session 分桶；不随 Provider 协议提升 |
 
 内部移动或控制流简化不构成协议升级理由，也不能重录 system/tool/payload 冻结 fixture 来掩盖字节变化。
+
+## 本次项目任务证据入口
+
+[项目助手专题](keepseek-project-assistant.md#回归和现场验收) 列出默认 runner 的行为矩阵和现场步骤。[本地视图/存储测量](benchmarks/keepseek-project-view-storage-20261107.json) 记录同机临时 fixture 的 Host 读入/发布准备时延，复现脚本是 `scripts/benchmark-project-views.cjs`；它不证明原生绘制、真实上游命中或费用改善。[协调验收记录](keepseek-project-coordination-verification.md) 记录本次临时目录、双进程、真实低层 Apply/命令/验证与 SSE 准入证据；对应[协调回归](../test/projectCoordination.test.ts)。其他平台、远端和未知文件系统限制按该报告分别阅读。
 
 ## 历史证据
 

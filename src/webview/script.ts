@@ -1,12 +1,29 @@
 import { getInputScript } from './input/script';
 import { getNewAccountDialogScript } from './input/newAccountDialog';
 import { getRichTextShortcutsScript } from './richTextShortcuts';
+import { getProjectTasksScript } from './projectTasks';
 import { WEBVIEW_TRANSLATIONS } from '../shared/i18n';
 import { DEFAULT_MODEL_REQUEST_TIMEOUT_SECONDS, MODEL_REQUEST_TIMEOUT_PRESETS } from '../shared/config';
 
 export function getScript(): string {
   return `
-    const vscode = window.keepseekVscode;
+    const vscodeApi = window.keepseekVscode;
+    const vscode = {
+      postMessage: function(message) {
+        var globalHistory = ['ready', 'startupRendered', 'newSession', 'selectSession', 'toggleSessionFavorite', 'renameSession',
+          'deleteSessions', 'listOtherWorkspaces', 'loadOtherWorkspaceSessions', 'copyOtherWorkspaceSession', 'deleteOtherWorkspaceSessions', 'deleteOtherWorkspace'];
+        if (projectTasks && projectViewMode === 'task' && projectTasks.viewTaskId && !message.type.startsWith('project') && !globalHistory.includes(message.type)) {
+          var targetCard = message.sessionId
+            ? projectTasks.cards.find(function(card) { return card.sessionId === message.sessionId; })
+            : projectCurrentCard();
+          if (targetCard) message = Object.assign({ projectId: projectTasks.projectId, taskCardId: projectCardId(targetCard),
+            sessionId: targetCard.sessionId, viewGeneration: projectViewGeneration }, message);
+        }
+        vscodeApi.postMessage(message);
+      },
+      getState: typeof vscodeApi.getState === 'function' ? function() { return vscodeApi.getState(); } : undefined,
+      setState: typeof vscodeApi.setState === 'function' ? function(value) { return vscodeApi.setState(value); } : undefined
+    };
     const keepseekLogoUri = window.keepseekLogoUri || '';
     const keepseekPluginIconUri = window.keepseekSkillIconUri || '';
     const modelProtocolLogoUris = window.keepseekModelProtocolLogoUris || {};
@@ -128,6 +145,7 @@ export function getScript(): string {
         sideEffectsReady: false
       }
       ,hasOlderMessages: false
+      ,hasNewerMessages: false
     };
     var lastStateRevision = 0;
     var runStreamRevisions = new Map();
@@ -140,27 +158,32 @@ export function getScript(): string {
     }
 
     function canSubmitPrompt() {
+      if (projectTaskUiActive()) return projectCanSubmit();
       var interaction = currentInteraction();
       return !pendingSubmission && (interaction ? interaction.canSubmit === true
         : state.startup?.interactiveReady === true && !state.isBusy);
     }
 
     function canNavigateSessions() {
+      if (projectTaskUiActive()) return true;
       var interaction = currentInteraction();
       return !pendingSubmission && (interaction ? interaction.canNavigate === true : !state.isBusy && !isBackgroundActive());
     }
 
     function canChangeContext() {
+      if (projectTaskUiActive()) return !projectTasks.readOnly;
       var interaction = currentInteraction();
       return interaction ? (interaction.canChangeContext ?? interaction.canSubmit) === true : !state.isBusy;
     }
 
     function canCancelPrompt() {
+      if (projectTaskUiActive()) return false;
       var interaction = currentInteraction();
       return interaction ? interaction.canCancel === true && !!interaction.cancelOperationId : Boolean(state.isBusy);
     }
 
     function beginPromptSubmission(kind, prompt, messageId) {
+      if (projectTaskUiActive() && kind === 'composer') return projectBeginSubmission(prompt);
       if (!canSubmitPrompt()) return null;
       var requestId = 'submission-' + Date.now().toString(36) + '-' + (++submissionSequence);
       pendingSubmission = { requestId: requestId, sessionId: state.activeSessionId,
@@ -187,7 +210,7 @@ export function getScript(): string {
     }
 
     function changeVisibleSession(previousSessionId, nextSessionId) {
-      if (previousSessionId === nextSessionId) return;
+      if (previousSessionId === nextSessionId || projectTaskUiActive()) return;
       var startupDraft = !previousSessionId && promptInput ? promptInput.innerHTML : '';
       if (previousSessionId && promptInput) sessionPromptDrafts.set(previousSessionId, promptInput.innerHTML);
       stopAgentStatusRotation(); agentStatusRotationKey = ''; reconnectStatusActive = false;
@@ -993,7 +1016,7 @@ export function getScript(): string {
 
     if (backgroundStart) {
       backgroundStart.addEventListener('click', function() {
-        if (state.isBusy || isBackgroundActive()) return;
+        if (projectTaskUiActive() || state.isBusy || isBackgroundActive()) return;
         var scripts = getBackgroundAvailableScripts();
         var script = normalizeValidationScript(backgroundScript?.value);
         if (scripts.indexOf(script) < 0) return;
@@ -1023,7 +1046,7 @@ export function getScript(): string {
 
     if (backgroundResume) {
       backgroundResume.addEventListener('click', function() {
-        if (state.isBusy) return;
+        if (projectTaskUiActive() || state.isBusy) return;
         vscode.postMessage({ type: 'resumeBackgroundRun' });
       });
     }
@@ -1334,11 +1357,27 @@ export function getScript(): string {
       }
     };
 
+    ${getProjectTasksScript()}
     ${getInputScript()}
     ${getNewAccountDialogScript()}
 
     function handleKeepseekHostMessage(event) {
       var message = event.data;
+      if (message.type === 'projectTasksState') { projectApplyState(message); return; }
+      if (message.type === 'projectTaskSubmissionResult') { projectApplySubmissionResult(message); return; }
+      if (typeof projectTasks !== 'undefined' && projectTasks?.hostId && message.hostId && message.hostId !== projectTasks.hostId) return;
+      if (message.type === 'projectTaskError') { setTransientStatus(String(message.reason || message.error || t('submissionNotAccepted')), false, 'global'); return; }
+      if (message.type === 'projectReadOnly') { setTransientStatus(t('projectReadOnly'), false, 'global'); return; }
+      if (message.type === 'projectTaskStopAuthorization') {
+        if (typeof projectTasks !== 'undefined' && projectTasks && (!message.projectId || message.projectId === projectTasks.projectId)) {
+          setTransientStatus(t('projectConfirmTaskStop', { title: String(message.title || t('projectUntitledTask')) }), false, 'global');
+        }
+        return;
+      }
+      if (typeof projectTasks !== 'undefined' && projectTasks && projectViewMode === 'task' && message.taskCardId && message.taskCardId !== projectTasks.viewTaskId
+        && ['state', 'statePatch', 'agentRunDelta', 'agentRunAttemptReset', 'sessionChanged'].includes(message.type)) return;
+      if (typeof projectTasks !== 'undefined' && projectTasks && typeof message.viewGeneration === 'number' && message.viewGeneration < projectViewGeneration
+        && ['state', 'statePatch', 'agentRunDelta', 'agentRunAttemptReset', 'sessionChanged'].includes(message.type)) return;
       if (message.type === 'submissionResult') {
         applySubmissionResult(message);
         return;
@@ -1373,8 +1412,10 @@ export function getScript(): string {
       } else if (message.type === 'state' || message.type === 'statePatch') {
         if (message.type === 'statePatch' && message.sessionId && message.sessionId !== state.activeSessionId) return;
         var incomingRevision = Number(message.revision || 0);
-        if (incomingRevision && incomingRevision <= lastStateRevision) return;
-        if (incomingRevision) lastStateRevision = incomingRevision;
+        var incomingLane = projectStateRevisionKey(message);
+        var knownLaneRevision = projectStateRevisions.get(incomingLane) || 0;
+        if (incomingRevision && incomingRevision <= knownLaneRevision) return;
+        if (incomingRevision) { lastStateRevision = incomingRevision; projectStateRevisions.set(incomingLane, incomingRevision); }
         var previousActiveSessionId = state.activeSessionId || '';
         if (message.state?.activeSessionId && previousActiveSessionId !== message.state.activeSessionId) {
           // Missing fields in an old or partial message cannot carry another
@@ -1383,7 +1424,10 @@ export function getScript(): string {
           state.isBusy = false;
           state.agentActivity = { base: 'idle', phase: 'idle' };
         }
+        var anchoredMessages = typeof projectTaskUiActive === 'function' && projectTaskUiActive() && state.hasNewerMessages
+          && message.state?.hasNewerMessages !== false ? state.messages : null;
         Object.assign(state, message.state);
+        if (anchoredMessages) { state.messages = anchoredMessages; state.hasNewerMessages = true; }
         changeVisibleSession(previousActiveSessionId, state.activeSessionId);
         if (message.type === 'statePatch' && message.scope === 'startupSettings') {
           rememberTerminalAgentActivity(state.agentActivity);
@@ -1401,6 +1445,9 @@ export function getScript(): string {
         rememberTerminalAgentActivity(state.agentActivity);
         render();
       } else if (message.type === 'agentRunDelta' || message.type === 'agentRunAttemptReset') {
+        // An anchored page is a bounded historical view. Live tail updates stay
+        // on the task card until the user explicitly opens Latest messages.
+        if (typeof projectTaskUiActive === 'function' && projectTaskUiActive() && state.hasNewerMessages) return;
         var streamPatch = applyAgentRunStreamPatch(message);
         if (!streamPatch) return;
         if (message.executionTime && state.usageMetrics) state.usageMetrics.executionTime = message.executionTime;
@@ -1612,6 +1659,7 @@ export function getScript(): string {
         window.keepseekInputControls.render();
       }
       syncSendButtonAvailability();
+      renderProjectTasks();
     }
 
     function captureDraftRunActionFocus(element) {
@@ -1671,13 +1719,14 @@ export function getScript(): string {
     }
 
     function canRegenerateSessionTitle(sessionId) {
-      return !!sessionId && state.titleRegenerationCapability?.available === true
+      return !!sessionId && (typeof projectTasks === 'undefined' || !projectTasks?.readOnly) && state.titleRegenerationCapability?.available === true
         && (Array.isArray(state.sessionSummaries) ? state.sessionSummaries : []).some(function(session) { return session.id === sessionId; })
         && !state.sessionTitleRegenerations?.[sessionId]
         && editingSessionTitleId !== sessionId;
     }
 
     function sessionTitleRefreshDisabledReason(sessionId) {
+      if (typeof projectTasks !== 'undefined' && projectTasks?.readOnly) return t('projectReadOnly');
       if (state.sessionTitleRegenerations?.[sessionId]) return t('regeneratingSessionTitle');
       if (editingSessionTitleId === sessionId) return t('titleRefreshEditing');
       if (state.titleRegenerationCapability?.available !== true) {
@@ -1877,7 +1926,7 @@ export function getScript(): string {
     }
 
     function openBackgroundRunDialog() {
-      if (!backgroundRunDialogOverlay || state.isBusy || isBackgroundActive()) return;
+      if (projectTaskUiActive() || !backgroundRunDialogOverlay || state.isBusy || isBackgroundActive()) return;
       var scripts = getBackgroundAvailableScripts();
       if (!scripts.length) return;
       backgroundRunDialogOpen = true;
@@ -1903,6 +1952,7 @@ export function getScript(): string {
     }
 
     function renderBackgroundRunDialog() {
+      if (projectTaskUiActive()) { if (backgroundStart) backgroundStart.disabled = true; closeBackgroundRunDialog(false); return; }
       if (!backgroundScript || !backgroundMaxRounds || !backgroundStart) return;
       var scripts = getBackgroundAvailableScripts();
       if (!scripts.length) {
@@ -1934,6 +1984,7 @@ export function getScript(): string {
 
     function renderBackgroundRun() {
       if (!backgroundRegion || !backgroundStatus) return;
+      if (projectTaskUiActive()) { backgroundRegion.classList.add('hidden'); if (backgroundStart) backgroundStart.disabled = true; closeBackgroundRunDialog(false); return; }
       var candidate = state.backgroundRun && typeof state.backgroundRun === 'object' ? state.backgroundRun : null;
       var run = candidate?.sessionId === state.activeSessionId ? candidate : null;
       var active = isBackgroundActive();

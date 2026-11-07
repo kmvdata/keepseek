@@ -7,6 +7,7 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
 export interface SessionRetentionOptions {
   currentWorkspaceKey: string;
   currentActiveSessionId: string;
+  protectedSessionIds?: readonly string[];
   now?: number;
 }
 
@@ -32,7 +33,8 @@ export function shouldRetainSession(
   cutoff: number,
   options: SessionRetentionOptions
 ): boolean {
-  if (session.workspaceKey === options.currentWorkspaceKey && session.id === options.currentActiveSessionId) {
+  if (session.workspaceKey === options.currentWorkspaceKey
+    && (session.id === options.currentActiveSessionId || options.protectedSessionIds?.includes(session.id))) {
     return true;
   }
 

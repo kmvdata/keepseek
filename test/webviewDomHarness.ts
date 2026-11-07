@@ -154,7 +154,8 @@ function parseHtml(html: string, parent: WebviewNode, owner?: WebviewNode): void
   }
 }
 
-export function createWebviewDomHarness() {
+export function createWebviewDomHarness(initialWebviewState: unknown = null) {
+  let persistedWebviewState = initialWebviewState;
   let now = 0;
   let timerSequence = 0;
   const timers = new Map<number, { at: number; interval: number; callback: () => void }>();
@@ -182,7 +183,9 @@ export function createWebviewDomHarness() {
   parseHtml(getTemplate(), document.body, document);
   const posted: Array<Record<string, any>> = [];
   const window = new WebviewNode('window');
-  window.keepseekVscode = { postMessage: (message: Record<string, any>) => posted.push(message) };
+  window.keepseekVscode = { postMessage: (message: Record<string, any>) => posted.push(message),
+    getState: () => persistedWebviewState,
+    setState: (value: unknown) => { persistedWebviewState = JSON.parse(JSON.stringify(value)); return value; } };
   window.keepseekBootstrapQueue = [];
   window.getSelection = () => ({ rangeCount: 0, removeAllRanges() {}, addRange() {}, anchorNode: null });
   window.innerHeight = 900; window.innerWidth = 1400;
@@ -204,6 +207,7 @@ export function createWebviewDomHarness() {
   new Script(getScript(), { filename: 'keepseek-generated.js' }).runInContext(context);
   return {
     document, window, posted,
+    savedWebviewState: () => persistedWebviewState,
     state: new Script('state').runInContext(context) as Record<string, any>,
     receive: (data: unknown) => window.dispatchEvent({ type: 'message', data }),
     advance: (ms: number) => {

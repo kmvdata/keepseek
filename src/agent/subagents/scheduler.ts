@@ -1,5 +1,6 @@
 import type { SubagentTreeBudget } from './types';
 import { AgentRunAbortedError } from '../runner';
+import { getProjectRequestAdmission, runProjectChild } from '../../tasks/requestAdmission';
 import type { KeepseekLanguage } from '../../shared/i18n';
 import {
   decodeProposalPathScope,
@@ -108,6 +109,12 @@ export class SubagentScheduler {
     signal?: AbortSignal;
     language: KeepseekLanguage;
   }, task: () => Promise<T>): Promise<T> {
+    // Every independent Worker still owns its tree/path state, while the
+    // project ALS authority supplies one shared logical-child quota.
+    if (getProjectRequestAdmission()) {
+      try { return await runProjectChild(input, task); }
+      catch (error) { if (input.signal?.aborted) throw new AgentRunAbortedError(input.language); throw error; }
+    }
     const releaseDepth = await (input.depth === 1 ? this.rootSlots : this.nestedSlots).acquire(input.signal, input.language);
     let releaseProposal: (() => void) | undefined;
     try {

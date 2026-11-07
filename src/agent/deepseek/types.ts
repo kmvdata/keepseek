@@ -71,6 +71,10 @@ export interface DeepSeekUsage {
   total_tokens?: number;
   prompt_cache_hit_tokens?: number;
   prompt_cache_miss_tokens?: number;
+  /** Native cache creation count, when explicitly reported. It is part of miss/input, not extra prompt tokens. */
+  prompt_cache_write_tokens?: number;
+  /** Adapter-level completeness; prevents inferring an absent native cache counter. */
+  prompt_cache_data_status?: 'reported' | 'partial' | 'unavailable';
   /** Kimi/OpenAI-compatible top-level cache-hit token field. */
   cached_tokens?: number;
   prompt_tokens_details?: {

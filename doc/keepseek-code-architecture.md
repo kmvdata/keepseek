@@ -4,12 +4,15 @@
 
 ## 1. 启动与依赖方向
 
-KeepSeek 在 VS Code Extension Host 内运行。`package.json` 定义 commands/views/keybindings/menus、配置和 `main: ./out/extension.js`；[extension.ts](../src/extension.ts) 的 `activate()` 创建 `GlobalSessionStorage`、`ChatSessionStore`、`KeepseekChatViewProvider`，尽早注册 `keepseek.chat`，再异步迁移并初始化当前 workspace 会话。配置、工作区、信任与文件事件由这里接线，不在激活入口放业务规则。
+KeepSeek 在 VS Code Extension Host 内运行。`package.json` 定义 commands/views/keybindings/menus、配置和 `main: ./out/extension.js`；[extension.ts](../src/extension.ts) 的 `activate()` 创建 `GlobalSessionStorage`、`ChatSessionStore`、`KeepseekChatViewProvider`，尽早注册 `keepseek.chat`，取得同物理项目的执行 owner 后再异步迁移并初始化会话；非 owner 保持只读。项目任务 session 使用 `project:<projectId>` 存储 scope，旧普通会话仍属于原 workspace，显式关联不搬移历史。配置、工作区、信任与文件事件由这里接线，不在激活入口放业务规则。
 
 ```mermaid
 flowchart TD
   E["extension.ts"] --> P["KeepseekChatViewProvider"]
   W["Webview 消息与状态"] <--> P
+  P --> H["ProjectAssistantHost / TaskRuntime"]
+  H --> R["每任务独立 Provider / Runner"]
+  R --> A["AgentRequestCoordinator / AgentLoop"]
   P --> A["AgentRequestCoordinator / AgentLoop"]
   P --> S["会话、来源、上下文服务"]
   P --> D["审批、文件与命令服务"]
@@ -24,12 +27,14 @@ flowchart TD
 | 入口 | 当前职责 | 变更时一起核对 |
 | --- | --- | --- |
 | [KeepseekChatViewProvider.ts](../src/provider/KeepseekChatViewProvider.ts) | 生命周期、`handleMessage()`、`sendPromptImpl()`、会话和运行协调、审批队列、`postState()` | 对应领域 service、消息联合类型、Host 行为测试 |
+| [projectAssistantHost.ts](../src/provider/projectAssistantHost.ts) | 项目输入/任务卡、每卡独立 headless Provider、定向回调/审批、纯视图、草稿和 Router 事件接线 | `tasks/`、独立 session scope、Webview 任务脚本、Host/Runner 集成测试 |
 | [interactionState.ts](../src/provider/interactionState.ts) | 操作预占/拥有者、等待原因、交互与独立标题能力派生 | 导航、提交、续跑/审批交接、状态 revision、Webview 生命周期 |
 | [webviewMessages.ts](../src/provider/webviewMessages.ts) | 唯一 Webview → Host 消息联合类型 | 发送 fragment 与 `handleMessage()`；Host 主动消息不加入此联合 |
 | [modelSelection.ts](../src/provider/modelSelection.ts) | 主模型切换事务、运行限制、lane 影响 | catalog、session requestProtocol、replay |
 | [requestTimeoutSettings.ts](../src/provider/requestTimeoutSettings.ts) | 统一模型请求超时设置 | config/i18n 与所有模型请求入口 |
 | [html.ts](../src/webview/html.ts) | CSP、nonce、资源 URI、首次 ready bootstrap | ready 之前的消息暂存和初始化门禁 |
 | [script.ts](../src/webview/script.ts) | transcript、会话、状态/设置渲染、Host 消息监听 | DOM id、状态投影、编辑重发、Apply/Discard |
+| [projectTasks.ts](../src/webview/projectTasks.ts) | 项目/新任务/任务详情视图，按目标草稿、增量卡片与绘制确认 | 原有 composer、requestId/草稿 revision、task/session/viewGeneration、迟到结果和可访问性 |
 | [input/composition.ts](../src/webview/input/composition.ts) | 输入模板、样式、脚本 fragment 固定拼装顺序 | 同一 IIFE 的词法依赖和监听顺序；优先保持生成字节 |
 | [richTextShortcuts.ts](../src/webview/richTextShortcuts.ts) | 两个编辑器共享快捷键 | 输入框与编辑重发的键盘/焦点行为 |
 
@@ -40,6 +45,19 @@ Webview 是字符串生成的页面，不是独立前端应用。`input/composer
 轻量状态、完整状态和 patch 共用宿主派生的 `interaction`：编辑、提交、导航和取消分别表达；导航/准备/保存不等于模型运行。状态与提交反馈绑定会话和 revision/requestId，持续提示跟随有效操作而不依赖通知计时器。`isStartingRun` 只读派生互斥；旧 `isBusy` 兼容字段不能重新成为输入框权威。标题刷新单独消费 Host 的 `titleRegenerationCapability`，不把当前上下文等待等同于命名不可用；所有状态补丁定点同步历史行按钮。首次导航只跨 session/安全初始化屏障，余额磁盘展示在模型目录关键路径之外。具体拥有者、接受屏障和后台工作规则见 [交互生命周期](keepseek-interaction-lifecycle.md)。
 
 当前菜单 `/` → 审批模式只有 ask/delegate；`/` → 子代理模型 → 审批模型与其他模型选择共用交互层级，但审批配置单独取用户级 `keepseek.autoApprovalReviewer`。普通子代理 default/research/review/proposal 不为审批 reviewer 提供默认值。
+
+### 2.1 项目任务领域
+
+| 入口 | 权威与边界 |
+| --- | --- |
+| [projectTasks.ts](../src/tasks/projectTasks.ts) | 卡片、耐久邮箱、幂等、依赖、结果及恢复；默认两个根 Worker；物理 Registry 2 引用不可变正文对象，逻辑记录 1 |
+| [taskRuntime.ts](../src/tasks/taskRuntime.ts) | 独立控制器与 `project/card/session/root/segment/generation` 身份，单 session 单 writer；不从正在查看的卡推断写入归属 |
+| [taskRouter.ts](../src/agent/taskRouter.ts) | 独立 Router role/toolset 1，固定调度工具及宿主校验；dispatch 耐久入队即返回，不等待 Worker |
+| [projectOwner.ts](../src/tasks/projectOwner.ts) | 同物理项目跨进程长期 owner；与 workspaceKey 和 session 写锁独立，超时不授权抢占 |
+| [projectResources.ts](../src/tasks/projectResources.ts) | 修改/验证阶段租约、固定获取顺序、嵌套 token 传递、基线失效；不跨人工/审批/child 等待持有修改租约 |
+| [requestAdmission.ts](../src/tasks/requestAdmission.ts) | 项目及来源的真实请求池、根任务与 child 准入、Router 有界优先级；request permit 不覆盖工具/审批等待 |
+
+项目自由输入进入独立 Router；显式新任务与任务详情输入走确定性路径，不产生 Router 分类费用。supplement 先耐久接收，已派发模型/工具结清原生配对后，同 root 新 segment 追加真正用户消息；完成后追问才新建 root。普通完成只更新结构化结果，重启只恢复 interrupted 与邮箱，不复活批准、permit 或进程。完整状态与验收合同见 [项目助手专题](keepseek-project-assistant.md)。
 
 ## 3. 来源、上下文与 Skills
 
@@ -57,7 +75,7 @@ Webview 是字符串生成的页面，不是独立前端应用。`input/composer
 | [skillActivationResolver.ts](../src/skills/skillActivationResolver.ts)、[skillLoader.ts](../src/skills/skillLoader.ts) | explicit→session→workspace-default→implicit；有界读取与隐式冻结 |
 | [codexPluginSupport.ts](../src/skills/codexPluginSupport.ts)、[codexPluginDiscovery.ts](../src/skills/codexPluginDiscovery.ts)、[codexPluginResources.ts](../src/skills/codexPluginResources.ts)、[pluginSkillRuntime.ts](../src/agent/pluginSkillRuntime.ts) | 插件 Skills 暂停开关；安装/资源底层和历史数据保留，当前不发现、不加载、不执行或恢复插件任务 |
 
-共享来源缓存只复用有界、可失效的读取快照；同版本并发读取合并，不同版本的 Skill 扫描通过独立 `discoverSnapshot()` 和 diagnostics 避免旧来源阻塞新来源。会话激活、冻结 implicit 集合、权限与错误状态仍归各自拥有者，不能作为共享缓存数据。普通导航不重算热会话的冻结集合，来源 dirty/force、信任/目录/配置变化和重启按受控边界重验。
+`SharedProjectSources.createSibling()` 共享来源 backend 的不可变配置/指令、in-flight、watcher 及 revision；`SkillStore.createSibling()` 共享 manifest 和冻结正文缓存。各自选择门面独立，父 facade 释放不影响仍在使用的 sibling。共享缓存只复用有界、可失效的读取快照；同版本并发读取合并，不同版本的 Skill 扫描通过独立 `discoverSnapshot()` 和 diagnostics 避免旧来源阻塞新来源。会话激活、冻结 implicit 集合、权限与错误状态仍归各自拥有者，不能作为共享缓存数据。普通导航不重算热会话的冻结集合，来源 dirty/force、信任/目录/配置变化和重启按受控边界重验。
 
 任务目录来自用户选择或单根默认，不随焦点/附件变化。共享文件只读；发现/加载 Skill 不执行 scripts。普通项目 Skill 创建只准备 `SKILL.md` 与 `agents/openai.yaml` 的 ChangeSet，实际落盘仍走文件审批。插件入口不扩大通用文件、cwd、child 或写入授权。
 
@@ -120,15 +138,17 @@ ask 由用户逐项/批量批准；delegate 对符合宿主规则的常规操作
 
 | 模块/数据 | 权威与边界 |
 | --- | --- |
-| [chatSessionStore.ts](../src/sessions/chatSessionStore.ts) | 当前 workspace 会话门面、内存状态、选择与保存协调；除原生 replay 外的 normalize/migration 仍在此 |
+| [chatSessionStore.ts](../src/sessions/chatSessionStore.ts) | workspace 门面与固定执行 session scope；纯查看有限页、冷读合并、pin/字节预算 LRU、dirty revision 和保存屏障；除原生 replay 外的 normalize/migration 仍在此 |
 | [providerReplayNormalization.ts](../src/sessions/providerReplayNormalization.ts) | 原生 Responses/Anthropic replay 的纯完整校验、容量限制和复制；Store/Provider 共用，禁止接受部分非法 replay |
-| [globalSessionStorage.ts](../src/sessions/globalSessionStorage.ts) | 按 workspace/session 分片的持久化 adapter，索引/全局 manifest V2 |
-| [sessionObjectStore.ts](../src/sessions/sessionObjectStore.ts) | session shard V4 对象图、hash/scope/revision/写锁、对象先于 manifest 提交；兼容 V3 与旧 V2 迁移 |
+| [globalSessionStorage.ts](../src/sessions/globalSessionStorage.ts) | 按 workspace/session 分片；`saveSessionChanges()` 只提交 dirty shard，短索引合并；scoped 保存不改变全局查看选择；索引/全局 manifest V2 |
+| [sessionObjectStore.ts](../src/sessions/sessionObjectStore.ts) | session shard V4 对象图、hash/scope/revision/写锁；对象先于 manifest 提交；最近展示页不解码全历史/全部 checkpoint、不作为执行权威；兼容 V3 与旧 V2 |
 | [persistenceSnapshot.ts](../src/sessions/persistenceSnapshot.ts)、[coalescedWriter.ts](../src/sessions/coalescedWriter.ts) | 不可变复用/可变状态复制、保存队列与失败/flush 语义；不能替换为普通 debounce |
 | [sessionRetention.ts](../src/sessions/sessionRetention.ts) | 过期清理、保留策略与状态审计 |
 | `ChatSession.messages` | UI 持久历史，append-only；`contextCompression` / `historyArchive` 仅是请求投影状态 |
 | `requestProtocol` / `contextInstructions` | 冻结 lane/工具 schema 与稳定上下文字节；normalizer 不反写旧前缀 |
 | `runCheckpoint` / `runCheckpointArchive` | 当前可恢复状态与归档引用；普通加载仅展开最新未结束 checkpoint，UI 不接收完整对象图 |
+
+任务视图调用 `viewSessionPage()` 而非执行选择 `selectSession()`。`SessionViewPage` 与完整 `ChatSession` 是不同类型，不能把局部页回写成历史。执行 scope、必要保存、待消费输入、审批/恢复的 pin 不受普通查看 LRU 或空会话过滤影响。规范项目 scope 与旧会话原 scope 分别保留，`findSessionScope()` 只定位原身份，不复制或重写关联 session。
 
 默认存储由各 Store 通过 `globalStorageUri` 解析。来源/子代理设置、`chat-sessions/v2` 索引及 shard、兼容 `chat-sessions/v1` evidence/child、`usage-ledger/v2`、`change-sets/v4`、DraftRun 和审批文件各由所属 Store 管理。业务层不拼版本路径，也不在项目仓库保存密钥或真实会话。JSON 优先 `writeJsonAtomic()`；未知副作用不自动重试，迁移与恢复在副本验证。
 
@@ -143,6 +163,7 @@ ask 由用户逐项/批量批准；delegate 对符合宿主规则的常规操作
 | 子代理 | `subagents/`、resolver、delegation | `subagentSafety`、`p1Delegation`、`p1SubagentInheritance`、`p1SubagentResultReader`、`subagentUsageRuntime` |
 | 引用/Skills/输入 | `context/references/`、`skills/`、`webview/input/` | `fileReference`、`skill*`、`codexPlugin*`、`inputComposition`、`richTextShortcuts` |
 | 交互/导航/后台工作 | `provider/interactionState.ts`、Provider 接线、Webview 状态入口 | `sessionNavigation`、`inputComposition`；拥有者/迟到结果、提交闭环与保存故障测试 |
+| 项目任务/Router/并行资源 | `tasks/`、`projectAssistantHost.ts`、`taskRouter.ts`、`webview/projectTasks.ts` | `projectTasks`、`projectRouter`、`supplementBoundary`、`projectAssistantIntegration`、`projectAssistantViewHost`、`projectTaskWebview`、`projectCoordination` |
 | 会话结构/保存 | `shared/types.ts`、`sessions/`、checkpoint | `chatSessionStore`、`longTaskPerformance`、`p0SubagentPersistence`、`executionTimeStats` |
 | 用量/观测 | ledger、usage、logging | `usageStats`、`subagentUsageStats`、`interactionTrace`、`runDetails` |
 | 打包/资源 | `.vscodeignore`、`scripts/package-market.js`、`verify-vsix.js` | 市场包入口/依赖/动态 SVG 清单及包内容比较 |

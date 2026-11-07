@@ -35,6 +35,37 @@ export class FileContextStore {
     return Array.from(this.files.values());
   }
 
+  /** Restore a Host-captured task snapshot without rereading the backing file.
+   * This preserves explicitly selected unsaved editor bytes. It does not grant
+   * filesystem access: external URI authorization is owned by the task Host.
+   * Validate the complete snapshot before replacing any current context. */
+  public restoreSnapshot(snapshot: readonly ContextFile[]): void {
+    const limits = this.getLimits();
+    if (!Array.isArray(snapshot) || snapshot.length > limits.maxContextFiles) {
+      throw new Error('Invalid context file snapshot size / 上下文文件快照数量无效');
+    }
+    const restored = new Map<string, ContextFile>();
+    for (const file of snapshot) {
+      if (!file || typeof file !== 'object' || typeof file.uri !== 'string' || !file.uri
+        || file.id !== file.uri || !['label', 'fsPath', 'languageId', 'content'].every(key => typeof file[key as keyof ContextFile] === 'string')
+        || !['workspace', 'external'].includes(file.source) || !Number.isSafeInteger(file.sizeBytes) || file.sizeBytes < 0) {
+        throw new Error('Invalid context file snapshot / 上下文文件快照无效');
+      }
+      const uri = vscode.Uri.parse(file.uri);
+      const sizeBytes = this.encoderSize(file.content);
+      if (!/^[a-z][a-z0-9+.-]*$/iu.test(uri.scheme) || uri.toString() !== file.uri || uri.fsPath !== file.fsPath
+        || restored.has(file.uri) || sizeBytes !== file.sizeBytes || sizeBytes > limits.maxFileBytes) {
+        throw new Error('Context file snapshot identity or content size changed / 上下文文件快照身份或正文大小发生变化');
+      }
+      restored.set(file.uri, { id: file.id, uri: file.uri, label: file.label, fsPath: file.fsPath,
+        languageId: file.languageId, content: file.content, sizeBytes, source: file.source });
+    }
+    this.files.clear();
+    for (const [uri, file] of restored) this.files.set(uri, file);
+  }
+
+  private encoderSize(content: string): number { return new TextEncoder().encode(content).byteLength; }
+
   public clear(): void {
     this.files.clear();
   }

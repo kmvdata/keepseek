@@ -16,6 +16,7 @@ import type {
 } from '../../shared/types';
 import { RUN_VALIDATION_TOOL_NAME } from '../protocol';
 import { hasValidationBlockingRisk } from './validationRisk';
+import { assertProjectMutationLease, getProjectExecutionContext, withProjectMutationPhase } from '../../tasks/projectResources';
 
 const MAX_DIAGNOSTIC_ITEMS = 200;
 const SAFE_NPM_SCRIPT_ORDER: SafeNpmScript[] = ['compile', 'lint', 'test'];
@@ -48,6 +49,15 @@ export class ValidationToolService implements ValidationToolAdapter {
     authorization: ToolAuthorizationDecision;
     expectedSnapshot?: string;
   }): Promise<string> {
+    return withProjectMutationPhase(async (lease) => {
+      // Compile/test scripts can write outputs even on failure. Invalidate old
+      // validation conclusions conservatively before invoking the fixed script.
+      lease?.recordMutation();
+      return this.runSafeNpmScriptOwned(input);
+    }, input.signal);
+  }
+
+  private async runSafeNpmScriptOwned(input: Parameters<ValidationToolService['runSafeNpmScript']>[0]): Promise<string> {
     const startedAt = Date.now();
     const createResult = (result: Partial<ValidationToolResult>): ValidationToolResult => ({
       ok: false,
@@ -125,10 +135,17 @@ export class ValidationToolService implements ValidationToolAdapter {
       }
       const remainingMs = input.runDeadlineAt === undefined ? timeoutMs : Math.min(timeoutMs, input.runDeadlineAt - Date.now());
       if (remainingMs <= 0) throw new Error(localizeValidation(input.language, 'timedOut'));
+      await assertProjectMutationLease();
+      if (!vscode.workspace.isTrusted || input.signal?.aborted) throw new Error(localizeValidation(input.language, 'snapshotChanged'));
       const outcome = await executeValidation(snapshot, remainingMs, input.signal);
       const diagnostics = createWorkspaceDiagnosticSummary();
       const ok = !outcome.timedOut && !outcome.aborted && outcome.exitCode === 0;
-      return JSON.stringify(createResult({
+      const context = getProjectExecutionContext();
+      const projectResource = context?.token ? {
+        projectId: context.owner.projectId, resourceRevision: context.resources.resourceRevision,
+        phaseId: context.token.id, fingerprint: snapshot.fingerprint
+      } : undefined;
+      return JSON.stringify({ ...createResult({
         ok,
         workspaceFolder: workspaceFolder.name,
         taskName,
@@ -152,7 +169,7 @@ export class ValidationToolService implements ValidationToolAdapter {
             : outcome.timedOut
               ? localizeValidation(input.language, 'timedOut')
               : localizeValidation(input.language, 'failed', input.script, outcome.exitCode)
-      }));
+      }), ...(projectResource ? { projectResource } : {}) });
     } catch (error) {
       if (error instanceof ValidationUnavailableError && !input.expectedSnapshot) {
         return JSON.stringify(createResult({
