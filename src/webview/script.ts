@@ -10,7 +10,10 @@ export function getScript(): string {
     const vscodeApi = window.keepseekVscode;
     const vscode = {
       postMessage: function(message) {
-        var globalHistory = ['ready', 'startupRendered', 'newSession', 'selectSession', 'toggleSessionFavorite', 'renameSession',
+        if (['newSession', 'createSession', 'selectSession'].includes(message.type) && typeof projectCompositionActive !== 'undefined' && (projectCompositionActive || projectCompositionTimer)) {
+          projectDeferNavigation(message); return;
+        }
+        var globalHistory = ['ready', 'startupRendered', 'newSession', 'createSession', 'selectSession', 'toggleSessionFavorite', 'renameSession',
           'deleteSessions', 'listOtherWorkspaces', 'loadOtherWorkspaceSessions', 'copyOtherWorkspaceSession', 'deleteOtherWorkspaceSessions', 'deleteOtherWorkspace'];
         if (projectTasks && projectViewMode === 'task' && projectTasks.viewTaskId && !message.type.startsWith('project') && !globalHistory.includes(message.type)) {
           var targetCard = message.sessionId
@@ -210,9 +213,12 @@ export function getScript(): string {
     }
 
     function changeVisibleSession(previousSessionId, nextSessionId) {
-      if (previousSessionId === nextSessionId || projectTaskUiActive()) return;
-      var startupDraft = !previousSessionId && promptInput ? promptInput.innerHTML : '';
-      if (previousSessionId && promptInput) sessionPromptDrafts.set(previousSessionId, promptInput.innerHTML);
+      if (projectTaskUiActive()) return;
+      var fromProject = typeof projectLegacyDraftRestorePending !== 'undefined' && projectLegacyDraftRestorePending;
+      projectLegacyDraftRestorePending = false;
+      if (previousSessionId === nextSessionId && !fromProject) return;
+      var startupDraft = !fromProject && !previousSessionId && promptInput ? promptInput.innerHTML : '';
+      if (!fromProject && previousSessionId && promptInput) sessionPromptDrafts.set(previousSessionId, promptInput.innerHTML);
       stopAgentStatusRotation(); agentStatusRotationKey = ''; reconnectStatusActive = false;
       operationStatus = ''; operationStatusKey = '';
       if (transientStatusScope !== 'global') setTransientStatus('');

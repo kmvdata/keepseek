@@ -1,4 +1,6 @@
 import type { AgentRequest } from '../shared/types';
+import type { TaskContextUsageOrigin, UsageSource } from '../shared/types';
+import { taskUsageFingerprint, taskUsageLaneFingerprint } from '../tasks/taskUsageSnapshot';
 import { InteractionCoordinator, deriveSessionTitleCapability, type InteractionOperation, type InteractionPhase } from './interactionState';
 import { SessionTitleCoordinator, type SessionTitleRequest, type SessionTitleRegenerationOutcome } from '../sessions/sessionTitleCoordinator';
 import { buildSessionTitleRegenerationMaterial, getSessionTitleRegenerationTaskId, parseSessionTitleResult } from '../sessions/sessionTitle';
@@ -546,6 +548,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private projectAssistant?: ProjectAssistantHost;
   private projectSupplementPending = false;
   private projectInput?: TaskExecutionContext;
+  private projectUsageRevision = 0;
+  private projectUsageSequence = 0;
   private projectRouterHost?: ProjectTaskRouterHost;
   private frozenProjectModel?: KeepseekModel;
   private frozenProjectSource?: ModelSourceConfigSnapshot;
@@ -664,6 +668,32 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   public requestProjectSupplementBoundary(): void { this.projectSupplementPending = true; }
+
+  /** Bind the prepared run rather than consulting selectedModel/projectInput
+   * when an asynchronous old response eventually returns. */
+  private captureProjectUsage(model: KeepseekModel, settings: AgentSettings, source: NonNullable<AgentRequest['sourceConfig']>,
+    identity: AgentRequest['projectTaskIdentity'], controller: AbortController): (purpose?: UsageSource) => TaskContextUsageOrigin | undefined {
+    const binding = this.projectBinding, input = this.projectInput;
+    if (!binding || binding.router || !input || !identity) return () => undefined;
+    const capturedIdentity = { ...identity, sessionId: input.identity.sessionId, hostId: binding.hostId, runtimeId: binding.runtimeId };
+    const configurationFingerprint = taskUsageLaneFingerprint(binding.snapshot);
+    const laneFingerprint = taskUsageFingerprint({ configurationFingerprint, model: { ...model },
+      profile: getAgentRuntimeProfile(model, settings), sourceId: source.sourceId, provider: source.provider,
+      endpointHash: endpointHash(source.baseUrl ?? '') });
+    return purpose => {
+      if (purpose === 'summary' || controller.signal.aborted || this.currentRunAbortController !== controller || this.projectInput !== input) return undefined;
+      const origin: TaskContextUsageOrigin = { identity: { ...capturedIdentity }, laneFingerprint, configurationFingerprint,
+        projectionRevision: ++this.projectUsageRevision, capturedAt: new Date().toISOString() };
+      binding.publish({ type: 'taskContextUsageStart', origin });
+      return origin;
+    };
+  }
+
+  private publishProjectUsage(usage: ContextUsageEstimate, origin: TaskContextUsageOrigin | undefined): void {
+    if (!origin || !this.projectBinding) return;
+    this.projectBinding.publish({ type: 'taskContextUsage', origin, usage,
+      sequence: ++this.projectUsageSequence, recordedAt: new Date().toISOString() });
+  }
   public invalidateProjectSource(sourceId: string): void { this.scrubDeletedModelSourceFromMemory(sourceId); }
   private hasProjectSupplement(): boolean {
     return this.projectSupplementPending || !!(this.projectInput && this.projectBinding?.hasPendingSupplement(this.projectInput.input.inputId, this.projectInput.identity.rootTaskId));
@@ -5713,7 +5743,14 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         onUsageLedgerRecord: async (record) => { await this.applyUsageLedgerRecord(session, record); refresh(); },
         getPreviousCacheObservation: (input) => this.getPreviousCacheObservation(input),
         getCacheObservationCandidates: (input) => this.getCacheObservationCandidates(input),
-        onUsageEstimate: (estimate) => { this.liveContextUsage = toSessionContextUsageEstimate(estimate); refresh(); },
+        captureUsageEstimate: this.captureProjectUsage(cp.outputFailure ? currentModel : checkpointForResume.request.model,
+          checkpointForResume.request.settings, { sourceId: source.sourceId, provider: source.provider, apiKey: source.apiKey,
+            baseUrl: source.baseUrl, supportsBilling: source.supportsBilling },
+          this.projectInput ? { ...this.projectInput.identity, segmentId: projectContinuation?.segmentId ?? cp.taskId } : undefined, controller),
+        onUsageEstimate: (estimate, origin) => {
+          if (this.currentRunAbortController !== controller || controller.signal.aborted) return;
+          this.liveContextUsage = toSessionContextUsageEstimate(estimate); this.publishProjectUsage(estimate, origin); refresh();
+        },
         onTaskPlan: (plan) => {
           if (this.currentRunAbortController !== controller || !this.isCurrentHistoryMessage(session, message)) return;
           this.taskPlansBySession.set(session.id, plan); refresh();
@@ -6767,9 +6804,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           activeSession.updatedAt = new Date().toISOString();
           streamPublisher?.schedule();
         },
-        onUsageEstimate: (usage) => {
+        captureUsageEstimate: this.captureProjectUsage(agentRequest.model, agentRequest.settings, sourceConfig, agentRequest.projectTaskIdentity, abortController),
+        onUsageEstimate: (usage, origin) => {
+          if (this.currentRunAbortController !== abortController || abortController.signal.aborted) return;
           this.liveContextUsage = toSessionContextUsageEstimate(usage);
           this.updateActiveSessionContextUsage(this.liveContextUsage);
+          this.publishProjectUsage(usage, origin);
           scheduleLiveState();
         },
         onUsage: (event) => {

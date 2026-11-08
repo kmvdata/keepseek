@@ -1,5 +1,5 @@
 import { getInputTemplate } from './input/template';
-import { getProjectTasksTemplate } from './projectTasks';
+import { getProjectTasksTemplate, getProjectTasksOverlayTemplate } from './projectTasks';
 import type { KeepseekExtensionInfo } from '../shared/types';
 import { DEFAULT_MODEL_REQUEST_TIMEOUT_SECONDS, MODEL_REQUEST_TIMEOUT_PRESETS } from '../shared/config';
 
@@ -122,7 +122,14 @@ export function getTemplate(extensionInfo?: Pick<KeepseekExtensionInfo, 'version
       </div>
     </section>
 
-    ${getProjectTasksTemplate()}
+    <div class="project-workspace">
+      ${getProjectTasksTemplate()}
+      <div class="project-main">
+        <div class="project-view-status">
+          <div id="projectOwnerNotice" class="project-owner-notice hidden" role="status" data-i18n="projectReadOnly">此窗口为只读，请在执行窗口处理任务。</div>
+          <button id="projectLatestMessages" type="button" class="secondary hidden" data-i18n="projectLatestMessages">最新消息</button>
+        </div>
+        <div class="project-transcript-stage">
     <section id="transcript" class="transcript">
       <section id="planRegion" class="plan-region hidden" aria-label="计划 / 进度" data-i18n-aria-label="planProgress">
         <button id="planToggle" type="button" class="plan-toggle" aria-expanded="false" aria-controls="planBody">
@@ -157,8 +164,12 @@ export function getTemplate(extensionInfo?: Pick<KeepseekExtensionInfo, 'version
       </aside>
     </section>
 
+        ${getProjectTasksOverlayTemplate()}
+        </div>
     <div id="projectInputTarget" class="project-input-target hidden" role="status" aria-live="polite"></div>
     ${getInputTemplate()}
+      </div>
+    </div>
   </main>`;
 }
 

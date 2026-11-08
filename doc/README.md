@@ -2,7 +2,7 @@
 
 本文是定位入口。当前行为以源码与契约测试为准，开发要求见 [AGENTS.md](../AGENTS.md)。下表的专题各负责一个范围；历史验收只证明其记录的基线与环境，不代表当前版本已经现场验收。
 
-本次项目助手的命令结果、请求/费用边界和现场限制见 [交付验收](keepseek-project-assistant-verification.md)。
+项目助手原始交付记录见 [交付验收](keepseek-project-assistant-verification.md)；左侧任务窄栏、稳定时间排序、独立用量快照的本轮命令、请求证据和原生 F5 步骤见 [任务侧栏验收](keepseek-task-sidebar-verification.md)。
 
 ## 当前专题
 

@@ -1160,7 +1160,7 @@ export class AgentLoop {
     };
     // Provider calibration changes the prompt total, not the work already done
     // in this run. Preserve these local-only categories in every notification.
-    runCallbacks.onUsageEstimate = (estimate) => callbacks.onUsageEstimate?.({
+    runCallbacks.onUsageEstimate = (estimate, origin) => callbacks.onUsageEstimate?.({
       ...estimate,
       breakdown: {
         ...estimate.breakdown,
@@ -1168,8 +1168,9 @@ export class AgentLoop {
         toolResultTokensEstimate: runtimeUsageBreakdown.toolResultTokensEstimate,
         reasoningTokensEstimate: runtimeUsageBreakdown.reasoningTokensEstimate
       }
-    });
+    }, origin);
     const emitUsageEstimate = (toolsForNextRequest: DeepSeekFunctionTool[]) => {
+      const origin = callbacks.captureUsageEstimate?.();
       const currentBudget = admission.decide({ estimatedInputTokens: this.estimateCurrentProviderInputTokens(request, messages, toolsForNextRequest, providerRunState),
         configuredMaxOutputTokens: runtimeConfig.maxTokens, phase: 'tool', remainingBatchResults: 0 });
       outputReserveTokens = currentBudget.outputReserveTokens;
@@ -1203,7 +1204,7 @@ export class AgentLoop {
             outputReserveTokens,
             safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS,
             breakdown
-          }));
+          }), origin);
     };
     let toolCallCount = restored?.toolCallCount ?? 0;
     let validationRunCount = restored?.validationRunCount ?? checkpoint.continuationState?.validationRunCount ?? 0;
@@ -2760,6 +2761,9 @@ export class AgentLoop {
       model: request.model, sourceId: runtimeConfig.sourceId, baseUrl: runtimeConfig.baseUrl,
       provider: runtimeConfig.provider, body, calibration: request.checkpoint?.state?.epoch?.calibration
     });
+    // The response may arrive after a newer projection/epoch. Its calibration
+    // keeps THIS producer token rather than receiving a new revision on return.
+    const usageEstimateOrigin = callbacks.captureUsageEstimate?.(options.usageSource);
     let budget = resolveBudget();
     const failure = recoveryCheckpoint?.outputFailure;
     const useSmallerCalls = recoveryCheckpoint?.modelStepGenerationStrategy === 'small_tools'
@@ -2773,7 +2777,7 @@ export class AgentLoop {
     }
     applyProviderRequestBudget(body, budget);
     runtimeConfig = { ...runtimeConfig, maxTokens: budget.actualMaxOutputTokens };
-    callbacks.onUsageEstimate?.(createRequestBudgetUsage(budget));
+    callbacks.onUsageEstimate?.(createRequestBudgetUsage(budget), usageEstimateOrigin);
     trace.record({ type: 'request_output_budget', ...budget, usageSource: options.usageSource ?? (request.agentRole ? 'router' : 'executor') });
     if (request.checkpoint && options.usageSource !== 'summary') request.checkpoint.lastRequestBudget = budget;
     const upstreamRequestId = randomUUID();
@@ -3030,7 +3034,7 @@ export class AgentLoop {
     const usageEvent = finalUsageEvent;
     if (response.ok && response.message) {
       if (usageEvent) {
-        callbacks.onUsageEstimate?.(calibrateContextUsageEstimate(createRequestBudgetUsage(budget), usageEvent.usage.promptTokens));
+        callbacks.onUsageEstimate?.(calibrateContextUsageEstimate(createRequestBudgetUsage(budget), usageEvent.usage.promptTokens), usageEstimateOrigin);
       }
       if (options.providerRunState?.protocol === 'openai-responses' && response.nativeOutputItems?.length) {
         // response.output is authoritative and must precede all local function

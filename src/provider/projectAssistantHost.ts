@@ -3,12 +3,13 @@ import * as vscode from 'vscode';
 import { KeepseekChatViewProvider } from './KeepseekChatViewProvider';
 import type { WebviewMessage } from './webviewMessages';
 import { ChatSessionStore, getVisibleMessages } from '../sessions/chatSessionStore';
-import { ProjectTaskService, type ProjectTaskCard, type TaskDefaultsSnapshot } from '../tasks/projectTasks';
+import { ProjectTaskService, type ProjectTaskCard, type TaskActionIdentity, type TaskDefaultsSnapshot } from '../tasks/projectTasks';
 import type { TaskExecutionContext, TaskExecutionDriver } from '../tasks/taskRuntime';
 import { ProjectExecutionOwner } from '../tasks/projectOwner';
 import { ProjectResourceCoordinator, runProjectExecution } from '../tasks/projectResources';
 import type { ProjectTaskRouterHost, ProjectTaskRouterSummary, ProjectTaskRouterContext } from '../agent/taskRouter';
-import type { KeepseekExtensionInfo, ChatMessage } from '../shared/types';
+import type { KeepseekExtensionInfo, ChatMessage, ContextUsageEstimate, TaskContextUsageOrigin } from '../shared/types';
+import { TaskUsageSnapshotTracker, taskUsageLaneFingerprint } from '../tasks/taskUsageSnapshot';
 import { writeJsonAtomic } from '../shared/atomicStorage';
 import { ProjectRequestAdmission } from '../tasks/requestAdmission';
 import type { SharedProjectSources } from '../context/sharedProjectSources';
@@ -25,6 +26,8 @@ export interface ProjectAssistantOptions {
 
 export interface ProjectWorkerBinding {
   taskCardId: string;
+  hostId: string;
+  runtimeId: string;
   snapshot: TaskDefaultsSnapshot;
   router: boolean;
   onSnapshotChanged?(snapshot: TaskDefaultsSnapshot): Promise<void>;
@@ -61,7 +64,7 @@ interface HostOptions extends ProjectAssistantOptions {
   stopLegacy?(): Promise<void>;
 }
 
-const ACTIVE = new Set(['queued', 'preparing', 'running', 'waiting', 'settling']);
+const ACTIVE = new Set(['queued', 'preparing', 'running', 'waiting', 'settling', 'stopping']);
 const ACTIONS = new Set(['sendPrompt', 'abortPrompt', 'startBackgroundRun', 'resumeBackgroundRun', 'applyDraftEdit', 'discardDraftEdit', 'applyChangeSet', 'discardChangeSet', 'revertDraftEdit', 'revertChangeSet',
   'applyAllDraftEdits', 'runDraftRun', 'runAllDraftRuns', 'confirmManualToolApproval', 'resolveManualApproval', 'resumeApprovalProcessing',
   'authorizeDraftRunCwd', 'authorizeExternalTool', 'continueAgentTask', 'continueTask', 'executePlan', 'resolvePlanDecision',
@@ -98,10 +101,19 @@ export class ProjectAssistantHost {
   private viewPage?: { taskCardId: string; generation: number; startIndex: number; totalMessages: number; messages: ChatMessage[] };
   private readonly routerStopRequests = new Map<string, { taskCardId: string; rootTaskId: string; generation: number; finish(approved: boolean): void }>();
   private shutdown?: Promise<void>;
+  private readonly contextUsage: TaskUsageSnapshotTracker;
+  private readonly contextUsageUri: vscode.Uri;
+  private contextUsagePublishTimer?: ReturnType<typeof setTimeout>;
+  private contextUsageSaveTimer?: ReturnType<typeof setTimeout>;
+  private contextUsageWriter: Promise<void> = Promise.resolve();
+  private contextUsageDirty = false;
+  private contextUsageDiagnostic?: string;
 
   constructor(private readonly options: HostOptions) {
     const base = vscode.Uri.joinPath(options.storageUri, 'project-assistant', options.owner.projectId);
     this.storageBase = base;
+    this.contextUsage = new TaskUsageSnapshotTracker(options.owner.projectId, this.runtimeId);
+    this.contextUsageUri = vscode.Uri.joinPath(base, 'task-context-usage.json');
     // Drafts belong to the window, and never confer project execution rights.
     const windowKey = options.windowId || vscode.env.sessionId || this.runtimeId;
     this.viewDraftUri = vscode.Uri.joinPath(base, 'views', `${windowKey}.json`);
@@ -121,7 +133,8 @@ export class ProjectAssistantHost {
           ...(router ? { agentRole: { kind: 'project-router', version: 1, toolSchemaVersion: 1 } as const } : {}) });
       },
       driverFactory: card => this.driver(card, router),
-      onChange: () => { if (this.initialized) { this.syncPins(); this.publish(); void this.trimWorkers(); } }
+      onChange: () => { if (this.initialized) { this.syncPins(); this.publish(); void this.trimWorkers();
+        if (!router && !this.tasks.list().some(card => ACTIVE.has(card.state))) void this.saveContextUsage(); } }
     });
     this.tasks = service(false);
     this.routerTasks = service(true);
@@ -133,6 +146,7 @@ export class ProjectAssistantHost {
       name: 'KeepSeek', folderUris: [isAbsolute(this.options.owner.canonicalRoot)
         ? vscode.Uri.file(this.options.owner.canonicalRoot).toString() : this.options.owner.canonicalRoot] });
     await Promise.all([this.tasks.initialize({ readOnly: !this.options.owner.isOwner }), this.routerTasks.initialize({ readOnly: !this.options.owner.isOwner })]);
+    await this.loadContextUsage();
     try {
       const raw = JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(this.viewDraftUri))) as { version: number; drafts: DraftRecord[]; viewTaskId?: string; viewMode?: string };
       if (raw.version === 1 && Array.isArray(raw.drafts)) for (const draft of raw.drafts) {
@@ -166,6 +180,10 @@ export class ProjectAssistantHost {
   revokeSource(sourceId: string): void {
     for (const [service, cards] of [[this.tasks, this.tasks.list()], [this.routerTasks, this.routerTasks.list()]] as const) {
       for (const card of cards) if (card.snapshot.sourceId === sourceId) {
+        if (service === this.tasks) {
+          this.contextUsage.invalidate(card.taskCardId); this.contextUsageDirty = true;
+          this.scheduleContextUsage();
+        }
         void this.workers.get(card.taskCardId)?.then(worker => worker.invalidateProjectSource(sourceId));
         if (this.options.owner.isOwner) void service.stop(card.taskCardId).catch(error => this.options.publish({ type: 'projectTaskError', reason: errorText(error) }));
       }
@@ -292,24 +310,33 @@ export class ProjectAssistantHost {
         }
         case 'projectTaskStop': {
           const card = this.tasks.get(requiredId(data));
-          if (!card || data.rootTaskId && data.rootTaskId !== card.rootTaskId) throw new Error('The task run changed; reopen it before stopping. / 任务运行已变化，请重新打开后停止。');
-          await this.tasks.stop(card.taskCardId);
+          if (!card) throw new Error('Task unavailable / 任务不存在');
+          const identity = this.taskActionIdentity(data, card);
+          await this.tasks.stop(identity.taskCardId, identity);
           for (const request of [...this.routerStopRequests.values()]) if (request.taskCardId === card.taskCardId
             && request.rootTaskId === card.rootTaskId && request.generation === card.generation) request.finish(true);
           return true;
         }
         case 'projectTaskStopAll': await Promise.all([this.tasks.stopAll(), this.routerTasks.stopAll(), this.options.stopLegacy?.()]); return true;
-        case 'projectTaskResume': await this.tasks.resume(requiredId(data)); return true;
-        case 'projectTaskArchive': await this.tasks.archive(requiredId(data), data.archived !== false); return true;
+        case 'projectTaskResume': {
+          const identity = this.taskActionIdentity(data, this.tasks.get(requiredId(data)));
+          await this.tasks.resume(identity.taskCardId, identity); return true;
+        }
+        case 'projectTaskArchive': {
+          const identity = this.taskActionIdentity(data, this.tasks.get(requiredId(data)));
+          await this.tasks.archive(identity.taskCardId, data.archived !== false, identity); return true;
+        }
         case 'projectTaskDelete': {
           if (this.options.owner.hasUncertainOperations) throw new Error('Inspect unknown operations before deleting task evidence. / 请先核对未知操作，再删除任务记录。');
           const card = this.tasks.get(requiredId(data));
-          if (!card) throw new Error('Task unavailable');
-          await this.tasks.delete(card.taskCardId);
+          if (!card) throw new Error('Task unavailable / 任务不存在');
+          const identity = this.taskActionIdentity(data, card);
+          await this.tasks.delete(identity.taskCardId, identity);
           const worker = this.workers.get(card.taskCardId);
           if (worker) { this.workers.delete(card.taskCardId); await (await worker).drainProjectRuntime(); }
           await (await this.storeForSession(card.sessionId)).deleteSessions([card.sessionId]);
           this.liveAccounting.delete(card.taskCardId);
+          this.contextUsage.remove(card.taskCardId); this.contextUsageDirty = true; void this.saveContextUsage();
           if (this.viewTaskId === card.taskCardId) await this.selectView(null, 'project'); return true;
         }
         case 'projectTaskAssociate': {
@@ -321,6 +348,7 @@ export class ProjectAssistantHost {
           await this.options.sessionStore.persistSession(session.id, 'task_association');
           this.sessionStores.set(session.id, Promise.resolve(this.options.sessionStore));
           const card = await this.tasks.associateSession({ sessionId: session.id, title: session.title,
+            ...associationTimes(session),
             snapshot: this.snapshotForSession(session), requestId: `associate:${session.id}` });
           await this.selectView(card.taskCardId, 'task'); return true;
         }
@@ -331,6 +359,22 @@ export class ProjectAssistantHost {
       else this.options.publish({ type: 'projectTaskError', reason: errorText(error) });
       return true;
     }
+  }
+
+  /** New sidebar actions carry their emission-time Host and full card/run
+   * identity. Legacy callers remain readable, and every accepted action still
+   * rechecks the captured current identity inside its Registry transaction. */
+  private taskActionIdentity(data: Record<string, unknown>, card: ProjectTaskCard | undefined): TaskActionIdentity {
+    const expired = () => new Error('The task run changed; reopen it before acting. / 任务运行已变化，请重新打开后操作。');
+    if (!card || data.hostId !== undefined && data.hostId !== this.runtimeId) throw expired();
+    const identity: TaskActionIdentity = { projectId: card.projectId, taskCardId: card.taskCardId,
+      sessionId: card.sessionId, rootTaskId: card.rootTaskId, segmentId: card.segmentId, generation: card.generation };
+    for (const key of ['sessionId', 'rootTaskId', 'segmentId', 'generation'] as const) {
+      if (data[key] !== undefined && data[key] !== identity[key]) throw expired();
+    }
+    if (data.hostId !== undefined && (data.sessionId !== card.sessionId || data.rootTaskId !== card.rootTaskId
+      || data.segmentId !== card.segmentId || data.generation !== card.generation)) throw expired();
+    return identity;
   }
 
   private async submit(data: Record<string, unknown>): Promise<void> {
@@ -397,10 +441,22 @@ export class ProjectAssistantHost {
       existing = (async () => {
         await this.drainingWorkers.get(card.taskCardId);
         const store = await (await this.storeForSession(card.sessionId)).createSessionScope(card.sessionId);
+        const runtimeId = randomUUID();
+        this.contextUsage.bindWorker(card.taskCardId, runtimeId);
         return new KeepseekChatViewProvider(this.options.extensionUri, store, this.options.storageUri, this.options.skillState,
           this.options.extensionInfo, Promise.resolve(), undefined, this.options, {
-            taskCardId: card.taskCardId, snapshot: card.snapshot, router,
-            onSnapshotChanged: snapshot => (router ? this.routerTasks : this.tasks).updateSnapshot(card.taskCardId, snapshot),
+            taskCardId: card.taskCardId, hostId: this.runtimeId, runtimeId, snapshot: card.snapshot, router,
+            onSnapshotChanged: async snapshot => {
+              const service = router ? this.routerTasks : this.tasks;
+              const previous = service.get(card.taskCardId);
+              if (!router && previous && taskUsageLaneFingerprint(previous.snapshot) !== taskUsageLaneFingerprint(snapshot)) {
+                // Invalidate before Registry publication. Switching A → B → A
+                // without another estimate must not resurrect the old A ring.
+                this.contextUsage.invalidate(card.taskCardId); this.contextUsageDirty = true;
+                this.scheduleContextUsage();
+              }
+              await service.updateSnapshot(card.taskCardId, snapshot);
+            },
             sources: this.options.sources.createSibling(),
             skills: this.options.skills?.createSibling(this.options.skillState),
             hasPendingSupplement: (inputId, rootTaskId) => (router ? this.routerTasks : this.tasks).inputs(card.taskCardId)
@@ -425,6 +481,19 @@ export class ProjectAssistantHost {
   private receiveWorkerEvent(taskCardId: string, router: boolean, event: unknown): void {
     if (this.disposed) return;
     let value = event as Record<string, unknown>;
+    if (value.type === 'taskContextUsageStart' || value.type === 'taskContextUsage') {
+      const card = !router && this.tasks.get(taskCardId);
+      if (!card) return;
+      const origin = value.origin as TaskContextUsageOrigin;
+      if (value.type === 'taskContextUsageStart') {
+        if (this.contextUsage.begin(origin, card)) { this.contextUsageDirty = true; this.scheduleContextUsage(); }
+      }
+      else if (this.contextUsage.accept(origin, Number(value.sequence), value.usage as ContextUsageEstimate, card, String(value.recordedAt))) {
+        this.contextUsageDirty = true;
+        this.scheduleContextUsage();
+      }
+      return;
+    }
     const state = value.state as { usageMetrics?: { executionTime?: { totalMs?: number; incomplete?: boolean }; sessionUsageStats?: { costByCurrency?: Record<string, number>; requestCount?: number; pricingStatus?: string } } } | undefined;
     const timing = value.type === 'taskTiming' ? value.executionTime as { totalMs?: number; incomplete?: boolean } : state?.usageMetrics?.executionTime;
     const usage = value.type === 'sessionTitleUsageUpdated' ? value.sessionUsageStats as { costByCurrency?: Record<string, number>; requestCount?: number; pricingStatus?: string } : state?.usageMetrics?.sessionUsageStats;
@@ -520,17 +589,20 @@ export class ProjectAssistantHost {
   private publish(messages?: unknown[], hasOlderMessages?: boolean, hasNewerMessages?: boolean): void {
     if (!this.initialized || this.disposed) return;
     const targetId = this.viewMode === 'task' ? this.viewTaskId! : this.viewMode === 'new' ? '$new' : '$project';
+    this.contextUsage.prune(this.tasks.list());
     const cards = this.tasks.list().map(card => {
       const live = this.liveAccounting.get(card.taskCardId);
-      return live ? { ...card, currentEffectiveMs: live.usedMs, usedMs: live.usedMs ?? card.usedMs,
+      const contextUsageSnapshot = this.contextUsage.get(card);
+      return live ? { ...card, contextUsageSnapshot, currentEffectiveMs: live.usedMs, usedMs: live.usedMs ?? card.usedMs,
         costByCurrency: live.costByCurrency ?? card.costByCurrency, requestCount: live.requestCount,
-        usageIncomplete: card.usageIncomplete || live.incomplete === true } : card;
+        usageIncomplete: card.usageIncomplete || live.incomplete === true } : { ...card, contextUsageSnapshot };
     });
     const start = Math.min(...cards.map(card => Date.parse(card.createdAt)));
     const last = Math.max(...cards.map(card => Date.parse(card.updatedAt)));
     const end = cards.some(card => ACTIVE.has(card.state)) ? Date.now() : last;
     this.options.publish({ type: 'projectTasksState', projectId: this.options.owner.projectId,
       hostId: this.runtimeId,
+      contextUsageDiagnostic: this.contextUsageDiagnostic,
       cards, viewTaskId: this.viewTaskId, viewMode: this.viewMode,
       timing: { projectElapsedMs: cards.length ? Math.max(0, end - start) : 0,
         totalEffectiveMs: cards.reduce((sum, card) => sum + card.usedMs, 0),
@@ -562,6 +634,44 @@ export class ProjectAssistantHost {
     const snapshot = { version: 1, viewTaskId: this.viewTaskId, viewMode: this.viewMode, drafts: [...this.drafts.values()] };
     const operation = this.draftWriter.catch(() => undefined).then(() => writeJsonAtomic(this.viewDraftUri, snapshot));
     this.draftWriter = operation; return operation;
+  }
+
+  private scheduleContextUsage(): void {
+    if (!this.contextUsagePublishTimer) this.contextUsagePublishTimer = setTimeout(() => {
+      this.contextUsagePublishTimer = undefined; this.publish();
+    }, 300);
+    if (!this.contextUsageSaveTimer) this.contextUsageSaveTimer = setTimeout(() => {
+      this.contextUsageSaveTimer = undefined; void this.saveContextUsage();
+    }, 1000);
+  }
+
+  private async loadContextUsage(): Promise<void> {
+    try {
+      const value = JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(this.contextUsageUri))) as { version?: number; projectId?: string; snapshots?: unknown[] };
+      if (value.version !== 1 || value.projectId !== this.options.owner.projectId || !Array.isArray(value.snapshots)) throw new Error('Invalid task context usage metadata');
+      this.contextUsage.restore(value.snapshots.slice(0, this.tasks.list().length), this.tasks.list());
+    } catch (error) {
+      if (!isMissing(error)) this.contextUsageDiagnostic = errorText(error);
+    }
+  }
+
+  /** Independent lightweight atomic metadata. A failed display save never
+   * rejects a submission ACK, stop, execution result or Registry transaction. */
+  private saveContextUsage(): Promise<void> {
+    clearTimeout(this.contextUsageSaveTimer); this.contextUsageSaveTimer = undefined;
+    if (!this.contextUsageDirty || !this.options.owner.isOwner) return this.contextUsageWriter;
+    const value = { version: 1, projectId: this.options.owner.projectId, snapshots: this.contextUsage.records(this.tasks.list()) };
+    this.contextUsageDirty = false;
+    this.contextUsageWriter = this.contextUsageWriter.catch(() => undefined).then(async () => {
+      await this.options.owner.verify();
+      await writeJsonAtomic(this.contextUsageUri, value);
+      this.contextUsageDiagnostic = undefined;
+    }).catch(error => {
+      this.contextUsageDirty = true;
+      this.contextUsageDiagnostic = errorText(error);
+      console.warn('[KeepSeek] task context usage save failed', this.contextUsageDiagnostic);
+    });
+    return this.contextUsageWriter;
   }
 
   private syncPins(): void {
@@ -599,6 +709,7 @@ export class ProjectAssistantHost {
         // Remove before awaiting so a new input builds a fresh isolated facade.
         // The session writer pin remains until all auxiliary saves settle.
         this.workers.delete(card.taskCardId);
+        this.contextUsage.unbindWorker(card.taskCardId);
         const drain = worker.then(worker => worker.drainProjectRuntime());
         this.drainingWorkers.set(card.taskCardId, drain);
         try { await drain; }
@@ -623,6 +734,8 @@ export class ProjectAssistantHost {
   private refreshObserver(): Promise<void> {
     if (this.options.owner.isOwner || !this.initialized) return Promise.resolve();
     return this.observerRefresh ??= Promise.all([this.tasks.reload(), this.routerTasks.reload()]).then(async changes => {
+      await this.loadContextUsage();
+      this.publish();
       if (changes.some(Boolean)) {
         for (const card of [...this.tasks.list(), ...this.routerTasks.list()]) (await this.storeForSession(card.sessionId)).invalidateSessionView(card.sessionId);
         this.publish(); await this.showView();
@@ -713,6 +826,7 @@ export class ProjectAssistantHost {
 
   private async disposeRuntime(): Promise<void> {
     this.disposed = true; clearTimeout(this.draftTimer);
+    clearTimeout(this.contextUsagePublishTimer); clearTimeout(this.contextUsageSaveTimer);
     for (const request of [...this.routerStopRequests.values()]) request.finish(false);
     this.observerWatcher?.close();
     const failures: unknown[] = [];
@@ -722,9 +836,32 @@ export class ProjectAssistantHost {
     await this.trimming;
     const drained = await Promise.allSettled([...this.drainingWorkers.values(), ...[...this.workers.values()].map(async worker => (await worker).drainProjectRuntime())]);
     for (const result of drained) if (result.status === 'rejected') failures.push(result.reason);
+    await this.saveContextUsage(); this.contextUsage.clear();
     for (const release of this.taskPins.values()) release();
     if (failures.length) throw new AggregateError(failures, 'Project shutdown did not finish all saves. / 项目关闭时有保存未完成。');
   }
+}
+
+/** loadSessionById returns a complete authoritative session, unlike view pages.
+ * Association itself is not execution activity; a legacy session with no real
+ * user input has no activity timestamp. */
+function associationTimes(session: import('../shared/types').ChatSession): { firstSubmittedAt?: string; firstSubmittedAtSource?: 'user_input' | 'session_created'; lastActivityAt?: string } {
+  const users = session.messages.filter(message => message.role === 'user' && (message.expandedContent ?? message.content).trim() && Number.isFinite(Date.parse(message.createdAt)));
+  const first = users.map(message => message.createdAt).sort((a, b) => Date.parse(a) - Date.parse(b))[0];
+  const activityTimes = users.length ? session.messages.flatMap(message => {
+    if (message.role !== 'user' && message.role !== 'assistant') return [];
+    const times = (message.expandedContent ?? message.content).trim() && Number.isFinite(Date.parse(message.createdAt)) ? [message.createdAt] : [];
+    const details = message.runDetails;
+    // A long answer starts before its last real completion/wait boundary.
+    // Legacy 'stopped' cannot distinguish user Stop from extension shutdown.
+    if (details?.endedAt && ['succeeded', 'failed', 'waiting', 'blocked'].includes(details.status)
+      && Number.isFinite(Date.parse(details.endedAt))) times.push(details.endedAt);
+    return times;
+  }) : [];
+  const activity = activityTimes.sort((a, b) => Date.parse(b) - Date.parse(a))[0];
+  return { ...(first ? { firstSubmittedAt: first, firstSubmittedAtSource: 'user_input' as const }
+    : Number.isFinite(Date.parse(session.createdAt)) ? { firstSubmittedAt: session.createdAt, firstSubmittedAtSource: 'session_created' as const } : {}),
+    ...(activity ? { lastActivityAt: activity } : {}) };
 }
 
 function summary(card: Readonly<ProjectTaskCard>): ProjectTaskRouterSummary {

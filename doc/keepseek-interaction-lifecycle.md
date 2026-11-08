@@ -37,6 +37,20 @@ Webview → Host 消息唯一入口仍是 `provider/webviewMessages.ts`；Host �
 
 项目助手的 card/viewGeneration/hostId 与每个 Worker 的 stateRevision 分别校验。每目标草稿、引用、光标、消息锚点及查看位置独立保存；先发布小型标题/草稿，再读取有界页，旧宿主和旧页面不能覆盖新目标。深历史使用锚点页与“最新消息”入口；加载更早历史为纯视图读取。ACK 丢失只按原 requestId 查询耐久收据，不重发任务。详见 [项目助手](keepseek-project-assistant.md)。
 
+### 任务侧栏的纯 UI 生命周期
+
+左侧窄栏是固定布局，任务浮层开合是项目+窗口级 UI 状态。首次默认收起，同窗口 Webview 重建恢复明确保存的开合；切换 A/B 不改变偏好，不同项目不串状态。通过 `vscode.getState()/setState()` 合并保存，不能覆盖草稿、会话或 pending requestId。旧 `ProjectTaskDraftInput.expanded`、Host drafts 和本地草稿继续兼容读取，只代表旧 details 状态，不作为新侧栏偏好。
+
+开合、tooltip、最近/全部/归档范围切换、到期重算均不增加 `viewGeneration`，不更改输入目标或执行 owner，也不请求 Router、Worker、标题、摘要、reviewer 或子代理。定时到期检查有界且随页面卸载释放；聚焦时校正，不按秒读取所有历史。上下文快照是展示后台工作：按 producer 身份和数据版本接收，保存失败不占用编辑/提交/停止能力，不修改安全预算或任务状态。
+
+点击任务沿 `projectSelectView → projectTaskView → selectView/showView` 查看链路。先结算原目标草稿，再切目标并恢复 markup、结构化引用、Skills、caret/selection、热页和 scroll anchor；只有正文耐久 ACK 可按原 revision 清稿。只查看不继续/重跑/停止，不调用 Router 分类。普通 `legacy` 会话仍可从窄栏返回项目；newSession/selectSession/sendPrompt 不继承上一任务身份。
+
+中文输入法合成期间不重写 composer。任务选择延后到 `compositionend` 结算最后确认文本后完成，仅最新仍有效的选择可生效；旧 Host/项目/查看代际的延迟选择丢弃。候选 Enter 不发送、不激活任务；合成中的 Escape 交给输入法，不新增全局任务锁或共享编辑器快捷键。
+
+浮层选择完成后自动收起，焦点沿原查看行为处理。外部点击关闭浮层而不吞掉原点击，不使用遮罩或合成第二次 click；输入定位、设置和发送仍只执行一次。浮层内部、所属 tooltip 和其子菜单属于同一临时 UI。Escape 只关闭最上层临时 UI，原生及 role dialog 都优先于侧栏；键盘关闭可回到触发入口，鼠标关闭不强制夺焦点。tooltip 切换任务时清理旧 `aria-describedby`，信息更新保持节点并重新定位。更新不自动选任务、不滚动；终态/等待状态的 aria-live 在 500ms 窗口合并，最多读出三项标题及其余数量，首次载入和逐 token 进度保持静默。
+
+浮层绝对定位于正文工作区，标题栏与动态输入区是实际布局边界；开合不参与主区域 flex 计算。样式使用 VS Code 主题 token，模态界面层级更高。按钮可 Tab/Enter/Space 访问，SVG 不产生额外焦点；未知用量不声明假的 `aria-valuenow`。原生几何、真实中文 IME、主题与键盘步骤见 [任务侧栏验收](keepseek-task-sidebar-verification.md)。
+
 ## 3. 持续状态与短通知
 
 | 显示内容 | 来源、作用域与结束规则 |
@@ -180,6 +194,8 @@ Webview → Host 消息唯一入口仍是 `provider/webviewMessages.ts`；Host �
 10. **来源复用与失效**：同作用域往返导航，记录命中与扫描次数；创建/修改/删除 AGENTS/Skill、切换信任/目录、显式刷新，确认正确失效。热会话保留冻结集合及旧请求字节，新任务在受控边界读取新来源。
 
 ## 9. 改动与兼容边界
+
+普通历史切入任务时，先保存普通会话自己的 composer 草稿；普通正文不进入项目助手热视图。返回同一普通 session 也恢复其独立草稿，不能用任务草稿替代。IME 从 compositionstart 到 compositionend 最终输入结算期间，目标导航、Host 替换及接受 ACK 的清稿均须延后，先保存源目标的最终确认文字。
 
 - 领域规则在 `provider/interactionState.ts`；Provider 将导航、提交、继续、计划/审批/DraftRun/repair 交接、文件操作、来源变更及必要保存接入同一拥有者。来源刷新错误的迟到完成不得改写较新刷新。
 - `webviewMessages.ts` 集中增加可选 request/session/revision 与取消身份，增加显式 retry；Host 反馈独立。旧消息仍经宿主检查；新运行状态全部为进程内瞬态，无会话磁盘 schema 迁移、无旧运行租约恢复。

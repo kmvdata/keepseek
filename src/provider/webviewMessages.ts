@@ -22,9 +22,12 @@ export interface DroppedFileReferenceInput {
 /** Every task action carries its emission-time target, never the later selected view. */
 export interface TaskMessageTarget {
   projectId?: string;
+  hostId?: string;
   taskCardId?: string | null;
   sessionId?: string;
   rootTaskId?: string;
+  segmentId?: string;
+  generation?: number;
   viewGeneration?: number;
 }
 

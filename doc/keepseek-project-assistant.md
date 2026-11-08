@@ -1,6 +1,6 @@
 # KeepSeek 项目助手与并行任务
 
-本页是项目任务、Router、执行拥有者和任务视图的实现入口。协议正文、字节兼容及副作用边界仍分别由 [缓存专题](cache_keepseek.md)、[API payload](keepseek-api-payload-reference.md)、[运行时](keepseek-agent-runtime-workflow.md)、[交互生命周期](keepseek-interaction-lifecycle.md) 和 [SUBAGENTS](../SUBAGENTS.md) 负责。校准基线为 `87ee2bbc29546e575556f2e49aae67136f781e00`，2026-11-07；验证结果只以本次实际运行的报告为准。
+本页是项目任务、Router、执行拥有者和任务视图的实现入口。协议正文、字节兼容及副作用边界仍分别由 [缓存专题](cache_keepseek.md)、[API payload](keepseek-api-payload-reference.md)、[运行时](keepseek-agent-runtime-workflow.md)、[交互生命周期](keepseek-interaction-lifecycle.md) 和 [SUBAGENTS](../SUBAGENTS.md) 负责。侧栏实施基线为 `d5f941dfb941f58c14267fdb4a8663e826275e10`（0.5.3），2026-11-08，Asia/Shanghai；本轮验证及原生现场缺口见 [任务侧栏验收](keepseek-task-sidebar-verification.md)。
 
 ## 产品入口与身份
 
@@ -19,11 +19,65 @@
 
 新卡拥有新 session 和 root。已完成卡的新问题复用 session、创建新 root。运行中补充使用同 root、新 segment；停止后的“继续原任务”继承原 root 剩余预算。编辑重发继续使用明确历史截断及新 root 合同，并将依赖旧产物的卡标为待复核。
 
+## 左侧任务窄栏与浮层
+
+项目任务位于 Webview 内左侧固定窄栏。窄栏预留约 44px，默认收起；任务竖列独立滚动。打开约 288px 的浮层只覆盖聊天正文，标题栏、输入目标提示和 composer 保持原布局；剩余宽度不足时浮层收缩。开合不调整 transcript 尺寸、滚动锚点、输入高度或执行选择。完整对话、工具记录与审批继续在主区域。
+
+| 原有能力 | 当前入口与行为 |
+| --- | --- |
+| 项目助手 / Router | 窄栏固定入口；只查看已有 Router 对话 |
+| 新 Worker | 窄栏“+”；明确新任务输入，Router 分类请求为 0 |
+| 最近 / 全部 / 归档 | 浮层范围与显示归档入口；全部范围不灌入收起窄栏 |
+| 关联当前普通会话 | 浮层更多操作；不复制历史、不执行任务、不续期 |
+| 停止 / 继续 | 选中任务操作；沿用原身份、权限和恢复检查 |
+| 停止全部 | 浮层更多操作；与单任务停止区分 |
+| 改动 / 验证 / 结果 / Run Details | 选中任务操作连接现有证据；完整内容留在主对话 |
+| 归档 / 恢复 / 删除 | 选中任务操作；归档但仍活动的任务保持可发现、可停止 |
+| 项目时间 / Router 用量 | 浮层汇总；项目经过时间、任务有效时间与逐币种费用分别显示 |
+| 最新消息 | 主对话入口；只读取本地最新页 |
+| 只读 owner 提示 | 主区域紧凑提示，浮层说明；查看可用，执行操作禁用 |
+| 审批 / Apply / Discard | 原主任务对话；动作仍绑定原 task/session/root/segment/target/hash/runtime |
+| 普通历史 / 标题编辑与刷新 / 设置 | 原标题栏与历史入口；侧栏查看不触发标题请求 |
+
+圆环弧长固定表示“上下文占用（估算）”，来自 Worker 已有 `ContextUsageEstimate`，不是任务完成度。中间状态用颜色、图标和文字共同表达：queued/preparing/running/waiting/settling/stopping 为橙色，completed 为绿色，failed/cancelled/interrupted 为红色。等待原因静态显示；stopping 必须等待真实结算，不能提前显示已停止。completed 只表示宿主任务终态，不证明验证通过。
+
+悬浮或键盘聚焦显示完整标题、首次时间及来源、状态与必要原因、上下文估算、有效时间和参考费用。tooltip 不读取全量会话、不启动模型，文本使用安全文本节点。任务行按 `taskCardId` 复用，指标更新修改既有文字和圆环，不重建所有行、当前焦点或 transcript。所有任务均可滚动到达。
+
+### 时间来源、排序与最近范围
+
+`createdAt/updatedAt` 保留旧语义。`firstSubmittedAt` 一旦确定即固定，`firstSubmittedAtSource` 解释来源：`user_input` 为可证实首条真实输入，`session_created` 为会话创建时间，`associated` 为加入列表时间，`task_created` 为旧普通卡的保守建卡回退。新普通卡与首条耐久输入同次提交首次时间。关联历史只有完整会话或能证明覆盖会话起点的权威数据才可采用最早 user 时间；中间/尾页不得充当原始首发。缺失旧字段确定性回退，不在查看、迁移或重启时用当前时间补值。
+
+`lastActivityAt` 只记录真实任务输入耐久接收、明确继续/停止以及执行进入、等待、退出、终态等业务边界，不进入通用 `touch()`。旧值从 durable inputs 的 created/incorporated/settled 时间和结果事件等可信记录取最大值；关联建卡时间和普通 `updatedAt` 不能证明执行活动。关闭、恢复、observer reload 不制造新活动。
+
+最近范围使用绝对时间滚动 24 小时（86,400,000ms），跨午夜不清空：
+
+| 状态 | 默认窄栏 / 最近列表 |
+| --- | --- |
+| queued / preparing / running / waiting / settling / stopping | 始终显示，包括已归档但仍活动的任务 |
+| interrupted | 未归档持续显示，等待明确处理；归档后从历史访问 |
+| completed / failed / cancelled | 未归档且可靠活动时间距现在小于 24 小时；刚好满 24 小时退出 |
+| 当前查看的过期终态 | 未归档时可在原排序位置临时保留并标注“当前查看”；离开后隐藏 |
+| 已删除 | 不由查看例外复活 |
+
+前天开始、刚刚结束的长任务从真实结束活动继续保留 24 小时。缺少可靠活动时间的历史任务可从全部任务访问。到期仅改变展示，不停止、删除或归档任务，不更改当前输入目标。改名、标题刷新、统计/快照、查看、hover、归档/恢复、ready 和重连不续期；全部和归档范围保持相同稳定排序。
+
+完整历史关联可采用已记录的完成/等待 `runDetails.endedAt`，不把回答起始时间误当结束；无法区分主动停止与关闭的旧 `stopped` 记录不据此续期。相同等待状态/原因的重复检查不制造新活动。
+
+### 每任务上下文快照
+
+每个 Worker 独立发布轻量上下文估算，即使前台正在查看其他任务。快照在估算产生时捕获 project/card/session/root/segment/generation、Host/runtime、lane/有效上下文配置、projection revision 和 sequence，Host 只接受当前匹配且不倒退的结果。复用 Worker 的新执行段重新捕获身份；接收端不得给旧估算补上当前身份或分母。lane 指纹不含凭据。
+
+有效快照显示原始 used/max token 与百分比；仅画弧限制为 0–100%。真实 0% 与缺失统计分开，无有效分母、负数、NaN/Infinity 或矛盾数据按未知处理。completed 保留最后有效值，不能强制 100%。压缩、epoch 或受控模型/上下文变化允许占用下降；累计预算和逐币种费用不随之下降。旧恢复值显示“上次记录”及时间；新 lane 无估算时不套旧分母。
+
+快照仅为展示元数据，单独保存为项目 `task-context-usage.json` v1；常规发布合并为 300ms，轻量原子保存合并为 1000ms，终态/销毁边界收口，不逐 token 重写 Registry。它不成为容量准入、审批、时间或费用预算权威。保存失败只能降低展示可信度并留下诊断，不能改变任务终态、阻止停止或延迟正文耐久 ACK。删除/销毁清理缓存与定时器；Worker 被回收时解绑 runtime，保留值降为上次记录，旧 producer 不再接收。observer 重载以 owner 当前文件为准清除已消失的快照，不能覆盖活 owner 的内存 producer。来源/配置 A→B→A 变化不使旧 A 分母重新生效。缺失请求、token、计价或用量始终显示未知/不完整，不能编造为 0 或免费。
+
 ## 模块与真实执行链
 
 | 模块 | 职责 |
 | --- | --- |
 | `src/tasks/projectTasks.ts` | Registry、卡片、耐久输入/结果、依赖、恢复、默认两个根 Worker 调度 |
+| `src/tasks/taskSidebarMetadata.ts` | 纯展示排序与滚动 24h 范围；不改 Registry 或调度 |
+| `src/tasks/taskUsageSnapshot.ts` | producer 身份/lane/revision 核验、独立展示快照与恢复归一化 |
 | `src/tasks/taskRuntime.ts` | 独立控制器及执行身份；单 runtime 单 writer；补充和定向停止 |
 | `src/provider/projectAssistantHost.ts` | 项目入口、每卡 headless Provider、只读查看、草稿、结果事件、Router 接线 |
 | `src/provider/KeepseekChatViewProvider.ts` | 原有 Host 执行管线在固定 session 容器内运行；实际 AgentRunner、审批及保存 |
@@ -33,9 +87,11 @@
 | `src/tasks/projectResources.ts` | 有界工作区修改/验证租约、基线失效及校验 |
 | `src/tasks/requestAdmission.ts` | 根任务、真实来源请求、Router 有界优先级；请求 permit 不覆盖工具或审批等待 |
 | `src/sessions/chatSessionStore.ts` | 执行 session scope、运行 pin、dirty revision 保存、有限查看页与预取 |
-| `src/webview/projectTasks.ts` | 卡片/详情、明确输入目标、热视图、分目标草稿和绘制确认消息 |
+| `src/webview/projectTasks.ts` | 窄栏/浮层/tooltip/圆环、keyed 展示、纯 UI 偏好、明确输入目标、热视图、分目标草稿和绘制确认消息 |
 
 TaskRuntime 的 driver 接入独立 headless Provider，而非并发调用同一个可变 Runner。Worker 之间共享经过审查的存储、不可变来源缓存、请求准入和工作区资源协调；不共享审批队列、授权、控制器或可变会话激活门面。查看任务不执行 `selectSession()` 的执行选择事务。
+
+侧栏停止、继续、归档和删除携带点击时的 Host/session/root/segment/generation；Host 拒绝旧窗口或过期目标，任务服务在串行事务内再次核对冻结身份，防止排队期间同卡切段后的迟到操作影响新段。内部既有调用可省略展示身份，但不会复用旧批准或 permit。
 
 Router 使用独立 session 和持久角色 `project-router`，角色/tool schema 版本为 1。Worker 当前 request/tool schema 维度仍是 15，child runtime 协议为 11；新增 Router 不提升或批量迁移 Worker 热 lane。`agentRole` 的归一化与旧会话读取属于会话存储合同。
 
@@ -59,7 +115,7 @@ Router 使用独立 session 和持久角色 `project-router`，角色/tool schem
 
 查看事件含 project/card/viewGeneration/revision。A→B→A 的迟到页面不会覆盖新视图。每个 headless Provider 的 stateRevision 按其卡片/会话 lane 独立比较，不能用 A 的 revision 阻止 B 或 Router 的首次状态。Host 实例变化另用 hostId 隔离，保留草稿并重新核对未确认输入。
 
-卡片更新只更新任务区域；不重建前台 transcript、不恢复或移动正在编辑的光标。Worker 流式输出仅在该任务被查看时发布正文增量；后台更新真实卡片进展和终态。排序只按待处理/活动/已结算分组以及稳定卡片顺序，不按每个 token 的更新时间反复重排。
+卡片更新只更新任务区域；不重建前台 transcript、不恢复或移动正在编辑的光标。Worker 流式输出仅在该任务被查看时发布正文增量；后台更新真实卡片进展和终态。窄栏与浮层按不可变首次时间升序展示，同毫秒保留 Registry 原 cards 顺序；状态、用量、标题、选中和新 root 都不参与排序。权威 Registry 不为展示原地重排。
 
 草稿使用每窗口、每目标的小型 v1 存储，包含 revision、markup、Skill 选择、光标及滚动。文本先经现有 composer 清洗和引用 codec 恢复。查看状态及草稿不进入 Provider 静态 system、冻结 contextInstructions、旧 user、工具 schema 或已保存 Evidence envelope。
 
@@ -71,7 +127,7 @@ Router 使用独立 session 和持久角色 `project-router`，角色/tool schem
 
 所有角色仍使用 `buildProviderRequestProjection()` 生成请求和准入估算；Router 的专用 schema 不注入 Worker。明确新建、定向输入和状态按钮的 Router 分类调用为 0；普通进度/完成只发耐久结构化结果，不调用 Router。
 
-查看、返回项目、展开历史、预取、恢复草稿和 ready 不发模型请求，不触发标题/摘要或付费预热。正在运行 Worker 的正常请求单独统计，不以全局请求计数误判视图触发调用。
+hover/focus、浮层开合、范围切换、到期重算、查看、返回项目、展开历史、预取、恢复草稿、ready 和重连不发模型请求，不触发标题/摘要或付费预热。正在运行 Worker 的正常请求单独统计，不以全局请求计数误判视图触发调用。
 
 新任务原子捕获项目来源/模型、root/cwd、审批/执行模式及显式 Skill 快照；缺少有效来源时可见失败并保留输入，不将空模型快照伪装为已开始执行。新默认值只影响新任务；当前 Worker 明确切换模型继续走既有受控 lane 合同。
 

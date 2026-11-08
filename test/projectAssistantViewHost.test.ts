@@ -13,6 +13,10 @@ import { ChatSessionStore } from '../src/sessions/chatSessionStore';
 import { GlobalSessionStorage } from '../src/sessions/globalSessionStorage';
 import { createWebviewDomHarness } from './webviewDomHarness';
 import { SharedProjectSources } from '../src/context/sharedProjectSources';
+import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
+import { taskUsageFingerprint, taskUsageLaneFingerprint } from '../src/tasks/taskUsageSnapshot';
+import type { TaskContextUsageOrigin } from '../src/shared/types';
+import type { ProjectWorkerBinding } from '../src/provider/projectAssistantHost';
 
 async function fixture(t: TestContext) {
   const root = await mkdtemp(join(tmpdir(), 'keepseek-project-view-host-'));
@@ -63,6 +67,24 @@ async function fixture(t: TestContext) {
     reopen: async () => { await host.dispose(); host = new ProjectAssistantHost(options); await host.initialize(); return host; } };
 }
 
+test('history association uses complete-session first input and real finish evidence without renewing a shutdown record', async t => {
+  const f = await fixture(t);
+  const start = '2026-11-01T08:00:00.000Z', finish = '2026-11-07T08:00:00.000Z';
+  for (const message of f.session.messages) message.createdAt = start;
+  f.session.messages[0].content = '';
+  f.session.messages[0].expandedContent = 'Original expanded user input';
+  f.session.messages[77].runDetails = { status: 'succeeded', endedAt: finish } as never;
+  f.session.messages[79].runDetails = { status: 'stopped', endedAt: '2026-11-08T08:00:00.000Z' } as never;
+  await f.store.persist();
+  const bytes = JSON.stringify(f.session.messages);
+  await f.host.handleMessage({ type: 'projectTaskAssociate', projectId: f.options.owner.projectId, sessionId: f.session.id });
+  const card = f.host.tasks.list()[0];
+  assert.equal(card.firstSubmittedAt, start);
+  assert.equal(card.firstSubmittedAtSource, 'user_input');
+  assert.equal(card.lastActivityAt, finish, 'a real long-running completion counts; ambiguous shutdown does not');
+  assert.equal(JSON.stringify(f.store.getSessionById(f.session.id)!.messages), bytes, 'association never rewrites the old request history');
+});
+
 test('real ProjectAssistantHost publishes task cards and finite session views without executing a Provider', async t => {
   const f = await fixture(t);
   const previousFetch = globalThis.fetch;
@@ -72,6 +94,7 @@ test('real ProjectAssistantHost publishes task cards and finite session views wi
   await f.host.handleMessage({ type: 'projectTaskAssociate', projectId: f.options.owner.projectId, sessionId: f.session.id });
   const card = f.host.tasks.list()[0];
   assert.ok(card);
+  f.view.element('projectSidebarToggle').click();
   assert.match(f.view.element('projectTaskList').textContent, new RegExp(card.title));
   assert.equal(f.view.state.messages.length <= 30, true);
   assert.equal(f.view.state.messages.at(-1).id, 'm-79');
@@ -82,6 +105,84 @@ test('real ProjectAssistantHost publishes task cards and finite session views wi
   await f.host.handleMessage({ type: 'ready' });
   assert.equal(providerRequests, 0);
   assert.equal(JSON.stringify(f.store.getSessionById(f.session.id)), f.before, 'viewing/association preserve Worker history and frozen context bytes');
+});
+
+test('usage updates coalesce independently; failed metadata save preserves durable ACK/terminal and reopen is last-known', async t => {
+  const f = await fixture(t);
+  const previousExecute = KeepseekChatViewProvider.prototype.executeProjectInput;
+  const previousRename = vscode.workspace.fs.rename;
+  const previousLoad = ChatSessionStore.prototype.loadSessionById;
+  let failUsageSave = true, usageWrites = 0, requests = 0, registryWrites = 0, fullSessionReads = 0;
+  let burstRegistryWrites = -1, burstSessionReads = -1;
+  ChatSessionStore.prototype.loadSessionById = function(...args) { fullSessionReads++; return previousLoad.apply(this, args); };
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => { requests++; throw new Error('Controlled execution must not request a model'); };
+  vscode.workspace.fs.rename = async (source, target, options) => {
+    if (target.fsPath.endsWith('project-tasks.json')) registryWrites++;
+    if (target.fsPath.endsWith('task-context-usage.json')) {
+      usageWrites++;
+      if (failUsageSave) throw Object.assign(new Error('controlled usage metadata failure'), { code: 'EACCES' });
+    }
+    return previousRename(source, target, options);
+  };
+  KeepseekChatViewProvider.prototype.executeProjectInput = async function(context) {
+    const binding = (this as unknown as { projectBinding: ProjectWorkerBinding }).projectBinding;
+    const source: TaskContextUsageOrigin = { identity: { ...context.identity, hostId: binding.hostId, runtimeId: binding.runtimeId },
+      laneFingerprint: taskUsageFingerprint('controlled prepared profile'), configurationFingerprint: taskUsageLaneFingerprint(context.card.snapshot),
+      projectionRevision: 1, capturedAt: '2026-11-07T00:00:00.000Z' };
+    binding.publish({ type: 'taskContextUsageStart', origin: source });
+    const registryBefore = registryWrites, readsBefore = fullSessionReads;
+    for (let sequence = 1; sequence <= 100; sequence++) binding.publish({ type: 'taskContextUsage', origin: source, sequence,
+      usage: { usedTokensEstimate: sequence, maxTokensEstimate: 1000, usedPercent: sequence / 10 }, recordedAt: '2026-11-07T00:00:01.000Z' });
+    burstRegistryWrites = registryWrites - registryBefore; burstSessionReads = fullSessionReads - readsBefore;
+    return { result: 'Controlled execution completed', usedMs: 12, costByCurrency: {}, usageIncomplete: true };
+  };
+  try {
+    const countBefore = f.posts.filter(event => event.type === 'projectTasksState').length;
+    await f.host.handleMessage({ type: 'projectTaskCreate', projectId: f.options.owner.projectId,
+      requestId: 'usage-save-failure', prompt: 'Controlled execution', draftRevision: 1,
+      targetId: '$new', sourceId: 'test-source', modelId: 'test-model' });
+    await f.host.tasks.whenIdle();
+    const internal = f.host as unknown as { contextUsageWriter: Promise<void>; saveContextUsage(): Promise<void> };
+    await internal.contextUsageWriter;
+    const card = f.host.tasks.list()[0];
+    assert.equal(card.state, 'completed');
+    assert.equal(f.posts.find(event => event.type === 'projectTaskSubmissionResult' && event.requestId === 'usage-save-failure')?.status, 'accepted');
+    assert.ok(usageWrites > 0, 'the independent save actually failed');
+    const snapshot = f.posts.filter(event => event.type === 'projectTasksState').at(-1)?.cards[0]?.contextUsageSnapshot;
+    assert.equal(snapshot?.usage.usedPercent, 10); assert.equal(snapshot?.sequence, 100);
+    assert.ok(f.posts.filter(event => event.type === 'projectTasksState').length - countBefore < 25,
+      '100 synchronous usage samples do not publish 100 Registry/card snapshots');
+    failUsageSave = false;
+    await internal.saveContextUsage();
+    const writesAfterFlush = usageWrites;
+    assert.ok(writesAfterFlush < 5, 'usage samples do not each rewrite metadata');
+    assert.equal(burstRegistryWrites, 0, '100 context estimates must not write the authoritative Registry');
+    assert.equal(burstSessionReads, 0, '100 context estimates must not load any full session');
+    t.diagnostic(JSON.stringify({ usageSamples: 100, usageMetadataWriteAttempts: writesAfterFlush,
+      registryWritesDuringSamples: burstRegistryWrites, fullSessionReadsDuringSamples: burstSessionReads,
+      hostPublicationsThroughTerminal: f.posts.filter(event => event.type === 'projectTasksState').length - countBefore }));
+    await f.reopen();
+    const restored = f.posts.filter(event => event.type === 'projectTasksState').at(-1)?.cards[0]?.contextUsageSnapshot;
+    assert.equal(restored?.status, 'last_known'); assert.equal(restored?.usage.usedPercent, 10);
+    assert.equal(f.host.tasks.get(card.taskCardId)?.state, 'completed');
+    const restoredCard = f.host.tasks.get(card.taskCardId)!;
+    const worker = await (f.host as unknown as { worker(card: typeof restoredCard, router: boolean): Promise<KeepseekChatViewProvider> }).worker(restoredCard, false);
+    const binding = (worker as unknown as { projectBinding: ProjectWorkerBinding }).projectBinding;
+    await binding.onSnapshotChanged!({ ...restoredCard.snapshot, modelId: 'another-window' });
+    await binding.onSnapshotChanged!(restoredCard.snapshot);
+    const afterRoundtrip = f.posts.filter(event => event.type === 'projectTasksState').at(-1)?.cards[0];
+    assert.equal(afterRoundtrip.contextUsageSnapshot, undefined,
+      'a lane A → B → A change without a fresh estimate cannot resurrect the old A snapshot');
+    assert.equal(afterRoundtrip.firstSubmittedAt, restoredCard.firstSubmittedAt);
+    assert.equal(afterRoundtrip.lastActivityAt, restoredCard.lastActivityAt, 'configuration changes do not renew recent activity');
+    assert.equal(requests, 0);
+  } finally {
+    KeepseekChatViewProvider.prototype.executeProjectInput = previousExecute;
+    vscode.workspace.fs.rename = previousRename;
+    ChatSessionStore.prototype.loadSessionById = previousLoad;
+    globalThis.fetch = previousFetch;
+  }
 });
 
 test('real Host persists task-local drafts and restores the newest revision across reconstruction', async t => {
@@ -102,6 +203,35 @@ test('real Host persists task-local drafts and restores the newest revision acro
   assert.deepEqual(snapshot.draft.skillIds, ['selected-skill']);
   assert.equal(f.view.element('promptInput').textContent, draft.markup);
   assert.equal(f.view.element('transcript').scrollTop, 72);
+});
+
+test('sidebar actions reject retired Hosts and stale full task identities before any mutation', async t => {
+  const f = await fixture(t);
+  const card = await f.host.tasks.associateSession({ sessionId: f.session.id, title: 'Identity fixture',
+    requestId: 'identity-association', snapshot: f.options.defaults() });
+  const hostId = f.posts.filter(event => event.type === 'projectTasksState').at(-1)!.hostId;
+  const identity = { projectId: card.projectId, taskCardId: card.taskCardId, hostId,
+    sessionId: card.sessionId, rootTaskId: card.rootTaskId, segmentId: card.segmentId, generation: card.generation };
+  const before = JSON.stringify(f.host.tasks.list());
+  const faults = [{ hostId: 'retired-host' }, { sessionId: 'different-session' }, { rootTaskId: 'previous-root' },
+    { segmentId: 'previous-segment' }, { generation: card.generation + 1 }, { sessionId: undefined }];
+  let rejected = 0;
+  for (const type of ['projectTaskStop', 'projectTaskResume', 'projectTaskArchive', 'projectTaskDelete']) {
+    for (const fault of faults) {
+      const errors = f.posts.filter(event => event.type === 'projectTaskError').length;
+      await f.host.handleMessage({ ...identity, ...fault, type } as never);
+      assert.equal(f.posts.filter(event => event.type === 'projectTaskError').length, errors + 1);
+      assert.equal(JSON.stringify(f.host.tasks.list()), before, 'a stale action cannot change activity, state, archive or evidence');
+      rejected++;
+    }
+  }
+  assert.equal(rejected, 24);
+  assert.equal((f.host as unknown as { workers: Map<string, unknown> }).workers.size, 0);
+  await f.host.handleMessage({ ...identity, type: 'projectTaskArchive', archived: true } as never);
+  assert.equal(f.host.tasks.get(card.taskCardId)?.archived, true, 'a matching identity remains usable');
+  await f.host.handleMessage({ ...identity, type: 'projectTaskArchive', archived: false } as never);
+  assert.equal(f.host.tasks.get(card.taskCardId)?.archived, false);
+  assert.equal(f.host.tasks.get(card.taskCardId)?.lastActivityAt, card.lastActivityAt);
 });
 
 test('real Host reopens a bounded deep-history anchor and Latest performs only a local page read', async t => {

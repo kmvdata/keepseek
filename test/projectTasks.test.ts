@@ -3,7 +3,8 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { test } from 'node:test';
-import { ProjectTaskService, type ProjectTaskServiceOptions, type TaskDefaultsSnapshot } from '../src/tasks/projectTasks';
+import { ProjectTaskService, type ProjectTaskServiceOptions, type TaskDefaultsSnapshot, type ProjectTaskCard } from '../src/tasks/projectTasks';
+import { isProjectTaskRecent, orderProjectTaskCards, TASK_RECENT_WINDOW_MS } from '../src/tasks/taskSidebarMetadata';
 import type { TaskExecutionContext, TaskExecutionDriver } from '../src/tasks/taskRuntime';
 import { writeJsonAtomic } from '../src/shared/atomicStorage';
 import * as vscode from 'vscode';
@@ -414,6 +415,41 @@ test('creation captures dependencies atomically before admission and a failed de
   } finally { release.resolve(); await f.cleanup(); }
 });
 
+test('unchanged dependency rechecks and repeated waiting notifications never renew real activity', async () => {
+  let now = '2026-11-01T00:00:00.000Z', manifests = 0;
+  const release = gate(); let pending: TaskExecutionContext | undefined;
+  const f = await fixture({ now: () => now, storageWrite: async (uri, value) => {
+    if (path.basename(uri.fsPath) === 'project-tasks.json') manifests++;
+    await writeJsonAtomic(uri, value, { durable: true });
+  }, driverFactory: () => ({ execute: async context => {
+    if (context.input.content === 'blocked dependency') throw new Error('dependency failed before execution');
+    await context.prepareInput(context.input.content, context.input.inputId); await context.incorporated(context.input.inputId);
+    if (context.input.content === 'other dependency') {
+      pending = context; await context.waiting('resource'); await release.promise;
+    }
+    return { result: context.input.content };
+  } }) });
+  try {
+    const a = await f.service.createTask({ requestId: 'blocked-time-a', content: 'blocked dependency', snapshot }); await f.service.whenIdle();
+    const b = await f.service.createTask({ requestId: 'blocked-time-b', content: 'other dependency', snapshot });
+    await until(() => !!pending && f.service.get(b.card.taskCardId)?.state === 'waiting');
+    const c = await f.service.createTask({ requestId: 'blocked-time-c', content: 'consumer', snapshot,
+      dependencies: [a.card.taskCardId, b.card.taskCardId] });
+    await until(() => f.service.get(c.card.taskCardId)?.state === 'waiting');
+    const before = f.service.get(c.card.taskCardId)!, waiting = f.service.get(b.card.taskCardId)!;
+    now = '2026-11-03T00:00:00.000Z'; await pending!.waiting('resource');
+    assert.equal(f.service.get(b.card.taskCardId)?.lastActivityAt, waiting.lastActivityAt);
+    assert.equal(f.service.get(b.card.taskCardId)?.revision, waiting.revision);
+    const saved = manifests;
+    release.resolve(); await f.service.whenIdle();
+    const after = f.service.get(c.card.taskCardId)!;
+    assert.equal(after.lastActivityAt, before.lastActivityAt); assert.equal(after.revision, before.revision);
+    assert.equal(after.waitingReason, `dependency:${a.card.taskCardId}`);
+    assert.equal(manifests - saved, 2, 'only the genuinely finishing dependency saves settling and its terminal result');
+    assert.equal(f.service.get(b.card.taskCardId)?.lastActivityAt, now);
+  } finally { release.resolve(); await f.cleanup(); }
+});
+
 test('result events are durable, deduplicated and consumed only by the original real input identity', async () => {
   const f = await fixture();
   try {
@@ -635,5 +671,255 @@ test('persisted malformed identities, counters, accounting, dependencies and sna
     assert.equal(restored.get(receipt.card.taskCardId)?.rootTaskId, receipt.card.rootTaskId);
     assert.equal(restored.findInputByRequestId('validate-metadata')?.content, 'original real user bytes');
   } finally { await f.cleanup(); }
+});
+
+test('first submission is immutable across metadata edits, same-card roots, archive and restart; only business activity renews recent time', async () => {
+  let now = '2026-11-01T10:00:00.000Z';
+  const f = await fixture({ now: () => now });
+  try {
+    const receipt = await f.service.createTask({ requestId: 'first-time', content: 'A', snapshot }); await f.service.whenIdle();
+    const id = receipt.card.taskCardId, original = f.service.get(id)!;
+    assert.equal(original.firstSubmittedAt, now); assert.equal(original.firstSubmittedAtSource, 'user_input');
+    now = '2026-11-03T10:00:00.000Z';
+    await f.service.rename(id, 'new title'); await f.service.rename(id, 'automatic title', false);
+    await f.service.updateSnapshot(id, { ...snapshot, modelId: 'changed-model' });
+    await f.service.archive(id); await f.service.archive(id, false);
+    assert.equal(f.service.get(id)?.lastActivityAt, original.lastActivityAt);
+    assert.equal(f.service.get(id)?.firstSubmittedAt, original.firstSubmittedAt);
+    assert.equal(isProjectTaskRecent(f.service.get(id)!, Date.parse(now)), false);
+    await f.service.submitInput(id, { requestId: 'next-root', content: 'next', kind: 'followup' }); await f.service.whenIdle();
+    const next = f.service.get(id)!;
+    assert.notEqual(next.rootTaskId, original.rootTaskId); assert.equal(next.firstSubmittedAt, original.firstSubmittedAt);
+    assert.equal(next.lastActivityAt, now);
+    now = '2026-12-01T00:00:00.000Z';
+    const restarted = new ProjectTaskService(f.options); await restarted.initialize();
+    assert.equal(restarted.get(id)?.firstSubmittedAt, original.firstSubmittedAt);
+    assert.equal(restarted.get(id)?.lastActivityAt, next.lastActivityAt);
+  } finally { await f.cleanup(); }
+});
+
+test('sidebar order uses immutable first time then whole Registry order for ties regardless of state and history insertion', async () => {
+  const f = await fixture({ now: () => '2026-11-01T00:00:00.000Z' });
+  try {
+    const cards: ProjectTaskCard[] = [];
+    for (const title of ['A', 'B', 'C']) {
+      cards.push(await f.service.associateSession({ requestId: title, sessionId: title, title, snapshot,
+        firstSubmittedAt: `2026-10-0${cards.length + 1}T00:00:00.000Z`, firstSubmittedAtSource: 'user_input' }));
+    }
+    for (const state of ['running', 'waiting', 'completed', 'failed', 'cancelled', 'interrupted'] as const) {
+      const mixed = [cards[2], { ...cards[0], state }, cards[1]];
+      assert.deepEqual(orderProjectTaskCards(mixed).map(card => card.title), ['A', 'B', 'C']);
+      assert.equal(mixed[0].title, 'C');
+    }
+    const tied = cards.map(card => ({ ...card, firstSubmittedAt: '2026-01-01T00:00:00.000Z' }));
+    assert.deepEqual(orderProjectTaskCards([tied[2], tied[0], tied[1]]).map(card => card.title), ['C', 'A', 'B']);
+    const restored = new ProjectTaskService(f.options); await restored.initialize();
+    await restored.archive(cards[1].taskCardId); await restored.archive(cards[1].taskCardId, false);
+    assert.deepEqual(orderProjectTaskCards(restored.list()).map(card => card.title), ['A', 'B', 'C']);
+    const historic = await restored.associateSession({ requestId: 'history', sessionId: 'history', title: 'Old', snapshot,
+      firstSubmittedAt: '2020-01-01T00:00:00.000Z', firstSubmittedAtSource: 'user_input' });
+    assert.deepEqual(orderProjectTaskCards([...restored.list()]).map(card => card.title), ['Old', 'A', 'B', 'C']);
+    assert.equal(historic.lastActivityAt, undefined);
+  } finally { await f.cleanup(); }
+});
+
+test('a multi-day task keeps its original order key while completion, explicit stop and continue record true activity', async () => {
+  let now = '2026-11-01T00:00:00.000Z'; const release = gate(); const contexts: TaskExecutionContext[] = [];
+  const f = await fixture({ now: () => now, driverFactory: () => ({ execute: async context => {
+    contexts.push(context); await context.prepareInput(context.input.preparedContent ?? context.input.content, context.input.messageId ?? context.input.inputId);
+    await context.incorporated(context.input.messageId ?? context.input.inputId);
+    if (contexts.length === 1) await release.promise;
+    return { result: 'finished' };
+  } }) });
+  try {
+    const receipt = await f.service.createTask({ requestId: 'multi-day', content: 'long task', snapshot });
+    await until(() => f.service.get(receipt.card.taskCardId)?.state === 'running');
+    now = '2026-11-04T00:00:00.000Z'; release.resolve(); await f.service.whenIdle();
+    const finished = f.service.get(receipt.card.taskCardId)!;
+    assert.equal(finished.firstSubmittedAt, receipt.input.createdAt); assert.equal(finished.lastActivityAt, now);
+    assert.equal(isProjectTaskRecent(finished, Date.parse(now) + TASK_RECENT_WINDOW_MS - 1), true);
+    now = '2026-11-05T00:00:00.000Z'; await f.service.stop(finished.taskCardId);
+    assert.equal(f.service.get(finished.taskCardId)?.lastActivityAt, now);
+    now = '2026-11-06T00:00:00.000Z'; await f.service.resume(finished.taskCardId); await f.service.whenIdle();
+    const resumed = f.service.get(finished.taskCardId)!;
+    assert.equal(resumed.lastActivityAt, now); assert.equal(resumed.firstSubmittedAt, finished.firstSubmittedAt);
+    assert.equal(resumed.rootTaskId, finished.rootTaskId); assert.ok(resumed.generation > finished.generation);
+  } finally { release.resolve(); await f.cleanup(); }
+});
+
+test('recent range is rolling 24h with exact expiry, live archived work and current-view terminal exceptions', async () => {
+  const f = await fixture({ now: () => '2026-11-01T23:59:59.000Z' });
+  try {
+    const result = await f.service.createTask({ requestId: 'range', content: 'task', snapshot }); await f.service.whenIdle();
+    const card = f.service.get(result.card.taskCardId)!, activity = Date.parse(card.lastActivityAt!);
+    assert.equal(isProjectTaskRecent(card, activity + TASK_RECENT_WINDOW_MS - 1), true);
+    assert.equal(isProjectTaskRecent(card, activity + TASK_RECENT_WINDOW_MS), false);
+    assert.equal(isProjectTaskRecent(card, activity + TASK_RECENT_WINDOW_MS + 1), false);
+    assert.equal(isProjectTaskRecent(card, activity + 2000), true, 'crossing midnight does not clear recent');
+    for (const state of ['queued', 'preparing', 'running', 'waiting', 'settling', 'stopping'] as const) {
+      assert.equal(isProjectTaskRecent({ ...card, state, archived: true }, activity + 100 * TASK_RECENT_WINDOW_MS), true, state);
+    }
+    assert.equal(isProjectTaskRecent({ ...card, state: 'interrupted' }, activity + 100 * TASK_RECENT_WINDOW_MS), true);
+    assert.equal(isProjectTaskRecent({ ...card, state: 'interrupted', archived: true }, activity, card.taskCardId), false);
+    for (const state of ['completed', 'failed', 'cancelled'] as const) {
+      const terminal = { ...card, state };
+      assert.equal(isProjectTaskRecent(terminal, activity + TASK_RECENT_WINDOW_MS, card.taskCardId), true);
+      assert.equal(isProjectTaskRecent(terminal, activity + TASK_RECENT_WINDOW_MS, 'different'), false);
+      assert.equal(isProjectTaskRecent({ ...terminal, archived: true }, activity, card.taskCardId), false);
+      assert.equal(isProjectTaskRecent({ ...terminal, createdAt: '2020-01-01T00:00:00.000Z' }, activity), true, 'long task retains its final activity');
+    }
+  } finally { await f.cleanup(); }
+});
+
+test('association fallback is explained and never invents execution recency; verified history time is fixed at association', async () => {
+  let now = '2026-11-01T00:00:00.000Z'; const f = await fixture({ now: () => now });
+  try {
+    const unknown = await f.service.associateSession({ requestId: 'unknown-history', sessionId: 'unknown-history', title: 'Unknown', snapshot });
+    assert.equal(unknown.firstSubmittedAt, now); assert.equal(unknown.firstSubmittedAtSource, 'associated');
+    assert.equal(unknown.lastActivityAt, undefined); assert.equal(isProjectTaskRecent(unknown, Date.parse(now)), false);
+    const known = await f.service.associateSession({ requestId: 'known-history', sessionId: 'known-history', title: 'Known', snapshot,
+      firstSubmittedAt: '2020-01-01T00:00:00.000Z', firstSubmittedAtSource: 'user_input', lastActivityAt: '2021-01-01T00:00:00.000Z' });
+    const fallback = await f.service.associateSession({ requestId: 'created-history', sessionId: 'created-history', title: 'Created', snapshot,
+      firstSubmittedAt: '2020-01-01T00:00:00.000Z', firstSubmittedAtSource: 'session_created' });
+    assert.equal(fallback.firstSubmittedAtSource, 'session_created');
+    assert.equal(fallback.lastActivityAt, undefined); assert.equal(isProjectTaskRecent(known, Date.parse(now)), false);
+    now = '2026-12-01T00:00:00.000Z';
+    const retried = await f.service.associateSession({ requestId: 'later-evidence', sessionId: unknown.sessionId, title: 'Old', snapshot,
+      firstSubmittedAt: '2020-01-01T00:00:00.000Z', firstSubmittedAtSource: 'user_input' });
+    assert.equal(retried.firstSubmittedAt, unknown.firstSubmittedAt, 'later viewing/evidence cannot silently move a known fallback');
+  } finally { await f.cleanup(); }
+});
+
+test('legacy inline and physical metadata normalize deterministically without using metadata updatedAt or wall clock', async () => {
+  let now = '2026-11-01T00:00:00.000Z'; const f = await fixture({ now: () => now });
+  try {
+    const receipt = await f.service.createTask({ requestId: 'legacy-time', content: 'old real user bytes', snapshot }); await f.service.whenIdle();
+    const associated = await f.service.associateSession({ requestId: 'legacy-associated', sessionId: 'legacy-session', title: 'History', snapshot });
+    const cards = f.service.list().map(card => { const copy = { ...card }; delete copy.firstSubmittedAt; delete copy.firstSubmittedAtSource; delete copy.lastActivityAt; return copy; });
+    for (const card of cards) card.updatedAt = '2099-01-01T00:00:00.000Z';
+    const legacy = { version: 1, projectId: f.options.projectId, revision: 50, cards,
+      inputs: f.service.inputs(receipt.card.taskCardId), events: f.service.events() };
+    now = '2026-12-01T00:00:00.000Z';
+    await writeJsonAtomic(vscode.Uri.file(path.join(f.directory, 'project-tasks.json')), legacy, { durable: true });
+    let observerWrites = 0;
+    const observer = new ProjectTaskService({ ...f.options, storageWrite: async () => { observerWrites += 1; } }); await observer.initialize({ readOnly: true });
+    assert.equal(observerWrites, 0); assert.equal(observer.get(receipt.card.taskCardId)?.firstSubmittedAt, receipt.input.createdAt);
+    assert.equal(observer.get(receipt.card.taskCardId)?.lastActivityAt, receipt.input.createdAt);
+    assert.equal(observer.get(associated.taskCardId)?.firstSubmittedAtSource, 'associated');
+    assert.equal(observer.get(associated.taskCardId)?.lastActivityAt, undefined);
+    const migrated = new ProjectTaskService(f.options); await migrated.initialize(); await migrated.rename(receipt.card.taskCardId, 'Renamed');
+    const uri = path.join(f.directory, 'project-tasks.json'), physical = JSON.parse(await readFile(uri, 'utf8'));
+    assert.equal(physical.version, 2); physical.cards[0].firstSubmittedAt = { invalid: true }; physical.cards[0].firstSubmittedAtSource = 'broken'; physical.cards[0].lastActivityAt = 'broken';
+    await writeFile(uri, JSON.stringify(physical));
+    const recovered = new ProjectTaskService(f.options); await recovered.initialize();
+    assert.equal(recovered.get(receipt.card.taskCardId)?.firstSubmittedAt, receipt.input.createdAt);
+    assert.equal(recovered.get(receipt.card.taskCardId)?.lastActivityAt, receipt.input.createdAt);
+    assert.equal(recovered.inputs(receipt.card.taskCardId)[0].content, 'old real user bytes');
+    assert.equal(recovered.events().length, f.service.events().length);
+    assert.equal(recovered.get(associated.taskCardId)?.lastActivityAt, undefined);
+  } finally { await f.cleanup(); }
+});
+
+test('shutdown, repeated recovery and observer reload do not refresh real activity or restart old work', async () => {
+  let now = '2026-11-01T00:00:00.000Z'; const started: TaskExecutionContext[] = [];
+  const f = await fixture({ now: () => now, driverFactory: () => ({ execute: async context => {
+    started.push(context); await context.prepareInput(context.input.content, context.input.inputId); await context.incorporated(context.input.inputId);
+    await new Promise<void>(resolve => context.signal.addEventListener('abort', () => resolve(), { once: true }));
+    return { result: 'Saved at shutdown' };
+  } }) });
+  try {
+    const receipt = await f.service.createTask({ requestId: 'closing-time', content: 'work', snapshot }); await until(() => started.length === 1);
+    await until(() => f.service.get(receipt.card.taskCardId)?.state === 'running');
+    const before = f.service.get(receipt.card.taskCardId)!;
+    now = '2026-12-01T00:00:00.000Z'; await f.service.dispose();
+    for (let index = 0; index < 2; index += 1) {
+      const restored = new ProjectTaskService(f.options); await restored.initialize();
+      assert.equal(restored.get(before.taskCardId)?.lastActivityAt, before.lastActivityAt);
+      assert.equal(restored.get(before.taskCardId)?.state, 'interrupted'); assert.equal(restored.activeCount, 0);
+      assert.equal(restored.events()[0].createdAt, before.lastActivityAt);
+    }
+    assert.equal(started.length, 1);
+  } finally { await rm(f.directory, { recursive: true, force: true }); }
+});
+
+test('repeating the same stale dependency notification does not invent another activity boundary', async () => {
+  let now = '2026-11-01T00:00:00.000Z'; const f = await fixture({ now: () => now });
+  try {
+    const dependency = await f.service.createTask({ requestId: 'stale-source', content: 'source', snapshot }); await f.service.whenIdle();
+    const consumer = await f.service.createTask({ requestId: 'stale-consumer', content: 'consumer', snapshot,
+      dependencies: [dependency.card.taskCardId] }); await f.service.whenIdle();
+    now = '2026-11-02T00:00:00.000Z'; await f.service.markDependentsStale(dependency.card.taskCardId);
+    const waiting = f.service.get(consumer.card.taskCardId)!;
+    assert.equal(waiting.lastActivityAt, now); assert.equal(waiting.waitingReason, 'dependency_requires_review');
+    now = '2026-11-03T00:00:00.000Z'; await f.service.markDependentsStale(dependency.card.taskCardId);
+    const unchanged = f.service.get(consumer.card.taskCardId)!;
+    assert.equal(unchanged.lastActivityAt, waiting.lastActivityAt); assert.equal(unchanged.revision, waiting.revision);
+    assert.equal(unchanged.firstSubmittedAt, consumer.card.firstSubmittedAt);
+  } finally { await f.cleanup(); }
+});
+
+test('observer normalization reconciles stale activity with later durable input and result boundaries without writes', async () => {
+  const f = await fixture({ now: () => '2026-11-01T00:00:00.000Z' });
+  try {
+    const receipt = await f.service.createTask({ requestId: 'activity-evidence', content: 'real input', snapshot }); await f.service.whenIdle();
+    const cards = f.service.list(), inputs = f.service.inputs(receipt.card.taskCardId), events = f.service.events();
+    inputs[0].settledAt = '2026-11-02T00:00:00.000Z'; events[0].createdAt = '2026-11-03T00:00:00.000Z';
+    cards[0].updatedAt = '2099-01-01T00:00:00.000Z';
+    await writeJsonAtomic(vscode.Uri.file(path.join(f.directory, 'project-tasks.json')),
+      { version: 1, projectId: f.options.projectId, revision: 60, cards, inputs, events }, { durable: true });
+    let writes = 0;
+    const observer = new ProjectTaskService({ ...f.options, now: () => '2099-02-01T00:00:00.000Z', storageWrite: async () => { writes++; } });
+    await observer.initialize({ readOnly: true });
+    assert.equal(writes, 0); assert.equal(observer.get(receipt.card.taskCardId)?.lastActivityAt, events[0].createdAt);
+    assert.equal(observer.get(receipt.card.taskCardId)?.firstSubmittedAt, receipt.input.createdAt);
+    assert.equal(observer.inputs(receipt.card.taskCardId)[0].content, receipt.input.content);
+  } finally { await f.cleanup(); }
+});
+
+test('stale rendered task actions cannot stop, resume, archive or delete another execution scope', async () => {
+  const f = await fixture();
+  try {
+    const receipt = await f.service.createTask({ requestId: 'action-scope', content: 'scope', snapshot }); await f.service.whenIdle();
+    const id = receipt.card.taskCardId, card = f.service.get(id)!, inputs = f.service.inputs(receipt.card.taskCardId);
+    const manifest = await readFile(path.join(f.directory, 'project-tasks.json'), 'utf8');
+    for (const expected of [{ ...card, generation: card.generation + 1 }, { ...card, segmentId: 'old-segment' },
+      { ...card, projectId: 'other-project' }, { ...card, sessionId: 'other-session' },
+      { ...card, rootTaskId: 'other-root' }, { ...card, taskCardId: 'other-card' }]) {
+      for (const action of [() => f.service.stop(id, expected), () => f.service.resume(id, expected),
+        () => f.service.archive(id, true, expected), () => f.service.delete(id, expected)]) {
+        await assert.rejects(action(), /task_action_identity_expired/);
+        assert.deepEqual(f.service.get(id), card); assert.deepEqual(f.service.inputs(id), inputs);
+        assert.equal(f.service.activeCount, 0);
+        assert.equal(await readFile(path.join(f.directory, 'project-tasks.json'), 'utf8'), manifest);
+      }
+    }
+    await f.service.archive(id, true, card); assert.equal(f.service.get(id)?.archived, true);
+    await f.service.archive(id, false, card); await f.service.stop(id, card); assert.equal(f.service.get(id)?.state, 'cancelled');
+    await f.service.resume(id, f.service.get(id)); await f.service.whenIdle();
+    assert.equal(f.service.get(id)?.state, 'completed'); assert.ok(f.service.get(id)!.generation > card.generation);
+    await f.service.delete(id, f.service.get(id)); assert.equal(f.service.get(id), undefined); assert.deepEqual(f.service.inputs(id), []);
+  } finally { await f.cleanup(); }
+});
+
+test('task action identity is captured before waiting and rechecked after a queued same-root segment change', async () => {
+  const transactionHold = gate(), finish = gate(); let hold = false, ownerEntered = false; let context: TaskExecutionContext | undefined;
+  const f = await fixture({ assertExecutionOwner: async () => { if (hold) { ownerEntered = true; await transactionHold.promise; } },
+    driverFactory: () => ({ execute: async value => {
+      context = value; await value.prepareInput(value.input.content, value.input.inputId); await value.incorporated(value.input.inputId);
+      await finish.promise; return { result: 'done' };
+    } }) });
+  try {
+    const receipt = await f.service.createTask({ requestId: 'queued-action', content: 'work', snapshot });
+    const id = receipt.card.taskCardId; await until(() => f.service.get(id)?.state === 'running');
+    const expected = f.service.get(id)!;
+    hold = true; const segment = context!.executionSegment!('new-authoritative-segment'); await until(() => ownerEntered);
+    const stopped = f.service.stop(id, expected);
+    // Mutating the caller's object after dispatch cannot redirect the action.
+    expected.segmentId = 'new-authoritative-segment'; hold = false; transactionHold.resolve(); await segment;
+    await assert.rejects(stopped, /task_action_identity_expired/);
+    assert.equal(f.service.get(id)?.state, 'running'); assert.equal(context!.signal.aborted, false);
+    assert.equal(f.service.get(id)?.rootTaskId, receipt.card.rootTaskId); assert.equal(f.service.get(id)?.segmentId, 'new-authoritative-segment');
+    finish.resolve(); await f.service.whenIdle(); assert.equal(f.service.get(id)?.state, 'completed');
+  } finally { hold = false; transactionHold.resolve(); finish.resolve(); await f.cleanup(); }
 });
 

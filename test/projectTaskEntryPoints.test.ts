@@ -1,8 +1,9 @@
 import './registerVscodeStub';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import * as vscode from 'vscode';
 import * as vscodeStub from './stubs/vscode';
@@ -12,12 +13,17 @@ import { GlobalSessionStorage } from '../src/sessions/globalSessionStorage';
 import { ModelSourceStore } from '../src/accounts/accountStore';
 import { SharedProjectSources } from '../src/context/sharedProjectSources';
 import { ProjectExecutionOwner } from '../src/tasks/projectOwner';
-import { ProjectResourceCoordinator } from '../src/tasks/projectResources';
+import { getProjectExecutionContext, ProjectResourceCoordinator } from '../src/tasks/projectResources';
 import { ProjectRequestAdmission } from '../src/tasks/requestAdmission';
 import type { TaskDefaultsSnapshot } from '../src/tasks/projectTasks';
 import type { WebviewMessage } from '../src/provider/webviewMessages';
+import { createWebviewDomHarness } from './webviewDomHarness';
+import type { TaskContextUsageSnapshot } from '../src/shared/types';
+import type { ModelSourceProvider } from '../src/accounts/types';
+import { taskUsageLaneFingerprint } from '../src/tasks/taskUsageSnapshot';
 
-type Transport = { url: string; body: Record<string, unknown>; signal?: AbortSignal | null };
+type Transport = { url: string; body: Record<string, unknown>; rawBody: string; signal?: AbortSignal | null;
+  scope?: { sessionId: string; rootTaskId: string; segmentId: string; runtimeId: string }; role: string };
 
 test('actual Host stamped legacy sendPrompt commits to the target inbox and cannot fall through a view-selected legacy Runner', async t => {
   const f = await fixture(t);
@@ -170,7 +176,101 @@ test('actual Host shutdown retains a draft-save failure while aborting the activ
   } finally { internals.persistDrafts = originalPersistDrafts; }
 });
 
-async function fixture(t: TestContext) {
+for (const provider of ['openai-compatible', 'openai-responses', 'anthropic-compatible'] as const) {
+test(`sidebar display gestures and local task browsing add zero ${provider} model requests to settled Workers`, async t => {
+  const f = await fixture(t, { webview: true, provider });
+  await f.send({ type: 'projectTaskCreate', requestId: 'sidebar-static-a', prompt: 'SIDEBAR_STATIC_A', draftRevision: 1 });
+  await f.host.tasks.whenIdle();
+  f.selectDefaultModel('entry-wide');
+  await f.send({ type: 'projectTaskCreate', requestId: 'sidebar-static-b', prompt: 'SIDEBAR_STATIC_B', draftRevision: 1 });
+  await f.host.tasks.whenIdle();
+  await f.flushTitleWork();
+  const cards = f.host.tasks.list();
+  assert.deepEqual(cards.map(card => card.snapshot.modelId), ['entry-model', 'entry-wide']);
+  assert.deepEqual(f.workers.map(capture => capture.body.model), ['entry-model', 'entry-wide']);
+  const terminal = f.posts.filter(post => post.type === 'projectTasksState' && Array.isArray(post.cards)).at(-1)!;
+  const published = terminal.cards as Array<{ taskCardId: string; contextUsageSnapshot?: TaskContextUsageSnapshot }>;
+  const snapshots = cards.map(card => {
+    const snapshot = published.find(candidate => candidate.taskCardId === card.taskCardId)?.contextUsageSnapshot;
+    assert.ok(snapshot, 'a background Worker must publish its actual estimate by terminal Host publication without viewing it');
+    assert.deepEqual(snapshot.identity, { projectId: card.projectId, taskCardId: card.taskCardId, sessionId: card.sessionId,
+      rootTaskId: card.rootTaskId, segmentId: card.segmentId, generation: card.generation,
+      hostId: terminal.hostId, runtimeId: snapshot.identity.runtimeId });
+    assert.equal(snapshot.configurationFingerprint, taskUsageLaneFingerprint(card.snapshot));
+    assert.ok(snapshot.identity.runtimeId && snapshot.sequence > 0 && snapshot.projectionRevision > 0);
+    assert.ok(Number.isFinite(Date.parse(snapshot.recordedAt)) && snapshot.usage.maxTokensEstimate > 0);
+    return { taskCardId: card.taskCardId, modelId: card.snapshot.modelId, snapshot };
+  });
+  assert.notEqual(snapshots[0].snapshot.identity.runtimeId, snapshots[1].snapshot.identity.runtimeId);
+  assert.notEqual(snapshots[0].snapshot.configurationFingerprint, snapshots[1].snapshot.configurationFingerprint);
+  assert.notEqual(snapshots[0].snapshot.laneFingerprint, snapshots[1].snapshot.laneFingerprint);
+  assert.notEqual(snapshots[0].snapshot.usage.maxTokensEstimate, snapshots[1].snapshot.usage.maxTokensEstimate,
+    '64K and 128K Worker estimates retain their independent denominators');
+  const before = f.transports.map(capture => capture.rawBody);
+  const historiesBefore = await Promise.all(cards.map(async card => JSON.stringify((await f.load(card.sessionId))?.messages)));
+  const scopeBefore = f.host.tasks.list().map(card => ({ taskCardId: card.taskCardId, sessionId: card.sessionId,
+    rootTaskId: card.rootTaskId, generation: card.generation, state: card.state }));
+  const operations = await sidebarDisplayActions(f);
+  await f.flushTitleWork();
+  assert.deepEqual(f.transports.map(capture => capture.rawBody), before,
+    'hover/focus/open/close/ranges/view/Latest/ready are local reads, including title, summary and reviewer roles');
+  assert.deepEqual(await Promise.all(cards.map(async card => JSON.stringify((await f.load(card.sessionId))?.messages))), historiesBefore,
+    'sidebar reads preserve the complete persisted history, including protocol-native replay and exact user bytes');
+  assert.deepEqual(f.host.tasks.list().map(card => ({ taskCardId: card.taskCardId, sessionId: card.sessionId,
+    rootTaskId: card.rootTaskId, generation: card.generation, state: card.state })), scopeBefore);
+  await persistSidebarRequestEvidence(provider + ':settled', f.transports, before.length, operations, cards, snapshots);
+});
+
+test(`sidebar gestures while an actual ${provider} Worker continues preserve role/root attribution and its frozen request prefix`, async t => {
+  const f = await fixture(t, { webview: true, provider });
+  await f.send({ type: 'projectTaskCreate', requestId: 'sidebar-background-b', prompt: 'SIDEBAR_VIEW_B', draftRevision: 1 });
+  await f.host.tasks.whenIdle(); await f.flushTitleWork();
+  let release!: (value: Response) => void;
+  const gate = new Promise<Response>(resolve => { release = resolve; });
+  let activeCalls = 0;
+  f.workerReply = transport => {
+    if (JSON.stringify(transport.body).includes('SIDEBAR_BACKGROUND_A')) {
+      activeCalls += 1;
+      if (activeCalls !== 1) return nativeTextReply(provider, 'Controlled continuation finished.');
+      return new Promise<Response>((resolve, reject) => {
+        const abort = () => reject(new DOMException('Controlled background request aborted', 'AbortError'));
+        if (transport.signal?.aborted) abort(); else transport.signal?.addEventListener('abort', abort, { once: true });
+        void gate.then(response => { transport.signal?.removeEventListener('abort', abort); resolve(response); });
+      });
+    }
+    return nativeTextReply(provider, 'Unrelated existing task.');
+  };
+  t.after(() => { release(nativeTextReply(provider, 'Released during test cleanup.')); });
+  await f.send({ type: 'projectTaskCreate', requestId: 'sidebar-background-a', prompt: 'SIDEBAR_BACKGROUND_A', draftRevision: 1 });
+  await until(() => activeCalls === 1, 'background Worker first controlled request');
+  const a = f.host.tasks.list().find(card => f.host.tasks.inputs(card.taskCardId).some(input => input.requestId === 'sidebar-background-a'))!;
+  const first = f.workers.at(-1)!;
+  const frozen = first.rawBody;
+  const countBefore = f.transports.length;
+  const operations = await sidebarDisplayActions(f);
+  assert.equal(f.transports.length, countBefore, 'sidebar gestures cannot add requests while the original request is gated');
+  assert.equal(first.rawBody, frozen);
+  assert.equal(JSON.stringify(first.body), frozen);
+  assert.equal(f.host.tasks.get(a.taskCardId)?.state, 'running');
+  release(nativeTextReply(provider, 'Controlled partial response.', 'length'));
+  await f.host.tasks.whenIdle(); await f.flushTitleWork();
+  assert.equal(f.transports.length, countBefore + 2,
+    'after release only the normal Worker continuation and the task-completion title request may be added');
+  const background = f.workers.filter(capture => capture.scope?.rootTaskId === a.rootTaskId);
+  assert.equal(background.length, 2, 'only the explicitly released Worker continuation adds another Worker request');
+  assert.ok(background.every(capture => capture.scope?.sessionId === a.sessionId && capture.role === 'worker'));
+  assert.deepEqual(background[1].body.tools, first.body.tools, 'frozen tools and order survive all sidebar gestures');
+  assert.deepEqual(requestUsers(background[1].body)[0], requestUsers(first.body)[0], 'persisted original user bytes remain exact');
+  const system = (capture: Transport) => requestSystem(capture.body);
+  assert.deepEqual(system(background[1]), system(first), 'static system remains exact during background continuation');
+  assert.ok(background.every(capture => !/firstSubmittedAt|lastActivityAt|contextUsageSnapshot|projectSidebar/.test(capture.rawBody)));
+  assert.equal(f.routerCalls(), 0);
+  await persistSidebarRequestEvidence(provider + ':background_continuation', f.transports, countBefore, operations, f.host.tasks.list());
+});
+}
+
+async function fixture(t: TestContext, options: { webview?: boolean; provider?: ModelSourceProvider } = {}) {
+  const provider = options.provider ?? 'openai-compatible';
   const directory = await mkdtemp(join(tmpdir(), 'keepseek-project-entry-'));
   const projectPath = join(directory, 'workspace'), storagePath = join(directory, 'storage'), codexPath = join(directory, 'codex');
   await Promise.all([mkdir(projectPath), mkdir(storagePath), mkdir(codexPath)]);
@@ -190,27 +290,36 @@ async function fixture(t: TestContext) {
   const storage = new GlobalSessionStorage(storageUri);
   const store = new ChatSessionStore(storage, 'en', { key: 'entry-fixture', name: 'Entry fixture', folderUris: [project.toString()] });
   await store.initialize();
-  await new ModelSourceStore(storageUri).createSource({ id: 'fixture', name: 'Entry controlled source', provider: 'openai-compatible',
-    apiKey: 'controlled-test-key', baseUrl: 'https://entry-fixture.invalid/v1', models: [{ id: 'entry-model', contextWindowTokens: 64000, maxOutputTokens: 2000 }] });
+  await new ModelSourceStore(storageUri).createSource({ id: 'fixture', name: 'Entry controlled source', provider,
+    apiKey: 'controlled-test-key', baseUrl: 'https://entry-fixture.invalid/v1', models: [
+      { id: 'entry-model', contextWindowTokens: 64000, maxOutputTokens: 2000 },
+      { id: 'entry-wide', contextWindowTokens: 128000, maxOutputTokens: 2000 }
+    ] });
   const defaults: TaskDefaultsSnapshot = { sourceId: 'fixture', modelId: 'entry-model', wireModel: 'entry-model',
-    endpoint: 'https://entry-fixture.invalid/v1', protocol: 'openai-compatible', rootUri: project.toString(), cwdUri: project.toString(),
+    endpoint: 'https://entry-fixture.invalid/v1', protocol: provider, rootUri: project.toString(), cwdUri: project.toString(),
     approvalMode: 'ask', executionMode: 'normal', skillIds: [], configuration: { settings: { thinkingEnabled: false, reasoningEffort: 'high', compressionThreshold: 'balanced' } } };
   const sources = new SharedProjectSources();
+  const view = options.webview ? createWebviewDomHarness() : undefined;
+  view?.receive({ type: 'state', revision: 1, state: { activeSessionId: store.activeSessionId, language: 'en',
+    startup: { interactiveReady: true, sideEffectsReady: true } } });
   const posts: Array<Record<string, unknown>> = [], workers: Transport[] = [], transports: Transport[] = [];
-  let workerReply: (transport: Transport) => Response | Promise<Response> = () => textReply('Controlled Worker answer.');
+  let workerReply: (transport: Transport) => Response | Promise<Response> = () => nativeTextReply(provider, 'Controlled Worker answer.');
   globalThis.fetch = (async (url, init) => {
     assert.equal(typeof init?.body, 'string', 'every fixture request must be an inspectable actual Provider payload');
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-    const transport = { url: String(url), body, signal: init?.signal };
+    const execution = getProjectExecutionContext();
+    const transport: Transport = { url: String(url), body, rawBody: String(init?.body), signal: init?.signal,
+      scope: execution ? { ...execution.scope } : undefined,
+      role: String(JSON.stringify(body.tools)).includes('keepseek_tasks_create') ? 'router' : body.tools ? execution?.requestRole ?? 'worker' : 'session_title' };
     transports.push(transport);
     if (body.tools) { workers.push(transport); return workerReply(transport); }
-    return textReply('{"decision":"defer","title":null}');
+    return nativeTextReply(provider, '{"decision":"defer","title":null}');
   }) as typeof fetch;
   const host = new ProjectAssistantHost({ owner, resources: new ProjectResourceCoordinator(owner.projectId), admission: new ProjectRequestAdmission(), sources,
     windowId: 'entry-fixture', extensionUri: storageUri, storageUri, sessionStore: store,
     skillState: { keys: () => [], get: (_key: string, fallback: unknown) => fallback, update: async () => {} } as never,
     extensionInfo: { displayName: 'KeepSeek', version: 'test', publisher: 'keepseek', author: 'keepseek', repositoryUrl: '', license: 'MIT' },
-    defaults: () => structuredClone(defaults), publish: value => posts.push(value as Record<string, unknown>) });
+    defaults: () => structuredClone(defaults), publish: value => { posts.push(value as Record<string, unknown>); view?.receive(value); } });
   await host.initialize();
   let expectedDisposeFailure: Error | undefined;
   t.after(async () => {
@@ -233,7 +342,22 @@ async function fixture(t: TestContext) {
     const scope = await store.findSessionScope(sessionId); assert.ok(scope);
     return (await store.createWorkspaceScope(scope)).loadSessionById(sessionId);
   };
-  return { host, posts, workers, transports, load,
+  let viewMessageIndex = 0;
+  return { host, posts, workers, transports, load, view,
+    selectDefaultModel: (modelId: 'entry-model' | 'entry-wide') => { defaults.modelId = modelId; defaults.wireModel = modelId; },
+    flushViewMessages: async () => {
+      if (!view) return;
+      for (let safety = 0; safety < 1000 && viewMessageIndex < view.posted.length; safety++) {
+        const message = view.posted[viewMessageIndex++];
+        if (message.type.startsWith('project')) await host.handleMessage(message as unknown as WebviewMessage);
+      }
+      assert.equal(viewMessageIndex, view.posted.length, 'view/Host feedback must settle with bounded messages');
+    },
+    flushTitleWork: async () => {
+      // Join existing title operations; never create a naming candidate from viewing.
+      const workers = (host as unknown as { workers: Map<string, Promise<{ sessionTitles: { flush(): Promise<void> } }>> }).workers;
+      await Promise.all([...workers.values()].map(async promise => (await promise).sessionTitles.flush()));
+    },
     expectDisposeFailure: (error: Error) => { expectedDisposeFailure = error; },
     get workerReply() { return workerReply; }, set workerReply(value: (transport: Transport) => Response | Promise<Response>) { workerReply = value; },
     send: (message: Record<string, unknown>) => host.handleMessage({ projectId: owner.projectId, ...message } as unknown as WebviewMessage),
@@ -250,8 +374,77 @@ async function until(condition: () => boolean, label: string): Promise<void> {
   const deadline = Date.now() + 20000;
   while (!condition()) { if (Date.now() > deadline) throw new Error(`Timed out waiting for ${label}`); await new Promise(resolve => setTimeout(resolve, 10)); }
 }
+async function sidebarDisplayActions(f: Awaited<ReturnType<typeof fixture>>): Promise<string[]> {
+  const view = f.view!;
+  const operations: string[] = [];
+  const toggle = view.element('projectSidebarToggle');
+  assert.ok(toggle, 'the actual generated Webview has the sidebar toggle');
+  const targetBefore = view.element('projectInputTarget').textContent;
+  const viewRequestsBefore = view.posted.filter(item => item.type === 'projectTaskView').length;
+  toggle.click(); toggle.click(); operations.push('open', 'close');
+  const history = view.element('projectTaskHistory'); history.click(); operations.push('all_history');
+  const scope = view.element('projectTaskScope');
+  scope.value = 'recent'; scope.dispatchEvent({ type: 'change' }); operations.push('recent');
+  scope.value = 'all'; scope.dispatchEvent({ type: 'change' }); operations.push('all');
+  const archived = view.element('projectShowArchived');
+  archived.checked = true; archived.dispatchEvent({ type: 'change' });
+  archived.checked = false; archived.dispatchEvent({ type: 'change' }); operations.push('archived_range');
+  const rail = view.element('projectTaskRailList');
+  const button = rail.querySelector('button'); assert.ok(button);
+  button.dispatchEvent({ type: 'mouseenter' }); button.dispatchEvent({ type: 'focus' });
+  button.dispatchEvent({ type: 'focusin' }); button.dispatchEvent({ type: 'mouseleave' }); operations.push('hover', 'focus');
+  assert.equal(view.element('projectInputTarget').textContent, targetBefore, 'display-only gestures preserve input target');
+  assert.equal(view.posted.filter(item => item.type === 'projectTaskView').length, viewRequestsBefore);
+  await f.flushViewMessages();
+  const ids = f.host.tasks.list().map(card => card.taskCardId);
+  for (const id of [ids[0], ids[1], ids[0]]) {
+    const node = rail.querySelector('[data-task-card-id="' + id + '"]');
+    assert.ok(node); (node.tagName === 'BUTTON' ? node : node.querySelector('button'))!.click();
+    await f.flushViewMessages();
+  }
+  operations.push('view_A_B_A', 'restore_drafts');
+  // Latest is a bounded local page read, even if the current page has no newer tail.
+  const current = f.posts.filter(post => post.type === 'projectTasksState').at(-1)!;
+  await f.send({ type: 'projectTaskLatest', taskCardId: f.host.selectedTaskId, viewGeneration: current.viewGeneration });
+  operations.push('latest_local_page');
+  view.element('projectAssistantView').click(); await f.flushViewMessages(); operations.push('view_project_assistant');
+  await f.send({ type: 'ready' }); operations.push('ready_reconnect');
+  view.advance(60_001); await f.flushViewMessages(); operations.push('expiry_recalculation');
+  assert.equal(view.posted.filter(item => ['projectAssistantSubmit', 'projectTaskCreate', 'projectTaskSubmit', 'sendPrompt'].includes(item.type)).length, 0);
+  return operations;
+}
+
+async function persistSidebarRequestEvidence(name: string, transports: Transport[], beforeCount: number, operations: string[],
+  cards: Array<{ taskCardId: string; sessionId: string; rootTaskId: string }>,
+  usageSnapshots?: Array<{ taskCardId: string; modelId: string; snapshot: TaskContextUsageSnapshot }>): Promise<void> {
+  const path = process.env.KEEPSEEK_SIDEBAR_REQUEST_EVIDENCE_PATH;
+  if (!path) return;
+  const hash = (bytes: string) => createHash('sha256').update(bytes).digest('hex');
+  const requests = transports.map((capture, index) => ({ ordinal: index + 1, role: capture.role,
+    taskCardId: cards.find(card => card.sessionId === capture.scope?.sessionId)?.taskCardId ?? null,
+    sessionId: capture.scope?.sessionId ?? null, rootTaskId: capture.scope?.rootTaskId ?? null,
+    segmentId: capture.scope?.segmentId ?? null, runtimeId: capture.scope?.runtimeId ?? null,
+    payloadBytes: Buffer.byteLength(capture.rawBody), payloadSha256: hash(capture.rawBody),
+    orderedToolsSha256: hash(JSON.stringify(capture.body.tools ?? [])),
+    staticSystemSha256: hash(JSON.stringify(requestSystem(capture.body))),
+    firstRealUserSha256: hash(JSON.stringify(requestUsers(capture.body)[0] ?? null)) }));
+  const data = { schemaVersion: 1, capturedAt: new Date().toISOString(), node: process.version, platform: process.platform,
+    transport: 'Actual Host/Provider/Runner through controlled fetch, no paid Provider requests',
+    limits: 'Actual Chat Completions, Responses and Anthropic sidebar attribution cases with controlled fetch; no upstream billing or real cache-hit claim.',
+    cases: [] as Array<Record<string, unknown>> };
+  try { data.cases = (JSON.parse(await readFile(path, 'utf8')) as typeof data).cases.filter(item => item.name !== name); }
+  catch (error) { if ((error as { code?: string }).code !== 'ENOENT') throw error; }
+  data.cases.push({ name, operations, usageSnapshots, requestCountBeforeActions: beforeCount, requestsAfterTaskSettled: requests.length,
+    sidebarTriggeredRequests: 0, normalContinuationWorkerRequests: name.endsWith(':background_continuation') ? 1 : 0,
+    normalCompletionTitleRequests: name.endsWith(':background_continuation') ? 1 : 0,
+    requestsByRole: Object.fromEntries(['worker', 'router', 'session_title', 'reviewer', 'summary', 'child'].map(role => [role, requests.filter(request => request.role === role).length])), requests });
+  await mkdir(dirname(path), { recursive: true }); await writeFile(path, JSON.stringify(data, null, 2) + '\n');
+}
 function requestUsers(body: Record<string, unknown>): Array<{ role: string; content: unknown }> {
-  return (body.messages as Array<{ role: string; content: unknown }>).filter(message => message.role === 'user');
+  return ((body.input ?? body.messages) as Array<{ role: string; content: unknown }>).filter(message => message.role === 'user');
+}
+function requestSystem(body: Record<string, unknown>): unknown {
+  return body.instructions ?? body.system ?? ((body.input ?? body.messages ?? []) as Array<{ role: string }>).filter(message => message.role === 'system' || message.role === 'developer');
 }
 function providerBytes(message: { content: string; expandedContent?: string; providerContent?: string }): string {
   return (message.providerContent ?? message.expandedContent ?? message.content).trim();
@@ -259,4 +452,21 @@ function providerBytes(message: { content: string; expandedContent?: string; pro
 function textReply(content: string): Response {
   return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: 'stop' }],
     usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 } })}\n\ndata: [DONE]\n\n`);
+}
+
+function nativeTextReply(provider: ModelSourceProvider, content: string, finish: 'stop' | 'length' = 'stop'): Response {
+  const events: object[] = provider === 'openai-responses' ? [{ type: finish === 'length' ? 'response.incomplete' : 'response.completed', response: {
+    status: finish === 'length' ? 'incomplete' : 'completed', incomplete_details: finish === 'length' ? { reason: 'max_output_tokens' } : undefined,
+    output: [{ type: 'message', id: 'sidebar-response', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: content }] }],
+    usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110 }
+  } }] : provider === 'anthropic-compatible' ? [
+    { type: 'message_start', message: { id: 'sidebar-message', role: 'assistant', usage: { input_tokens: 100 } } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: content } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: finish === 'length' ? 'max_tokens' : 'end_turn' }, usage: { output_tokens: 10 } },
+    { type: 'message_stop' }
+  ] : [{ choices: [{ delta: { content }, finish_reason: finish }], usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 } }];
+  return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')
+    + (provider === 'openai-responses' || provider === 'anthropic-compatible' ? '' : 'data: [DONE]\n\n'));
 }

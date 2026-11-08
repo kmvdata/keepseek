@@ -12,6 +12,7 @@ class WebviewNode {
   dataset: Record<string, string> = {};
   attributes: Array<{ name: string; value: string }> = [];
   listeners = new Map<string, Array<(event: any) => void>>();
+  private captureListeners = new Set<(event: any) => void>();
   style = { setProperty() {}, removeProperty() {}, height: '' };
   scrollTop = 0;
   scrollHeight = 40;
@@ -83,6 +84,14 @@ class WebviewNode {
     }
   }
   appendChild(node: WebviewNode): WebviewNode { this.append(node); return node; }
+  insertBefore(node: WebviewNode, reference: WebviewNode | null): WebviewNode {
+    if (reference === node) return node;
+    if (!reference) return this.appendChild(node);
+    node.remove();
+    const index = this.childNodes.indexOf(reference);
+    if (index < 0) throw new Error('insertBefore reference is not a child');
+    node.parentNode = this; this.childNodes.splice(index, 0, node); return node;
+  }
   replaceChildren(...nodes: WebviewNode[]): void { for (const node of this.childNodes) node.parentNode = null; this.childNodes = []; this.append(...nodes); }
   remove(): void { if (this.parentNode) this.parentNode.childNodes = this.parentNode.childNodes.filter(node => node !== this); this.parentNode = null; }
   contains(node: WebviewNode | null): boolean { while (node) { if (node === this) return true; node = node.parentNode; } return false; }
@@ -110,12 +119,21 @@ class WebviewNode {
   querySelectorAll(selector: string): WebviewNode[] { return this.children.flatMap(node => [...(node.matches(selector) ? [node] : []), ...node.querySelectorAll(selector)]); }
   querySelector(selector: string): WebviewNode | null { return this.querySelectorAll(selector)[0] ?? null; }
   closest(selector: string): WebviewNode | null { for (let node: WebviewNode | null = this; node; node = node.parentNode) if (node.matches(selector)) return node; return null; }
-  addEventListener(type: string, listener: (event: any) => void): void { const list = this.listeners.get(type) ?? []; list.push(listener); this.listeners.set(type, list); }
-  removeEventListener(type: string, listener: (event: any) => void): void { this.listeners.set(type, (this.listeners.get(type) ?? []).filter(item => item !== listener)); }
+  addEventListener(type: string, listener: (event: any) => void, options?: boolean | { capture?: boolean }): void {
+    const list = this.listeners.get(type) ?? []; list.push(listener); this.listeners.set(type, list);
+    if (options === true || typeof options === 'object' && options.capture) this.captureListeners.add(listener);
+  }
+  removeEventListener(type: string, listener: (event: any) => void): void {
+    this.listeners.set(type, (this.listeners.get(type) ?? []).filter(item => item !== listener)); this.captureListeners.delete(listener);
+  }
   dispatchEvent(event: any): void {
     event.target ??= this; event.currentTarget = this;
-    event.preventDefault ??= () => {}; event.stopPropagation ??= () => {};
-    for (const listener of this.listeners.get(event.type) ?? []) listener(event);
+    event.preventDefault ??= () => { event.defaultPrevented = true; }; event.stopPropagation ??= () => {};
+    event.stopImmediatePropagation ??= () => { event.immediatePropagationStopped = true; };
+    const listeners = this.listeners.get(event.type) ?? [];
+    for (const listener of [...listeners.filter(value => this.captureListeners.has(value)), ...listeners.filter(value => !this.captureListeners.has(value))]) {
+      listener.call(this, event); if (event.immediatePropagationStopped) break;
+    }
   }
   click(): void { if (!this.disabled && !this.closest('[inert]')) this.dispatchEvent({ type: 'click', target: this }); }
   focus(): void { if (this.owner) this.owner.activeElement = this; }
@@ -157,6 +175,11 @@ function parseHtml(html: string, parent: WebviewNode, owner?: WebviewNode): void
 export function createWebviewDomHarness(initialWebviewState: unknown = null) {
   let persistedWebviewState = initialWebviewState;
   let now = 0;
+  let epoch = Date.now();
+  class HarnessDate extends Date {
+    constructor(value?: string | number) { super(value === undefined ? epoch + now : value as string); }
+    static now(): number { return epoch + now; }
+  }
   let timerSequence = 0;
   const timers = new Map<number, { at: number; interval: number; callback: () => void }>();
   const schedule = (callback: () => void, delay = 0, interval = 0) => {
@@ -165,12 +188,14 @@ export function createWebviewDomHarness(initialWebviewState: unknown = null) {
     return id;
   };
   const document = new WebviewNode('document');
+  const domMetrics = { createdElements: 0, createdSvgElements: 0 };
   document.body = new WebviewNode('body', '', document);
   document.documentElement = new WebviewNode('html', '', document);
   document.documentElement.append(document.body); document.append(document.documentElement);
   document.activeElement = document.body;
   document.getElementById = (id: string) => document.querySelector('#' + id);
-  document.createElement = (tag: string) => new WebviewNode(tag, '', document);
+  document.createElement = (tag: string) => { domMetrics.createdElements++; return new WebviewNode(tag, '', document); };
+  document.createElementNS = (_namespace: string, tag: string) => { domMetrics.createdSvgElements++; return new WebviewNode(tag, '', document); };
   document.createTextNode = (text: string) => new WebviewNode('#text', text, document);
   document.createDocumentFragment = () => new WebviewNode('#fragment', '', document);
   document.createRange = () => ({ selectNodeContents() {}, collapse() {}, cloneRange() { return this; }, setStart() {}, setEnd() {}, startContainer: document.body, commonAncestorContainer: document.body });
@@ -194,7 +219,7 @@ export function createWebviewDomHarness(initialWebviewState: unknown = null) {
     HTMLSelectElement: WebviewNode, HTMLButtonElement: WebviewNode, HTMLAnchorElement: WebviewNode,
     Node: Object.assign(WebviewNode, { ELEMENT_NODE: 1, TEXT_NODE: 3, DOCUMENT_FRAGMENT_NODE: 11 }),
     NodeFilter: { SHOW_TEXT: 4, SHOW_ELEMENT: 1, FILTER_ACCEPT: 1, FILTER_SKIP: 3 },
-    URL, TextEncoder, TextDecoder, performance, console, Intl,
+    URL, TextEncoder, TextDecoder, performance, console, Intl, Date: HarnessDate,
     navigator: { platform: 'MacIntel', userAgent: 'test' },
     getComputedStyle: () => ({ lineHeight: '16px', fontSize: '14px' }),
     setTimeout: (callback: () => void, delay: number) => schedule(callback, delay),
@@ -209,6 +234,9 @@ export function createWebviewDomHarness(initialWebviewState: unknown = null) {
     document, window, posted,
     savedWebviewState: () => persistedWebviewState,
     state: new Script('state').runInContext(context) as Record<string, any>,
+    now: () => epoch + now,
+    setNow: (milliseconds: number) => { epoch = milliseconds - now; },
+    domMetrics: () => ({ ...domMetrics }),
     receive: (data: unknown) => window.dispatchEvent({ type: 'message', data }),
     advance: (ms: number) => {
       const until = now + ms;

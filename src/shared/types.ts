@@ -95,6 +95,24 @@ export interface ContextUsageEstimate {
   };
 }
 
+/** Local display provenance captured before computing a projection. Never part
+ * of an AgentRequest or a Provider payload. */
+export interface TaskContextUsageOrigin {
+  identity: import('../tasks/taskRuntime').TaskExecutionIdentity & { hostId: string; runtimeId: string };
+  laneFingerprint: string;
+  configurationFingerprint: string;
+  projectionRevision: number;
+  capturedAt: string;
+}
+
+export interface TaskContextUsageSnapshot extends TaskContextUsageOrigin {
+  version: 1;
+  sequence: number;
+  recordedAt: string;
+  usage: Pick<ContextUsageEstimate, 'usedTokensEstimate' | 'maxTokensEstimate' | 'usedPercent'>;
+  status: 'current' | 'last_known';
+}
+
 export interface Usage {
   promptTokens: number;
   completionTokens: number;
@@ -1814,7 +1832,9 @@ export interface AgentRunCallbacks {
   onModelRoundStart?: () => void;
   onStatus?: (status: AgentActivityInput) => void;
   onToolRejected?: (event: { toolName: string; errorType: 'subagent_tool_not_exposed' }) => void;
-  onUsageEstimate?: (usage: ContextUsageEstimate) => void;
+  /** Capture provenance at estimation start; async calibration reuses it. */
+  captureUsageEstimate?: (purpose?: UsageSource) => TaskContextUsageOrigin | undefined;
+  onUsageEstimate?: (usage: ContextUsageEstimate, origin?: TaskContextUsageOrigin) => void;
   onUsage?: (event: UsageEvent) => void;
   onUsageLedgerRecord?: (record: ProviderUsageLedgerRecord) => Promise<void> | void;
   getPreviousCacheObservation?: (input: {

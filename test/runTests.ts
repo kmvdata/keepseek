@@ -1,5 +1,6 @@
 import './registerVscodeStub';
 import './projectTasks.test';
+import './taskUsageSnapshot.test';
 import './approvalMode.test';
 import './approvalReviewer.test';
 import './oneShotTextRequest.test';

@@ -1,0 +1,772 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-11-08T01:12:45.393Z",
+  "node": "v24.15.0",
+  "platform": "darwin",
+  "transport": "Actual Host/Provider/Runner through controlled fetch, no paid Provider requests",
+  "limits": "Actual Chat Completions, Responses and Anthropic sidebar attribution cases with controlled fetch; no upstream billing or real cache-hit claim.",
+  "cases": [
+    {
+      "name": "openai-compatible:settled",
+      "operations": [
+        "open",
+        "close",
+        "all_history",
+        "recent",
+        "all",
+        "archived_range",
+        "hover",
+        "focus",
+        "view_A_B_A",
+        "restore_drafts",
+        "latest_local_page",
+        "view_project_assistant",
+        "ready_reconnect",
+        "expiry_recalculation"
+      ],
+      "usageSnapshots": [
+        {
+          "taskCardId": "a26133f3-b598-49a4-8815-2e61dd39ae90",
+          "modelId": "entry-model",
+          "snapshot": {
+            "identity": {
+              "projectId": "c1de22fe6fdd23a03c8b8b1da72271e4c96d3e4f98616829d9e5e82ea49d7404",
+              "taskCardId": "a26133f3-b598-49a4-8815-2e61dd39ae90",
+              "sessionId": "2918681e-1cd0-4dbb-9b8a-66a25ddeeb9f",
+              "rootTaskId": "44ef20b5-50fc-4bea-8e6a-87cb086aa825",
+              "segmentId": "f4107cb9-b96b-4978-b491-21f488d745fe",
+              "generation": 1,
+              "hostId": "d9daa9bb-07f4-4363-8c6b-96bccd5e3118",
+              "runtimeId": "b7195c41-a9d6-42fe-a5c2-80f0d60d5e58"
+            },
+            "laneFingerprint": "8f7963f2cff34a5b9ce7ab7f2974504289bcd282e5437a7fc167a27d7b49b8e0",
+            "configurationFingerprint": "e88b75ad820602cc8a070ede46d4093315bd391a4cfe5aa44fb7e6a2bdf93953",
+            "projectionRevision": 3,
+            "capturedAt": "2026-11-08T01:12:01.526Z",
+            "version": 1,
+            "sequence": 4,
+            "recordedAt": "2026-11-08T01:12:01.975Z",
+            "usage": {
+              "usedTokensEstimate": 2484,
+              "maxTokensEstimate": 64000,
+              "usedPercent": 3.88125
+            },
+            "status": "current"
+          }
+        },
+        {
+          "taskCardId": "a29d6c2d-cda1-4727-a533-610dfc3f53d0",
+          "modelId": "entry-wide",
+          "snapshot": {
+            "identity": {
+              "projectId": "c1de22fe6fdd23a03c8b8b1da72271e4c96d3e4f98616829d9e5e82ea49d7404",
+              "taskCardId": "a29d6c2d-cda1-4727-a533-610dfc3f53d0",
+              "sessionId": "67152a98-6a54-4099-944d-7d70deca34e1",
+              "rootTaskId": "7ac1d9de-9884-4f29-8cce-3938dd04593b",
+              "segmentId": "b9f36123-fc34-489b-859e-26d937fafe8a",
+              "generation": 1,
+              "hostId": "d9daa9bb-07f4-4363-8c6b-96bccd5e3118",
+              "runtimeId": "5783ac08-84f9-42eb-9d8d-96fabfb109a7"
+            },
+            "laneFingerprint": "ba23af9bc087b7c0bef47769a09daedffa3296435b750ac63013ad89e5cf5e9c",
+            "configurationFingerprint": "d230ad618f4a107aa5d3e0e6d51b12704a2704694bb3a1d70d75e0b4d47db06f",
+            "projectionRevision": 3,
+            "capturedAt": "2026-11-08T01:12:04.695Z",
+            "version": 1,
+            "sequence": 4,
+            "recordedAt": "2026-11-08T01:12:05.131Z",
+            "usage": {
+              "usedTokensEstimate": 2484,
+              "maxTokensEstimate": 128000,
+              "usedPercent": 1.940625
+            },
+            "status": "current"
+          }
+        }
+      ],
+      "requestCountBeforeActions": 4,
+      "requestsAfterTaskSettled": 4,
+      "sidebarTriggeredRequests": 0,
+      "normalContinuationWorkerRequests": 0,
+      "normalCompletionTitleRequests": 0,
+      "requestsByRole": {
+        "worker": 2,
+        "router": 0,
+        "session_title": 2,
+        "reviewer": 0,
+        "summary": 0,
+        "child": 0
+      },
+      "requests": [
+        {
+          "ordinal": 1,
+          "role": "worker",
+          "taskCardId": "a26133f3-b598-49a4-8815-2e61dd39ae90",
+          "sessionId": "2918681e-1cd0-4dbb-9b8a-66a25ddeeb9f",
+          "rootTaskId": "44ef20b5-50fc-4bea-8e6a-87cb086aa825",
+          "segmentId": "f4107cb9-b96b-4978-b491-21f488d745fe",
+          "runtimeId": "d9daa9bb-07f4-4363-8c6b-96bccd5e3118:1",
+          "payloadBytes": 36196,
+          "payloadSha256": "9e62acef15f4bb92c989a12b2125b90e3d887fd781ad7f9cae6a78bd69cccd05",
+          "orderedToolsSha256": "3186cbe94c619a8d1a519425d2733f2b54d207991741f357eceac808c7a3032e",
+          "staticSystemSha256": "e22a2642832084caf4e273d8927885275cf38ebdfe48a674044fee3844166d54",
+          "firstRealUserSha256": "a2f129cf102ab1e1eb68cf2944aa5a91abe1feb2bfded9de7e2065f258e06a87"
+        },
+        {
+          "ordinal": 2,
+          "role": "session_title",
+          "taskCardId": "a26133f3-b598-49a4-8815-2e61dd39ae90",
+          "sessionId": "2918681e-1cd0-4dbb-9b8a-66a25ddeeb9f",
+          "rootTaskId": "44ef20b5-50fc-4bea-8e6a-87cb086aa825",
+          "segmentId": "f4107cb9-b96b-4978-b491-21f488d745fe",
+          "runtimeId": "d9daa9bb-07f4-4363-8c6b-96bccd5e3118:1",
+          "payloadBytes": 1676,
+          "payloadSha256": "13eab6cce5d8e97c20b1273cd4bd0abe17c57906cd45e948323cdd46a979ae91",
+          "orderedToolsSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "staticSystemSha256": "bd0f9ee96aecc7ef729d67f6d61e8957aadcc2e8286c31a9ab193b114affb634",
+          "firstRealUserSha256": "975ef59eb87426d59fd184d75ef73d6a2e70038b1d0d403fcdb2c68180bd404a"
+        },
+        {
+          "ordinal": 3,
+          "role": "worker",
+          "taskCardId": "a29d6c2d-cda1-4727-a533-610dfc3f53d0",
+          "sessionId": "67152a98-6a54-4099-944d-7d70deca34e1",
+          "rootTaskId": "7ac1d9de-9884-4f29-8cce-3938dd04593b",
+          "segmentId": "b9f36123-fc34-489b-859e-26d937fafe8a",
+          "runtimeId": "d9daa9bb-07f4-4363-8c6b-96bccd5e3118:1",
+          "payloadBytes": 36195,
+          "payloadSha256": "56ec82b03d8da3f47c445dc27d318d99c10ff43aef2300fe6291ab5d1076ca53",
+          "orderedToolsSha256": "3186cbe94c619a8d1a519425d2733f2b54d207991741f357eceac808c7a3032e",
+          "staticSystemSha256": "e22a2642832084caf4e273d8927885275cf38ebdfe48a674044fee3844166d54",
+          "firstRealUserSha256": "6cebea73bd2be1294251a9fcf1d600605cd07d72e4d973f3f337f74a67f2c824"
+        },
+        {
+          "ordinal": 4,
+          "role": "session_title",
+          "taskCardId": "a29d6c2d-cda1-4727-a533-610dfc3f53d0",
+          "sessionId": "67152a98-6a54-4099-944d-7d70deca34e1",
+          "rootTaskId": "7ac1d9de-9884-4f29-8cce-3938dd04593b",
+          "segmentId": "b9f36123-fc34-489b-859e-26d937fafe8a",
+          "runtimeId": "d9daa9bb-07f4-4363-8c6b-96bccd5e3118:1",
+          "payloadBytes": 1675,
+          "payloadSha256": "21208d03ffb7fefe1f1c1aa5809a4d0b6f096fd7a2d1424f5db029eb68534dab",
+          "orderedToolsSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "staticSystemSha256": "bd0f9ee96aecc7ef729d67f6d61e8957aadcc2e8286c31a9ab193b114affb634",
+          "firstRealUserSha256": "055c5b13894aec77f1e4cd204972452fe8a7e77220aa68ce067cc1290eed4fdd"
+        }
+      ]
+    },
+    {
+      "name": "openai-compatible:background_continuation",
+      "operations": [
+        "open",
+        "close",
+        "all_history",
+        "recent",
+        "all",
+        "archived_range",
+        "hover",
+        "focus",
+        "view_A_B_A",
+        "restore_drafts",
+        "latest_local_page",
+        "view_project_assistant",
+        "ready_reconnect",
+        "expiry_recalculation"
+      ],
+      "requestCountBeforeActions": 3,
+      "requestsAfterTaskSettled": 5,
+      "sidebarTriggeredRequests": 0,
+      "normalContinuationWorkerRequests": 1,
+      "normalCompletionTitleRequests": 1,
+      "requestsByRole": {
+        "worker": 3,
+        "router": 0,
+        "session_title": 2,
+        "reviewer": 0,
+        "summary": 0,
+        "child": 0
+      },
+      "requests": [
+        {
+          "ordinal": 1,
+          "role": "worker",
+          "taskCardId": "32f832e5-aa40-4280-a309-cf61a9f3cb97",
+          "sessionId": "f69f7bdc-c778-4846-9420-0275e160f420",
+          "rootTaskId": "5f084146-0d79-40b4-af98-254086bd8c83",
+          "segmentId": "8a7faab9-b24d-40fe-9ade-bf9e26d43181",
+          "runtimeId": "1b208490-46a3-4159-bee0-afe722952ba2:1",
+          "payloadBytes": 36194,
+          "payloadSha256": "bc977969af3b9593cdcbf189de84e900193d517898828e3d2ed4fd6ccec93b98",
+          "orderedToolsSha256": "3186cbe94c619a8d1a519425d2733f2b54d207991741f357eceac808c7a3032e",
+          "staticSystemSha256": "e22a2642832084caf4e273d8927885275cf38ebdfe48a674044fee3844166d54",
+          "firstRealUserSha256": "29c2a1c961144ca3dadb48cd8322b6324e494d82754a96aed876d0f635fe655f"
+        },
+        {
+          "ordinal": 2,
+          "role": "session_title",
+          "taskCardId": "32f832e5-aa40-4280-a309-cf61a9f3cb97",
+          "sessionId": "f69f7bdc-c778-4846-9420-0275e160f420",
+          "rootTaskId": "5f084146-0d79-40b4-af98-254086bd8c83",
+          "segmentId": "8a7faab9-b24d-40fe-9ade-bf9e26d43181",
+          "runtimeId": "1b208490-46a3-4159-bee0-afe722952ba2:1",
+          "payloadBytes": 1674,
+          "payloadSha256": "f1f7694a943c5b25f4b7b35332c3286477b042527af40f2cbeb53b1f71ec6e6d",
+          "orderedToolsSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "staticSystemSha256": "bd0f9ee96aecc7ef729d67f6d61e8957aadcc2e8286c31a9ab193b114affb634",
+          "firstRealUserSha256": "acf9b21c0479906745a48143429c6a51663de171dea73f80718d94e748a7b79d"
+        },
+        {
+          "ordinal": 3,
+          "role": "worker",
+          "taskCardId": "ecbda15a-03c2-4d4a-870f-da4531f729e2",
+          "sessionId": "5653468a-7738-428c-99eb-bb68dab4818a",
+          "rootTaskId": "9a9d9f02-2ea4-4634-afee-a073364dd9b0",
+          "segmentId": "1c59a5e7-df0a-49d3-8e27-e5cfc70682b5",
+          "runtimeId": "1b208490-46a3-4159-bee0-afe722952ba2:1",
+          "payloadBytes": 36200,
+          "payloadSha256": "bb1b19b1b9c4a3fab7323255b0a8c053c79711374024aa39e8835b1bef179872",
+          "orderedToolsSha256": "3186cbe94c619a8d1a519425d2733f2b54d207991741f357eceac808c7a3032e",
+          "staticSystemSha256": "e22a2642832084caf4e273d8927885275cf38ebdfe48a674044fee3844166d54",
+          "firstRealUserSha256": "f06fdab2dd276fb3844e86524c008c4fc54d2c3fbb10d7eb49324e6e519626bf"
+        },
+        {
+          "ordinal": 4,
+          "role": "worker",
+          "taskCardId": "ecbda15a-03c2-4d4a-870f-da4531f729e2",
+          "sessionId": "5653468a-7738-428c-99eb-bb68dab4818a",
+          "rootTaskId": "9a9d9f02-2ea4-4634-afee-a073364dd9b0",
+          "segmentId": "1c59a5e7-df0a-49d3-8e27-e5cfc70682b5",
+          "runtimeId": "1b208490-46a3-4159-bee0-afe722952ba2:1",
+          "payloadBytes": 36378,
+          "payloadSha256": "1a95fc3d9abd4bcd375a6cea864992b4bd1cd99b6eb26c27fbe4371887bfc609",
+          "orderedToolsSha256": "3186cbe94c619a8d1a519425d2733f2b54d207991741f357eceac808c7a3032e",
+          "staticSystemSha256": "e22a2642832084caf4e273d8927885275cf38ebdfe48a674044fee3844166d54",
+          "firstRealUserSha256": "f06fdab2dd276fb3844e86524c008c4fc54d2c3fbb10d7eb49324e6e519626bf"
+        },
+        {
+          "ordinal": 5,
+          "role": "session_title",
+          "taskCardId": "ecbda15a-03c2-4d4a-870f-da4531f729e2",
+          "sessionId": "5653468a-7738-428c-99eb-bb68dab4818a",
+          "rootTaskId": "9a9d9f02-2ea4-4634-afee-a073364dd9b0",
+          "segmentId": "1c59a5e7-df0a-49d3-8e27-e5cfc70682b5",
+          "runtimeId": "1b208490-46a3-4159-bee0-afe722952ba2:1",
+          "payloadBytes": 1716,
+          "payloadSha256": "f31edeb3c40130e5c061f2e507571d177dac64f86d344dd60b88abc489d5deee",
+          "orderedToolsSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "staticSystemSha256": "bd0f9ee96aecc7ef729d67f6d61e8957aadcc2e8286c31a9ab193b114affb634",
+          "firstRealUserSha256": "f275b76eee11b5d996047196056aad81bffc5e528d3046a854750dba6ca3557f"
+        }
+      ]
+    },
+    {
+      "name": "openai-responses:settled",
+      "operations": [
+        "open",
+        "close",
+        "all_history",
+        "recent",
+        "all",
+        "archived_range",
+        "hover",
+        "focus",
+        "view_A_B_A",
+        "restore_drafts",
+        "latest_local_page",
+        "view_project_assistant",
+        "ready_reconnect",
+        "expiry_recalculation"
+      ],
+      "usageSnapshots": [
+        {
+          "taskCardId": "1b87d7dc-78f4-460d-8e2e-fd9322fe8049",
+          "modelId": "entry-model",
+          "snapshot": {
+            "identity": {
+              "projectId": "ce140c9d5f9f3e78293b496b219f297451a7e4ab0cca62f027183ed4503391cc",
+              "taskCardId": "1b87d7dc-78f4-460d-8e2e-fd9322fe8049",
+              "sessionId": "45320db3-6466-45cf-9a39-52b2243754f8",
+              "rootTaskId": "b0f4fa6f-acca-4d45-8d93-80f7e9b2d6f7",
+              "segmentId": "99bd4895-7a05-4248-a213-3dca19dae3c3",
+              "generation": 1,
+              "hostId": "3cd9a360-8337-495c-89f3-0ded5d357ff7",
+              "runtimeId": "cc929b03-5fb3-4610-a9eb-95676901b930"
+            },
+            "laneFingerprint": "d7e6212b20e8be0562aae79345d0e7030d46b0374241c5af8277d7c205c28678",
+            "configurationFingerprint": "a5e78b73b77b7621da380878e4a963b104865091190e8157faec641066d4750e",
+            "projectionRevision": 3,
+            "capturedAt": "2026-11-08T01:12:16.612Z",
+            "version": 1,
+            "sequence": 4,
+            "recordedAt": "2026-11-08T01:12:17.050Z",
+            "usage": {
+              "usedTokensEstimate": 2484,
+              "maxTokensEstimate": 64000,
+              "usedPercent": 3.88125
+            },
+            "status": "current"
+          }
+        },
+        {
+          "taskCardId": "71b26b34-9639-4cbe-ab18-ee443d7b4331",
+          "modelId": "entry-wide",
+          "snapshot": {
+            "identity": {
+              "projectId": "ce140c9d5f9f3e78293b496b219f297451a7e4ab0cca62f027183ed4503391cc",
+              "taskCardId": "71b26b34-9639-4cbe-ab18-ee443d7b4331",
+              "sessionId": "adfe17c0-f06f-45ea-a05e-adf543c9d1c3",
+              "rootTaskId": "53e5eee7-257e-41ca-9779-5e6470e6f546",
+              "segmentId": "e78c4d06-bfa0-42c9-b340-b3a66bc4a055",
+              "generation": 1,
+              "hostId": "3cd9a360-8337-495c-89f3-0ded5d357ff7",
+              "runtimeId": "c627e8e5-efbf-40e2-9683-830776d44e14"
+            },
+            "laneFingerprint": "6431b516f6ae3e7b0830756472e1aee5f26879e14320f50d679435e565288836",
+            "configurationFingerprint": "785ccc1c1b354449ae1e83f8a847b5bfd6d45766c8274d3db426f22ba8d44405",
+            "projectionRevision": 3,
+            "capturedAt": "2026-11-08T01:12:19.814Z",
+            "version": 1,
+            "sequence": 4,
+            "recordedAt": "2026-11-08T01:12:20.215Z",
+            "usage": {
+              "usedTokensEstimate": 2484,
+              "maxTokensEstimate": 128000,
+              "usedPercent": 1.940625
+            },
+            "status": "current"
+          }
+        }
+      ],
+      "requestCountBeforeActions": 4,
+      "requestsAfterTaskSettled": 4,
+      "sidebarTriggeredRequests": 0,
+      "normalContinuationWorkerRequests": 0,
+      "normalCompletionTitleRequests": 0,
+      "requestsByRole": {
+        "worker": 2,
+        "router": 0,
+        "session_title": 2,
+        "reviewer": 0,
+        "summary": 0,
+        "child": 0
+      },
+      "requests": [
+        {
+          "ordinal": 1,
+          "role": "worker",
+          "taskCardId": "1b87d7dc-78f4-460d-8e2e-fd9322fe8049",
+          "sessionId": "45320db3-6466-45cf-9a39-52b2243754f8",
+          "rootTaskId": "b0f4fa6f-acca-4d45-8d93-80f7e9b2d6f7",
+          "segmentId": "99bd4895-7a05-4248-a213-3dca19dae3c3",
+          "runtimeId": "3cd9a360-8337-495c-89f3-0ded5d357ff7:1",
+          "payloadBytes": 35823,
+          "payloadSha256": "2626eed6d5cc6f56bba1bb5b3ac21b7c47569962f2ef7e83e4a2da60e2d71c43",
+          "orderedToolsSha256": "697c222258db98b6fc99563ae874d4f226308232187f4d85febfd409f9412546",
+          "staticSystemSha256": "e22a2642832084caf4e273d8927885275cf38ebdfe48a674044fee3844166d54",
+          "firstRealUserSha256": "a2f129cf102ab1e1eb68cf2944aa5a91abe1feb2bfded9de7e2065f258e06a87"
+        },
+        {
+          "ordinal": 2,
+          "role": "session_title",
+          "taskCardId": "1b87d7dc-78f4-460d-8e2e-fd9322fe8049",
+          "sessionId": "45320db3-6466-45cf-9a39-52b2243754f8",
+          "rootTaskId": "b0f4fa6f-acca-4d45-8d93-80f7e9b2d6f7",
+          "segmentId": "99bd4895-7a05-4248-a213-3dca19dae3c3",
+          "runtimeId": "3cd9a360-8337-495c-89f3-0ded5d357ff7:1",
+          "payloadBytes": 1654,
+          "payloadSha256": "f90a5a5eb85c154dbd39d3f1d234ad8cf439585f4c210627d8e9728106acef65",
+          "orderedToolsSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "staticSystemSha256": "bd0f9ee96aecc7ef729d67f6d61e8957aadcc2e8286c31a9ab193b114affb634",
+          "firstRealUserSha256": "83140aa2af9df415693be0064c143395781f5c86544c1b4f0a242693f73b1db7"
+        },
+        {
+          "ordinal": 3,
+          "role": "worker",
+          "taskCardId": "71b26b34-9639-4cbe-ab18-ee443d7b4331",
+          "sessionId": "adfe17c0-f06f-45ea-a05e-adf543c9d1c3",
+          "rootTaskId": "53e5eee7-257e-41ca-9779-5e6470e6f546",
+          "segmentId": "e78c4d06-bfa0-42c9-b340-b3a66bc4a055",
+          "runtimeId": "3cd9a360-8337-495c-89f3-0ded5d357ff7:1",
+          "payloadBytes": 35822,
+          "payloadSha256": "b37e37afaedd7b0a32b0e053b1486625fa304e0c4969fca521eae2feed944c4a",
+          "orderedToolsSha256": "697c222258db98b6fc99563ae874d4f226308232187f4d85febfd409f9412546",
+          "staticSystemSha256": "e22a2642832084caf4e273d8927885275cf38ebdfe48a674044fee3844166d54",
+          "firstRealUserSha256": "6cebea73bd2be1294251a9fcf1d600605cd07d72e4d973f3f337f74a67f2c824"
+        },
+        {
+          "ordinal": 4,
+          "role": "session_title",
+          "taskCardId": "71b26b34-9639-4cbe-ab18-ee443d7b4331",
+          "sessionId": "adfe17c0-f06f-45ea-a05e-adf543c9d1c3",
+          "rootTaskId": "53e5eee7-257e-41ca-9779-5e6470e6f546",
+          "segmentId": "e78c4d06-bfa0-42c9-b340-b3a66bc4a055",
+          "runtimeId": "3cd9a360-8337-495c-89f3-0ded5d357ff7:1",
+          "payloadBytes": 1653,
+          "payloadSha256": "50c7382299cc671811ef5a135f49c673f3b704380d91056a078cbadfca9155a5",
+          "orderedToolsSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "staticSystemSha256": "bd0f9ee96aecc7ef729d67f6d61e8957aadcc2e8286c31a9ab193b114affb634",
+          "firstRealUserSha256": "24ebc0000a5086ddc4d42303a0640925b2b9ee62cf5ce8ffee9510e34a247db5"
+        }
+      ]
+    },
+    {
+      "name": "openai-responses:background_continuation",
+      "operations": [
+        "open",
+        "close",
+        "all_history",
+        "recent",
+        "all",
+        "archived_range",
+        "hover",
+        "focus",
+        "view_A_B_A",
+        "restore_drafts",
+        "latest_local_page",
+        "view_project_assistant",
+        "ready_reconnect",
+        "expiry_recalculation"
+      ],
+      "requestCountBeforeActions": 3,
+      "requestsAfterTaskSettled": 5,
+      "sidebarTriggeredRequests": 0,
+      "normalContinuationWorkerRequests": 1,
+      "normalCompletionTitleRequests": 1,
+      "requestsByRole": {
+        "worker": 3,
+        "router": 0,
+        "session_title": 2,
+        "reviewer": 0,
+        "summary": 0,
+        "child": 0
+      },
+      "requests": [
+        {
+          "ordinal": 1,
+          "role": "worker",
+          "taskCardId": "edfcb8ee-59d4-47f2-83d4-86d78891b588",
+          "sessionId": "9f77cb55-ecdc-4d8f-9d65-6550f8d38735",
+          "rootTaskId": "55cd9704-5106-477b-b7e2-15950d5372f5",
+          "segmentId": "cadcf566-8cfb-4055-952d-30835aca0e28",
+          "runtimeId": "c138b913-2b01-42d2-9664-df9074a8b59d:1",
+          "payloadBytes": 35821,
+          "payloadSha256": "e3238dfc9425c0076bd23d0f61afcbe10646a5d1f2b8d1db16f9571ec3105dec",
+          "orderedToolsSha256": "697c222258db98b6fc99563ae874d4f226308232187f4d85febfd409f9412546",
+          "staticSystemSha256": "e22a2642832084caf4e273d8927885275cf38ebdfe48a674044fee3844166d54",
+          "firstRealUserSha256": "29c2a1c961144ca3dadb48cd8322b6324e494d82754a96aed876d0f635fe655f"
+        },
+        {
+          "ordinal": 2,
+          "role": "session_title",
+          "taskCardId": "edfcb8ee-59d4-47f2-83d4-86d78891b588",
+          "sessionId": "9f77cb55-ecdc-4d8f-9d65-6550f8d38735",
+          "rootTaskId": "55cd9704-5106-477b-b7e2-15950d5372f5",
+          "segmentId": "cadcf566-8cfb-4055-952d-30835aca0e28",
+          "runtimeId": "c138b913-2b01-42d2-9664-df9074a8b59d:1",
+          "payloadBytes": 1652,
+          "payloadSha256": "4f9af4ecdf45ff438eb50610e4c39a0f76626d7c1f1413f1f00f243abbf3d819",
+          "orderedToolsSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "staticSystemSha256": "bd0f9ee96aecc7ef729d67f6d61e8957aadcc2e8286c31a9ab193b114affb634",
+          "firstRealUserSha256": "4cf0f854584e040ac35f0dd15649212b426a242d01f9b471a4375e931160efbd"
+        },
+        {
+          "ordinal": 3,
+          "role": "worker",
+          "taskCardId": "d592198b-7b32-493b-802d-38b0aaf6c030",
+          "sessionId": "aecbfd9f-11be-4167-a012-4c69e6ad3041",
+          "rootTaskId": "7fda17a1-57a2-4ce9-b64b-9f99b8145841",
+          "segmentId": "98439ae1-3e83-4bb5-9437-402bafb437ae",
+          "runtimeId": "c138b913-2b01-42d2-9664-df9074a8b59d:1",
+          "payloadBytes": 35827,
+          "payloadSha256": "7faae5bf4707b607c1ae903b0145d357707b676674ec3e905415fa644caf3265",
+          "orderedToolsSha256": "697c222258db98b6fc99563ae874d4f226308232187f4d85febfd409f9412546",
+          "staticSystemSha256": "e22a2642832084caf4e273d8927885275cf38ebdfe48a674044fee3844166d54",
+          "firstRealUserSha256": "f06fdab2dd276fb3844e86524c008c4fc54d2c3fbb10d7eb49324e6e519626bf"
+        },
+        {
+          "ordinal": 4,
+          "role": "worker",
+          "taskCardId": "d592198b-7b32-493b-802d-38b0aaf6c030",
+          "sessionId": "aecbfd9f-11be-4167-a012-4c69e6ad3041",
+          "rootTaskId": "7fda17a1-57a2-4ce9-b64b-9f99b8145841",
+          "segmentId": "98439ae1-3e83-4bb5-9437-402bafb437ae",
+          "runtimeId": "c138b913-2b01-42d2-9664-df9074a8b59d:1",
+          "payloadBytes": 36099,
+          "payloadSha256": "bfdf0f38b291a2a754f02ef8625af28ade505d6589642e72cdd8315a69d6e0ba",
+          "orderedToolsSha256": "697c222258db98b6fc99563ae874d4f226308232187f4d85febfd409f9412546",
+          "staticSystemSha256": "e22a2642832084caf4e273d8927885275cf38ebdfe48a674044fee3844166d54",
+          "firstRealUserSha256": "f06fdab2dd276fb3844e86524c008c4fc54d2c3fbb10d7eb49324e6e519626bf"
+        },
+        {
+          "ordinal": 5,
+          "role": "session_title",
+          "taskCardId": "d592198b-7b32-493b-802d-38b0aaf6c030",
+          "sessionId": "aecbfd9f-11be-4167-a012-4c69e6ad3041",
+          "rootTaskId": "7fda17a1-57a2-4ce9-b64b-9f99b8145841",
+          "segmentId": "98439ae1-3e83-4bb5-9437-402bafb437ae",
+          "runtimeId": "c138b913-2b01-42d2-9664-df9074a8b59d:1",
+          "payloadBytes": 1694,
+          "payloadSha256": "6e21d66a052978665ab1e002583d42787ccdf4b9b80aab6a05b85e4c0b00a1f9",
+          "orderedToolsSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "staticSystemSha256": "bd0f9ee96aecc7ef729d67f6d61e8957aadcc2e8286c31a9ab193b114affb634",
+          "firstRealUserSha256": "56f16c5803604b700d21eddb8f1c54ad3805166036e836e572790eb50ef0a9f8"
+        }
+      ]
+    },
+    {
+      "name": "anthropic-compatible:settled",
+      "operations": [
+        "open",
+        "close",
+        "all_history",
+        "recent",
+        "all",
+        "archived_range",
+        "hover",
+        "focus",
+        "view_A_B_A",
+        "restore_drafts",
+        "latest_local_page",
+        "view_project_assistant",
+        "ready_reconnect",
+        "expiry_recalculation"
+      ],
+      "usageSnapshots": [
+        {
+          "taskCardId": "52f84c9a-2176-4caf-9679-c6c48fee1f8d",
+          "modelId": "entry-model",
+          "snapshot": {
+            "identity": {
+              "projectId": "d8d75accfc1bc176ccf660fc87c4a78943cfedc1681f0eeeb33ae4374bf133ab",
+              "taskCardId": "52f84c9a-2176-4caf-9679-c6c48fee1f8d",
+              "sessionId": "0736f707-f88c-4377-b537-9cb923af185b",
+              "rootTaskId": "f5010a67-e032-486f-b94c-59686df4a569",
+              "segmentId": "3b2dd396-82c2-4ba9-b76a-31bd959c4f9c",
+              "generation": 1,
+              "hostId": "e70f6490-09af-407e-96f1-ca647f76acac",
+              "runtimeId": "432a8fc3-483d-4a52-bce3-ac8938b48023"
+            },
+            "laneFingerprint": "021ee6e49bc9482aecadea150922f60b1c8f61d6555fdb6ac7668ad8a5b13c96",
+            "configurationFingerprint": "38c122e181df19ffca5db323cec83e43099df3f1210561a449eaa515479c3537",
+            "projectionRevision": 3,
+            "capturedAt": "2026-11-08T01:12:31.961Z",
+            "version": 1,
+            "sequence": 4,
+            "recordedAt": "2026-11-08T01:12:32.406Z",
+            "usage": {
+              "usedTokensEstimate": 2484,
+              "maxTokensEstimate": 64000,
+              "usedPercent": 3.88125
+            },
+            "status": "current"
+          }
+        },
+        {
+          "taskCardId": "635ea094-241e-4ebc-8c01-ad1a25a2b018",
+          "modelId": "entry-wide",
+          "snapshot": {
+            "identity": {
+              "projectId": "d8d75accfc1bc176ccf660fc87c4a78943cfedc1681f0eeeb33ae4374bf133ab",
+              "taskCardId": "635ea094-241e-4ebc-8c01-ad1a25a2b018",
+              "sessionId": "3a05dcf5-c2df-49aa-8bf2-f1f5f1693123",
+              "rootTaskId": "efa5ad95-019b-4236-a8b2-8677c57ce5c4",
+              "segmentId": "4476e50e-2c9c-4020-aa86-8df2aa90d688",
+              "generation": 1,
+              "hostId": "e70f6490-09af-407e-96f1-ca647f76acac",
+              "runtimeId": "9369b75d-91ee-4136-8bd7-ea374ecb710e"
+            },
+            "laneFingerprint": "2b3cbcb283c3e59b805e508524d50c56f021feb8be6836fe648d82dfa6dd979b",
+            "configurationFingerprint": "a330b9df0498d3cbd5448419396c87acbbc60b9cef60b2da880772fef54b2604",
+            "projectionRevision": 3,
+            "capturedAt": "2026-11-08T01:12:35.033Z",
+            "version": 1,
+            "sequence": 4,
+            "recordedAt": "2026-11-08T01:12:35.491Z",
+            "usage": {
+              "usedTokensEstimate": 2484,
+              "maxTokensEstimate": 128000,
+              "usedPercent": 1.940625
+            },
+            "status": "current"
+          }
+        }
+      ],
+      "requestCountBeforeActions": 4,
+      "requestsAfterTaskSettled": 4,
+      "sidebarTriggeredRequests": 0,
+      "normalContinuationWorkerRequests": 0,
+      "normalCompletionTitleRequests": 0,
+      "requestsByRole": {
+        "worker": 2,
+        "router": 0,
+        "session_title": 2,
+        "reviewer": 0,
+        "summary": 0,
+        "child": 0
+      },
+      "requests": [
+        {
+          "ordinal": 1,
+          "role": "worker",
+          "taskCardId": "52f84c9a-2176-4caf-9679-c6c48fee1f8d",
+          "sessionId": "0736f707-f88c-4377-b537-9cb923af185b",
+          "rootTaskId": "f5010a67-e032-486f-b94c-59686df4a569",
+          "segmentId": "3b2dd396-82c2-4ba9-b76a-31bd959c4f9c",
+          "runtimeId": "e70f6490-09af-407e-96f1-ca647f76acac:1",
+          "payloadBytes": 35403,
+          "payloadSha256": "819049baeb54f2b289254bd73bcd92455be25109f4aa21c0b89380cd81f81ae0",
+          "orderedToolsSha256": "b270af4eecb1d73b6dc0c5ff2daf1444629672e20724cf367dd30527ec4968be",
+          "staticSystemSha256": "d42480f84a39831eb2b7bd405c6ce4929282bac837b789524cfb5ece817ad091",
+          "firstRealUserSha256": "e26997d984882ec409f708abab7364ca2bd3ea0accb49be0b2ca9c0c40a53ac4"
+        },
+        {
+          "ordinal": 2,
+          "role": "session_title",
+          "taskCardId": "52f84c9a-2176-4caf-9679-c6c48fee1f8d",
+          "sessionId": "0736f707-f88c-4377-b537-9cb923af185b",
+          "rootTaskId": "f5010a67-e032-486f-b94c-59686df4a569",
+          "segmentId": "3b2dd396-82c2-4ba9-b76a-31bd959c4f9c",
+          "runtimeId": "e70f6490-09af-407e-96f1-ca647f76acac:1",
+          "payloadBytes": 1655,
+          "payloadSha256": "fc93fb07dd12fe96d3a902d46f0419e83e9ba9c2fa17772a09f43ecc7e3aa4b9",
+          "orderedToolsSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "staticSystemSha256": "a5910ccb4022ece195754ba2f70ec6592818b4efc28859ce793ebd79e5cb1693",
+          "firstRealUserSha256": "9de4767a8d604ca0b97e535ce2e0028a7a9612092e5868a97b1e868f19cfe99e"
+        },
+        {
+          "ordinal": 3,
+          "role": "worker",
+          "taskCardId": "635ea094-241e-4ebc-8c01-ad1a25a2b018",
+          "sessionId": "3a05dcf5-c2df-49aa-8bf2-f1f5f1693123",
+          "rootTaskId": "efa5ad95-019b-4236-a8b2-8677c57ce5c4",
+          "segmentId": "4476e50e-2c9c-4020-aa86-8df2aa90d688",
+          "runtimeId": "e70f6490-09af-407e-96f1-ca647f76acac:1",
+          "payloadBytes": 35402,
+          "payloadSha256": "db8bd97b2a0df84e14c98f1c4ebe41236aa9e570aec5ef1307ce4e666bdcd677",
+          "orderedToolsSha256": "b270af4eecb1d73b6dc0c5ff2daf1444629672e20724cf367dd30527ec4968be",
+          "staticSystemSha256": "d42480f84a39831eb2b7bd405c6ce4929282bac837b789524cfb5ece817ad091",
+          "firstRealUserSha256": "c6897d392fecd25e2e56886a0b9ae9ae624046d3bd1dcfda08f33a6110a8d48f"
+        },
+        {
+          "ordinal": 4,
+          "role": "session_title",
+          "taskCardId": "635ea094-241e-4ebc-8c01-ad1a25a2b018",
+          "sessionId": "3a05dcf5-c2df-49aa-8bf2-f1f5f1693123",
+          "rootTaskId": "efa5ad95-019b-4236-a8b2-8677c57ce5c4",
+          "segmentId": "4476e50e-2c9c-4020-aa86-8df2aa90d688",
+          "runtimeId": "e70f6490-09af-407e-96f1-ca647f76acac:1",
+          "payloadBytes": 1654,
+          "payloadSha256": "315f8de75af29eb72470c115cb0ce02a10bd0e9db223a3aceff68f7c480e36ba",
+          "orderedToolsSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "staticSystemSha256": "a5910ccb4022ece195754ba2f70ec6592818b4efc28859ce793ebd79e5cb1693",
+          "firstRealUserSha256": "41766caf173687f85facd1902980a3b8d4b8bbc6f0843db0a662378aabfcc2a8"
+        }
+      ]
+    },
+    {
+      "name": "anthropic-compatible:background_continuation",
+      "operations": [
+        "open",
+        "close",
+        "all_history",
+        "recent",
+        "all",
+        "archived_range",
+        "hover",
+        "focus",
+        "view_A_B_A",
+        "restore_drafts",
+        "latest_local_page",
+        "view_project_assistant",
+        "ready_reconnect",
+        "expiry_recalculation"
+      ],
+      "requestCountBeforeActions": 3,
+      "requestsAfterTaskSettled": 5,
+      "sidebarTriggeredRequests": 0,
+      "normalContinuationWorkerRequests": 1,
+      "normalCompletionTitleRequests": 1,
+      "requestsByRole": {
+        "worker": 3,
+        "router": 0,
+        "session_title": 2,
+        "reviewer": 0,
+        "summary": 0,
+        "child": 0
+      },
+      "requests": [
+        {
+          "ordinal": 1,
+          "role": "worker",
+          "taskCardId": "4463b3d2-58a9-4cf2-8bbc-80b5767c7b34",
+          "sessionId": "b3f21e78-ec29-4189-a7f0-250358f96367",
+          "rootTaskId": "379bc05d-2a7b-453f-bd11-496957e04eb8",
+          "segmentId": "30c6fb33-544c-4945-b571-bf14eb4948ae",
+          "runtimeId": "ea3f309a-4ea1-4058-9ac2-f778affb4006:1",
+          "payloadBytes": 35401,
+          "payloadSha256": "27558cdb9423dd940b97a3a06828bf583aad01bd8dc1d613071894a4234158ec",
+          "orderedToolsSha256": "b270af4eecb1d73b6dc0c5ff2daf1444629672e20724cf367dd30527ec4968be",
+          "staticSystemSha256": "d42480f84a39831eb2b7bd405c6ce4929282bac837b789524cfb5ece817ad091",
+          "firstRealUserSha256": "4054a9a4f9caa76e71e5f5752318613d54e80a0e5de80bef4897a081aa2d94b9"
+        },
+        {
+          "ordinal": 2,
+          "role": "session_title",
+          "taskCardId": "4463b3d2-58a9-4cf2-8bbc-80b5767c7b34",
+          "sessionId": "b3f21e78-ec29-4189-a7f0-250358f96367",
+          "rootTaskId": "379bc05d-2a7b-453f-bd11-496957e04eb8",
+          "segmentId": "30c6fb33-544c-4945-b571-bf14eb4948ae",
+          "runtimeId": "ea3f309a-4ea1-4058-9ac2-f778affb4006:1",
+          "payloadBytes": 1653,
+          "payloadSha256": "9272c1600d3e2f6cbfcf088a9a49c70281ae8156af2b44ea49efacfeca38253f",
+          "orderedToolsSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "staticSystemSha256": "a5910ccb4022ece195754ba2f70ec6592818b4efc28859ce793ebd79e5cb1693",
+          "firstRealUserSha256": "a27a5f967caa7dde19c6a9d4a6b7a4cd71a69c89832a4b1fb8dc04f597304c87"
+        },
+        {
+          "ordinal": 3,
+          "role": "worker",
+          "taskCardId": "6506d94a-ab89-499f-bd87-25f974b055cb",
+          "sessionId": "57480b5b-d925-405e-8676-96b194b1a3f3",
+          "rootTaskId": "bfb0aecf-21c0-413a-9ac6-994d648fcc53",
+          "segmentId": "dad693a7-4aa3-4775-a0b9-770d88e0eb1a",
+          "runtimeId": "ea3f309a-4ea1-4058-9ac2-f778affb4006:1",
+          "payloadBytes": 35407,
+          "payloadSha256": "3d2d403af19d241430523af7c6bf12a684546c45e353b75c4411654ab493bd63",
+          "orderedToolsSha256": "b270af4eecb1d73b6dc0c5ff2daf1444629672e20724cf367dd30527ec4968be",
+          "staticSystemSha256": "d42480f84a39831eb2b7bd405c6ce4929282bac837b789524cfb5ece817ad091",
+          "firstRealUserSha256": "931ed6f027b9b5a5211965caec3494e62680728dd55d010c90528066c9c83c7e"
+        },
+        {
+          "ordinal": 4,
+          "role": "worker",
+          "taskCardId": "6506d94a-ab89-499f-bd87-25f974b055cb",
+          "sessionId": "57480b5b-d925-405e-8676-96b194b1a3f3",
+          "rootTaskId": "bfb0aecf-21c0-413a-9ac6-994d648fcc53",
+          "segmentId": "dad693a7-4aa3-4775-a0b9-770d88e0eb1a",
+          "runtimeId": "ea3f309a-4ea1-4058-9ac2-f778affb4006:1",
+          "payloadBytes": 35635,
+          "payloadSha256": "7abfcdc18a82a6558aa45eb346e2d24047c783c375fd46ec0359952470d3551f",
+          "orderedToolsSha256": "b270af4eecb1d73b6dc0c5ff2daf1444629672e20724cf367dd30527ec4968be",
+          "staticSystemSha256": "d42480f84a39831eb2b7bd405c6ce4929282bac837b789524cfb5ece817ad091",
+          "firstRealUserSha256": "931ed6f027b9b5a5211965caec3494e62680728dd55d010c90528066c9c83c7e"
+        },
+        {
+          "ordinal": 5,
+          "role": "session_title",
+          "taskCardId": "6506d94a-ab89-499f-bd87-25f974b055cb",
+          "sessionId": "57480b5b-d925-405e-8676-96b194b1a3f3",
+          "rootTaskId": "bfb0aecf-21c0-413a-9ac6-994d648fcc53",
+          "segmentId": "dad693a7-4aa3-4775-a0b9-770d88e0eb1a",
+          "runtimeId": "ea3f309a-4ea1-4058-9ac2-f778affb4006:1",
+          "payloadBytes": 1695,
+          "payloadSha256": "88433133a6807b75a6e6c58944647461540513934ad5e30ed471dc0b33ef4aeb",
+          "orderedToolsSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "staticSystemSha256": "a5910ccb4022ece195754ba2f70ec6592818b4efc28859ce793ebd79e5cb1693",
+          "firstRealUserSha256": "4a43ed8e0a56fb0bf9e6c223b35dfa58a3836c8019619ffe68addc6b0f834959"
+        }
+      ]
+    }
+  ]
+}

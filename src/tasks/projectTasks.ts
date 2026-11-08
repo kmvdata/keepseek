@@ -6,6 +6,7 @@ import { TaskRuntime, type TaskExecutionDriver, type TaskExecutionIdentity, type
 export type ProjectTaskState = 'queued' | 'preparing' | 'running' | 'waiting' | 'settling' | 'completed' | 'failed' | 'cancelled' | 'stopping' | 'interrupted';
 export type TaskInputKind = 'new' | 'followup' | 'supplement' | 'continue';
 export type TaskInputState = 'received' | 'durable' | 'queued' | 'incorporated' | 'settled' | 'failed' | 'cancelled';
+export type TaskFirstSubmittedAtSource = 'user_input' | 'session_created' | 'associated' | 'task_created';
 
 /** Host metadata, never serialized into a Provider prefix. No credentials. */
 export interface TaskDefaultsSnapshot {
@@ -68,11 +69,21 @@ export interface ProjectTaskCard {
   resultEventId?: string;
   createdAt: string;
   updatedAt: string;
+  /** Immutable display order key. Added metadata never enters a model request. */
+  firstSubmittedAt?: string;
+  firstSubmittedAtSource?: TaskFirstSubmittedAtSource;
+  /** Real business activity only; metadata changes and recovery do not renew it. */
+  lastActivityAt?: string;
   archived: boolean;
   usedMs: number;
   costByCurrency: Record<string, number>;
   usageIncomplete: boolean;
 }
+
+/** A rendered task action belongs to precisely this execution scope. Metadata
+ * refreshes may change revision without invalidating the user's exact target. */
+export type TaskActionIdentity = Readonly<Pick<ProjectTaskCard,
+  'projectId' | 'taskCardId' | 'sessionId' | 'rootTaskId' | 'segmentId' | 'generation'>>;
 
 export interface TaskResultEvent {
   version: 1;
@@ -257,6 +268,7 @@ export class ProjectTaskService {
       r.cards.push({ version: 1, projectId: r.projectId, taskCardId: cardId, sessionId, rootTaskId,
         generation: 0, revision: 1, title: value.title?.trim() || temporaryTitle(value.content), snapshot: clone(value.snapshot),
         state: 'queued', sessionCreated: false, dependencies, inputIds: [inputId], createdAt: now, updatedAt: now,
+        firstSubmittedAt: now, firstSubmittedAtSource: 'user_input', lastActivityAt: now,
         archived: false, usedMs: 0, costByCurrency: {}, usageIncomplete: false });
       r.inputs.push({ version: 1, inputId, requestId: value.requestId, taskCardId: cardId, sessionId, rootTaskId,
         kind: 'new', state: 'durable', content: value.content, references: clone(value.references ?? []),
@@ -322,7 +334,7 @@ export class ProjectTaskService {
           references: clone(value.references ?? []), skillIds: [...(value.skillIds ?? card.snapshot.skillIds)], fingerprint, createdAt: this.now() });
         card.inputIds.push(inputId);
         if (!this.runtimes.has(taskCardId)) card.state = 'queued';
-        card.error = undefined; card.waitingReason = undefined; this.touch(card);
+        card.error = undefined; card.waitingReason = undefined; this.activity(card); this.touch(card);
       });
       const accepted = this.registry.inputs.find(input => input.inputId === inputId)!;
       if (value.kind === 'supplement' && UNFINISHED_INPUT.has(accepted.state) && (!duplicate || this.get(taskCardId)!.state !== 'interrupted')) {
@@ -352,11 +364,16 @@ export class ProjectTaskService {
 
   /** Metadata-only association. The caller verifies that the existing session
    * belongs to this project. It never creates a user message or starts a run. */
-  async associateSession(value: { requestId: string; sessionId: string; snapshot: TaskDefaultsSnapshot; title: string; rootTaskId?: string }): Promise<ProjectTaskCard> {
+  async associateSession(value: { requestId: string; sessionId: string; snapshot: TaskDefaultsSnapshot; title: string; rootTaskId?: string;
+    /** Caller supplies only authoritative complete-session/index evidence. A
+     * tail page cannot establish the first user input or execution recency. */
+    firstSubmittedAt?: string; firstSubmittedAtSource?: 'user_input' | 'session_created'; lastActivityAt?: string }): Promise<ProjectTaskCard> {
     this.assertAccepting();
     validateSnapshot(value.snapshot);
     if (!validId(value.requestId) || !validId(value.sessionId) || value.rootTaskId !== undefined && !validId(value.rootTaskId)) throw new Error('task_association_identity_required');
     if (!validText(value.title, 4096)) throw new Error('task_title_invalid');
+    if (value.firstSubmittedAt !== undefined && (!validTimestamp(value.firstSubmittedAt) || !['user_input', 'session_created'].includes(value.firstSubmittedAtSource ?? ''))
+      || value.lastActivityAt !== undefined && !validTimestamp(value.lastActivityAt)) throw new Error('task_association_time_invalid');
     let cardId = '';
     await this.transaction(r => {
       if (r.inputs.some(input => input.requestId === value.requestId)) throw new Error('task_request_id_conflict');
@@ -368,17 +385,21 @@ export class ProjectTaskService {
       r.cards.push({ version: 1, projectId: r.projectId, taskCardId: cardId, sessionId: value.sessionId,
         rootTaskId: value.rootTaskId ?? randomUUID(), generation: 0, revision: 1, title: value.title.trim() || 'Task',
         snapshot: clone(value.snapshot), state: 'completed', sessionCreated: true, associationRequestId: value.requestId,
-        dependencies: [], inputIds: [], createdAt: now, updatedAt: now, archived: false, usedMs: 0,
+        dependencies: [], inputIds: [], createdAt: now, updatedAt: now,
+        firstSubmittedAt: value.firstSubmittedAt ?? now, firstSubmittedAtSource: value.firstSubmittedAt ? value.firstSubmittedAtSource : 'associated',
+        ...(value.lastActivityAt ? { lastActivityAt: value.lastActivityAt } : {}), archived: false, usedMs: 0,
         costByCurrency: {}, usageIncomplete: true });
     });
     return this.get(cardId)!;
   }
 
   /** Explicit restart continuation; no old callback/permit/process is revived. */
-  async resume(taskCardId: string): Promise<void> {
+  async resume(taskCardId: string, expected?: TaskActionIdentity): Promise<void> {
+    expected = expected && Object.freeze({ ...expected });
     this.assertAccepting();
     await this.transaction(r => {
       const card = this.requireCard(r, taskCardId);
+      assertTaskActionIdentity(card, expected);
       if (this.runtimes.has(taskCardId) || !['interrupted', 'waiting', 'failed', 'cancelled'].includes(card.state)) throw new Error('task_not_resumable');
       if (!r.inputs.some(input => input.taskCardId === taskCardId && UNFINISHED_INPUT.has(input.state))) {
         const failed = r.inputs.find(input => input.taskCardId === taskCardId && input.rootTaskId === card.rootTaskId && input.state === 'failed');
@@ -391,7 +412,7 @@ export class ProjectTaskService {
           card.inputIds.push(inputId);
         }
       }
-      card.state = 'queued'; card.waitingReason = undefined; card.error = undefined; this.touch(card);
+      card.state = 'queued'; card.waitingReason = undefined; card.error = undefined; this.activity(card); this.touch(card);
     });
     const card = this.get(taskCardId)!;
     if (!card.sessionCreated) {
@@ -401,11 +422,13 @@ export class ProjectTaskService {
     this.eligible.add(taskCardId); this.schedule();
   }
 
-  async stop(taskCardId: string): Promise<void> {
+  async stop(taskCardId: string, expected?: TaskActionIdentity): Promise<void> {
+    expected = expected && Object.freeze({ ...expected });
     let stoppedRuntime: TaskRuntime | undefined;
     let before!: ProjectTaskCard;
     await this.transaction(r => {
       const card = this.requireCard(r, taskCardId);
+      assertTaskActionIdentity(card, expected);
       before = clone(card);
       // Linearize against admission under the same serialized transaction.
       // A pre-await runtime snapshot could miss a newly reserved container.
@@ -415,7 +438,7 @@ export class ProjectTaskService {
       for (const input of r.inputs) if (input.taskCardId === taskCardId && ['received', 'durable', 'queued'].includes(input.state)) {
         input.state = 'cancelled'; input.error = 'user_stopped'; input.settledAt = this.now();
       }
-      this.touch(card);
+      this.activity(card); this.touch(card);
     });
     const current = this.runtimes.get(taskCardId);
     if (stoppedRuntime && current === stoppedRuntime) await stoppedRuntime.stop(this.currentExecutionIdentity(stoppedRuntime));
@@ -446,9 +469,10 @@ export class ProjectTaskService {
     await this.transaction(r => {
       this.requireCard(r, taskCardId);
       for (const card of r.cards) if (card.dependencies.includes(taskCardId)) {
+        if (card.waitingReason === 'dependency_requires_review' && (this.runtimes.has(card.taskCardId) || card.state === 'waiting')) continue;
         card.waitingReason = 'dependency_requires_review';
         if (!this.runtimes.has(card.taskCardId)) card.state = 'waiting';
-        this.touch(card);
+        this.activity(card); this.touch(card);
       }
     });
   }
@@ -470,13 +494,19 @@ export class ProjectTaskService {
       card.snapshot = clone(snapshot); this.touch(card);
     });
   }
-  async archive(taskCardId: string, archived = true): Promise<void> {
-    await this.transaction(r => { const card = this.requireCard(r, taskCardId); card.archived = archived; this.touch(card); });
+  async archive(taskCardId: string, archived = true, expected?: TaskActionIdentity): Promise<void> {
+    expected = expected && Object.freeze({ ...expected });
+    await this.transaction(r => {
+      const card = this.requireCard(r, taskCardId); assertTaskActionIdentity(card, expected);
+      card.archived = archived; this.touch(card);
+    });
   }
-  async delete(taskCardId: string): Promise<void> {
-    await this.stop(taskCardId);
+  async delete(taskCardId: string, expected?: TaskActionIdentity): Promise<void> {
+    expected = expected && Object.freeze({ ...expected });
+    await this.stop(taskCardId, expected);
     await this.whenIdle(taskCardId);
     await this.transaction(r => {
+      assertTaskActionIdentity(this.requireCard(r, taskCardId), expected);
       if (r.cards.some(card => card.dependencies.includes(taskCardId))) throw new Error('task_has_dependents');
       r.cards = r.cards.filter(card => card.taskCardId !== taskCardId);
       r.inputs = r.inputs.filter(input => input.taskCardId !== taskCardId);
@@ -532,7 +562,13 @@ export class ProjectTaskService {
       const blocked = card.dependencies.find(id => this.registry.cards.find(item => item.taskCardId === id)?.state !== 'completed');
       if (blocked || card.waitingReason === 'dependency_requires_review') {
         this.eligible.delete(card.taskCardId);
-        await this.transaction(r => { const target = this.requireCard(r, card.taskCardId); target.state = 'waiting'; target.waitingReason = card.waitingReason ?? `dependency:${blocked}`; this.touch(target); });
+        const reason = card.waitingReason === 'dependency_requires_review' ? card.waitingReason : `dependency:${blocked}`;
+        // Completion of another dependency may recheck this card while the
+        // same dependency is still blocked. That read is not new activity.
+        if (card.state !== 'waiting' || card.waitingReason !== reason) await this.transaction(r => {
+          const target = this.requireCard(r, card.taskCardId);
+          target.state = 'waiting'; target.waitingReason = reason; this.activity(target); this.touch(target);
+        });
         continue;
       }
       const input = this.registry.inputs.find(item => item.taskCardId === card.taskCardId && UNFINISHED_INPUT.has(item.state))!;
@@ -550,7 +586,7 @@ export class ProjectTaskService {
             || this.inputBarriers.has(card.taskCardId) || ['stopping', 'cancelled', 'interrupted', 'failed'].includes(target.state)
             || target.archived || runtime.controller.signal.aborted) throw new Error('task_admission_superseded');
           target.rootTaskId = input.rootTaskId; target.state = 'preparing'; target.error = undefined;
-          target.segmentId = identity.segmentId; target.generation = identity.generation; this.touch(target);
+          target.segmentId = identity.segmentId; target.generation = identity.generation; this.activity(target); this.touch(target);
           if (current.state !== 'incorporated') current.state = 'queued';
         });
       } catch (error) {
@@ -559,7 +595,7 @@ export class ProjectTaskService {
         if (errorText(error) !== 'task_admission_superseded') throw error;
         if (this.get(card.taskCardId)?.state === 'stopping') await this.transaction(r => {
           const target = this.requireCard(r, card.taskCardId);
-          if (target.state === 'stopping' && !this.runtimes.has(card.taskCardId)) { target.state = 'cancelled'; this.touch(target); }
+          if (target.state === 'stopping' && !this.runtimes.has(card.taskCardId)) { target.state = 'cancelled'; this.activity(target); this.touch(target); }
         });
         this.wakeIdle(); continue;
       }
@@ -574,7 +610,7 @@ export class ProjectTaskService {
           if (!/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/.test(segmentId)) return Promise.reject(new Error('task_execution_segment_invalid'));
           return this.executionTransaction(identity, (_r, card) => {
             if (!runtime.isExecuting || runtime.controller.signal.aborted || card.state === 'stopping') throw new Error('task_execution_identity_expired');
-            card.segmentId = segmentId; this.touch(card);
+            card.segmentId = segmentId; this.activity(card); this.touch(card);
           });
         },
         prepareInput: (content, messageId) => this.executionTransaction(identity, (r, _card) => {
@@ -586,16 +622,20 @@ export class ProjectTaskService {
           const target = r.inputs.find(item => item.inputId === input.inputId)!;
           if (target.messageId !== messageId || target.preparedContent === undefined) throw new Error('task_input_not_prepared');
           target.state = 'incorporated'; target.incorporatedAt ??= this.now();
-          if (card.state !== 'stopping') card.state = 'running'; this.touch(card);
+          if (card.state !== 'stopping') card.state = 'running'; this.activity(card); this.touch(card);
         }),
         progress: text => this.executionTransaction(identity, (_r, card) => {
           card.progress = text.slice(0, 2000);
           if (card.state === 'waiting' && runtime.isExecuting && !runtime.controller.signal.aborted) { card.state = 'running'; card.waitingReason = undefined; }
-          this.touch(card);
+          this.activity(card); this.touch(card);
         }),
-        waiting: reason => this.executionTransaction(identity, (_r, card) => { if (card.state !== 'stopping') card.state = 'waiting'; card.waitingReason = reason; this.touch(card); })
+        waiting: reason => this.executionTransaction(identity, (_r, card) => {
+          const state = card.state === 'stopping' ? card.state : 'waiting';
+          if (card.state === state && card.waitingReason === reason) return;
+          card.state = state; card.waitingReason = reason; this.activity(card); this.touch(card);
+        })
       });
-      await this.executionTransaction(identity, (_r, card) => { if (card.state !== 'stopping') card.state = 'settling'; this.touch(card); });
+      await this.executionTransaction(identity, (_r, card) => { if (card.state !== 'stopping') card.state = 'settling'; this.activity(card); this.touch(card); });
       await this.finish(identity, input.inputId, result, runtime.controller.signal.aborted);
     } catch (error) {
       let advanceRouter = false;
@@ -615,7 +655,7 @@ export class ProjectTaskService {
           card.state = runtime.controller.signal.aborted && !this.closing ? 'cancelled'
             : !this.closing && target.state === 'failed' ? 'failed' : 'interrupted';
         }
-        card.error = errorText(error); this.touch(card);
+        card.error = errorText(error); this.activity(card); this.touch(card);
       }).catch(() => { advanceRouter = false; }); // The last durable state stays interrupted on restart.
       if (advanceRouter) this.eligible.add(identity.taskCardId); else this.eligible.delete(identity.taskCardId);
     } finally {
@@ -651,10 +691,12 @@ export class ProjectTaskService {
         const eventId = `${segmentId}:result:${digest({ content: result.result, messageId: result.resultMessageId, state: card.state }).slice(0, 24)}`;
         if (!r.events.some(event => event.eventId === eventId)) r.events.push({ version: 1, eventId,
           taskCardId: card.taskCardId, sessionId: card.sessionId, rootTaskId: identity.rootTaskId, segmentId,
-          state: card.state, content: result.result, resultMessageId: result.resultMessageId, createdAt: this.now() });
+          state: card.state, content: result.result, resultMessageId: result.resultMessageId,
+          // Extension shutdown is a recovery record, not new task activity.
+          createdAt: this.closing ? card.lastActivityAt ?? input.incorporatedAt ?? input.createdAt : this.now() });
         card.resultEventId = eventId;
       }
-      this.touch(card);
+      this.activity(card); this.touch(card);
     });
     const card = this.get(identity.taskCardId)!;
     if (card.state === 'completed') for (const dependent of this.registry.cards) if (dependent.dependencies.includes(card.taskCardId) && dependent.waitingReason?.startsWith('dependency:')) this.eligible.add(dependent.taskCardId);
@@ -811,12 +853,25 @@ export class ProjectTaskService {
     return value;
   }
   private assertAccepting(): void { if (this.closing || this.disposed) throw new Error('task_service_disposed'); }
+  private activity(card: ProjectTaskCard): void {
+    if (this.closing) return;
+    const now = this.now();
+    if (!validTimestamp(card.lastActivityAt) || Date.parse(now) > Date.parse(card.lastActivityAt)) card.lastActivityAt = now;
+  }
   private touch(card: ProjectTaskCard): void { card.revision = incrementCounter(card.revision); card.updatedAt = this.now(); }
   private publish(): void {
     try { this.options.onChange?.(this.list()); }
     catch { /* View publication is not a storage or execution barrier. */ }
   }
   private wakeIdle(): void { const waiters = [...this.idleWaiters]; this.idleWaiters.clear(); for (const resolve of waiters) resolve(); }
+}
+
+function assertTaskActionIdentity(card: ProjectTaskCard, expected?: TaskActionIdentity): void {
+  if (expected === undefined) return;
+  if (card.projectId !== expected.projectId || card.taskCardId !== expected.taskCardId || card.sessionId !== expected.sessionId
+    || card.rootTaskId !== expected.rootTaskId || card.segmentId !== expected.segmentId || card.generation !== expected.generation) {
+    throw new Error('task_action_identity_expired');
+  }
 }
 
 function normalizeTaskRegistry(value: unknown, projectId: string): TaskRegistry {
@@ -828,6 +883,11 @@ function normalizeTaskRegistry(value: unknown, projectId: string): TaskRegistry 
   const sessions = new Set<string>(), requests = new Set<string>(), inputIds = new Set<string>(), eventIds = new Set<string>();
   const eventCards = new Map<string, string>();
   const cards = new Map<string, ProjectTaskCard>(), inputsByCard = new Map<string, string[]>(), rootsByCard = new Map<string, Set<string>>();
+  const firstInputs = new Map<string, string>(), activities = new Map<string, string>();
+  const recordActivity = (id: string, at: string) => {
+    const previous = activities.get(id);
+    if (!previous || Date.parse(at) > Date.parse(previous)) activities.set(id, at);
+  };
   for (const card of r.cards) {
     if (!isPlainRecord(card) || card.version !== 1 || card.projectId !== projectId || !validId(card.taskCardId) || !validId(card.sessionId)
       || !validId(card.rootTaskId) || cards.has(card.taskCardId) || sessions.has(card.sessionId) || !validCounter(card.generation) || !validCounter(card.revision)
@@ -861,6 +921,13 @@ function normalizeTaskRegistry(value: unknown, projectId: string): TaskRegistry 
       || input.replaceMessageId !== undefined && (!validId(input.replaceMessageId) || input.kind !== 'followup')) throw new Error('task_input_invalid');
     validateInput(input, input.kind === 'continue');
     requests.add(input.requestId); inputIds.add(input.inputId); inputsByCard.get(card.taskCardId)!.push(input.inputId); rootsByCard.get(card.taskCardId)!.add(input.rootTaskId);
+    if (input.kind === 'new') {
+      const previous = firstInputs.get(card.taskCardId);
+      if (!previous || Date.parse(input.createdAt) < Date.parse(previous)) firstInputs.set(card.taskCardId, input.createdAt);
+    }
+    recordActivity(card.taskCardId, input.createdAt);
+    if (input.incorporatedAt) recordActivity(card.taskCardId, input.incorporatedAt);
+    if (input.settledAt) recordActivity(card.taskCardId, input.settledAt);
   }
   // Rebuild list indices from durable input identities; never use array offsets
   // as a cross-file consumption receipt.
@@ -873,8 +940,28 @@ function normalizeTaskRegistry(value: unknown, projectId: string): TaskRegistry 
       || typeof event.content !== 'string' || event.content.length > 64 * 1024 * 1024 || event.resultMessageId !== undefined && !validId(event.resultMessageId)
       || event.consumedByInputId !== undefined && !validId(event.consumedByInputId)) throw new Error('task_event_invalid');
     eventIds.add(event.eventId); eventCards.set(event.eventId, card.taskCardId);
+    recordActivity(card.taskCardId, event.createdAt);
   }
   for (const card of r.cards) if (card.resultEventId && eventCards.get(card.resultEventId) !== card.taskCardId) throw new Error('task_event_reference_invalid');
+  for (const card of r.cards) {
+    // Additive metadata works with both inline v1 and object-backed v2. Broken
+    // optional display metadata must not discard validated card/input bodies.
+    if (!validTimestamp(card.firstSubmittedAt) || !['user_input', 'session_created', 'associated', 'task_created'].includes(card.firstSubmittedAtSource ?? '')) {
+      const first = firstInputs.get(card.taskCardId);
+      card.firstSubmittedAt = !card.associationRequestId && first ? first : card.createdAt;
+      card.firstSubmittedAtSource = !card.associationRequestId && first ? 'user_input' : card.associationRequestId ? 'associated' : 'task_created';
+    }
+    // Prefer the latest independently durable business boundary even when a
+    // saved optional snapshot is well formed but older. Never use updatedAt:
+    // rename/archive writes and recovery may have changed that timestamp.
+    const recordedActivity = activities.get(card.taskCardId);
+    if (!validTimestamp(card.lastActivityAt)) {
+      // An associated card's createdAt only records its addition to the list.
+      card.lastActivityAt = recordedActivity ?? (card.associationRequestId ? undefined : card.createdAt);
+    } else if (recordedActivity && Date.parse(recordedActivity) > Date.parse(card.lastActivityAt)) {
+      card.lastActivityAt = recordedActivity;
+    }
+  }
   return r;
 }
 function validateSnapshot(snapshot: TaskDefaultsSnapshot): void {
