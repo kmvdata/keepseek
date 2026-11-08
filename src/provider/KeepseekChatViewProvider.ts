@@ -1887,6 +1887,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         await this.selectProjectScope();
         return;
       case 'requestSkills': {
+        // A directory request must not invalidate sources being prepared by
+        // an accepted submission or another foreground execution owner.
+        if (this.isBusy || this.isStartingRun || this.activeChangeActions.size || this.activeDraftRunId) return;
         this.sharedProjectSources.dirty = true;
         if (this.hasDeferredEmptyContext()) {
           // An explicit catalog request stays available before first send.
@@ -1894,7 +1897,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           // the selected session's request context or locking input.
           const session = this.sessionStore.getActiveSession();
           const generation = this.sessionContextGeneration ?? 0;
-          const current = () => this.sessionStore.activeSessionId === session.id && (this.sessionContextGeneration ?? 0) === generation;
+          const current = () => this.sessionStore.activeSessionId === session.id && (this.sessionContextGeneration ?? 0) === generation
+            && this.hasDeferredEmptyContext(session) && !this.isBusy && !this.isStartingRun && !this.activeChangeActions.size && !this.activeDraftRunId;
           try {
             const snapshot = await this.sharedProjectSources.refresh(session.id, session.projectScopeUri);
             if (!current()) return;

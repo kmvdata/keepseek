@@ -451,6 +451,56 @@ test('a Skills catalog read failure leaves the fresh editor ready and its input 
   assert.equal(lastState(posts).interaction?.canSubmit, true);
 });
 
+test('a pending Skills menu cannot refresh metadata or dirty sources after the first send owns preparation', { timeout: 10_000 }, async t => {
+  const { host, store, posts, publish } = await fixture(t);
+  await host.handleMessage({ type: 'newSession' });
+  const sessionId = store.activeSessionId;
+  const sourceEntered = deferred(); const releaseSource = deferred();
+  const bodiesEntered = deferred(); const releaseBodies = deferred();
+  t.after(() => { releaseSource.resolve(); releaseBodies.resolve(); });
+  const refreshSources = host.sharedProjectSources.refresh.bind(host.sharedProjectSources);
+  const refreshMetadata = host.skillStore.refresh.bind(host.skillStore);
+  const loadBodies = host.skillStore.resolveAndLoadSkills.bind(host.skillStore);
+  let catalogSource = true;
+  let sourceReads = 0, metadataRefreshes = 0;
+  host.sharedProjectSources.refresh = async (...args) => {
+    sourceReads++;
+    const snapshot = await refreshSources(...args);
+    if (catalogSource) { catalogSource = false; sourceEntered.resolve(); await releaseSource.promise; }
+    return snapshot;
+  };
+  host.skillStore.refresh = async (...args) => { metadataRefreshes++; await refreshMetadata(...args); };
+  host.skillStore.resolveAndLoadSkills = async input => { bodiesEntered.resolve(); await releaseBodies.promise; return loadBodies(input); };
+  const calls = acceptedRun(host, store);
+  const catalogRequest = host.handleMessage({ type: 'requestSkills' });
+  let taskRequest: Promise<void> | undefined;
+  try {
+    await sourceEntered.promise;
+    taskRequest = host.handleMessage(submission(sessionId, 'first-send-during-skill-menu'));
+    await bodiesEntered.promise;
+    publish();
+    const operationId = lastState(posts).interaction?.operationId;
+    assert.ok(operationId);
+    assert.equal(lastState(posts).interaction?.phase, 'preparing_task');
+    assert.equal(lastState(posts).interaction?.canSubmit, false);
+    assert.equal(host.sharedProjectSources.dirty, false);
+    const readsAtTask = sourceReads, refreshesAtTask = metadataRefreshes;
+    await host.handleMessage({ type: 'requestSkills' });
+    assert.equal(sourceReads, readsAtTask, 'a repeated menu request cannot read sources while foreground preparation owns them');
+    assert.equal(host.sharedProjectSources.dirty, false, 'a repeated menu request cannot invalidate the owned preparation snapshot');
+    releaseSource.resolve(); await catalogRequest;
+    publish();
+    assert.equal(metadataRefreshes, refreshesAtTask, 'a menu started before Send cannot advance Skill refresh selection after task preparation starts');
+    assert.equal(lastState(posts).interaction?.operationId, operationId);
+    assert.equal(lastState(posts).interaction?.canSubmit, false);
+  } finally {
+    releaseSource.resolve(); releaseBodies.resolve();
+    await Promise.all([catalogRequest, taskRequest]);
+  }
+  assert.equal(calls.length, 1);
+  assert.equal(posts.find(post => post.requestId === 'first-send-during-skill-menu')?.status, 'accepted');
+});
+
 test('fresh-session file watching defers attached-file reads until the first send and ignores unattached files', async t => {
   const { host, store, posts, publish } = await fixture(t);
   await host.handleMessage({ type: 'newSession' });
