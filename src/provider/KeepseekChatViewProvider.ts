@@ -209,7 +209,7 @@ import { resolveSharedScope, uriInside } from '../context/sharedConfigPaths';
 import { buildCurrentRunContext } from '../agent/currentRunContext';
 import { BackgroundRunCoordinator } from '../agent/backgroundRunCoordinator';
 import { BackgroundRunStatusBar } from './backgroundRunStatusBar';
-import { getAvailableSafeValidationScripts } from '../agent/tools/validationTools';
+import { getAvailableSafeValidationScripts, inspectValidationRecoveryMetadata } from '../agent/tools/validationTools';
 import {
   buildProviderRequestProjection,
   CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION,
@@ -272,6 +272,8 @@ interface CommandSettingsReadiness {
 
 export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = CHAT_VIEW_TYPE;
+  /** Webview drafts may survive reconstruction only within this root Host lifetime. */
+  private readonly activationId = randomUUID();
 
   private readonly fileContext = new FileContextStore();
   private readonly sessionTitles: SessionTitleCoordinator;
@@ -586,6 +588,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private ownerReadiness: Promise<unknown> = Promise.resolve();
   private projectAssistantInitialization?: Promise<void>;
   private lastReconciledOwnerGeneration?: string;
+  private ownershipDiagnosticController?: AbortController;
 
   public setHistoryLoader(load: () => Promise<void>): void { this.historyLoader = load; }
   public setOwnerReadiness(ready: Promise<unknown>): void { this.ownerReadiness = ready; }
@@ -606,10 +609,28 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   public async checkProjectOwnership(): Promise<void> {
     const owner = this.projectOptions?.owner;
     if (!owner || this.titleLifecycleDisposed) return;
+    this.ownershipDiagnosticController?.abort();
+    const controller = this.ownershipDiagnosticController = new AbortController();
     await owner.retryAcquire();
-    if (this.titleLifecycleDisposed) return;
+    if (this.titleLifecycleDisposed || controller.signal.aborted) return;
     this.publishOwnershipChanged();
-    this.postToWebview({ type: 'projectOwnerState', state: owner.state, diagnostics: await owner.diagnostics() });
+    const diagnostics = await owner.diagnostics();
+    let summary = owner.isOwner ? this.t('projectOwnerReady') : owner.reason;
+    if (diagnostics.legacy) {
+      const metadata = await Promise.all([
+        this.draftRuns.inspectPersistedMetadata({ signal: controller.signal }),
+        this.changeSets.inspectPersistedMetadata({ signal: controller.signal })
+      ]).catch(error => { if (controller.signal.aborted) return undefined; throw error; });
+      if (!metadata) return;
+      const [commands, changes] = metadata;
+      const validations = inspectValidationRecoveryMetadata(diagnostics.operations, true);
+      summary = this.t('projectOwnerMetadataSummary', { commands: commands.records, changes: changes.records,
+        validations: validations.availability === 'unavailable' ? this.t('projectOwnerUnknown') : validations.records,
+        unknown: commands.unknown + changes.unknown + validations.unknown,
+        coverage: commands.availability === 'partial' || changes.availability === 'partial' ? this.t('projectOwnerMetadataPartial') : '' });
+    }
+    if (this.titleLifecycleDisposed || controller.signal.aborted || diagnostics.state.revision !== owner.state.revision) return;
+    this.postToWebview({ type: 'projectOwnerState', state: owner.state, diagnostics: { ...diagnostics, summary } });
   }
 
   private async loadSessionHistory(requestId?: string): Promise<void> {
@@ -811,6 +832,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   public async drainProjectRuntime(): Promise<void> {
     this.titleLifecycleDisposed = true;
+    this.ownershipDiagnosticController?.abort();
     this.cancelAllSessionTitleWork();
     await this.projectViewPreparation;
     await this.activeRunSettled;
@@ -964,6 +986,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private disposeLocalResources(): void {
+    this.ownershipDiagnosticController?.abort();
     if (this.projectBinding) this.sessionStore.disposeSessionScope();
     this.titleLifecycleDisposed = true;
     for (const controller of this.accountOperations.values()) controller.abort();
@@ -1658,7 +1681,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
       case 'refreshBalance':
         // 用量统计界面弹出时触发:不 force,遵守 60s 限流,1 分钟内只真正请求一次。
-        void this.refreshBalance({ force: false });
+        await this.refreshBalance({ force: false, userRequested: true });
         return;
       case 'abortPrompt':
         if (message.sessionId && message.sessionId !== this.sessionStore.activeSessionId) return;
@@ -4910,7 +4933,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async refreshBalance(options: { force?: boolean; post?: boolean } = {}): Promise<void> {
+  private async refreshBalance(options: { force?: boolean; post?: boolean; userRequested?: boolean } = {}): Promise<void> {
+    if (this.hasDeferredEmptyContext() && !options.userRequested) return;
     if (this.balanceRefreshPromise) {
       await this.balanceRefreshPromise;
       return;
@@ -7951,6 +7975,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async cleanupExpiredSessions(options: { post?: boolean; force?: boolean } = {}): Promise<void> {
+    if (this.hasDeferredEmptyContext() && options.force !== true) return;
     if (!this.historyOpened && options.force !== true) return;
     if (!this.approvalDataReady) return;
     const protectedSessionIds = [
@@ -9801,6 +9826,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private publishWebview(message: unknown): void {
+    const stateMessage = message as { type?: string; state?: Record<string, unknown> };
+    if (['state', 'statePatch'].includes(stateMessage.type ?? '') && stateMessage.state) {
+      message = { ...stateMessage, state: { ...stateMessage.state, activationId: this.activationId } };
+    }
     for (const view of this.views) {
       void view.webview.postMessage(message);
     }

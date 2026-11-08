@@ -24,6 +24,7 @@ export interface ProjectOperationInput {
 }
 export interface ProjectOperationRecord extends ProjectOperationInput {
   generation: string;
+  bootIdentity?: string;
   state: 'intent' | 'dispatched' | ProjectOperationSettlement;
   createdAt: string;
   settledAt?: string;
@@ -53,7 +54,8 @@ interface JournalData {
 export class ProjectOperationJournal {
   private data?: JournalData;
   private writing: Promise<void> = Promise.resolve();
-  public constructor(private readonly file: string, private readonly projectId: string) {}
+  public constructor(private readonly file: string, private readonly projectId: string,
+    private readonly bootIdentityProbe: () => Promise<string | undefined> = readMachineBootIdentity) {}
 
   public async load(): Promise<boolean> {
     try {
@@ -82,7 +84,8 @@ export class ProjectOperationJournal {
 
   public async recover(): Promise<ProjectOperationRecord[]> {
     if (!this.data) return [];
-    const bootTime = await readMachineBootTime();
+    const probedBootIdentity = await this.bootIdentityProbe();
+    const bootIdentity = isCurrentHostBootIdentity(probedBootIdentity) ? probedBootIdentity : undefined;
     let changed = false;
     for (const operation of this.data.operations) {
       if (operation.state === 'completed' || operation.state === 'not_dispatched') continue;
@@ -95,7 +98,7 @@ export class ProjectOperationJournal {
         operation.reason = 'Apply host ended; restore its ChangeSet before continuing this operation. Independent work may proceed with fresh hash checks. / Apply 宿主已结束；继续此操作前须恢复 ChangeSet。独立工作可重新核验 hash 后进行。';
         operation.settledAt ??= new Date().toISOString(); changed = true; continue;
       }
-      if (bootTime !== undefined && Date.parse(operation.createdAt) < bootTime) {
+      if (bootIdentity && operation.bootIdentity && operation.bootIdentity !== bootIdentity) {
         operation.state = 'result_unknown'; operation.processState = 'ended'; operation.settledAt ??= new Date().toISOString();
         operation.reason = 'Machine restarted after this operation; no old process survives, and its result will not be replayed. / 此操作后计算机已重启；旧进程不再存活，结果不会重放。';
         changed = true; continue;
@@ -126,7 +129,8 @@ export class ProjectOperationJournal {
     if (this.data.operations.some((operation) => operation.id === input.id)) throw new Error('An operation identifier cannot be reused. / 操作标识不得复用。');
     try { await stat(this.receiptPath(input.id)); throw new Error('An archived operation identifier cannot be replayed. / 已归档的操作标识不得重放。'); }
     catch (error) { if (errorCode(error) !== 'ENOENT') throw error; }
-    const operation: ProjectOperationRecord = { ...input, generation, state: 'intent', createdAt: new Date().toISOString() };
+    const bootIdentity = await this.bootIdentityProbe();
+    const operation: ProjectOperationRecord = { ...input, generation, bootIdentity: isCurrentHostBootIdentity(bootIdentity) ? bootIdentity : undefined, state: 'intent', createdAt: new Date().toISOString() };
     this.data.operations.push(operation);
     await this.persist();
     return {
@@ -161,7 +165,8 @@ export class ProjectOperationJournal {
     const existing = this.data.operations.find((operation) => operation.id === id || operation.id.startsWith(`apply-${id}-`) || operation.id.startsWith(`revert-${id}-`));
     if (existing) { existing.state = 'result_unknown'; }
     else {
-      this.data.operations.push({ id, generation, kind: 'command', state: 'result_unknown', processState: 'unknown', createdAt: new Date().toISOString(), reason: 'Operation result cannot be verified. / 无法验证操作结果。' });
+      const bootIdentity = await this.bootIdentityProbe();
+      this.data.operations.push({ id, generation, bootIdentity: isCurrentHostBootIdentity(bootIdentity) ? bootIdentity : undefined, kind: 'command', state: 'result_unknown', processState: 'unknown', createdAt: new Date().toISOString(), reason: 'Operation result cannot be verified. / 无法验证操作结果。' });
     }
     await this.persist();
   }
@@ -238,25 +243,28 @@ export async function readProcessIdentity(pid: number): Promise<string | undefin
   } catch { return undefined; }
 }
 
-/** Kernel/OS boot evidence, never a heartbeat or owner timestamp timeout. */
-export async function readMachineBootTime(): Promise<number | undefined> {
+/** A kernel boot-session identity cannot move with wall-clock corrections.
+ * Windows currently has no independently verified adapter, so reboot recovery
+ * there remains unavailable rather than inferring it from boot timestamps.
+ */
+export async function readMachineBootIdentity(): Promise<string | undefined> {
   try {
     if (process.platform === 'linux') {
-      const match = /^btime (\d+)$/mu.exec(await readFile('/proc/stat', 'utf8'));
-      return match ? Number(match[1]) * 1000 : undefined;
+      const value = (await readFile('/proc/sys/kernel/random/boot_id', 'utf8')).trim();
+      return /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/iu.test(value) ? `${process.platform}:${os.hostname()}:${value.toLowerCase()}` : undefined;
     }
     if (process.platform === 'darwin') {
-      const result = await execute('/usr/sbin/sysctl', ['-n', 'kern.boottime'], { timeout: 3000 });
-      const match = /sec\s*=\s*(\d+)/u.exec(result.stdout);
-      return match ? Number(match[1]) * 1000 : undefined;
-    }
-    if (process.platform === 'win32') {
-      const result = await execute('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '[DateTimeOffset]::new((Get-CimInstance Win32_OperatingSystem).LastBootUpTime).ToUnixTimeMilliseconds()'], { timeout: 3000, windowsHide: true });
-      const value = Number(result.stdout.trim());
-      return Number.isFinite(value) && value > 0 ? value : undefined;
+      const result = await execute('/usr/sbin/sysctl', ['-n', 'kern.bootsessionuuid'], { timeout: 3000 });
+      const value = result.stdout.trim();
+      return /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/iu.test(value) ? `${process.platform}:${os.hostname()}:${value.toLowerCase()}` : undefined;
     }
   } catch { /* Missing/denied boot evidence must keep legacy isolation. */ }
   return undefined;
+}
+export function isCurrentHostBootIdentity(value: unknown): value is string {
+  const prefix = `${process.platform}:${os.hostname()}:`;
+  return typeof value === 'string' && value.startsWith(prefix)
+    && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/iu.test(value.slice(prefix.length));
 }
 
 function validOperation(value: unknown): value is ProjectOperationRecord {
@@ -264,6 +272,7 @@ function validOperation(value: unknown): value is ProjectOperationRecord {
   const operation = value as Partial<ProjectOperationRecord>;
   return typeof operation.id === 'string' && typeof operation.generation === 'string'
     && typeof operation.createdAt === 'string' && Number.isFinite(Date.parse(operation.createdAt))
+    && (operation.bootIdentity === undefined || isCurrentHostBootIdentity(operation.bootIdentity))
     && (operation.gated === undefined || typeof operation.gated === 'boolean')
     && (operation.processId === undefined || Number.isSafeInteger(operation.processId) && operation.processId > 0)
     && (operation.processGroup === undefined || Number.isSafeInteger(operation.processGroup) && operation.processGroup > 0)

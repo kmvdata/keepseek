@@ -166,7 +166,7 @@ export function getProjectTasksScript(): string {
       projectTasks.ownerState = message.state;
       projectTasks.reason = String(message.state.reason || '');
       renderProjectTasks();
-      if (Array.isArray(message.diagnostics?.checks)) setTransientStatus(message.diagnostics.checks.join('; '), false, 'global');
+      if (typeof message.diagnostics?.summary === 'string') setTransientStatus(message.diagnostics.summary, false, 'global');
     }
 
     function projectSaveLocalDrafts() {

@@ -6,7 +6,7 @@
 
 真实事实分别表示：主任务/准备/内部续跑、导航事务、当前会话上下文就绪、必要持久化、文件/命令/审批操作。标题、余额和展示统计等后台工作有独立生命周期。可见阶段用于解释当前阻塞，不能取代这些可并存的事实。
 
-统一派生结果 `interaction` 包含 `sessionId/revision/operationId/phase`、`canEdit/canSubmit/canNavigate/canCreateSession/canCancel/canChangeContext/canReadAccounts/canManageAccounts`、`cancelOperationId`、`blockingReason` 与 `waitingReason`。账号能力不依赖 owner、模型和上下文。`waitingReason` 区分模型、会话、操作恢复、项目上下文和必要保存；不能再把模型或恢复等待统一显示为 Skills 加载。草稿在这些阶段保持可编辑。`canSubmit` 表示可接收一次提交准备，实际请求仍须跨过正确会话的安全、来源、上下文及耐久屏障。
+统一派生结果 `interaction` 包含 `sessionId/revision/operationId/phase`、`canEdit/canSubmit/canNavigate/canCreateSession/canCancel/canChangeContext/canReadAccounts/canManageAccounts/canRecoverDraft`、`cancelOperationId`、`blockingReason` 与 `waitingReason`。账号能力不依赖 owner、模型和上下文。`waitingReason` 区分模型、会话、操作恢复、项目上下文和必要保存；不能再把模型或恢复等待统一显示为 Skills 加载。草稿在这些阶段保持可编辑。`canSubmit` 表示可接收一次提交准备，实际请求仍须跨过正确会话的安全、来源、上下文及耐久屏障。
 
 | 事实或兼容字段 | 所有权与用途 |
 | --- | --- |
@@ -70,6 +70,8 @@ Webview → Host 消息唯一入口仍是 `provider/webviewMessages.ts`；Host �
 ### 默认空白与新建空会话
 
 每个新 extension host activation 调用一次 `initializeFreshBoot()`，生成普通空 UUID，不继承历史、Router/Worker、上下文、引用、Skills、滚动或草稿。未使用目标留在窗口内存，不新增永久空历史；重复 ready、隐藏重开和同宿主 Webview 重建保留当前目标。owner 检查独立异步，不挡住账号和编辑。旧 index、V1/Memento 迁移、任务 Registry、usage 与操作正文不在首屏或自动 idle 工作中读取。
+
+根 Host 给所有状态发布附加 activationId。普通 composer 以 activation/session 保存未发送 markup，并合并 `vscode.getState()/setState()` 既有字段；同宿主 Webview 重建恢复当前草稿，新 activation 不自动恢复旧稿。切换 activation 先退役旧 revision/提交状态，迟到 ACK 或旧高 revision 不覆盖新目标。设置中的“恢复草稿”只在明确点击后列出本地保存项，并只把选中 markup 复制到当前无内容的普通新目标；目标身份、审批与执行状态不恢复，IME、较新输入及目标变化会阻止覆盖。历史列表刷新沿独立 requestId 闭环，保留缓存行及其操作；仅空列表显示加载占位，避免读取状态打断标题编辑。
 
 `canCreateSession` 与 `canNavigate` 分离。新建不需要旧正文、项目指令、Skills 或有效账号；observer 可以建立本地空目标和编辑草稿，执行仍受 owner 与硬检查限制。恢复来的旧 UUID 继续保留自己的操作恢复屏障，不能用新目标规则跳过历史恢复。
 

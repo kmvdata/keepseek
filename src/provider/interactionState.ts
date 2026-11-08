@@ -91,6 +91,8 @@ export interface InteractionSnapshot {
   canEdit: boolean;
   canReadAccounts?: boolean;
   canManageAccounts?: boolean;
+  /** Importing a local UI draft requires an idle, genuinely fresh target. */
+  canRecoverDraft?: boolean;
   canSubmit: boolean;
   /** Source, Skill and context changes use the same readiness boundary. */
   canChangeContext: boolean;
@@ -272,6 +274,7 @@ export function deriveInteractionState(facts: InteractionFacts, operation?: {
     canCreateSession: !executing,
     canReadAccounts: true,
     canManageAccounts: true,
+    canRecoverDraft: fresh && !pending && !facts.failure,
     canCancel,
     ...(canCancel ? { cancelOperationId } : {}),
     ...(waitingReason ? { waitingReason } : {}),

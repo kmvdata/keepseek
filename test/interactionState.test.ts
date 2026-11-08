@@ -10,6 +10,21 @@ function ready(overrides: Partial<InteractionFacts> = {}): InteractionFacts {
     approvalDataReady: true, ...overrides };
 }
 
+test('local draft recovery requires an idle fresh target and remains independent of project execution ownership', () => {
+  assert.equal(deriveInteractionState(ready()).canRecoverDraft, false);
+  assert.equal(deriveInteractionState(ready({ freshSession: true, readOnly: true, modelReady: false,
+    requestContextReady: false, approvalDataReady: false })).canRecoverDraft, true);
+  for (const overrides of [{ mainRunning: true }, { starting: true }, { actionRunning: true },
+    { backgroundRunning: true }, { failure: 'Current durability failed' }]) {
+    assert.equal(deriveInteractionState(ready({ freshSession: true, ...overrides })).canRecoverDraft, false);
+  }
+  const coordinator = new InteractionCoordinator();
+  const saving = coordinator.begin('navigation', 'A', 'saving')!;
+  assert.equal(coordinator.snapshot(ready({ freshSession: true })).canRecoverDraft, false);
+  coordinator.finish(saving);
+  assert.equal(coordinator.snapshot(ready({ freshSession: true })).canRecoverDraft, true);
+});
+
 test('project target capabilities keep account repair, viewing and drafts available when execution has another owner', () => {
   const observer = deriveProjectInteractionState({ disposed: false, owned: false, viewMode: 'task', targetPresent: true, stopping: false });
   assert.equal(observer.canSubmit, false);

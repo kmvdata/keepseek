@@ -236,6 +236,8 @@ test('complete webview handles timing ticks and keeps new/history session naviga
   assert.equal(view.element('contextProgressBreakdown').textContent, bUsage);
 
   view.element('historyTab').click();
+  const history = view.posted.filter(message => message.type === 'loadSessionHistory').at(-1)!;
+  view.receive({ type: 'sessionHistoryResult', requestId: history.requestId, status: 'ready' });
   const menu = view.element('sessionMenu');
   const aRow = menu.querySelector(`[data-session-id="${a.id}"]`);
   assert.ok(aRow);

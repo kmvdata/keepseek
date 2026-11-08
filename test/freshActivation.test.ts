@@ -85,8 +85,9 @@ test('real activation, stores, Host and generated Webview keep old V1/Memento/ta
     extensionMode: 2, extension: { packageJSON: { version: 'test', displayName: 'KeepSeek', publisher: 'keepseek' } },
     workspaceState: memento, globalState: memento, subscriptions: [] as Array<{ dispose(): unknown }> });
   const samples: Array<Record<string, number>> = [];
-  let view = createWebviewDomHarness();
+  let view = createWebviewDomHarness(null, { serializeMarkup: true });
   const posts: Array<Record<string, any>> = [];
+  let observeSubmissionPost: ((value: Record<string, any>) => void) | undefined;
   let lastContext = context();
   try {
     const started = performance.now();
@@ -106,7 +107,8 @@ test('real activation, stores, Host and generated Webview keep old V1/Memento/ta
     assert.equal(host.sessionStore.getActiveSession().contextInstructions, undefined);
     assert.equal(host.sessionStore.getActiveSession().approvalMode, 'ask');
     const ready = performance.now();
-    view.element('promptInput').textContent = 'Draft remains editable';
+    const retainedDraft = 'Draft remains editable 中文🙂e\u0301';
+    view.element('promptInput').textContent = retainedDraft;
     view.element('promptInput').dispatchEvent({ type: 'input' });
     assert.equal(view.element('promptInput').getAttribute('contenteditable'), 'true');
     view.element('settingsApiKeyMenuItem').click();
@@ -117,7 +119,21 @@ test('real activation, stores, Host and generated Webview keep old V1/Memento/ta
     const accountReady = performance.now();
     await host.handleMessage({ type: 'ready' });
     assert.equal(host.sessionStore.activeSessionId, initialId, 'duplicate ready is the same activation target');
-    assert.equal(view.element('promptInput').textContent, 'Draft remains editable');
+    assert.equal(view.element('promptInput').textContent, retainedDraft);
+    const initialActivationId = view.state.activationId;
+    assert.ok(typeof initialActivationId === 'string' && initialActivationId);
+    const rebuildState = view.savedWebviewState();
+    disposed();
+    view = createWebviewDomHarness(rebuildState, { serializeMarkup: true });
+    provider.resolveWebviewView({ webview: { cspSource: 'test', asWebviewUri: (uri: unknown) => uri,
+      onDidReceiveMessage: () => ({ dispose() {} }), postMessage: async (value: Record<string, any>) => { posts.push(value); view.receive(value); return true; } },
+      onDidDispose: (callback: () => void) => { disposed = callback; return { dispose() {} }; } } as never);
+    await host.handleMessage({ type: 'ready' });
+    assert.equal(host.sessionStore.activeSessionId, initialId);
+    assert.equal(view.state.activationId, initialActivationId);
+    assert.equal(view.element('promptInput').textContent, retainedDraft, 'same-host reconstruction restores the ordinary unsent Unicode draft');
+    assert.equal(view.posted.some(message => message.type === 'sendPrompt'), false);
+    const previousActivationDraftState = view.savedWebviewState();
     await host.cleanupExpiredSessions();
     for (const callback of events.get('config') ?? []) callback({ affectsConfiguration: () => true });
     for (const callback of events.get('trust') ?? []) callback();
@@ -142,14 +158,29 @@ test('real activation, stores, Host and generated Webview keep old V1/Memento/ta
     for (const subscription of lastContext.subscriptions) subscription.dispose();
     lastContext = context();
     await activate(lastContext as never);
-    view = createWebviewDomHarness();
+    view = createWebviewDomHarness(previousActivationDraftState, { serializeMarkup: true });
     provider.resolveWebviewView({ webview: { cspSource: 'test', asWebviewUri: (uri: unknown) => uri,
-      onDidReceiveMessage: () => ({ dispose() {} }), postMessage: async (value: Record<string, any>) => { posts.push(value); view.receive(value); return true; } },
+      onDidReceiveMessage: () => ({ dispose() {} }), postMessage: async (value: Record<string, any>) => {
+        observeSubmissionPost?.(value); posts.push(value); view.receive(value); return true;
+      } },
       onDidDispose: () => ({ dispose() {} }) } as never);
-    const second = provider as unknown as { sessionStore: ChatSessionStore; handleMessage(message: WebviewMessage): Promise<void> };
+    const second = provider as unknown as { sessionStore: ChatSessionStore; handleMessage(message: WebviewMessage): Promise<void>; initializeAfterWebviewReady(): Promise<void> };
     await second.handleMessage({ type: 'ready' });
     assert.notEqual(second.sessionStore.activeSessionId, initialId, 'new activation creates exactly one new empty target');
     assert.equal(second.sessionStore.messages.length, 0);
+    assert.notEqual(view.state.activationId, initialActivationId);
+    assert.equal(view.element('promptInput').textContent, '', 'a new activation must ignore the previous Webview draft');
+    await second.initializeAfterWebviewReady();
+    const beforeLocalRecoveryPosts = view.posted.length, beforeLocalRecoveryReads = attempts.length;
+    view.element('settingsRecoverDraftMenuItem').click();
+    const orphanChoice = view.element('ordinaryDraftRecoveryEntries').querySelector('[data-ordinary-draft-index="0"]');
+    assert.ok(orphanChoice, 'an unsent ephemeral draft has an explicit local recovery entry');
+    view.element('ordinaryDraftRecoveryEntries').dispatchEvent({ type: 'click', target: orphanChoice });
+    assert.equal(view.element('promptInput').textContent, retainedDraft);
+    assert.equal(view.posted.length, beforeLocalRecoveryPosts, 'explicit orphan draft recovery posts no Host/history/Worker/model message');
+    assert.equal(attempts.length, beforeLocalRecoveryReads);
+    assert.equal(second.sessionStore.messages.length, 0);
+    view.window.keepseekInputControls.clearPrompt();
     assert.equal(reads.filter(value => value.historical).length, 0);
     assert.equal(remoteRequests, 0);
     // Exercise the real first submission after the zero-I/O startup evidence.
@@ -157,7 +188,7 @@ test('real activation, stores, Host and generated Webview keep old V1/Memento/ta
     // paths remain real, including the exact user-body durability barrier.
     const sending = provider as unknown as { sourceStore: ModelSourceStore; sessionStore: ChatSessionStore;
       ownerReadiness: Promise<unknown>; ensureProjectAssistant(): Promise<void>;
-      initializeAfterWebviewReady(): Promise<void>; handleMessage(message: WebviewMessage): Promise<void> };
+      initializeAfterWebviewReady(): Promise<void>; handleMessage(message: WebviewMessage): Promise<void>; cleanupExpiredSessions(): Promise<void> };
     await sending.initializeAfterWebviewReady();
     await sending.ownerReadiness;
     await sending.ensureProjectAssistant();
@@ -168,8 +199,25 @@ test('real activation, stores, Host and generated Webview keep old V1/Memento/ta
     const currentId = sending.sessionStore.activeSessionId;
     allowCurrentSession(currentId);
     const marker = 'Exact first-send fixture bytes 中文';
+    const firstSendTimes: Partial<Record<'click' | 'preparing' | 'durable' | 'accepted' | 'request', number>> = {};
+    let measuredRequestId: unknown;
+    observeSubmissionPost = value => {
+      if (value.state?.interaction?.sessionId === currentId && value.state.interaction.phase === 'preparing_task') {
+        firstSendTimes.preparing ??= performance.now();
+      }
+      if (value.type === 'submissionResult' && value.sessionId === currentId
+        && value.requestId === measuredRequestId && value.status === 'accepted') firstSendTimes.accepted ??= performance.now();
+    };
+    const originalPersist = sending.sessionStore.persist;
+    sending.sessionStore.persist = async function (reason?: string): Promise<void> {
+      const includesInput = this.activeSessionId === currentId
+        && this.messages.some(message => message.role === 'user' && message.content === marker);
+      await originalPersist.call(this, reason);
+      if (includesInput) firstSendTimes.durable ??= performance.now();
+    };
     let controlledRequests = 0, dispatchAfterDurableAck = false;
     globalThis.fetch = async (_url, options) => {
+      if (!controlledRequests) firstSendTimes.request = performance.now();
       const request = JSON.parse(String(options?.body)) as { stream?: boolean; messages: Array<{ role: string; content: string }> };
       controlledRequests++;
       if (controlledRequests === 1) {
@@ -192,16 +240,37 @@ test('real activation, stores, Host and generated Webview keep old V1/Memento/ta
     view.element('promptInput').textContent = marker;
     view.element('promptInput').dispatchEvent({ type: 'input' });
     assert.equal(view.element('sendButton').disabled, false);
-    view.element('composer').dispatchEvent({ type: 'submit' });
-    const submission = view.posted.filter(post => post.type === 'sendPrompt').at(-1)!;
-    assert.ok(submission && submission.sessionId === currentId);
-    await sending.handleMessage({ ...submission, sourceId: source.id, modelId: 'controlled-fixture-model' } as WebviewMessage);
+    try {
+      firstSendTimes.click = performance.now();
+      view.element('composer').dispatchEvent({ type: 'submit' });
+      const submission = view.posted.filter(post => post.type === 'sendPrompt').at(-1)!;
+      assert.ok(submission && submission.sessionId === currentId);
+      measuredRequestId = submission.requestId;
+      await sending.handleMessage({ ...submission, sourceId: source.id, modelId: 'controlled-fixture-model' } as WebviewMessage);
+    } finally {
+      sending.sessionStore.persist = originalPersist;
+      observeSubmissionPost = undefined;
+    }
     assert.equal(dispatchAfterDurableAck, true);
     assert.equal(sending.sessionStore.messages.filter(message => message.role === 'user').length, 1);
     assert.equal(view.element('promptInput').textContent, '');
     assert.equal(await readFile(legacyPath, 'utf8'), originalLegacy);
+    for (const stage of ['click', 'preparing', 'durable', 'accepted', 'request'] as const) {
+      assert.equal(typeof firstSendTimes[stage], 'number', `first send records ${stage}`);
+    }
+    assert.ok(firstSendTimes.click! <= firstSendTimes.preparing!
+      && firstSendTimes.preparing! <= firstSendTimes.durable!
+      && firstSendTimes.durable! <= firstSendTimes.accepted!
+      && firstSendTimes.accepted! <= firstSendTimes.request!, 'first send prepares and durably commits before acceptance and dispatch');
     t.diagnostic(JSON.stringify({ firstSend: { modelAndTitleRequests: controlledRequests,
-      durableBeforeAckAndDispatch: dispatchAfterDurableAck, userMessages: 1 } }));
+      durableBeforeAckAndDispatch: dispatchAfterDurableAck, userMessages: 1,
+      elapsedFromClickMs: { preparing: firstSendTimes.preparing! - firstSendTimes.click!,
+        durable: firstSendTimes.durable! - firstSendTimes.click!, accepted: firstSendTimes.accepted! - firstSendTimes.click!,
+        controlledRequest: firstSendTimes.request! - firstSendTimes.click! },
+      intervalMs: { clickToPreparing: firstSendTimes.preparing! - firstSendTimes.click!,
+        preparingToDurable: firstSendTimes.durable! - firstSendTimes.preparing!,
+        durableToAccepted: firstSendTimes.accepted! - firstSendTimes.durable!,
+        acceptedToControlledRequest: firstSendTimes.request! - firstSendTimes.accepted! } } }));
 
     await sending.handleMessage({ type: 'newSession' });
     const cancelSessionId = sending.sessionStore.activeSessionId;
@@ -245,6 +314,11 @@ test('real activation, stores, Host and generated Webview keep old V1/Memento/ta
     assert.equal(mementoHistoryReads, 0);
     assert.equal(migrationWrites, 0, 'fresh message barriers publish no old-history index or migration');
     t.diagnostic(JSON.stringify({ cancelDuringDurability: { cancelledRequests: 0, retryUserMessages: 1, retryModelRequests: 1 } }));
+    await sending.handleMessage({ type: 'loadSessionHistory', requestId: 'explicit-history-after-send' });
+    await sending.handleMessage({ type: 'newSession' });
+    const oldAttemptsAfterExplicitHistory = attempts.filter(value => value.historical).length;
+    await sending.cleanupExpiredSessions();
+    assert.equal(attempts.filter(value => value.historical).length, oldAttemptsAfterExplicitHistory, 'idle new blank target does not scan history even after an explicit history menu operation');
     await deactivate();
     // The previous activation used initialize() on this exact V1 fixture. This
     // comparison measures that storage path, not a fabricated native UI time.

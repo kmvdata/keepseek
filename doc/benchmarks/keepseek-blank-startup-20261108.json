@@ -8,9 +8,10 @@
   "fixtureMessages": 3600,
   "samples": [
     {
-      "activateToRegisteredMs": 16.280414000000064,
-      "activateToReadyMs": 52.57928400000003,
-      "activateToAccountsMs": 117.11434700000007,
+      "activateToRegisteredMs": 13.509258999999929,
+      "activateToReadyMs": 40.885441000000014,
+      "activateToAccountsMs": 88.06495999999993,
+      "oldReadAttempts": 0,
       "oldReadCount": 0,
       "oldReadBytes": 0,
       "migrations": 0,
@@ -20,28 +21,45 @@
   ],
   "baseline": {
     "kind": "previous activation storage initialize path; not full native activation",
-    "storageInitializeMs": 4613.418602999998,
+    "storageInitializeMs": 230.2436660000003,
     "oldReadCount": 5,
     "oldReadAttempts": 11,
     "oldReadBytes": 2120424,
     "selectedMessages": 30,
     "migrations": 1
   },
-  "scope": "Controlled Node activation/Host/DOM/temporary-filesystem sample; baseline is the former storage initialize path, not native full startup",
+  "scope": "Final-source single controlled Node activation/Host/generated-DOM/temporary-filesystem sample in the five-file focused regression run; baseline is the former storage initialize path, not full native startup",
   "defaultHistoricalReadAttempts": 0,
   "newSendAndCancelRetryOldHistoricalReadAttempts": 0,
+  "explicitOrphanDraftRecovery": {
+    "hostMessages": 0,
+    "historicalReadAttempts": 0,
+    "preservesOriginalDraft": true,
+    "autoSend": false
+  },
   "requestEvidence": {
     "firstSend": {
-      "mainRequests": 1,
-      "persistedBytesBeforeAcceptedAndRequest": true
+      "modelAndTitleRequests": 1,
+      "durableBeforeAckAndDispatch": true,
+      "userMessages": 1,
+      "elapsedFromClickMs": {
+        "preparing": 7.757716999999957,
+        "durable": 251.3879989999998,
+        "accepted": 251.5003999999999,
+        "controlledRequest": 1162.921531
+      },
+      "intervalMs": {
+        "clickToPreparing": 7.757716999999957,
+        "preparingToDurable": 243.63028199999985,
+        "durableToAccepted": 0.11240100000009079,
+        "acceptedToControlledRequest": 911.4211310000001
+      }
     },
-    "cancelDuringReceipt": {
-      "requests": 0,
-      "draftRetained": true
-    },
-    "explicitRetry": {
-      "mainRequests": 1,
-      "userRows": 1
+    "cancelDuringDurability": {
+      "cancelledRequests": 0,
+      "retryUserMessages": 1,
+      "retryModelRequests": 1
     }
-  }
+  },
+  "durabilityEvidence": "Exact fixture user bytes are read from durable current-session storage before matching accepted feedback and the first controlled request; a cancelled committed tail is reused only on explicit retry"
 }

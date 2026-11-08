@@ -5,6 +5,7 @@ import { inspectDraftRunDependencies, inspectDraftRunDependencyFacts, inspectGit
 import { isSuccessfulDraftRunOutcome, normalizeGitQueryResult } from './gitQueryResult';
 import { writeJsonAtomic } from '../shared/atomicStorage';
 import { readSessionAuditLanes, sessionAuditLaneUri } from '../shared/sessionAuditLanes';
+import { RecoveryMetadataReader, metadataRecords, type RecoveryMetadataInspectionOptions, type RecoveryMetadataSummary } from '../shared/recoveryMetadataInspection';
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { getConfiguredDraftRunMaxTranscriptBytes } from '../shared/config';
@@ -98,6 +99,30 @@ export class DraftRunStore {
   public async initializeFreshSession(sessionId: string): Promise<void> {
     sessionAuditLaneUri(this.sessionLanesUri, sessionId);
     this.freshSessionIds.add(sessionId);
+  }
+
+  /** Explicit owner diagnostics: no initialize/recovery, no saved bytes change. */
+  public async inspectPersistedMetadata(options: RecoveryMetadataInspectionOptions = {}): Promise<RecoveryMetadataSummary> {
+    const reader = new RecoveryMetadataReader(options);
+    const metadata = new Map<string, { status: string; unknown: boolean }>();
+    const inspect = (value: Record<string, unknown> | undefined) => {
+      if (!value) return;
+      if (value.version !== 1) { reader.summary.malformedFiles++; return; }
+      for (const run of metadataRecords(value.draftRuns)) {
+        if (typeof run.id !== 'string') continue;
+        const status = ['pending', 'approved', 'running', 'done', 'failed', 'cancelled', 'rejected', 'needs_replan', 'no_changes'].includes(String(run.status)) ? String(run.status) : 'unrecognized';
+        metadata.set(run.id, { status, unknown: run.executionPhase === 'result_unknown' || run.executionStarted === undefined && Boolean(run.startedAt) && status === 'failed' });
+      }
+    };
+    inspect(await reader.read(this.storageUri));
+    for (const lane of await reader.lanes(this.sessionLanesUri)) inspect(await reader.read(lane));
+    for (const run of metadata.values()) {
+      reader.summary.states[run.status] = (reader.summary.states[run.status] ?? 0) + 1;
+      if (run.status === 'approved' || run.status === 'running') reader.summary.unsettled++;
+      if (run.unknown || run.status === 'unrecognized') reader.summary.unknown++;
+    }
+    reader.summary.records = metadata.size;
+    return reader.finish();
   }
 
   public async initialize(): Promise<void> {

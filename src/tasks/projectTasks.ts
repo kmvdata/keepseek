@@ -561,6 +561,14 @@ export class ProjectTaskService {
       .finally(() => { this.pumping = false; this.wakeIdle(); if (this.reschedule) { this.reschedule = false; this.schedule(); } });
   }
   private async pump(): Promise<void> {
+    try { await this.pumpPending(); }
+    catch (error) {
+      try { await this.options.assertExecutionOwner?.(); }
+      catch { await this.revokePendingAdmissions(error); }
+      throw error;
+    }
+  }
+  private async pumpPending(): Promise<void> {
     while (!this.disposed && !this.closing && this.runtimes.size < this.maxWorkers) {
       const card = this.registry.cards.find(item => this.eligible.has(item.taskCardId) && item.sessionCreated
         && !this.runtimes.has(item.taskCardId) && !this.inputBarriers.has(item.taskCardId) && !item.archived
@@ -582,7 +590,8 @@ export class ProjectTaskService {
       const recovering = input.kind === 'continue' || input.state === 'incorporated' || input.preparedContent !== undefined;
       const identity: TaskExecutionIdentity = { projectId: card.projectId, taskCardId: card.taskCardId, sessionId: card.sessionId,
         rootTaskId: input.rootTaskId, segmentId: recovering && card.segmentId ? card.segmentId : randomUUID(), generation: incrementCounter(card.generation) };
-      await this.options.assertExecutionOwner?.();
+      try { await this.options.assertExecutionOwner?.(); }
+      catch (error) { await this.revokePendingAdmissions(error); throw error; }
       const runtime = new TaskRuntime(Object.freeze(identity), this.options.driverFactory(clone(card)));
       this.runtimes.set(card.taskCardId, runtime);
       try {
@@ -608,6 +617,24 @@ export class ProjectTaskService {
       }
       void this.run(runtime, clone(input));
     }
+  }
+  /** A failed dispatch fence retires the current in-memory queue. A later
+   * owner check or unrelated submission cannot replay accepted old inputs;
+   * explicit per-target resume/submit must grant admission again. */
+  private async revokePendingAdmissions(error: unknown): Promise<void> {
+    const revoked = this.registry.cards.filter(card => this.eligible.has(card.taskCardId))
+      .map(card => ({ taskCardId: card.taskCardId, rootTaskId: card.rootTaskId, generation: card.generation, revision: card.revision }));
+    this.eligible.clear();
+    if (!revoked.length) return;
+    await this.transaction(registry => {
+      for (const previous of revoked) {
+        const card = registry.cards.find(item => item.taskCardId === previous.taskCardId);
+        if (!card || this.runtimes.has(card.taskCardId) || card.rootTaskId !== previous.rootTaskId
+          || card.generation !== previous.generation || card.revision !== previous.revision
+          || !registry.inputs.some(input => input.taskCardId === card.taskCardId && UNFINISHED_INPUT.has(input.state))) continue;
+        card.state = 'interrupted'; card.waitingReason = 'owner_check_requires_resume'; card.error = errorText(error); this.touch(card);
+      }
+    }, 'settlement').catch(() => { /* A lost writer cannot alter its durable predecessor's records. */ });
   }
   private async run(runtime: TaskRuntime, input: TaskInput): Promise<void> {
     const identity = runtime.identity;

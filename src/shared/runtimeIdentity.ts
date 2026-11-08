@@ -35,4 +35,6 @@ export function initializeRuntimeIdentity(input: Parameters<typeof captureRuntim
   activeIdentity ??= captureRuntimeIdentity(input);
 }
 export function getRuntimeIdentity() { return activeIdentity; }
+/** Called after the activation's shutdown barrier, never while its work runs. */
+export function clearRuntimeIdentity(): void { activeIdentity = undefined; }
 function sha(value: string | Uint8Array): string { return createHash('sha256').update(value).digest('hex'); }

@@ -1,13 +1,13 @@
 import './registerVscodeStub';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { test } from 'node:test';
 import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
 import type { KeepseekModel } from '../src/shared/types';
 
 import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { TestContext } from 'node:test';
 import * as vscode from './stubs/vscode';
@@ -95,8 +95,9 @@ async function accountFixture(t: TestContext) {
   const previousAlignment = (vscode as unknown as { StatusBarAlignment?: unknown }).StatusBarAlignment;
   Object.assign(vscode, { StatusBarAlignment: { Left: 1, Right: 2 } });
   Object.assign(vscode.window, { createStatusBarItem: () => ({ show() {}, hide() {}, dispose() {} }) });
-  const live = await ProjectExecutionOwner.acquire({ projectUri: root, lockRoot: join(root, 'locks') });
-  const observer = await ProjectExecutionOwner.acquire({ projectUri: root, lockRoot: join(root, 'locks') });
+  const bootIdentityProbe = async () => `${process.platform}:${hostname()}:00000000-0000-4000-8000-000000000001`;
+  const live = await ProjectExecutionOwner.acquire({ projectUri: root, lockRoot: join(root, 'locks'), bootIdentityProbe });
+  const observer = await ProjectExecutionOwner.acquire({ projectUri: root, lockRoot: join(root, 'locks'), bootIdentityProbe });
   assert.equal(live.isOwner, true);
   assert.equal(observer.isOwner, false);
   const storage = new GlobalSessionStorage(uri as never);
@@ -123,8 +124,29 @@ async function accountFixture(t: TestContext) {
     else Object.assign(vscode, { StatusBarAlignment: previousAlignment });
     await rm(root, { recursive: true, force: true });
   });
-  return { root, view, posts, host, store };
+  return { root, view, posts, host, store, live, observer };
 }
+
+test('real observer Host checks legacy metadata explicitly without repairing records or granting execution', async t => {
+  const f = await accountFixture(t);
+  await f.live.dispose();
+  const lock = join(f.root, 'locks', f.observer.projectId + '.lock');
+  const identity = JSON.parse(await readFile(lock, 'utf8'));
+  await writeFile(lock, JSON.stringify({ ...identity, version: 1, processId: 2147483647, acquiredAt: new Date().toISOString() }));
+  const aggregate = join(f.root, 'draft-runs.json');
+  const original = JSON.stringify({ version: 1, draftRuns: [{ id: 'legacy-record', status: 'failed', executionPhase: 'result_unknown',
+    outputHead: 'PRIVATE-LEGACY-OUTPUT', spec: { args: ['PRIVATE-LEGACY-ARGV'] } }] });
+  await writeFile(aggregate, original);
+  await f.host.handleMessage({ type: 'checkProjectOwnership', requestId: 'legacy-check' });
+  const diagnostic = f.posts.filter(message => message.type === 'projectOwnerState' && message.diagnostics).at(-1)!;
+  assert.equal(diagnostic.state.reasonCode, 'legacy_evidence_required');
+  assert.match(diagnostic.diagnostics.summary, /1 command records|命令 1 项/u);
+  assert.match(diagnostic.diagnostics.summary, /unverified|do not prove|无法核实|不能单独证明/u);
+  assert.doesNotMatch(JSON.stringify(diagnostic), /PRIVATE-LEGACY/u);
+  assert.equal(f.observer.isOwner, false);
+  assert.equal(await readFile(aggregate, 'utf8'), original);
+  assert.equal(f.store.messages.length, 0);
+});
 
 test('observer account entry opens before local account I/O; saving first account works with hung session safety and no model', async t => {
   const f = await accountFixture(t);

@@ -6,7 +6,7 @@ import * as os from 'node:os';
 import { promisify } from 'node:util';
 import type * as vscode from 'vscode';
 import { LocalKernelMutex, type LocalMutexLease } from './localKernelMutex';
-import { ProjectOperationJournal, readMachineBootTime, readProcessIdentity, writeDurableLocalJson, type ProjectOperationHandle, type ProjectOperationInput, type ProjectOperationRecord } from './projectOperationJournal';
+import { ProjectOperationJournal, isCurrentHostBootIdentity, readMachineBootIdentity, readProcessIdentity, writeDurableLocalJson, type ProjectOperationHandle, type ProjectOperationInput, type ProjectOperationRecord } from './projectOperationJournal';
 import { ProjectScopeRegistry, ProjectScopeConflictError, type ActiveProjectScope } from './projectScopeRegistry';
 
 export interface ProjectOwnerIdentity {
@@ -32,8 +32,8 @@ export interface ProjectOwnerOptions {
   projectUri: string | vscode.Uri;
   /** Shared machine-local directory; never a workspace-keyed storage directory. */
   lockRoot?: string;
-  /** Trusted test seam for OS boot-evidence failure and clock fixtures. */
-  bootTimeProbe?: () => Promise<number | undefined>;
+  /** Trusted test seam for stable OS boot-session identity fixtures. */
+  bootIdentityProbe?: () => Promise<string | undefined>;
   /** Integration tests bypass the controlled harness to test the actual OS. */
   mutexBackend?: 'native';
 }
@@ -58,9 +58,11 @@ export class ProjectExecutionOwner {
   private projectScope?: { selectionPath: string; dev: number; ino: number; gitMarker: string | null };
   private options?: ProjectOwnerOptions;
   private legacy = false;
+  private bootEvidenceAvailable?: boolean;
   private closed = false;
   private disposal?: Promise<void>;
   private pendingCheck?: Promise<ProjectExecutionOwner>;
+  private initialReadiness?: Promise<ProjectExecutionOwner>;
   private pendingWrites: Promise<void> = Promise.resolve();
   private readonly uncertainOperations = new Set<string>();
   private activeOperations = 0;
@@ -115,6 +117,7 @@ export class ProjectExecutionOwner {
       owner.setState('error', 'ownership_initialization_failed', error instanceof Error ? error.message : 'Project ownership initialization failed. / 项目所有权初始化失败。');
       return owner;
     });
+    owner.initialReadiness = ready;
     return { owner, ready };
   }
   private static async acquireChecked(options: ProjectOwnerOptions, owner: ProjectExecutionOwner): Promise<ProjectExecutionOwner> {
@@ -152,7 +155,7 @@ export class ProjectExecutionOwner {
       owner.setState('unsupported', 'filesystem_unverified', 'This filesystem has no verified local ownership backend. / 此文件系统没有经过验证的本地所有权锁。'); return owner;
     }
     owner.lockPath = path.join(lockRoot, `${id}.lock`);
-    owner.journal = new ProjectOperationJournal(path.join(lockRoot, `${id}.operations.json`), id);
+    owner.journal = new ProjectOperationJournal(path.join(lockRoot, `${id}.operations.json`), id, options.bootIdentityProbe);
     owner.scopeRegistry = new ProjectScopeRegistry(lockRoot, options.mutexBackend === 'native');
     return owner.retryAcquire();
   }
@@ -179,19 +182,23 @@ export class ProjectExecutionOwner {
       }
       this.setState('recovering', 'journal_check', 'Checking unsettled project operations. / 正在核对项目未结算操作。');
       let saved: ProjectOwnerIdentity | undefined;
+      let savedBytes: Buffer | undefined;
       try {
         const recordInfo = await lstat(this.lockPath);
         if (recordInfo.isSymbolicLink() || !recordInfo.isFile()) throw new Error('Project owner record is not a regular private file. / 项目所有权记录不是私有普通文件。');
-        saved = parseOwner(await readFile(this.lockPath, 'utf8'));
+        savedBytes = await readFile(this.lockPath);
+        saved = parseOwner(savedBytes.toString('utf8'));
       }
       catch (error) {
         if (code(error) !== 'ENOENT') {
           const recordInfo = await lstat(this.lockPath).catch(() => undefined);
-          const bootTime = await (this.options.bootTimeProbe ?? readMachineBootTime)();
-          if (recordInfo?.isFile() && !recordInfo.isSymbolicLink() && bootTime !== undefined && recordInfo.mtimeMs < bootTime) {
-            const original = await readFile(this.lockPath);
+          const original = recordInfo?.isFile() && !recordInfo.isSymbolicLink() ? await readFile(this.lockPath) : undefined;
+          if (original && await this.observePriorBoot(original)) {
+            await this.assertLockBytesUnchanged(original);
             await writeDurableLocalJson(`${this.lockPath}.damaged-${hash(original.toString('base64')).slice(0, 16)}.json`, JSON.stringify({ recovery: 'machine_reboot_verified', originalBytesBase64: original.toString('base64') }));
-          } else throw new Error('Project lock is incomplete or unreadable. Inspect records, or restart the computer then Check ownership; confirmation alone cannot release isolation. / 项目锁不完整或不可读。请检查记录，或重启计算机后点击检查所有权；单纯确认不能解除隔离。');
+          } else throw new Error(this.bootEvidenceAvailable === false
+            ? 'Project lock is incomplete or unreadable, and stable OS boot-session identity is unavailable; reboot recovery cannot be verified here. / 项目锁不完整或不可读，且无法取得稳定的系统启动标识，当前环境不能核实重启恢复。'
+            : 'Project lock is incomplete or unreadable. Check ownership before and after restarting the computer; confirmation alone cannot release isolation. / 项目锁不完整或不可读。请先检查所有权，重启计算机后再检查；单纯确认不能解除隔离。');
         }
       }
       const loaded = await this.journal.load();
@@ -201,12 +208,22 @@ export class ProjectExecutionOwner {
       this.previousIdentity = saved;
       this.legacy = saved?.version === 1;
       if (this.legacy) {
-        const bootTime = await (this.options.bootTimeProbe ?? readMachineBootTime)();
-        const acquiredAt = Date.parse(saved!.acquiredAt);
-        if (bootTime !== undefined && Number.isFinite(acquiredAt) && acquiredAt < bootTime) {
+        // Legacy records have no process-start/boot identity. A reboot-time
+        // comparison must never override a live or unverifiable PID: a wall
+        // clock correction can move the reported boot epoch within one boot.
+        let exited = false;
+        try { process.kill(saved!.processId, 0); }
+        catch (error) { exited = code(error) === 'ESRCH'; }
+        if (!exited) {
+          await this.mutex.release(); this.mutex = undefined;
+          this.setState('owned_elsewhere', 'legacy_owner_live_or_unverifiable', 'The legacy owner PID is still live or cannot be verified; execution remains isolated. / 旧版宿主 PID 仍存活或无法验证，继续隔离执行。');
+          return this;
+        }
+        if (await this.observePriorBoot(savedBytes!)) {
           // A verified whole-machine restart proves even detached/escaped
           // descendants ended. Preserve the original v1 record before upgrade.
-          await writeDurableLocalJson(`${this.lockPath}.legacy-${hash(saved!.nonce).slice(0, 16)}.json`, JSON.stringify(saved));
+          await this.assertLockBytesUnchanged(savedBytes!);
+          await writeDurableLocalJson(`${this.lockPath}.legacy-${hash(saved!.nonce).slice(0, 16)}.json`, savedBytes!.toString('utf8'));
           await this.journal.initialize(randomUUID());
           await this.journal.recordRecovery(saved!.nonce, 'legacy_machine_reboot_verified_result_unknown_no_replay');
           this.legacy = false;
@@ -214,12 +231,8 @@ export class ProjectExecutionOwner {
         }
       }
       if (this.legacy) {
-        let alive = true;
-        try { process.kill(saved!.processId, 0); } catch (error) { if (code(error) === 'ESRCH') alive = false; }
-        if (alive) {
-          await this.mutex.release(); this.mutex = undefined;
-          this.setState('owned_elsewhere', 'legacy_owner_live_or_unverifiable', 'A legacy execution owner remains alive or cannot be verified. / 旧版执行宿主仍存活或无法验证。');
-        } else this.setState('blocked', 'legacy_evidence_required', 'Previous legacy host stopped; detached-process identities are missing. Inspect existing operation records, or restart the computer then Check ownership to prove old processes ended. Confirmation alone cannot release isolation. / 旧宿主已退出，但缺少遗留进程身份；请核对操作记录，或重启计算机后点击检查所有权，以证实旧进程已结束。单纯确认不能解除隔离。');
+        if (this.bootEvidenceAvailable === false) this.setState('blocked', 'legacy_boot_identity_unavailable', 'Stable OS boot-session identity is unavailable; reboot recovery cannot be verified here. Existing operation metadata can be inspected but does not authorize takeover. / 当前环境无法取得稳定的系统启动标识，不能核实重启恢复；可以检查已有操作元数据，但不能据此接管。');
+        else this.setState('blocked', 'legacy_evidence_required', 'Previous legacy host stopped; detached-process identities are missing. Check ownership now, restart the computer, then check again to verify a different boot session. Confirmation alone cannot release isolation. / 旧宿主已退出，但缺少遗留进程身份；请先检查所有权，重启计算机后再检查，以核实启动会话已改变。单纯确认不能解除隔离。');
         return this;
       }
       if (saved && (!loaded || !this.journal.recognizesGeneration(saved.nonce))) {
@@ -269,6 +282,32 @@ export class ProjectExecutionOwner {
       this.legacy ? 'legacy_no_durable_dispatch_identity: inspect DraftRun/ChangeSet records; confirmation alone cannot settle an unknown process' : 'journal_checked'
     ] };
   }
+
+  /** Legacy records have no boot ID. Observe the exact immutable lock bytes
+   * under exclusion, then require a different stable boot session on a later
+   * check. Neither wall-clock age nor a first observation authorizes takeover.
+   */
+  private async observePriorBoot(bytes: Uint8Array): Promise<boolean> {
+    const bootIdentity = await (this.options?.bootIdentityProbe ?? readMachineBootIdentity)();
+    this.bootEvidenceAvailable = isCurrentHostBootIdentity(bootIdentity);
+    if (!this.bootEvidenceAvailable) return false;
+    const lockHash = createHash('sha256').update(bytes).digest('hex');
+    const observation = `${this.lockPath}.observed-${lockHash}.json`;
+    try {
+      const saved = JSON.parse(await readFile(observation, 'utf8')) as Record<string, unknown>;
+      if (saved.version !== 1 || saved.projectId !== this.projectId || saved.lockHash !== lockHash
+        || saved.hostname !== os.hostname() || !isCurrentHostBootIdentity(saved.bootIdentity)) return false;
+      return saved.bootIdentity !== bootIdentity;
+    } catch (error) {
+      if (code(error) !== 'ENOENT') return false;
+      await writeDurableLocalJson(observation, JSON.stringify({ version: 1, projectId: this.projectId,
+        lockHash, hostname: os.hostname(), bootIdentity }));
+      return false;
+    }
+  }
+  private async assertLockBytesUnchanged(expected: Uint8Array): Promise<void> {
+    if (Buffer.compare(await readFile(this.lockPath!), expected) !== 0) throw new Error('Legacy lock changed during diagnosis; check ownership again. / 旧锁在诊断期间发生变化，请重新检查所有权。');
+  }
   public assertOwner(): void { if (!this.isOwner) throw new Error(this.reason ?? 'Project execution ownership was lost. / 项目执行所有权已失效。'); }
 
   /** The exclusive socket remains continuously held across verify→dispatch and
@@ -314,6 +353,7 @@ export class ProjectExecutionOwner {
     return this.disposal;
   }
   private async releaseAfterDrain(): Promise<void> {
+    await this.initialReadiness;
     await this.pendingCheck;
     await this.pendingWrites; await this.journal?.flush();
     if (this.registeredScope) await this.scopeRegistry?.release(this.registeredScope, !this.hasUncertainOperations);

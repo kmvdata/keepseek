@@ -2,6 +2,7 @@ import './registerVscodeStub';
 import './freshBootStorage.test';
 import './freshSafetyStores.test';
 import './projectTasks.test';
+import './legacyOperationDiagnostics.test';
 import './taskUsageSnapshot.test';
 import './approvalMode.test';
 import './approvalReviewer.test';

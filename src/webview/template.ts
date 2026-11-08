@@ -57,6 +57,12 @@ export function getTemplate(extensionInfo?: Pick<KeepseekExtensionInfo, 'version
           <span class="command-row-description" data-i18n="settingsHistoryMenuDescription">默认显示范围与 60 天清理</span>
         </span>
       </button>
+      <button id="settingsRecoverDraftMenuItem" type="button" class="command-row settings-menu-row" aria-haspopup="dialog" aria-controls="ordinaryDraftRecoveryMenu">
+        <span class="command-row-main">
+          <span class="command-row-title" data-i18n="recoverOrdinaryDraft">恢复草稿</span>
+          <span class="command-row-description" data-i18n="recoverOrdinaryDraftDescription">手动找回此窗口保存的未发送输入</span>
+        </span>
+      </button>
       <div class="settings-debug-item">
         <button id="settingsDebugMenuItem" type="button" class="command-row settings-menu-row" aria-haspopup="menu" aria-expanded="false">
           <span class="command-row-main">
@@ -105,6 +111,16 @@ export function getTemplate(extensionInfo?: Pick<KeepseekExtensionInfo, 'version
     </div>
 
     <div id="sessionMenu" class="session-menu hidden" role="menu" aria-label="Session history" data-i18n-aria-label="sessionHistory"></div>
+    <div id="ordinaryDraftRecoveryMenu" class="session-menu hidden" role="dialog" aria-label="恢复草稿" data-i18n-aria-label="recoverOrdinaryDraft">
+      <div class="session-menu-title" data-i18n="recoverOrdinaryDraft">恢复草稿</div>
+      <div id="ordinaryDraftRecoveryStatus" class="session-menu-empty" role="status"></div>
+      <div id="ordinaryDraftRecoveryEntries"></div>
+      <div class="session-menu-controls">
+        <button id="ordinaryDraftRecoveryPrevious" type="button" class="secondary" data-i18n="recoverDraftPrevious">上一页</button>
+        <button id="ordinaryDraftRecoveryNext" type="button" class="secondary" data-i18n="recoverDraftNext">下一页</button>
+        <button id="ordinaryDraftRecoveryClose" type="button" class="secondary" data-i18n="cancel">取消</button>
+      </div>
+    </div>
 
     <div class="context-bar hidden" id="contextBarOuter">
       <div class="context-bar-inner" id="contextBar"></div>

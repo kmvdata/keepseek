@@ -103,7 +103,8 @@ export class ProjectAssistantHost {
   private readonly taskPins = new Map<string, () => void>();
   private projectStore?: ChatSessionStore;
   private readonly sessionStores = new Map<string, Promise<ChatSessionStore>>();
-  private readonly scopedStores = new Set<ChatSessionStore>();
+  private readonly scopedStores = new Set<WeakRef<ChatSessionStore>>();
+  private readonly trackedStores = new WeakSet<ChatSessionStore>();
   private observerWatcher?: FSWatcher;
   private observerRefresh?: Promise<void>;
   private readonly storageBase: vscode.Uri;
@@ -234,17 +235,20 @@ export class ProjectAssistantHost {
     const readOnly = !this.options.owner.canWriteStorage;
     this.options.sessionStore.setReadOnly(readOnly);
     this.projectStore?.setReadOnly(readOnly);
-    for (const store of this.scopedStores) store.setReadOnly(readOnly);
+    for (const reference of this.scopedStores) {
+      const store = reference.deref();
+      if (store) store.setReadOnly(readOnly); else this.scopedStores.delete(reference);
+    }
   }
   private trackStorage(store: ChatSessionStore): ChatSessionStore {
     if (this.disposed) {
       // An old view lookup may resolve during root shutdown. It cannot revoke
       // a shared store that another admitted runtime is still settling.
-      if (store !== this.options.sessionStore && !this.scopedStores.has(store)) store.setReadOnly(true);
+      if (store !== this.options.sessionStore && !this.trackedStores.has(store)) store.setReadOnly(true);
       return store;
     }
     store.setReadOnly(!this.options.owner.canWriteStorage);
-    this.scopedStores.add(store);
+    if (!this.trackedStores.has(store)) { this.trackedStores.add(store); this.scopedStores.add(new WeakRef(store)); }
     return store;
   }
   isSourceInUse(sourceId: string): boolean {

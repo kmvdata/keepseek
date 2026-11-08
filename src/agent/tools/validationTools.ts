@@ -19,10 +19,28 @@ import type {
 import { RUN_VALIDATION_TOOL_NAME } from '../protocol';
 import { hasValidationBlockingRisk } from './validationRisk';
 import { assertProjectMutationLease, beginProjectDurableOperation, getProjectExecutionContext, withProjectMutationPhase } from '../../tasks/projectResources';
+import type { RecoveryMetadataSummary } from '../../shared/recoveryMetadataInspection';
 
 const MAX_DIAGNOSTIC_ITEMS = 200;
 const SAFE_NPM_SCRIPT_ORDER: SafeNpmScript[] = ['compile', 'lint', 'test'];
 const SAFE_NPM_SCRIPTS = new Set<SafeNpmScript>(SAFE_NPM_SCRIPT_ORDER);
+
+/** Legacy validation results live inside session checkpoints, not a standalone
+ * validation catalog. Explicit diagnostics may inspect the independent owner
+ * journal, and must report unavailable instead of reading historical bodies. */
+export function inspectValidationRecoveryMetadata(operations: readonly { kind: string; state: string; processState?: string }[], legacyOwner: boolean): RecoveryMetadataSummary {
+  const records = operations.filter(operation => operation.kind === 'validation');
+  const summary: RecoveryMetadataSummary = { availability: records.length ? 'found' : legacyOwner ? 'unavailable' : 'missing',
+    records: records.length, states: {}, unsettled: 0, unknown: 0, filesRead: 0, bytesRead: 0,
+    malformedFiles: 0, inaccessibleFiles: 0, truncated: false, scope: 'extension_storage', settlementProof: false };
+  for (const record of records) {
+    const state = ['intent', 'dispatched', 'completed', 'not_dispatched', 'result_unknown'].includes(record.state) ? record.state : 'unrecognized';
+    summary.states[state] = (summary.states[state] ?? 0) + 1;
+    if (!['completed', 'not_dispatched'].includes(state) && record.processState !== 'ended') summary.unsettled++;
+    if (state === 'result_unknown' || state === 'unrecognized') summary.unknown++;
+  }
+  return summary;
+}
 
 export interface ValidationToolAdapter {
   readWorkspaceDiagnostics(language: KeepseekLanguage): Promise<string>;

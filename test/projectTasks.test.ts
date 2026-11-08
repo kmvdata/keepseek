@@ -58,6 +58,44 @@ test('default scheduler runs two distinct Worker drivers; the third is durably q
   } finally { release.resolve(); await f.cleanup(); }
 });
 
+test('owner quarantine retires queued admissions; recovery and unrelated input cannot restart them', async () => {
+  const release = gate();
+  let owned = true;
+  const executions: string[] = [];
+  const f = await fixture({ maxWorkers: 1,
+    assertExecutionOwner: () => { if (!owned) throw new Error('controlled_owner_quarantine'); },
+    assertStorageWriter: () => undefined,
+    driverFactory: () => ({ execute: async context => {
+      executions.push(context.input.content);
+      await context.prepareInput(context.input.content, context.input.inputId);
+      await context.incorporated(context.input.inputId);
+      if (context.input.content === 'active') await release.promise;
+      return { result: context.input.content };
+    } }) });
+  try {
+    await f.service.createTask({ requestId: 'active', content: 'active', snapshot });
+    await until(() => executions.length === 1);
+    const b = await f.service.createTask({ requestId: 'queued-b', content: 'queued-b', snapshot });
+    const c = await f.service.createTask({ requestId: 'queued-c', content: 'queued-c', snapshot });
+    const oldActivity = f.service.get(b.card.taskCardId)?.lastActivityAt;
+    owned = false; release.resolve(); await f.service.whenIdle();
+    assert.deepEqual(executions, ['active']);
+    assert.equal(f.service.get(b.card.taskCardId)?.state, 'interrupted');
+    assert.equal(f.service.get(c.card.taskCardId)?.state, 'interrupted');
+    assert.equal(f.service.get(b.card.taskCardId)?.lastActivityAt, oldActivity, 'quarantine is audit, not new task activity');
+    assert.equal(f.service.inputs(b.card.taskCardId)[0].state, 'durable');
+    owned = true;
+    await f.service.createTask({ requestId: 'independent', content: 'independent', snapshot });
+    await f.service.whenIdle();
+    assert.deepEqual(executions, ['active', 'independent']);
+    assert.equal(f.service.get(b.card.taskCardId)?.state, 'interrupted');
+    assert.equal(f.service.get(c.card.taskCardId)?.state, 'interrupted');
+    await f.service.resume(b.card.taskCardId); await f.service.whenIdle();
+    assert.deepEqual(executions, ['active', 'independent', 'queued-b'], 'only explicit target continuation grants admission again');
+    assert.equal(f.service.get(c.card.taskCardId)?.state, 'interrupted');
+  } finally { release.resolve(); await f.cleanup(); }
+});
+
 test('detaching or failing the view observer cannot reject durable inputs or terminate Worker execution', async () => {
   const seen: TaskExecutionContext[] = [];
   const f = await fixture({ onChange: () => { throw new Error('webview detached'); }, driverFactory: () => completeDriver(seen) });

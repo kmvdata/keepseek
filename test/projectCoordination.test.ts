@@ -293,7 +293,7 @@ describe('physical project execution ownership', () => {
     } finally { await f.cleanup(); }
   });
 
-  it('keeps a legacy same-boot owner isolated and recovers only with machine-reboot evidence', async () => {
+  it('keeps first legacy observations isolated and recovers only after a stable boot-session change', async () => {
     for (const bootEvidence of ['missing', 'same-boot', 'rebooted', 'wrong-host'] as const) {
       const f = await fixture();
       try {
@@ -305,12 +305,91 @@ describe('physical project execution ownership', () => {
         record.acquiredAt = new Date(Date.now() - 10_000).toISOString();
         if (bootEvidence === 'wrong-host') record.hostname = 'different-host';
         await writeFile(lock, JSON.stringify(record));
+        let bootId = `${process.platform}:${os.hostname()}:00000000-0000-4000-8000-000000000001`;
         const recovered = await acquire({ projectUri: f.project, lockRoot: f.locks,
-          bootTimeProbe: async () => bootEvidence === 'missing' ? undefined : Date.now() - (bootEvidence === 'same-boot' ? 20_000 : 1_000) });
+          bootIdentityProbe: async () => bootEvidence === 'missing' ? undefined : bootId });
+        assert.equal(recovered.isOwner, false, 'a first observation never proves that old descendants exited');
+        if (bootEvidence === 'rebooted') bootId = `${process.platform}:${os.hostname()}:00000000-0000-4000-8000-000000000002`;
+        await recovered.retryAcquire();
         assert.equal(recovered.isOwner, bootEvidence === 'rebooted');
         if (bootEvidence === 'rebooted') {
           assert.equal((JSON.parse(await readFile(lock, 'utf8')) as { version: number }).version, 2);
-        } else assert.match(recovered.reason!, bootEvidence === 'wrong-host' ? /different scope or host/u : /restart the computer/u);
+        } else assert.match(recovered.reason!, bootEvidence === 'wrong-host' ? /different scope or host/u : bootEvidence === 'missing' ? /identity is unavailable/u : /restart the computer/u);
+      } finally { await f.cleanup(); }
+    }
+  });
+
+  it('never lets apparent clock/boot changes override live or unverifiable legacy PID isolation', async () => {
+    for (const probe of ['live', 'denied'] as const) {
+      const f = await fixture(); const originalKill = process.kill;
+      try {
+        const initial = await acquire({ projectUri: f.project, lockRoot: f.locks });
+        const lock = path.join(f.locks, `${initial.projectId}.lock`);
+        const record = JSON.parse(await readFile(lock, 'utf8')) as Record<string, unknown>;
+        await initial.dispose();
+        record.version = 1; record.processId = process.pid; record.acquiredAt = '1970-01-01T00:00:00Z';
+        const original = JSON.stringify(record); await writeFile(lock, original);
+        if (probe === 'denied') process.kill = ((pid: number, signal?: number | NodeJS.Signals) => {
+          if (pid === process.pid && signal === 0) { const error = new Error('denied') as NodeJS.ErrnoException; error.code = 'EPERM'; throw error; }
+          return originalKill(pid, signal);
+        }) as typeof process.kill;
+        let bootChecks = 0;
+        const blocked = await acquire({ projectUri: f.project, lockRoot: f.locks, bootIdentityProbe: async () => { bootChecks++; return `${process.platform}:${os.hostname()}:00000000-0000-4000-8000-000000000004`; } });
+        assert.equal(blocked.isOwner, false); assert.equal(blocked.state.reasonCode, 'legacy_owner_live_or_unverifiable');
+        assert.equal(bootChecks, 0, 'legacy PID guard precedes even a claimed different boot identity');
+        assert.equal(await readFile(lock, 'utf8'), original);
+      } finally { process.kill = originalKill; await f.cleanup(); }
+    }
+  });
+
+  it('proves a journal reboot only from a changed stored stable boot identity, never old timestamps', async () => {
+    for (const storedIdentity of [false, true]) {
+      const f = await fixture();
+      try {
+        const original = await acquire({ projectUri: f.project, lockRoot: f.locks,
+          bootIdentityProbe: async () => storedIdentity ? `${process.platform}:${os.hostname()}:00000000-0000-4000-8000-000000000001` : undefined });
+        await original.beginDurableOperation({ id: 'unknown-dispatch', kind: 'command' });
+        await original.dispose();
+        const journal = path.join(f.locks, `${original.projectId}.operations.json`);
+        const saved = JSON.parse(await readFile(journal, 'utf8')) as { operations: Array<{ createdAt: string }> };
+        saved.operations[0].createdAt = '1970-01-01T00:00:00Z'; await writeFile(journal, JSON.stringify(saved));
+        const successor = await acquire({ projectUri: f.project, lockRoot: f.locks,
+          bootIdentityProbe: async () => `${process.platform}:${os.hostname()}:00000000-0000-4000-8000-000000000002` });
+        assert.equal(successor.isOwner, storedIdentity, 'missing boot identity cannot be replaced with timestamp inference');
+        if (!storedIdentity) assert.equal(successor.state.reasonCode, 'operation_unsettled');
+      } finally { await f.cleanup(); }
+    }
+  });
+
+  it('binds damaged-lock reboot observations to exact bytes so changed records require a new observation', async () => {
+    const f = await fixture();
+    try {
+      const original = await acquire({ projectUri: f.project, lockRoot: f.locks });
+      const lock = path.join(f.locks, `${original.projectId}.lock`); await original.dispose();
+      await writeFile(lock, '{first-corrupt');
+      let bootId = `${process.platform}:${os.hostname()}:00000000-0000-4000-8000-000000000001`;
+      const successor = await acquire({ projectUri: f.project, lockRoot: f.locks, bootIdentityProbe: async () => bootId });
+      assert.equal(successor.isOwner, false);
+      bootId = `${process.platform}:${os.hostname()}:00000000-0000-4000-8000-000000000002`;
+      await writeFile(lock, '{different-corrupt'); await successor.retryAcquire();
+      assert.equal(successor.isOwner, false, 'different lock bytes cannot reuse the older boot observation');
+      bootId = `${process.platform}:${os.hostname()}:00000000-0000-4000-8000-000000000003`; await successor.retryAcquire();
+      assert.equal(successor.isOwner, true);
+    } finally { await f.cleanup(); }
+  });
+
+  it('rejects malformed or foreign journal boot identities instead of treating them as reboot proof', async () => {
+    for (const bootIdentity of [123, '', 'other-platform:other-host:boot', `${process.platform}:${os.hostname()}:malformed-boot`]) {
+      const f = await fixture();
+      try {
+        const original = await acquire({ projectUri: f.project, lockRoot: f.locks });
+        await original.beginDurableOperation({ id: 'unknown', kind: 'command' }); await original.dispose();
+        const journal = path.join(f.locks, `${original.projectId}.operations.json`);
+        const saved = JSON.parse(await readFile(journal, 'utf8')) as { operations: Array<{ bootIdentity?: unknown }> };
+        saved.operations[0].bootIdentity = bootIdentity; await writeFile(journal, JSON.stringify(saved));
+        const successor = await acquire({ projectUri: f.project, lockRoot: f.locks,
+          bootIdentityProbe: async () => `${process.platform}:${os.hostname()}:00000000-0000-4000-8000-000000000002` });
+        assert.equal(successor.isOwner, false); assert.equal(successor.state.status, 'error');
       } finally { await f.cleanup(); }
     }
   });

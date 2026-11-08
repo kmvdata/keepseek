@@ -57,6 +57,7 @@ export function getScript(): string {
       },
       messages: [],
       activeSessionId: '',
+      activationId: '',
       workspaceFolders: [],
       sessionSummaries: [],
       contextFiles: [],
@@ -163,7 +164,137 @@ export function getScript(): string {
     var pendingSubmission = null;
     var submissionSequence = 0;
     var sessionPromptDrafts = new Map();
+    var ordinaryDraftRestoreInProgress = false;
+    var retiredOrdinaryDraftActivations = new Set();
+    var ordinaryDraftRecoveryEntries = [];
+    var ordinaryDraftRecoveryTarget = null;
+    var ordinaryDraftRecoveryPage = 0;
+    var ordinaryDraftRecoveryOpen = false;
+    var ordinaryDraftRecoveryReason = '';
+    var ordinaryDraftRecoveryPageSize = 20;
     var pendingHistoryPreparation = null;
+
+    function readOrdinaryDraftEntries(saved) {
+      var envelope = saved && saved.ordinarySessionDrafts;
+      if (!envelope || envelope.version !== 1 || !Array.isArray(envelope.entries)) return [];
+      return envelope.entries.filter(function(entry) { return entry && typeof entry.activationId === 'string' && entry.activationId
+        && typeof entry.sessionId === 'string' && entry.sessionId && typeof entry.markup === 'string'; });
+    }
+
+    // This is a Webview UI draft, never session/request history or a submission.
+    // Merge shared state so task drafts and sidebar preferences stay intact.
+    function persistOrdinaryComposerDraft(sessionId, activationId) {
+      if (ordinaryDraftRestoreInProgress || projectTaskUiActive() || !promptInput) return;
+      var target = sessionId || state.activeSessionId, owner = activationId || state.activationId;
+      if (!target) return;
+      var markup = promptInput.innerHTML;
+      sessionPromptDrafts.set(target, markup);
+      if (!owner || !vscode.setState) return;
+      try {
+        var saved = vscode.getState ? vscode.getState() || {} : {};
+        if (typeof saved !== 'object' || Array.isArray(saved)) return;
+        if (saved.ordinarySessionDrafts && saved.ordinarySessionDrafts.version !== 1) return;
+        if (saved.ordinarySessionDrafts && !Array.isArray(saved.ordinarySessionDrafts.entries)) return;
+        // Keep unrecognized entries/fields for a later compatible client.
+        var entries = (saved.ordinarySessionDrafts?.entries || []).filter(function(entry) {
+          if (!entry || typeof entry.activationId !== 'string' || typeof entry.sessionId !== 'string' || typeof entry.markup !== 'string') return true;
+          return entry.sessionId !== target || (!markup && entry.activationId !== owner);
+        });
+        if (markup) entries.push({ activationId: owner, sessionId: target, markup: markup });
+        vscode.setState(Object.assign({}, saved, { ordinarySessionDrafts: Object.assign({}, saved.ordinarySessionDrafts, { version: 1, entries: entries }) }));
+      } catch (_error) { /* UI-state failure never consumes or blocks the editor draft. */ }
+    }
+
+    function storedOrdinaryComposerDraft(sessionId) {
+      if (!state.activationId || projectTaskUiActive() || !vscode.getState) return '';
+      try {
+        var explicitHistory = state.historyPreview && state.historyPreview.sessionId === sessionId;
+        var entries = readOrdinaryDraftEntries(vscode.getState());
+        for (var i = entries.length - 1; i >= 0; i--) {
+          if (entries[i].sessionId === sessionId && (entries[i].activationId === state.activationId || explicitHistory)) return entries[i].markup;
+        }
+      } catch (_error) { /* The fresh target stays editable if UI state is unavailable. */ }
+      return '';
+    }
+
+    function reconcileOrdinaryDraftActivation(nextActivationId) {
+      if (projectTaskUiActive() || !nextActivationId || !state.activationId || state.activationId === nextActivationId) return false;
+      persistOrdinaryComposerDraft(state.activeSessionId, state.activationId);
+      retiredOrdinaryDraftActivations.add(state.activationId);
+      sessionPromptDrafts.clear();
+      pendingSubmission = null; pendingHistoryPreparation = null;
+      editingMessageId = ''; editingDraftText = ''; pendingEditFocusId = ''; savedEditRange = null;
+      inlineShortcutController.deactivateMark(); closeEditReferenceMenu(false);
+      projectStateRevisions.clear(); runStreamRevisions.clear(); lastStateRevision = 0;
+      closeOrdinaryDraftRecovery(false);
+      ordinaryDraftRestoreInProgress = true;
+      try { clearPromptDraft(); } finally { ordinaryDraftRestoreInProgress = false; }
+      return true;
+    }
+
+    function ordinaryDraftRecoveryBlocker() {
+      if (projectCompositionActive || projectCompositionTimer) return t('recoverDraftFinishComposition');
+      if (projectTaskUiActive() || state.historyPreview || currentInteraction()?.canRecoverDraft !== true
+        || pendingSubmission || state.isBusy || isBackgroundActive() || editingMessageId
+        || !state.activationId || !state.activeSessionId || (Array.isArray(state.messages) && state.messages.length)) return t('recoverDraftNeedsBlank');
+      if (promptInput.textContent.trim() || promptInput.querySelector('a.rich-file-link, a.rich-skill-link')) return t('recoverDraftNeedsEmpty');
+      return '';
+    }
+
+    function closeOrdinaryDraftRecovery(restoreFocus) {
+      ordinaryDraftRecoveryOpen = false; ordinaryDraftRecoveryTarget = null;
+      ordinaryDraftRecoveryEntries = []; ordinaryDraftRecoveryReason = '';
+      if (ordinaryDraftRecoveryMenu) ordinaryDraftRecoveryMenu.classList.add('hidden');
+      if (ordinaryDraftRecoveryList) ordinaryDraftRecoveryList.replaceChildren();
+      if (restoreFocus && settingsTab) settingsTab.focus();
+    }
+
+    function openOrdinaryDraftRecovery() {
+      closeSettingsMenu();
+      ordinaryDraftRecoveryOpen = true; ordinaryDraftRecoveryPage = 0;
+      ordinaryDraftRecoveryTarget = { activationId: state.activationId, sessionId: state.activeSessionId };
+      ordinaryDraftRecoveryReason = ordinaryDraftRecoveryBlocker(); ordinaryDraftRecoveryEntries = [];
+      if (!ordinaryDraftRecoveryReason) {
+        try {
+          // Enumeration is explicit and local; only one bounded page is rendered.
+          ordinaryDraftRecoveryEntries = readOrdinaryDraftEntries(vscode.getState ? vscode.getState() : null)
+            .filter(function(entry) { return entry.markup.trim(); }).slice().reverse();
+        } catch (_error) { ordinaryDraftRecoveryReason = t('recoverDraftReadFailed'); }
+      }
+      renderOrdinaryDraftRecovery();
+    }
+
+    function renderOrdinaryDraftRecovery() {
+      if (!ordinaryDraftRecoveryMenu || !ordinaryDraftRecoveryList) return;
+      ordinaryDraftRecoveryMenu.classList.toggle('hidden', !ordinaryDraftRecoveryOpen);
+      if (!ordinaryDraftRecoveryOpen) return;
+      ordinaryDraftRecoveryList.replaceChildren();
+      ordinaryDraftRecoveryStatus.textContent = ordinaryDraftRecoveryReason || t(ordinaryDraftRecoveryEntries.length ? 'recoverDraftChoose' : 'recoverDraftNone');
+      var start = ordinaryDraftRecoveryPage * ordinaryDraftRecoveryPageSize;
+      ordinaryDraftRecoveryEntries.slice(start, start + ordinaryDraftRecoveryPageSize).forEach(function(entry, offset) {
+        var button = document.createElement('button'); button.type = 'button'; button.className = 'command-row settings-menu-row';
+        button.dataset.ordinaryDraftIndex = String(start + offset);
+        var preview = entry.markup.slice(0, 512).replace(/<[^>]*>/g, ' ').replace(/\\s+/g, ' ').trim().slice(0, 96);
+        button.textContent = t('recoverDraftChoice', { index: start + offset + 1 }) + ': ' + (preview || t('recoverDraftRichText'));
+        ordinaryDraftRecoveryList.append(button);
+      });
+      ordinaryDraftRecoveryPrevious.disabled = ordinaryDraftRecoveryPage === 0;
+      ordinaryDraftRecoveryNext.disabled = start + ordinaryDraftRecoveryPageSize >= ordinaryDraftRecoveryEntries.length;
+    }
+
+    function recoverOrdinaryDraft(index) {
+      var target = ordinaryDraftRecoveryTarget, entry = ordinaryDraftRecoveryEntries[index];
+      if (!ordinaryDraftRecoveryOpen || !target || !entry) return;
+      var blocker = ordinaryDraftRecoveryBlocker();
+      if (target.activationId !== state.activationId || target.sessionId !== state.activeSessionId) blocker = t('recoverDraftTargetChanged');
+      if (blocker) { ordinaryDraftRecoveryReason = blocker; renderOrdinaryDraftRecovery(); return; }
+      // Copy only the chosen markup. Session identity, approvals, Skills and run
+      // state remain the current fresh target's state; no Host message is sent.
+      window.keepseekInputControls.restoreDraft(entry.markup);
+      persistOrdinaryComposerDraft();
+      closeOrdinaryDraftRecovery(false); promptInput.focus();
+      setTransientStatus(t('recoverDraftRestored'));
+    }
 
     function currentInteraction() {
       return state.interaction && state.interaction.sessionId === state.activeSessionId ? state.interaction : null;
@@ -235,16 +366,21 @@ export function getScript(): string {
       var fromProject = typeof projectLegacyDraftRestorePending !== 'undefined' && projectLegacyDraftRestorePending;
       projectLegacyDraftRestorePending = false;
       if (previousSessionId === nextSessionId && !fromProject) return;
+      closeOrdinaryDraftRecovery(false);
       var startupDraft = !fromProject && !previousSessionId && promptInput ? promptInput.innerHTML : '';
-      if (!fromProject && previousSessionId && promptInput) sessionPromptDrafts.set(previousSessionId, promptInput.innerHTML);
+      if (!fromProject && previousSessionId && promptInput) persistOrdinaryComposerDraft(previousSessionId);
       stopAgentStatusRotation(); agentStatusRotationKey = ''; reconnectStatusActive = false;
       operationStatus = ''; operationStatusKey = '';
       if (transientStatusScope !== 'global') setTransientStatus('');
-      clearPromptDraft();
-      var draft = sessionPromptDrafts.get(nextSessionId) || startupDraft || '';
-      if (window.keepseekInputControls?.restoreDraft) window.keepseekInputControls.restoreDraft(draft);
-      else if (promptInput) promptInput.innerHTML = draft;
-      if (window.keepseekInputControls) window.keepseekInputControls.render();
+      var draft = sessionPromptDrafts.get(nextSessionId) || startupDraft || storedOrdinaryComposerDraft(nextSessionId) || '';
+      ordinaryDraftRestoreInProgress = true;
+      try {
+        clearPromptDraft();
+        if (window.keepseekInputControls?.restoreDraft) window.keepseekInputControls.restoreDraft(draft);
+        else if (promptInput) promptInput.innerHTML = draft;
+        if (window.keepseekInputControls) window.keepseekInputControls.render();
+      } finally { ordinaryDraftRestoreInProgress = false; }
+      persistOrdinaryComposerDraft();
       planExpanded = false; runStreamRevisions.clear();
     }
 
@@ -546,6 +682,12 @@ export function getScript(): string {
     const settingsMenu = document.getElementById('settingsMenu');
     const settingsApiKeyMenuItem = document.getElementById('settingsApiKeyMenuItem');
     const settingsHistoryMenuItem = document.getElementById('settingsHistoryMenuItem');
+    const settingsRecoverDraftMenuItem = document.getElementById('settingsRecoverDraftMenuItem');
+    const ordinaryDraftRecoveryMenu = document.getElementById('ordinaryDraftRecoveryMenu');
+    const ordinaryDraftRecoveryList = document.getElementById('ordinaryDraftRecoveryEntries');
+    const ordinaryDraftRecoveryStatus = document.getElementById('ordinaryDraftRecoveryStatus');
+    const ordinaryDraftRecoveryPrevious = document.getElementById('ordinaryDraftRecoveryPrevious');
+    const ordinaryDraftRecoveryNext = document.getElementById('ordinaryDraftRecoveryNext');
     const settingsRequestTimeoutValue = document.getElementById('settingsRequestTimeoutValue');
     let pendingModelRequestTimeoutSeconds = null;
     let pendingModelRequestTimeoutFocus = false;
@@ -1385,9 +1527,44 @@ export function getScript(): string {
       }
     };
 
+    if (settingsRecoverDraftMenuItem) settingsRecoverDraftMenuItem.addEventListener('click', function(event) {
+      event.preventDefault(); event.stopPropagation(); openOrdinaryDraftRecovery();
+    });
+    if (ordinaryDraftRecoveryList) ordinaryDraftRecoveryList.addEventListener('click', function(event) {
+      var button = event.target instanceof Element ? event.target.closest('button[data-ordinary-draft-index]') : null;
+      if (!button) return;
+      event.preventDefault(); event.stopPropagation(); recoverOrdinaryDraft(Number(button.dataset.ordinaryDraftIndex));
+    });
+    if (ordinaryDraftRecoveryPrevious) ordinaryDraftRecoveryPrevious.addEventListener('click', function() {
+      ordinaryDraftRecoveryPage = Math.max(0, ordinaryDraftRecoveryPage - 1); renderOrdinaryDraftRecovery();
+    });
+    if (ordinaryDraftRecoveryNext) ordinaryDraftRecoveryNext.addEventListener('click', function() {
+      if ((ordinaryDraftRecoveryPage + 1) * ordinaryDraftRecoveryPageSize >= ordinaryDraftRecoveryEntries.length) return;
+      ordinaryDraftRecoveryPage++; renderOrdinaryDraftRecovery();
+    });
+    var ordinaryDraftRecoveryClose = document.getElementById('ordinaryDraftRecoveryClose');
+    if (ordinaryDraftRecoveryClose) ordinaryDraftRecoveryClose.addEventListener('click', function() { closeOrdinaryDraftRecovery(true); });
+    document.addEventListener('mousedown', function(event) {
+      if (ordinaryDraftRecoveryOpen && event.target instanceof Element && !ordinaryDraftRecoveryMenu.contains(event.target)
+        && !settingsRecoverDraftMenuItem.contains(event.target)) closeOrdinaryDraftRecovery(false);
+    });
+    document.addEventListener('keydown', function(event) {
+      if (!ordinaryDraftRecoveryOpen || event.key !== 'Escape' || event.isComposing || event.keyCode === 229 || projectCompositionActive) return;
+      var higherLayer = Array.from(document.querySelectorAll('dialog, [role="dialog"], [aria-modal="true"]')).some(function(node) {
+        return node !== ordinaryDraftRecoveryMenu && !ordinaryDraftRecoveryMenu.contains(node)
+          && !node.closest('.hidden') && (node.tagName !== 'DIALOG' || node.open);
+      });
+      if (higherLayer) return;
+      event.preventDefault(); event.stopImmediatePropagation(); closeOrdinaryDraftRecovery(true);
+    }, true);
+
     ${getProjectTasksScript()}
     ${getInputScript()}
     ${getNewAccountDialogScript()}
+
+    promptInput.addEventListener('compositionend', function() { persistOrdinaryComposerDraft(); });
+    promptInput.addEventListener('blur', function() { persistOrdinaryComposerDraft(); });
+    window.addEventListener('pagehide', function() { persistOrdinaryComposerDraft(); closeOrdinaryDraftRecovery(false); });
 
     var historyPrepareContinue = document.getElementById('historyPrepareContinue');
     if (historyPrepareContinue) historyPrepareContinue.addEventListener('click', function() {
@@ -1418,6 +1595,7 @@ export function getScript(): string {
         if (message.requestId !== sessionHistoryRequestId) return;
         sessionHistoryLoading = message.status === 'loading';
         sessionHistoryError = message.status === 'failed' ? String(message.reason || t('sessionLoadError')) : '';
+        if (sessionHistoryError && getActiveVisibleSessions().length) setTransientStatus(sessionHistoryError);
         renderSessionControls(); return;
       }
       if (message.type === 'projectTasksState') {
@@ -1478,13 +1656,15 @@ export function getScript(): string {
         renderSettingsControls();
         if (restoreTimeoutFocus) settingsRequestTimeoutValue.focus();
       } else if (message.type === 'state' || message.type === 'statePatch') {
+        if (message.state?.activationId && retiredOrdinaryDraftActivations.has(message.state.activationId)) return;
         if (message.type === 'statePatch' && message.sessionId && message.sessionId !== state.activeSessionId) return;
+        var activationChanged = reconcileOrdinaryDraftActivation(message.state?.activationId);
         var incomingRevision = Number(message.revision || 0);
         var incomingLane = projectStateRevisionKey(message);
         var knownLaneRevision = projectStateRevisions.get(incomingLane) || 0;
         if (incomingRevision && incomingRevision <= knownLaneRevision) return;
         if (incomingRevision) { lastStateRevision = incomingRevision; projectStateRevisions.set(incomingLane, incomingRevision); }
-        var previousActiveSessionId = state.activeSessionId || '';
+        var previousActiveSessionId = activationChanged ? '' : state.activeSessionId || '';
         if (message.state?.activeSessionId && previousActiveSessionId !== message.state.activeSessionId) {
           // Missing fields in an old or partial message cannot carry another
           // session's interaction lease into the newly selected session.
@@ -1495,6 +1675,7 @@ export function getScript(): string {
         var anchoredMessages = typeof projectTaskUiActive === 'function' && projectTaskUiActive() && state.hasNewerMessages
           && message.state?.hasNewerMessages !== false ? state.messages : null;
         Object.assign(state, message.state);
+        if (ordinaryDraftRecoveryOpen && currentInteraction()?.canRecoverDraft !== true) closeOrdinaryDraftRecovery(false);
         if (anchoredMessages) { state.messages = anchoredMessages; state.hasNewerMessages = true; }
         changeVisibleSession(previousActiveSessionId, state.activeSessionId);
         if (message.type === 'statePatch' && message.scope === 'startupSettings') {
@@ -2113,6 +2294,7 @@ export function getScript(): string {
         historyTab.disabled = !canNavigateSessions();
         historyTab.classList.toggle('active', sessionMenuOpen);
         historyTab.setAttribute('aria-expanded', sessionMenuOpen ? 'true' : 'false');
+        historyTab.setAttribute('aria-busy', sessionHistoryLoading ? 'true' : 'false');
       }
       renderSessionMenu();
     }
@@ -2186,7 +2368,8 @@ export function getScript(): string {
     }
 
     function getSessionMenuRenderKey(sessions) {
-      return JSON.stringify([getLanguage(), state.activeSessionId, activeWorkspaceTab, sessionHistoryLoading, sessionHistoryError,
+      return JSON.stringify([getLanguage(), state.activeSessionId, activeWorkspaceTab,
+        !sessions.length && sessionHistoryLoading, !sessions.length && sessionHistoryError,
         sessionMultiSelectMode, sessionRangeDays, sessionFavoritesOnly, Array.from(selectedSessionIds),
         editingSessionTitleId, sessions, otherWorkspaces, otherWorkspacesError,
         otherWorkspaceSessionErrors[activeWorkspaceTab], hasOtherWorkspaceSessionsCache(activeWorkspaceTab)]);
@@ -2298,7 +2481,7 @@ export function getScript(): string {
         sessionMenu.append(bulk);
       }
 
-      if (activeOtherWorkspaceError || currentTab && sessionHistoryError) {
+      if (activeOtherWorkspaceError || currentTab && sessionHistoryError && !sessions.length) {
         var loadError = document.createElement('div');
         loadError.className = 'session-menu-empty session-menu-error';
         loadError.textContent = t('sessionLoadError') + ': ' + (activeOtherWorkspaceError || sessionHistoryError);
@@ -2306,7 +2489,7 @@ export function getScript(): string {
         return;
       }
 
-      if (activeOtherWorkspaceLoading || currentTab && sessionHistoryLoading) {
+      if (activeOtherWorkspaceLoading || currentTab && sessionHistoryLoading && !sessions.length) {
         var loading = document.createElement('div');
         loading.className = 'session-menu-empty';
         loading.textContent = t('loading') + '...';

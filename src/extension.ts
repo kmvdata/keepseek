@@ -6,7 +6,7 @@ import { ChatSessionStore, getCurrentWorkspaceSessionScope } from './sessions/ch
 import { getConfiguredKeepseekLanguage } from './shared/i18n';
 import type { KeepseekExtensionInfo } from './shared/types';
 import { StartupPerformanceTrace } from './shared/startupPerformance';
-import { getRuntimeIdentity, initializeRuntimeIdentity } from './shared/runtimeIdentity';
+import { clearRuntimeIdentity, getRuntimeIdentity, initializeRuntimeIdentity } from './shared/runtimeIdentity';
 import { ProjectExecutionOwner } from './tasks/projectOwner';
 import { ProjectResourceCoordinator, configureProjectExecutionEnforcement } from './tasks/projectResources';
 import { ProjectRequestAdmission } from './tasks/requestAdmission';
@@ -125,10 +125,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
 }
 
-export function deactivate(): Promise<void> {
+export async function deactivate(): Promise<void> {
   const provider = activeProvider;
   activeProvider = undefined;
-  return provider?.shutdown() ?? Promise.resolve();
+  try { await provider?.shutdown(); }
+  finally { if (!activeProvider) clearRuntimeIdentity(); }
 }
 
 function createExtensionInfo(context: vscode.ExtensionContext): KeepseekExtensionInfo {

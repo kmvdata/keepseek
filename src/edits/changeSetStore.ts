@@ -27,6 +27,7 @@ import { ChangeArtifactStore } from './changeArtifactStore';
 import { getDraftEditBase, getDraftEditKind, getDraftEditResult } from './draftEdit';
 import { getConfiguredPatchSettings } from '../shared/config';
 import { readSessionAuditLanes, sessionAuditLaneUri } from '../shared/sessionAuditLanes';
+import { RecoveryMetadataReader, metadataRecords, type RecoveryMetadataInspectionOptions, type RecoveryMetadataSummary } from '../shared/recoveryMetadataInspection';
 
 type Translator = (key: string, values?: Record<string, string | number>) => string;
 type ChangeSetTraceHandler = (changeSet: ChangeSet, event: Record<string, unknown>) => void;
@@ -148,6 +149,56 @@ export class ChangeSetStore {
       this.freshSessionIds.clear();
       await this.loadSession(this.sessionStore.activeSessionId || this.sessionStore.getActiveSession().id);
     }
+  }
+
+  /** Explicit owner diagnostics. Index/checkpoint metadata is projected without
+   * loading sessions, applying recovery, migrating V1/V3 or collecting blobs. */
+  public async inspectPersistedMetadata(options: RecoveryMetadataInspectionOptions = {}): Promise<RecoveryMetadataSummary> {
+    const reader = new RecoveryMetadataReader(options);
+    const sets = new Map<string, string>();
+    const checkpoints = new Map<string, string>();
+    const checkpointIds: Array<{ id: string; legacyV3: boolean }> = [];
+    const inspectCheckpoint = (value: unknown) => {
+      for (const checkpoint of metadataRecords([value])) {
+        if (typeof checkpoint.id !== 'string') continue;
+        const state = ['prepared', 'applying', 'applied', 'reverted', 'uncertain'].includes(String(checkpoint.state)) ? String(checkpoint.state) : 'unrecognized';
+        checkpoints.set(checkpoint.id, state);
+      }
+    };
+    const aggregate = await reader.read(this.storageUri);
+    if (aggregate) {
+      if (aggregate.version !== 1 && aggregate.version !== 2) reader.summary.malformedFiles++;
+      else {
+        for (const set of metadataRecords(aggregate.changeSets)) if (typeof set.id === 'string') sets.set(set.id, 'runtime_indexed');
+        for (const set of metadataRecords(aggregate.history)) if (typeof set.id === 'string') sets.set(set.id, 'history_indexed');
+        for (const checkpoint of metadataRecords(aggregate.checkpoints)) inspectCheckpoint(checkpoint);
+      }
+    }
+    const inspectIndex = (index: Record<string, unknown> | undefined, legacyV3: boolean) => {
+      if (!index) return;
+      if (![1, 3, 4].includes(Number(index.version))) { reader.summary.malformedFiles++; return; }
+      for (const entry of metadataRecords(index.entries)) {
+        if (typeof entry.id !== 'string') continue;
+        sets.set(entry.id, entry.kind === 'history' ? 'history_indexed' : 'runtime_indexed');
+        for (const id of Array.isArray(entry.checkpointIds) ? entry.checkpointIds : []) if (typeof id === 'string') checkpointIds.push({ id, legacyV3 });
+      }
+    };
+    inspectIndex(await reader.read(vscode.Uri.joinPath(this.legacyV3RootUri, 'index.json')), true);
+    inspectIndex(await reader.read(this.indexUri), false);
+    for (const lane of await reader.lanes(this.sessionIndexesUri)) inspectIndex(await reader.read(lane), false);
+    for (const checkpoint of checkpointIds) {
+      const root = checkpoint.legacyV3 ? vscode.Uri.joinPath(this.legacyV3RootUri, 'checkpoints') : this.checkpointsUri;
+      const value = await reader.read(vscode.Uri.joinPath(root, fileNameForId(checkpoint.id)));
+      if (value) inspectCheckpoint(value.checkpoint);
+    }
+    for (const state of sets.values()) reader.summary.states[state] = (reader.summary.states[state] ?? 0) + 1;
+    for (const state of checkpoints.values()) {
+      const label = `checkpoint_${state}`; reader.summary.states[label] = (reader.summary.states[label] ?? 0) + 1;
+      if (state === 'prepared' || state === 'applying' || state === 'uncertain') reader.summary.unsettled++;
+      if (state === 'uncertain' || state === 'unrecognized') reader.summary.unknown++;
+    }
+    reader.summary.records = sets.size;
+    return reader.finish();
   }
 
   public async initializeFreshSession(sessionId: string): Promise<void> {

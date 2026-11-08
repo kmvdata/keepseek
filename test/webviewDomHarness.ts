@@ -56,7 +56,7 @@ class WebviewNode {
   set textContent(value: string) { this.replaceChildren(); if (value) this.append(new WebviewNode('#text', String(value), this.owner)); }
   get innerText(): string { return this.textContent; }
   set innerText(value: string) { this.textContent = value; }
-  get innerHTML(): string { return this.textContent; }
+  get innerHTML(): string { return this.owner?.serializeMarkup ? serializeHtmlChildren(this.content ?? this) : this.textContent; }
   set innerHTML(value: string) { const target = this.content ?? this; target.replaceChildren(); parseHtml(String(value), target, this.owner); }
 
   setAttribute(name: string, value: string): void {
@@ -173,7 +173,21 @@ function parseHtml(html: string, parent: WebviewNode, owner?: WebviewNode): void
   }
 }
 
-export function createWebviewDomHarness(initialWebviewState: unknown = null) {
+/** Optional markup serialization exercises Webview getState/setState reconstruction. */
+function serializeHtmlChildren(parent: WebviewNode): string {
+  const escape = (value: string) => value.replace(/&/gu, '&amp;').replace(/</gu, '&lt;').replace(/>/gu, '&gt;').replace(/"/gu, '&quot;');
+  return parent.childNodes.map(node => {
+    if (node.nodeType === 3) return escape(node.nodeValue);
+    const attributes = new Map(node.attributes.map(attribute => [attribute.name, attribute.value]));
+    if (node.className) attributes.set('class', node.className); else attributes.delete('class');
+    for (const [key, value] of Object.entries(node.dataset)) attributes.set('data-' + key.replace(/[A-Z]/gu, character => '-' + character.toLowerCase()), value);
+    const tag = node.tagName.toLowerCase();
+    const opening = '<' + tag + [...attributes].map(([key, value]) => ' ' + key + '="' + escape(value) + '"').join('') + '>';
+    return opening + (voidTags.has(node.tagName) ? '' : serializeHtmlChildren(node.content ?? node) + '</' + tag + '>');
+  }).join('');
+}
+
+export function createWebviewDomHarness(initialWebviewState: unknown = null, options: { serializeMarkup?: boolean } = {}) {
   let persistedWebviewState = initialWebviewState;
   let now = 0;
   let epoch = Date.now();
@@ -189,6 +203,7 @@ export function createWebviewDomHarness(initialWebviewState: unknown = null) {
     return id;
   };
   const document = new WebviewNode('document');
+  document.serializeMarkup = options.serializeMarkup === true;
   const domMetrics = { createdElements: 0, createdSvgElements: 0 };
   document.body = new WebviewNode('body', '', document);
   document.documentElement = new WebviewNode('html', '', document);

@@ -440,6 +440,7 @@ export const editorVisualStateFragment: WebviewFragment = {
         promptInput.classList.toggle('is-empty', isEmpty);
         renderSendButton(isEmpty);
         renderContextProgress();
+        persistOrdinaryComposerDraft();
       }
 
       function isPromptEmpty() {
