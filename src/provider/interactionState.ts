@@ -215,13 +215,15 @@ export function deriveInteractionState(facts: InteractionFacts, operation?: {
 }): InteractionSnapshot {
   const owned = operation?.sessionId === facts.sessionId ? operation : undefined;
   const fresh = facts.freshSession === true && Boolean(facts.sessionId);
+  // Observer views need loaded history, not the execution owner's request preparation.
+  const viewReady = facts.readOnly === true && facts.sessionReady;
   const executing = Boolean(operation || facts.mainRunning || facts.starting
     || facts.actionRunning || facts.backgroundRunning);
-  const contextPending = !fresh && Boolean(facts.contextRefreshing);
+  const contextPending = !fresh && !viewReady && Boolean(facts.contextRefreshing);
   const pending = executing || contextPending;
-  // This only admits local input. The task owner still checks model, context,
-  // recovery and durability before issuing a request or executing an action.
-  const ready = fresh || (facts.sessionReady && facts.requestContextReady && facts.approvalDataReady
+  // Display/input readiness does not grant execution authority. The task owner
+  // still checks model, context, recovery and durability before a request or action.
+  const ready = fresh || viewReady || (facts.sessionReady && facts.requestContextReady && facts.approvalDataReady
     && facts.modelReady !== false && facts.contextReady !== false && facts.sessionRecoveryReady !== false);
   let phase: InteractionPhase = owned?.phase ?? 'idle';
   if (!owned) {

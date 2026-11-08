@@ -1,6 +1,6 @@
 import './registerVscodeStub';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
@@ -8,6 +8,7 @@ import * as vscode from './stubs/vscode';
 import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
 import { ChatSessionStore, type StoredWorkspaceSessionState } from '../src/sessions/chatSessionStore';
 import { GlobalSessionStorage } from '../src/sessions/globalSessionStorage';
+import { createHistoryTruncationPlan } from '../src/sessions/historyTruncation';
 import type { SessionTitleCoordinator } from '../src/sessions/sessionTitleCoordinator';
 import type { SharedProjectSources } from '../src/context/sharedProjectSources';
 import type { SkillStore } from '../src/skills/skillStore';
@@ -27,7 +28,12 @@ interface NavigationHost {
   initializeAfterWebviewReady(): Promise<void>;
   ensureSessionNavigationReady(): Promise<void>;
   refreshWorkspaceScope(): Promise<void>;
+  refreshConfiguration(): void;
   refreshSkills(options?: { post?: boolean }): Promise<void>;
+  refreshModelSourceState(): Promise<void>;
+  scheduleRunContextRefresh(uris: readonly string[]): void;
+  runContextRefreshPromise?: Promise<void>;
+  recoverHistoryTruncation(session: ChatSession): Promise<void>;
   postState(options: { immediate?: boolean; forceFull?: boolean }): void;
   postLightweightState(): void;
   isStartingRun: boolean;
@@ -52,7 +58,7 @@ interface NavigationHost {
   recoverSubagentUsage(session: ChatSession): Promise<void>;
   usageLedgerFlushes: Map<string, Promise<void>>;
   usageDisplayReadiness: Map<string, 'loading' | 'ready' | 'incomplete'>;
-  changeSets: Pick<ChangeSetStore, 'initialize' | 'loadSession' | 'addDraftEdits'>;
+  changeSets: Pick<ChangeSetStore, 'initialize' | 'loadSession' | 'addDraftEdits' | 'flush'>;
   views: Set<unknown>;
 }
 
@@ -62,6 +68,7 @@ interface PostedState {
   interaction?: InteractionSnapshot;
   messages?: ChatMessage[];
   changeSets?: Array<{ id: string }>;
+  skills?: { items: Array<{ name: string }> };
   usageMetrics?: { displayReadiness?: 'loading' | 'ready' | 'incomplete' };
 }
 
@@ -259,6 +266,317 @@ test('unreadable project context does not block New; first send preserves its un
   assert.deepEqual(fresh.messages, [], 'no durable user acceptance means no ACK may clear the draft');
 });
 
+for (const action of ['skills', 'configuration', 'source-watcher'] as const) {
+  test(`automatic ${action} refresh does not load context or take readiness from a fresh empty session`, async t => {
+    const { host, store, posts, publish } = await fixture(t);
+    await host.handleMessage({ type: 'newSession' });
+    const freshId = store.activeSessionId;
+    const refreshSources = host.sharedProjectSources.refresh.bind(host.sharedProjectSources);
+    const resolveSkills = host.skillStore.resolveAndLoadSkills.bind(host.skillStore);
+    const refreshModels = host.refreshModelSourceState.bind(host);
+    const releaseModels = deferred();
+    t.after(() => releaseModels.resolve());
+    let sourceReads = 0, skillReads = 0;
+    let modelWork: Promise<void> | undefined;
+    host.sharedProjectSources.refresh = async (...args) => { sourceReads++; return refreshSources(...args); };
+    host.skillStore.resolveAndLoadSkills = async input => { skillReads++; return resolveSkills(input); };
+    host.refreshModelSourceState = () => modelWork = (async () => { await releaseModels.promise; await refreshModels(); })();
+    try {
+      if (action === 'skills') await host.refreshSkills();
+      else if (action === 'configuration') host.refreshConfiguration();
+      else host.scheduleRunContextRefresh(['file:///temporary-project/AGENTS.md', 'file:///temporary-project/.agents/skills/example/SKILL.md']);
+      // A watcher is queued on the previous refresh promise. Observe its work
+      // without making any model/source request complete to unlock the editor.
+      await host.runContextRefreshPromise;
+      await new Promise<void>(resolve => setImmediate(resolve));
+      publish();
+      assert.equal(store.activeSessionId, freshId);
+      assert.equal(sourceReads, 0, 'automatic maintenance must defer project reads until a real submission');
+      assert.equal(skillReads, 0, 'automatic maintenance must defer Skill resolution until a real submission');
+      assert.equal(host.currentRunContextsBySession.has(freshId), false);
+      assert.equal(lastState(posts).interaction?.phase, 'idle');
+      assert.equal(lastState(posts).interaction?.canEdit, true);
+      assert.equal(lastState(posts).interaction?.canSubmit, true);
+      assert.equal(host.sharedProjectSources.dirty, true, 'the next real submission must still refresh changed sources');
+    } finally {
+      releaseModels.resolve();
+      await modelWork;
+    }
+  });
+}
+
+test('automatic refreshes before initial loading completes cannot own the placeholder or block New', { timeout: 10_000 }, async t => {
+  const { host, store, first, posts, releaseLoad, initialization, publish } = await fixture(t, { delayLoad: true });
+  const releaseMaintenance = deferred();
+  t.after(() => { releaseMaintenance.resolve(); releaseLoad.resolve(); });
+  const refreshSources = host.sharedProjectSources.refresh.bind(host.sharedProjectSources);
+  const refreshModels = host.refreshModelSourceState.bind(host);
+  let sourceReads = 0;
+  let modelWork: Promise<void> | undefined;
+  host.sharedProjectSources.refresh = async (...args) => { sourceReads++; await releaseMaintenance.promise; return refreshSources(...args); };
+  host.refreshModelSourceState = () => modelWork = (async () => { await releaseMaintenance.promise; await refreshModels(); })();
+  const skillsRefresh = host.refreshSkills();
+  let watcherRefresh: Promise<void> | undefined;
+  try {
+    host.refreshConfiguration();
+    host.scheduleRunContextRefresh(['file:///temporary-project/AGENTS.md', 'file:///temporary-project/.agents/skills/example/SKILL.md']);
+    watcherRefresh = host.runContextRefreshPromise;
+    publish();
+    assert.equal(host.sessionReady, false, 'the historical load is still deliberately paused');
+    assert.equal(sourceReads, 0, 'automatic work must not read placeholder context before session authority exists');
+    assert.equal(lastState(posts).interaction?.operationId, undefined, 'automatic maintenance cannot reserve a placeholder recovery owner');
+    await host.handleMessage({ type: 'newSession' });
+    publish();
+    assert.notEqual(store.activeSessionId, first.id);
+    assert.equal(store.messages.length, 0);
+    assert.equal(lastState(posts).interaction?.phase, 'idle');
+    assert.equal(lastState(posts).interaction?.canEdit, true);
+    assert.equal(lastState(posts).interaction?.canSubmit, true, 'New is usable before old loading and model maintenance finish');
+    assert.equal(sourceReads, 0);
+  } finally {
+    releaseMaintenance.resolve(); releaseLoad.resolve();
+    await Promise.allSettled([initialization, skillsRefresh, watcherRefresh, modelWork]);
+  }
+});
+
+test('explicit Skills catalog loading remains available in a fresh editor without preparing prompt bodies or blocking input', { timeout: 10_000 }, async t => {
+  const { host, store, root, posts, publish } = await fixture(t);
+  await host.handleMessage({ type: 'newSession' });
+  const sessionId = store.activeSessionId;
+  const skillDirectory = join(root, '.agents', 'skills', 'menu-skill');
+  await mkdir(skillDirectory, { recursive: true });
+  await writeFile(join(skillDirectory, 'SKILL.md'), '---\nname: menu-skill\ndescription: A catalog-only fixture\n---\nPrivate prompt body stays unloaded.\n');
+  const previousFolders = vscode.workspace.workspaceFolders;
+  const previousTrusted = vscode.workspace.isTrusted;
+  Object.assign(vscode.workspace, { workspaceFolders: [{ uri: vscode.Uri.file(root), name: 'Skills Menu Fixture', index: 0 }], isTrusted: true });
+  const metadataEntered = deferred(); const releaseMetadata = deferred();
+  t.after(() => releaseMetadata.resolve());
+  const refreshSources = host.sharedProjectSources.refresh.bind(host.sharedProjectSources);
+  const refreshMetadata = host.skillStore.refresh.bind(host.skillStore);
+  const loadBodies = host.skillStore.resolveAndLoadSkills.bind(host.skillStore);
+  let sourceReads = 0, bodyLoads = 0;
+  host.sharedProjectSources.refresh = async (...args) => { sourceReads++; return refreshSources(...args); };
+  host.skillStore.refresh = async (...args) => { metadataEntered.resolve(); await releaseMetadata.promise; await refreshMetadata(...args); };
+  host.skillStore.resolveAndLoadSkills = async input => { bodyLoads++; return loadBodies(input); };
+  const request = host.handleMessage({ type: 'requestSkills' });
+  try {
+    await metadataEntered.promise;
+    publish();
+    assert.equal(store.activeSessionId, sessionId);
+    assert.equal(sourceReads, 1, 'an explicit menu request still refreshes the actual catalog source');
+    assert.equal(bodyLoads, 0);
+    assert.equal(host.currentRunContextsBySession.has(sessionId), false);
+    assert.equal(lastState(posts).interaction?.operationId, undefined);
+    assert.equal(lastState(posts).interaction?.phase, 'idle');
+    assert.equal(lastState(posts).interaction?.canEdit, true);
+    assert.equal(lastState(posts).interaction?.canSubmit, true, 'metadata I/O cannot own the first-send editor');
+  } finally {
+    releaseMetadata.resolve();
+    try { await request; }
+    finally { Object.assign(vscode.workspace, { workspaceFolders: previousFolders, isTrusted: previousTrusted }); }
+  }
+  assert.equal(bodyLoads, 0, 'listing a Skill must not activate or load its prompt body');
+  assert.ok(lastState(posts).skills?.items.some(skill => skill.name === 'menu-skill'), 'the menu receives real discovered metadata');
+  assert.equal(host.currentRunContextsBySession.has(sessionId), false);
+  assert.equal(lastState(posts).interaction?.phase, 'idle');
+  assert.equal(lastState(posts).interaction?.canSubmit, true);
+});
+
+test('a Skills catalog completion from the previous fresh session cannot publish into the next New target', { timeout: 10_000 }, async t => {
+  const { host, store, root, posts, errors, publish } = await fixture(t);
+  const oldScope = join(root, 'catalog-old'); const newScope = join(root, 'catalog-current');
+  await Promise.all([oldScope, newScope].map(async scope => {
+    const name = scope === oldScope ? 'old-only' : 'current-only';
+    const directory = join(scope, '.agents', 'skills', name);
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, 'SKILL.md'), `---\nname: ${name}\ndescription: Distinct catalog fixture\n---\nKeep the prompt body unloaded.\n`);
+  }));
+  const previousFolders = vscode.workspace.workspaceFolders;
+  const previousTrusted = vscode.workspace.isTrusted;
+  Object.assign(vscode.workspace, { workspaceFolders: [{ uri: vscode.Uri.file(root), name: 'Catalog Race Fixture', index: 0 }], isTrusted: true });
+  await host.handleMessage({ type: 'newSession' });
+  store.getActiveSession().projectScopeUri = vscode.Uri.file(oldScope).toString();
+  const previousSessionId = store.activeSessionId;
+  const metadataEntered = deferred(); const releaseMetadata = deferred();
+  t.after(() => releaseMetadata.resolve());
+  const refreshMetadata = host.skillStore.refresh.bind(host.skillStore);
+  host.skillStore.refresh = async (...args) => {
+    if (args[0]?.scope?.cwd.path.endsWith('/catalog-old')) { metadataEntered.resolve(); await releaseMetadata.promise; }
+    await refreshMetadata(...args);
+  };
+  const request = host.handleMessage({ type: 'requestSkills' });
+  let nextSessionId = '';
+  let postsAtSwitch = 0;
+  let currentCatalog: ReturnType<SkillStore['getStateView']> | undefined;
+  try {
+    await metadataEntered.promise;
+    await host.handleMessage({ type: 'newSession' });
+    nextSessionId = store.activeSessionId;
+    store.getActiveSession().projectScopeUri = vscode.Uri.file(newScope).toString();
+    postsAtSwitch = posts.length;
+    assert.notEqual(nextSessionId, previousSessionId);
+    await host.handleMessage({ type: 'requestSkills' });
+    currentCatalog = host.skillStore.getStateView(store.getActiveSession());
+    assert.ok(currentCatalog.items.some(skill => skill.name === 'current-only'));
+    assert.ok(!currentCatalog.items.some(skill => skill.name === 'old-only'));
+    releaseMetadata.resolve(); await request;
+    assert.deepEqual(host.skillStore.getStateView(store.getActiveSession()), currentCatalog,
+      'late old-scope metadata must not replace the current scope, config or manifests in the shared Skill store');
+  } finally {
+    releaseMetadata.resolve();
+    try { await request; }
+    finally { Object.assign(vscode.workspace, { workspaceFolders: previousFolders, isTrusted: previousTrusted }); }
+  }
+  assert.ok(posts.slice(postsAtSwitch).every(post => post.state?.activeSessionId !== previousSessionId), 'late catalog work cannot restore or publish the old input target');
+  assert.equal(store.activeSessionId, nextSessionId);
+  assert.equal(errors.length, 0, 'a superseded catalog lookup is not a current-session preparation failure');
+  publish();
+  assert.equal(lastState(posts).interaction?.phase, 'idle');
+  assert.equal(lastState(posts).interaction?.canSubmit, true);
+  assert.equal(host.currentRunContextsBySession.has(nextSessionId), false);
+});
+
+test('a Skills catalog read failure leaves the fresh editor ready and its input untouched', async t => {
+  const { host, store, posts, publish } = await fixture(t);
+  await host.handleMessage({ type: 'newSession' });
+  const sessionId = store.activeSessionId;
+  host.sharedProjectSources.refresh = async () => { throw new Error('catalog metadata unavailable'); };
+  await host.handleMessage({ type: 'requestSkills' });
+  publish();
+  assert.equal(store.activeSessionId, sessionId);
+  assert.equal(store.messages.length, 0);
+  assert.equal(host.currentRunContextsBySession.has(sessionId), false);
+  assert.equal(lastState(posts).interaction?.phase, 'idle');
+  assert.equal(lastState(posts).interaction?.canEdit, true);
+  assert.equal(lastState(posts).interaction?.canSubmit, true);
+});
+
+test('fresh-session file watching defers attached-file reads until the first send and ignores unattached files', async t => {
+  const { host, store, posts, publish } = await fixture(t);
+  await host.handleMessage({ type: 'newSession' });
+  const freshId = store.activeSessionId;
+  const runtime = host as unknown as { fileContext: {
+    getAll(): unknown[];
+    refreshUris(uris: readonly string[]): Promise<void>;
+  } };
+  const selectedUri = 'file:///temporary-project/selected.txt';
+  runtime.fileContext.getAll = () => [{ id: 'selected', uri: selectedUri, label: 'selected.txt',
+    fsPath: '/temporary-project/selected.txt', languageId: 'plaintext', source: 'workspace', content: '', sizeBytes: 0 }];
+  const reads: string[][] = [];
+  runtime.fileContext.refreshUris = async uris => { reads.push([...uris]); };
+  host.scheduleRunContextRefresh([selectedUri, 'file:///temporary-project/unattached.txt', 'file:///temporary-project/AGENTS.md']);
+  await host.runContextRefreshPromise;
+  publish();
+  assert.deepEqual(reads, [], 'watcher notifications cannot start fresh-session file I/O');
+  assert.equal(lastState(posts).interaction?.phase, 'idle');
+  assert.equal(lastState(posts).interaction?.canSubmit, true);
+  const calls = acceptedRun(host, store);
+  await host.handleMessage(submission(freshId, 'fresh-deferred-file-refresh'));
+  assert.deepEqual(reads, [[selectedUri]], 'the real request refreshes only its previously attached changed file');
+  assert.equal(calls.length, 1);
+  assert.equal(posts.find(post => post.requestId === 'fresh-deferred-file-refresh')?.status, 'accepted');
+});
+
+for (const initialEmpty of ['restored', 'created'] as const) {
+  test(`${initialEmpty} empty startup session is ready while model and safety initialization are paused`, { timeout: 10_000 }, async t => {
+    const { host, store, posts, publish } = await fixture(t, { skipStartup: true, initialEmpty });
+    const safetyEntered = deferred(); const modelEntered = deferred();
+    const release = deferred();
+    t.after(() => release.resolve());
+    const initializeSafety = host.changeSets.initialize.bind(host.changeSets);
+    const loadOperations = host.changeSets.loadSession.bind(host.changeSets);
+    const refreshModels = host.refreshModelSourceState.bind(host);
+    const refreshSources = host.sharedProjectSources.refresh.bind(host.sharedProjectSources);
+    const resolveSkills = host.skillStore.resolveAndLoadSkills.bind(host.skillStore);
+    let sourceReads = 0, skillReads = 0, initializingSafety = false;
+    const recoveredSessionIds: string[] = [];
+    host.changeSets.initialize = async () => {
+      safetyEntered.resolve(); await release.promise;
+      initializingSafety = true;
+      try { await initializeSafety(); } finally { initializingSafety = false; }
+    };
+    host.changeSets.loadSession = async sessionId => {
+      if (!initializingSafety) recoveredSessionIds.push(sessionId);
+      await loadOperations(sessionId);
+    };
+    host.refreshModelSourceState = async () => { modelEntered.resolve(); await release.promise; await refreshModels(); };
+    host.sharedProjectSources.refresh = async (...args) => { sourceReads++; return refreshSources(...args); };
+    host.skillStore.resolveAndLoadSkills = async input => { skillReads++; return resolveSkills(input); };
+    const startup = host.initializeAfterWebviewReady();
+    const calls = acceptedRun(host, store);
+    let request: Promise<void> | undefined;
+    const emptyId = store.activeSessionId;
+    try {
+      await Promise.all([safetyEntered.promise, modelEntered.promise]);
+      publish();
+      assert.equal(store.messages.length, 0);
+      assert.equal(sourceReads, 0, 'restoring an empty editor does not scan project instructions');
+      assert.equal(skillReads, 0);
+      assert.equal(host.approvalDataReady, false, 'interactive readiness does not fabricate finished safety recovery');
+      assert.equal(host.requestContextReady, false);
+      assert.equal(lastState(posts).interaction?.phase, 'idle');
+      assert.equal(lastState(posts).interaction?.canEdit, true);
+      assert.equal(lastState(posts).interaction?.canSubmit, true);
+      request = host.handleMessage(submission(emptyId, `empty-${initialEmpty}-first-send`));
+      publish();
+      assert.equal(lastState(posts).interaction?.phase, 'preparing_task');
+      assert.equal(calls.length, 0, 'a real first request still waits for its required safety and model preparation');
+    } finally {
+      release.resolve();
+      await Promise.all([startup, request]);
+    }
+    assert.equal(store.activeSessionId, emptyId);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].sessionId, emptyId);
+    assert.equal(posts.find(post => post.requestId === `empty-${initialEmpty}-first-send`)?.status, 'accepted');
+    assert.ok(recoveredSessionIds.includes(emptyId), 'a restored or automatically created empty session still loads its own operation records before its first request');
+    assert.ok(recoveredSessionIds.every(sessionId => sessionId === emptyId), 'empty-session preparation must retain its exact recovery identity');
+    assert.ok(sourceReads > 0 && skillReads > 0, 'the accepted first input has its own prepared project and Skill context');
+  });
+}
+
+test('history validation without a truncation journal never reserves a foreground recovery operation', async t => {
+  const { host, store, posts, publish } = await fixture(t);
+  const release = deferred();
+  t.after(() => release.resolve());
+  const flush = host.changeSets.flush.bind(host.changeSets);
+  host.changeSets.flush = async () => { await release.promise; await flush(); };
+  const recovery = host.recoverHistoryTruncation(store.getActiveSession());
+  try {
+    publish();
+    assert.equal(lastState(posts).interaction?.operationId, undefined, 'read-only operation validation must not take the foreground editor owner');
+    assert.equal(lastState(posts).interaction?.phase, 'idle');
+    assert.equal(lastState(posts).interaction?.canEdit, true);
+    assert.equal(lastState(posts).interaction?.canSubmit, true);
+  } finally { release.resolve(); await recovery; }
+});
+
+test('a durable pending history truncation still blocks submission until its recovery commits', async t => {
+  const { host, store, posts, publish } = await fixture(t);
+  const session = store.getActiveSession();
+  const replacement: ChatMessage = { id: 'recovered-input', role: 'user', content: 'Revised durable input', createdAt: new Date(0).toISOString(),
+    userTask: { version: 1, id: 'recovered-input', originMessageId: 'recovered-input', reason: 'user' } };
+  session.pendingHistoryTruncation = createHistoryTruncationPlan(session, session.messages[0].id, replacement);
+  assert.ok(session.pendingHistoryTruncation);
+  await store.persist();
+  const entered = deferred(); const release = deferred();
+  t.after(() => release.resolve());
+  const persist = store.persist.bind(store);
+  store.persist = async (...args) => { entered.resolve(); await release.promise; await persist(...args); };
+  const recovery = host.recoverHistoryTruncation(session);
+  try {
+    await entered.promise;
+    publish();
+    assert.ok(lastState(posts).interaction?.operationId);
+    assert.equal(lastState(posts).interaction?.canSubmit, false, 'a real durable mutation remains a required foreground barrier');
+    assert.notEqual(lastState(posts).interaction?.phase, 'idle');
+  } finally { release.resolve(); await recovery; }
+  assert.equal(session.pendingHistoryTruncation, undefined);
+  assert.deepEqual(session.messages, [replacement]);
+  publish();
+  assert.equal(lastState(posts).interaction?.canSubmit, true);
+});
+
 test('cold startup context for the previous session cannot hold or overwrite a ready history target', async t => {
   const { host, store, first, second, publish, posts } = await fixture(t, { skipStartup: true });
   const started = deferred(); const release = deferred();
@@ -444,7 +762,9 @@ function messages(taskId: string): ChatMessage[] {
   ];
 }
 
-async function fixture(t: TestContext, options: { delayLoad?: boolean; loadFailure?: boolean; skipStartup?: boolean } = {}) {
+async function fixture(t: TestContext, options: {
+  delayLoad?: boolean; loadFailure?: boolean; skipStartup?: boolean; initialEmpty?: 'restored' | 'created';
+} = {}) {
   const root = await mkdtemp(join(tmpdir(), 'keepseek-session-navigation-'));
   const uri = vscode.Uri.file(root);
   const scope = { key: 'workspace:navigation', name: 'Navigation', folderUris: [] };
@@ -452,12 +772,19 @@ async function fixture(t: TestContext, options: { delayLoad?: boolean; loadFailu
   const seed = new ChatSessionStore(storage, 'en', scope);
   await seed.initialize();
   const first = seed.getActiveSession();
-  first.messages = messages('task-first');
-  await seed.persist();
-  const second = await seed.createNewSession();
-  second.messages = messages('task-second');
-  await seed.persist();
-  await seed.selectSession(first.id);
+  let second = first;
+  if (options.initialEmpty !== 'created') {
+    first.messages = messages('task-first');
+    await seed.persist();
+    second = await seed.createNewSession();
+    second.messages = messages('task-second');
+    await seed.persist();
+    await seed.selectSession(first.id);
+    if (options.initialEmpty === 'restored') {
+      seed.getActiveSession().messages = [];
+      await seed.persist();
+    }
+  }
 
   const loadStarted = deferred();
   const releaseLoad = deferred();
@@ -505,7 +832,7 @@ async function fixture(t: TestContext, options: { delayLoad?: boolean; loadFailu
   });
   if (!options.delayLoad && !options.skipStartup) await host.initializeAfterWebviewReady();
   const publish = () => host.postState({ immediate: true, forceFull: true });
-  return { host, store, storage, scope, first, second, posts, errors, releaseLoad, initialization, publish };
+  return { host, store, storage, scope, root, first, second, posts, errors, releaseLoad, initialization, publish };
 }
 
 /** The real Host admission, ownership and final persistence remain in use. */

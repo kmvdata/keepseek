@@ -487,14 +487,32 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
       const activeSessionIdsByWorkspace = normalizeStoredActiveSessionIds(legacyState, legacySessions);
       for (const [workspaceKey, sessions] of groupSessionsByWorkspace(legacySessions)) {
         const scope = getWorkspaceScopeForSessions(workspaceKey, sessions, currentWorkspaceScope);
-        const existing = await this.loadWorkspaceSessions(workspaceKey);
-        const merged = mergeSessionsById(existing, sessions);
-        await this.saveWorkspace(scope, {
-          activeSessionId: chooseActiveSessionId(merged, activeSessionIdsByWorkspace[workspaceKey]),
-          sessions: merged,
-          sessionSummaries: merged.map(toSessionSummary)
+        await withStorageCoordinator(this.rootUri, async () => {
+          this.assertWritable();
+          const existing = await this.loadIndexByWorkspaceKey(workspaceKey, true);
+          const entries = new Map(existing?.sessions.map(entry => [entry.id, entry]));
+          const imported: ChatSession[] = [];
+          for (const session of sessions) {
+            const previous = entries.get(session.id);
+            // Compare the latest index inside the same transaction as the write.
+            // Current authority wins ties; ordinary current bodies stay cold.
+            if (previous && getSessionUpdatedTimestamp(session) <= getIsoTimestamp(previous.updatedAt)) continue;
+            if (previous && !await this.readSession(workspaceKey, session.id, existing!)) {
+              throw new Error('Cannot verify the existing session before importing newer legacy history.');
+            }
+            // Only a strictly newer same-ID legacy conflict needs its current
+            // body verified to acquire the normal revision/hash save boundary.
+            imported.push(session);
+          }
+          if (!imported.length) return;
+          await this.saveWorkspaceCoordinated(scope, {
+            activeSessionId: activeSessionIdsByWorkspace[workspaceKey] ?? '',
+            sessions: imported,
+            sessionSummaries: imported.map(toSessionSummary)
+          }, Boolean(existing?.activeSessionId));
         });
       }
+      await this.flush();
       await workspaceState.update(SESSION_MIGRATION_KEY, true);
       return true;
     } catch (error) {
@@ -936,15 +954,6 @@ function getWorkspaceScopeForSessions(workspaceKey: string, sessions: readonly C
   if (workspaceKey === current.key) return current;
   const newest = sortSessionsByUpdatedAt([...sessions])[0];
   return { key: workspaceKey, name: newest?.workspaceName || workspaceKey, folderUris: newest?.workspaceFolders ?? [] };
-}
-
-function mergeSessionsById(existing: readonly ChatSession[], incoming: readonly ChatSession[]): ChatSession[] {
-  const byId = new Map(existing.map((session) => [session.id, session]));
-  for (const session of incoming) {
-    const previous = byId.get(session.id);
-    if (!previous || getSessionUpdatedTimestamp(session) >= getSessionUpdatedTimestamp(previous)) byId.set(session.id, session);
-  }
-  return sortSessionsByUpdatedAt(Array.from(byId.values()));
 }
 
 function manifestEntryToMetadata(entry: GlobalSessionWorkspaceManifestEntry | undefined): WorkspaceMetadata | undefined {

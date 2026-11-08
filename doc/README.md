@@ -4,7 +4,7 @@
 
 项目助手原始交付记录见 [交付验收](keepseek-project-assistant-verification.md)；左侧任务窄栏、稳定时间排序、独立用量快照的本轮命令、请求证据和原生 F5 步骤见 [任务侧栏验收](keepseek-task-sidebar-verification.md)。
 
-“新建会话”脱离旧会话加载、首次发送延迟准备及旧初始化竞态的回归与 F5 步骤见 [新建会话验收](keepseek-fresh-session-verification.md)。
+“新建会话”脱离旧会话加载、恢复空会话立即可编辑、自动维护延迟到首次发送及旧初始化竞态的回归与 F5 步骤见 [新建会话验收](keepseek-fresh-session-verification.md)。
 
 ## 当前专题
 

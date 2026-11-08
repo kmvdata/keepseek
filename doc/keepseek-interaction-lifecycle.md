@@ -71,9 +71,13 @@ Webview → Host 消息唯一入口仍是 `provider/webviewMessages.ts`；Host �
 
 “新建会话”使用独立 `canCreateSession`，不等待旧活动会话的初始化、正文、来源或 Skills。宿主在首个 await 前取得导航 owner，生成真实空会话 UUID 并切换内存目标；现有分片路径只提交该会话与新的选择。保存期间准确显示“正在保存”，成功后立即发布空白正文和本地就绪，不再显示旧会话的“加载会话”。实际运行、待接受提交、必要保存和只读 owner 仍禁止冲突新建；历史列表的 `canNavigate` 不因此提前开放。
 
-新建不扫描项目来源、不生成标题、不请求模型，也不恢复旧会话的提案或批准。首次发送先同步取得 `preparing_task` owner，再等待共享安全存储初始化、真实模型来源和新会话自身上下文；旧会话正文与旧上下文不是依赖。只有正文耐久接受后才返回 accepted 并允许前端清除对应草稿。准备失败保留草稿并报告真实错误，不将空白会话就绪当作审批、permit 或请求准入。
+普通启动恢复或自动建立的空会话，在正文加载完成、无 pending approval/truncation 时也进入本地就绪，不等待模型与上下文准备。这只是展示/输入标记：恢复来的 UUID 仍可能有旧操作记录，首次发送必须恢复它自己的记录；只有本次明确生成的新 UUID 可跳过旧操作 hydration。只读 observer 加载完正文后可空闲查看和编辑本地草稿，不等待 owner 的请求准备，仍禁止发送、新建、上下文变更及副作用；轻量就绪状态先于项目助手的后续初始化发布。
+
+新建不扫描项目来源、不生成标题、不请求模型，也不恢复旧会话的提案或批准。首次发送先同步取得 `preparing_task` owner，再等待共享安全存储初始化、真实模型来源和所属会话自身恢复/上下文；其它会话正文与旧上下文不是依赖。只有正文耐久接受后才返回 accepted 并允许前端清除对应草稿。准备失败保留草稿并报告真实错误，不将空白会话就绪当作审批、permit 或请求准入。
 
 迟到的初始化只合并历史，保留新会话的原内存对象、已接受消息、脏 revision 与当前选择；旧启动的成功、失败和 finally 均不能锁回新会话或选择回 Router。分片存储通过现有协调事务合并索引；旧 V1 数据先安全迁移，不能用新会话的局部列表覆盖旧历史，也不保存加载前的占位会话。上述本地标记均为瞬态，不升级磁盘或请求协议。回归与本轮原生步骤见 [新建会话验收](keepseek-fresh-session-verification.md)。
+
+旧 workspace Memento 导入在同一存储事务内比较最新索引，保留已存在的新选择和审批模式。当前记录在时间相同或更新时获胜，无关正文保持冷态；仅同 ID 且旧导入记录严格更新时，先核验当前正文后沿正常 hash/revision 边界保存，不绕过完整性检查。
 
 ### 历史导航与真实请求屏障
 
@@ -93,6 +97,8 @@ Webview → Host 消息唯一入口仍是 `provider/webviewMessages.ts`；Host �
 
 历史导航不等待整个 `startupInitializationPromise`。会话及必要安全存储跨过初始化屏障后，即使旧活动会话项目上下文、模型目录或展示工作仍在加载，也可开始目标会话事务。select/copy 的目标正文、安全选择保存、操作记录恢复及截断失效 flush 完成后，同步释放导航 owner。项目上下文继续按目标 session/generation 准备，此时 canEdit=true、canNavigate=true、canSubmit=false；上下文和其它执行必要条件满足后在同次状态更新开放提交。导航方法返回的 Promise 仍可等待上下文完成供调用方收口，但 UI 导航能力不依赖这个 Promise 结算。会话/上下文 generation 变化使旧启动或导航上下文工作的 ready、error 和 finally 失效，A→B→A 也不能把第一次进入 A 的结果赋给第二次 A；旧 finally 不释放新 owner、不重复发布 sessionChanged 抬高新入口 revision 下界。不可取消的读取可继续完成缓存，但不能回写新会话状态。
 
+历史恢复按 session 合并，不共用另一个目标的恢复 Promise。没有截断 journal 的普通历史校验/元数据 flush 是后台工作，不取得前台 recovery owner；真实 pending truncation 继续持有必要操作和耐久屏障，完成前不能提交，不能为消除加载提示而跳过。
+
 余额 `refreshFromDisk()` 是按来源读取磁盘展示快照，不是每次启动在线查询。它在模型目录发布与必要选择保存之外完成；结果只在来源与模型刷新 generation 仍匹配时发布，读取失败只影响余额展示，不能锁回输入或回滚新模型选择。来源隔离和原刷新限流继续由现有余额 store 负责。
 
 原始 Provider usage 记录在传输推进前单独持久化。`usageMetrics.displayReadiness` 使用 `loading/ready/incomplete` 表达展示恢复状态。展示重建失败保留内联迁移来源和不完整标记；不能把缺失统计当作 0。后台结果核验所属会话与数据版本，不能选择回旧会话或把展示完成误标为运行就绪。
@@ -108,6 +114,10 @@ Webview → Host 消息唯一入口仍是 `provider/webviewMessages.ts`；Host �
 复用内容限于配置、项目指令和 Skill 清单/读取结果。会话激活、冻结 implicit 集合、外部授权和可变错误不共享。`SkillStore` 的会话选择在读取结果之外处理；普通导航不无故失效热会话的 frozen implicit，也不重写 `contextInstructions`。不同来源版本通过无共享可变结果的 `discoverSnapshot()` 独立扫描并保留各自 diagnostics；旧来源 A 的慢扫描不能让来源 B 排在它后面，A 迟到也不能替换 B 的清单或错误。同一来源版本仍使用现有 cache 和 pending 合并，不新增另一套全局缓存。
 
 创建/删除/修改 AGENTS、配置、Skill 及相关资源通过 watcher dirty 或明确变更通知失效；目录/信任/配置变化重新核验；显式刷新强制新版本。重启从新实例开始。无法证实来源仍有效时不复用旧授权；共享来源始终只读。
+
+在 session 尚未加载就绪或尚未首次发送的本地就绪空会话中，自动配置/信任刷新及 AGENTS/Skill watcher 只标记来源 dirty，不启动扫描或取得前台 owner；不能先对占位会话取得恢复锁而阻止新建。已选择附件发生变化时按 URI 有界去重保留待刷新项，忽略未附加文件；首次发送准备上下文后刷新这些附件，再构建真实输入。切换目标清理该延迟集合，不能把另一会话的附件带入请求。
+
+用户明确请求空会话的 Skills 清单时，可读取共享配置、项目指令来源和 Skill 目录；不激活或加载 Skill 提示词正文，不构建当前请求上下文，不取得输入 owner，输入仍就绪。Host 在读取后核验 session/generation，`SkillStore.refresh()` 最终发布前也通过可选 `isCurrent` 守卫：A 的目录发现期间切到 B 后，A 的结果不能装入 B；有效的不可变发现缓存可保留。当前目标的目录读取失败只显示警告，不写入上下文阻塞错误，也不影响之后首次发送的必要准备。
 
 缓存与 UI 身份不进入 Provider 静态 system、旧 user、工具 schema 或 replay。未变化的 `contextInstructions` 原样复用；真实来源变化按现有受控边界生效。
 

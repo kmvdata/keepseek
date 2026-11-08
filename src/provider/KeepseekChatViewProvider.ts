@@ -378,6 +378,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.postState({ immediate: true, forceFull: true });
   }
   private historyTruncationRecovery?: Promise<void>;
+  private historyRecoveriesBySession?: Map<string, Promise<void>>;
   private activeRunSettled?: Promise<void>;
   private currentRunAbortController: AbortController | undefined;
   private activeDraftRunId: string | undefined;
@@ -506,6 +507,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   /** A newly created local target has no historical operations to recover.
    * First-send admission is independent from old history initialization. */
   private freshSessionId?: string;
+  private readonly deferredContextRefreshUris = new Set<string>();
   private locallyCreatedSessionId?: string;
   private initialProjectViewMode?: 'legacy';
   private approvalStoresInitialization?: Promise<void>;
@@ -973,7 +975,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.postState({ immediate: true });
     try {
       await this.sessionInitialization;
-      await this.historyTruncationRecovery;
+      await Promise.all([this.historyTruncationRecovery, ...(this.historyRecoveriesBySession?.values() ?? [])]);
       if (!(await this.sessionStore.setWorkspaceScope(getCurrentWorkspaceSessionScope()))) return;
       const session = this.sessionStore.getActiveSession();
       this.interactions.update(operation, 'preparing_context', session.id);
@@ -1884,10 +1886,28 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       case 'selectProjectScope':
         await this.selectProjectScope();
         return;
-      case 'requestSkills':
+      case 'requestSkills': {
         this.sharedProjectSources.dirty = true;
+        if (this.hasDeferredEmptyContext()) {
+          // An explicit catalog request stays available before first send.
+          // Discover the catalog without activating Skill bodies, preparing
+          // the selected session's request context or locking input.
+          const session = this.sessionStore.getActiveSession();
+          const generation = this.sessionContextGeneration ?? 0;
+          const current = () => this.sessionStore.activeSessionId === session.id && (this.sessionContextGeneration ?? 0) === generation;
+          try {
+            const snapshot = await this.sharedProjectSources.refresh(session.id, session.projectScopeUri);
+            if (!current()) return;
+            await this.skillStore.refresh(snapshot, { isCurrent: current });
+            if (current()) this.postState({ immediate: true, omitMessages: true });
+          } catch (error) {
+            if (current()) vscode.window.showWarningMessage(this.t('runContextRefreshFailed', { message: getErrorMessage(error) }));
+          }
+          return;
+        }
         await this.refreshSkills();
         return;
+      }
       case 'useSkill':
         await this.useSkill(message.skillId);
         return;
@@ -2397,6 +2417,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private clearSessionTransientState(): void {
+    this.deferredContextRefreshUris?.clear();
     this.sessionContextGeneration = (this.sessionContextGeneration ?? 0) + 1;
     this.runContextReadiness = 'loading';
     this.sessionRecoveryReady = false;
@@ -3301,6 +3322,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   public async refreshSkills(options: { post?: boolean } = {}): Promise<void> {
     if (this.projectOptions?.owner.isOwner === false) return;
+    if (!this.sessionReady || this.hasDeferredEmptyContext()) { this.sharedProjectSources.dirty = true; return; }
     if (this.isBusy || this.isStartingRun || this.activeChangeActions?.size || this.activeDraftRunId) { this.sharedProjectSources.dirty = true; return; }
     const session = this.sessionStore.getActiveSession();
     const operation = this.interactions.begin('recovery', session.id, 'preparing_context');
@@ -3337,6 +3359,14 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const scope = classifyRunContextRefresh(uris, this.fileContext?.getAll?.().map((file) => file.uri) ?? []);
     if (this.sharedProjectSources && uris.some(uri => this.sharedProjectSources.matches(uri))) this.sharedProjectSources.dirty = true;
     if (!scope.contextFiles && !scope.projectInstructions && !scope.skills) return;
+    if (!this.sessionReady || this.hasDeferredEmptyContext()) {
+      this.sharedProjectSources.dirty = true;
+      if (scope.contextFiles) {
+        const selected = new Set(this.fileContext.getAll().map(file => file.uri));
+        for (const uri of uris) if (selected.has(uri)) this.deferredContextRefreshUris.add(uri);
+      }
+      return;
+    }
     const previous = this.runContextRefreshPromise ?? Promise.resolve();
     const session = this.sessionStore.getActiveSession();
     const refresh = previous.catch(() => undefined).then(async () => {
@@ -6146,8 +6176,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async recoverHistoryTruncation(session: ChatSession): Promise<void> {
-    if (this.historyTruncationRecovery) return this.historyTruncationRecovery;
-    const operation = this.interactionCoordinator?.current ? undefined
+    const recoveries = this.historyRecoveriesBySession ??= new Map();
+    const existing = recoveries.get(session.id);
+    if (existing) return existing;
+    // Ordinary validation/metadata flush is background work. Only a real
+    // truncation transaction may reserve navigation across durable mutation.
+    const operation = !session.pendingHistoryTruncation || this.interactionCoordinator?.current ? undefined
       : this.interactions.begin('recovery', session.id, 'preparing_context');
     const recovery = (async () => {
       await recoverPendingHistoryTruncation(session, this.historyTruncationHooks(session));
@@ -6157,9 +6191,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       await this.draftRuns.flush();
     })();
     this.historyTruncationRecovery = recovery;
+    recoveries.set(session.id, recovery);
     try { await recovery; }
     finally {
       if (this.historyTruncationRecovery === recovery) this.historyTruncationRecovery = undefined;
+      if (recoveries.get(session.id) === recovery) recoveries.delete(session.id);
       if (operation) this.interactions.finish(operation);
     }
   }
@@ -7258,16 +7294,32 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     })();
   }
 
+  private hasDeferredEmptyContext(session?: ChatSession): boolean {
+    if (!this.freshSessionId) return false;
+    const target = session ?? this.sessionStore.getActiveSession();
+    return this.freshSessionId === target.id && !target.messages.length;
+  }
+
   private async prepareFreshSessionForSend(session: ChatSession, signal: AbortSignal): Promise<void> {
     const generation = this.sessionContextGeneration ?? 0;
     await Promise.all([this.ensureApprovalStoresInitialized(), this.refreshModelSourceState()]);
     if (signal.aborted) return;
     this.assertSessionContextOwner(session, generation);
     this.approvalDataReady = true;
-    this.sessionRecoveryReady = true; // UUID was locally created, with no old operations.
+    // A restored empty session is view-ready, but its UUID may still have old
+    // operation records. Only a newly generated local UUID can skip hydration.
+    if (session.id !== this.locallyCreatedSessionId) await this.prepareSessionRecovery(session);
+    else this.sessionRecoveryReady = true;
+    if (signal.aborted) return;
+    this.assertSessionContextOwner(session, generation);
     this.commandSettingsReadiness.approvalMode = 'ready';
     this.commandSettingsReadiness.mainModel = 'ready';
     await this.refreshSessionSkills(session);
+    while (this.deferredContextRefreshUris.size && !signal.aborted) {
+      const uris = [...this.deferredContextRefreshUris]; this.deferredContextRefreshUris.clear();
+      await this.fileContext.refreshUris(uris);
+      this.assertSessionContextOwner(session, generation);
+    }
     if (signal.aborted) return;
     this.assertSessionContextOwner(session, generation);
     this.freshSessionId = undefined;
@@ -7291,16 +7343,20 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         this.commandSettingsReadiness.executionMode = 'error';
         throw sessionResult[0].reason;
       }
-      if (sessionResult[0]?.status === 'fulfilled' && !this.locallyCreatedSessionId && this.usageLedgerStore && this.usageLedgerFlushes && this.projectOptions?.owner.isOwner !== false) {
+      const initialSession = this.sessionStore.getActiveSession();
+      if (!this.projectBinding && !this.locallyCreatedSessionId && this.projectOptions?.owner.isOwner !== false && !initialSession.messages.length
+        && !initialSession.pendingHistoryTruncation && !initialSession.pendingApproval) this.freshSessionId = initialSession.id;
+      if (sessionResult[0]?.status === 'fulfilled' && !this.hasDeferredEmptyContext() && this.usageLedgerStore && this.usageLedgerFlushes && this.projectOptions?.owner.isOwner !== false) {
         const session = this.sessionStore.getActiveSession();
         this.loadUsageDisplay(session);
       }
       if (this.projectOptions?.owner.isOwner === false) {
         this.sessionReady = true;
         this.commandSettingsReadiness.executionMode = 'ready';
-        await this.ensureProjectAssistant();
         navigationReady();
         this.postLightweightState();
+        this.postToWebview({ type: 'projectReadOnly', reason: this.projectOptions.owner.reason });
+        await this.ensureProjectAssistant();
         return;
       }
       const migrated = this.sessionStore.getActiveSession();
@@ -7384,7 +7440,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       const ownsStartupContext = () => this.sessionStore.activeSessionId === startupSession.id
         && (this.sessionContextGeneration ?? 0) === startupContextGeneration;
       const runContextTask = (async () => {
-        if (startupSession.id === this.locallyCreatedSessionId) return;
+        if (startupSession.id === this.locallyCreatedSessionId || this.hasDeferredEmptyContext(startupSession)) return;
         try {
           await this.measureStartup(
             'skills-and-project-instructions-loaded',

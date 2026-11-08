@@ -478,7 +478,10 @@ test('command settings become ready without waiting for project context or the f
     },
     availableModels: [{ id: 'model', sourceId: 'source' }],
     startupTraceStages: new Set<string>(),
-    sessionStore: { activeSessionId: 'session', getActiveSession: () => ({ id: 'session', messages: [], approvalMode: 'ask' }) },
+    // This contract exercises an existing conversation. Empty targets defer
+    // context preparation until first send (covered by sessionNavigation).
+    sessionStore: { activeSessionId: 'session', getActiveSession: () => ({ id: 'session',
+      messages: [{ id: 'original-user', role: 'user', content: 'Existing task', createdAt: new Date(0).toISOString() }], approvalMode: 'ask' }) },
     approvalReviews: { initialize: async () => {} },
     changeSets: { initialize: async () => {}, loadSession: async () => {}, reconcileHistoryOrigins: () => {}, flush: async () => {} },
     draftRuns: { initialize: async () => {}, loadSession: async () => {}, reconcileHistoryOrigins: () => {}, flush: async () => {} },

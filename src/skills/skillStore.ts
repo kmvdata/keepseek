@@ -77,7 +77,7 @@ export class SkillStore {
     return new SkillStore(storage, this.discovery, this.loader, new SkillActivationResolver(), this.getWorkspaceKey, this.sourceCache);
   }
 
-  public async refresh(config?: SharedCodexConfigSnapshot): Promise<void> {
+  public async refresh(config?: SharedCodexConfigSnapshot, options: { isCurrent?: () => boolean } = {}): Promise<void> {
     const selection = ++this.refreshSelection;
     let snapshot = config ? this.sourceSnapshots.get(config) : undefined;
     if (snapshot) {
@@ -99,7 +99,7 @@ export class SkillStore {
         }
       } finally { if (config && this.pendingSources.get(config) === pending) this.pendingSources.delete(config); }
     }
-    if (selection !== this.refreshSelection) { this.sourceDiagnostics.stale++; return; }
+    if (selection !== this.refreshSelection || options.isCurrent?.() === false) { this.sourceDiagnostics.stale++; return; }
     this.config = config;
     this.manifests = snapshot.manifests;
     this.discoveryDiagnostics = snapshot.diagnostics;

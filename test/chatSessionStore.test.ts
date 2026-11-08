@@ -8,6 +8,7 @@ import {
   ChatSessionStore,
   getVisibleMessages,
   normalizeStoredSessions,
+  SESSION_STORAGE_KEY,
   type ChatSessionStorageAdapter,
   type StoredWorkspaceSessionState,
   type WorkspaceSessionScope
@@ -16,7 +17,8 @@ import {
   CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION,
   CURRENT_PROVIDER_TOOL_SCHEMA_VERSION
 } from '../src/agent/providerRequestProjection';
-import { GlobalSessionStorage, getWorkspaceHash } from '../src/sessions/globalSessionStorage';
+import { GlobalSessionStorage, getWorkspaceHash, SESSION_MIGRATION_KEY } from '../src/sessions/globalSessionStorage';
+import type { Memento } from 'vscode';
 import { createHistoryTruncationPlan } from '../src/sessions/historyTruncation';
 import type { ChatMessage, ChatSession, WorkspaceSummary } from '../src/shared/types';
 import * as vscode from './stubs/vscode';
@@ -388,6 +390,111 @@ test('fresh sessions preserve V1 history when a delayed legacy migration resumes
   assert.deepEqual((await storage.loadSession(scope.key, old.id))?.messages.map(message => message.content), ['message 0', 'message 1']);
 });
 
+test('workspace-state migration imports history without reopening current bodies or reverting a fresh selection', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-fresh-workspace-migration-'));
+  const storage = new GlobalSessionStorage(vscode.Uri.file(root) as never);
+  const originalRead = vscode.workspace.fs.readFile;
+  t.after(async () => {
+    vscode.workspace.fs.readFile = originalRead;
+    await storage.flush(); await rm(root, { recursive: true, force: true });
+  });
+  const scope = { key: 'fresh-workspace-migration', name: 'Fresh', folderUris: [] };
+  const current = createSession('current', [createMessage(0), createMessage(1)], scope);
+  current.updatedAt = '2026-01-02T00:00:00.000Z';
+  await storage.saveWorkspace(scope, { activeSessionId: current.id, approvalMode: 'delegate', sessions: [current] });
+  const store = new ChatSessionStore(storage, 'en', scope);
+  const fresh = await store.createFreshSession();
+  const shard = (id: string) => path.join(root, 'chat-sessions', 'v2', 'workspaces', getWorkspaceHash(scope.key), 'sessions',
+    `${createHash('sha256').update(id).digest('hex').slice(0, 32)}.json`);
+  const protectedPaths = [shard(current.id), shard(fresh.id)];
+  const before = await Promise.all(protectedPaths.map(file => readFile(file, 'utf8')));
+  const stale = createSession(current.id, [createMessage(0)], scope);
+  const imported = createSession('legacy-only', [createMessage(3)], scope);
+  const state = new MemoryMemento();
+  await state.update(SESSION_STORAGE_KEY, { version: 2, activeSessionId: imported.id,
+    activeSessionIdsByWorkspace: { [scope.key]: imported.id }, sessions: [stale, imported] });
+  let bodyReads = 0;
+  vscode.workspace.fs.readFile = async uri => {
+    if (protectedPaths.some(file => uri.fsPath === file || uri.fsPath.startsWith(`${file}.objects${path.sep}`))) bodyReads += 1;
+    return await originalRead(uri);
+  };
+  assert.equal(await storage.migrateLegacyWorkspaceState(state, scope), true);
+  assert.equal(bodyReads, 0, 'metadata comparison must not reopen current authority bodies');
+  vscode.workspace.fs.readFile = originalRead;
+  const disk = await new GlobalSessionStorage(vscode.Uri.file(root) as never).loadWorkspace(scope);
+  assert.equal(disk.activeSessionId, fresh.id, 'an obsolete workspace-state selection cannot replace New Chat');
+  assert.equal(disk.approvalMode, 'delegate');
+  assert.deepEqual(new Set(disk.sessionSummaries?.map(session => session.id)), new Set([current.id, fresh.id, imported.id]));
+  assert.deepEqual(await Promise.all(protectedPaths.map(file => readFile(file, 'utf8'))), before);
+  assert.equal((await storage.loadSession(scope.key, imported.id))?.messages[0]?.id, 'm3');
+  assert.equal(state.get(SESSION_MIGRATION_KEY), true);
+  assert.equal(await storage.migrateLegacyWorkspaceState(state, scope), false);
+});
+
+test('workspace-state migration verifies only strictly newer same-ID legacy conflicts and keeps current ties', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-workspace-migration-conflict-'));
+  const writer = new GlobalSessionStorage(vscode.Uri.file(root) as never);
+  const importer = new GlobalSessionStorage(vscode.Uri.file(root) as never);
+  const originalRead = vscode.workspace.fs.readFile;
+  t.after(async () => {
+    vscode.workspace.fs.readFile = originalRead;
+    await writer.flush(); await importer.flush(); await rm(root, { recursive: true, force: true });
+  });
+  const scope = { key: 'workspace-migration-conflict', name: 'Migration', folderUris: [] };
+  const newer = createSession('newer-current', [createMessage(0), createMessage(1)], scope);
+  const equal = createSession('equal-current', [createMessage(2)], scope);
+  const older = createSession('older-current', [createMessage(3)], scope);
+  newer.updatedAt = '2026-01-03T00:00:00.000Z';
+  equal.updatedAt = '2026-01-02T00:00:00.000Z';
+  older.updatedAt = '2026-01-01T00:00:00.000Z';
+  await writer.saveWorkspace(scope, { activeSessionId: newer.id, approvalMode: 'delegate', sessions: [newer, equal, older] });
+  const incomingOlder = { ...newer, updatedAt: '2026-01-01T00:00:00.000Z', messages: [createMessage(4)] };
+  const incomingEqual = { ...equal, messages: [createMessage(5)] };
+  const incomingNewer = { ...older, updatedAt: '2026-01-04T00:00:00.000Z', messages: [createMessage(6), createMessage(7)] };
+  const missing = createSession('legacy-only', [createMessage(8)], scope);
+  const state = new MemoryMemento();
+  await state.update(SESSION_STORAGE_KEY, { version: 2, activeSessionId: missing.id,
+    activeSessionIdsByWorkspace: { [scope.key]: missing.id }, sessions: [incomingOlder, incomingEqual, incomingNewer, missing] });
+  const shard = (id: string) => path.join(root, 'chat-sessions', 'v2', 'workspaces', getWorkspaceHash(scope.key), 'sessions',
+    `${createHash('sha256').update(id).digest('hex').slice(0, 32)}.json`);
+  const protectedPaths = [shard(newer.id), shard(equal.id)];
+  const protectedBytes = await Promise.all(protectedPaths.map(file => readFile(file, 'utf8')));
+  let unrelatedReads = 0, conflictReads = 0;
+  vscode.workspace.fs.readFile = async uri => {
+    if (protectedPaths.some(file => uri.fsPath === file || uri.fsPath.startsWith(`${file}.objects${path.sep}`))) unrelatedReads += 1;
+    if (uri.fsPath.startsWith(shard(older.id))) conflictReads += 1;
+    return await originalRead(uri);
+  };
+  assert.equal(await importer.migrateLegacyWorkspaceState(state, scope), true);
+  assert.equal(unrelatedReads, 0);
+  assert.ok(conflictReads > 0, 'a new writer must verify the winning conflict before committing its replacement');
+  vscode.workspace.fs.readFile = originalRead;
+  const disk = await importer.loadWorkspace(scope);
+  assert.equal(disk.activeSessionId, newer.id);
+  assert.equal(disk.approvalMode, 'delegate');
+  assert.deepEqual(await Promise.all(protectedPaths.map(file => readFile(file, 'utf8'))), protectedBytes);
+  assert.deepEqual((await importer.loadSession(scope.key, older.id))?.messages.map(message => message.id), ['m6', 'm7']);
+  assert.equal((await importer.loadSession(scope.key, missing.id))?.messages[0]?.id, 'm8');
+});
+
+test('first workspace-state import keeps its original active conversation and completes once', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-first-workspace-migration-'));
+  const storage = new GlobalSessionStorage(vscode.Uri.file(root) as never);
+  t.after(async () => { await storage.flush(); await rm(root, { recursive: true, force: true }); });
+  const scope = { key: 'first-workspace-migration', name: 'Migration', folderUris: [] };
+  const first = createSession('first', [createMessage(0)], scope);
+  const selected = createSession('selected', [createMessage(1)], scope);
+  const state = new MemoryMemento();
+  await state.update(SESSION_STORAGE_KEY, { version: 2, activeSessionId: selected.id,
+    activeSessionIdsByWorkspace: { [scope.key]: selected.id }, sessions: [first, selected] });
+  assert.equal(await storage.migrateLegacyWorkspaceState(state, scope), true);
+  const disk = await storage.loadWorkspace(scope);
+  assert.equal(disk.activeSessionId, selected.id);
+  assert.deepEqual(new Set(disk.sessionSummaries?.map(session => session.id)), new Set([first.id, selected.id]));
+  assert.equal(state.get(SESSION_MIGRATION_KEY), true);
+  assert.equal(await storage.migrateLegacyWorkspaceState(state, scope), false);
+});
+
 test('approval mode persists for the project and is inherited by every new or selected session', async () => {
   const workspaceScope: WorkspaceSessionScope = {
     key: 'workspace:approval-mode',
@@ -575,6 +682,17 @@ function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>(yes => { resolve = yes; });
   return { promise, resolve };
+}
+
+class MemoryMemento implements Memento {
+  private readonly values = new Map<string, unknown>();
+  public keys(): readonly string[] { return [...this.values.keys()]; }
+  public get<T>(key: string): T | undefined;
+  public get<T>(key: string, defaultValue: T): T;
+  public get<T>(key: string, defaultValue?: T): T | undefined {
+    return this.values.has(key) ? this.values.get(key) as T : defaultValue;
+  }
+  public async update(key: string, value: unknown): Promise<void> { this.values.set(key, value); }
 }
 
 class MemorySessionStorage implements ChatSessionStorageAdapter {

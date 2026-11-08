@@ -193,6 +193,36 @@ test('new-session creation can escape historical loading but never an execution 
   assert.equal(deriveInteractionState(ready()).canCreateSession, true);
 });
 
+test('loaded observer history is idle without execution readiness and retains read-only capabilities', () => {
+  const facts = ready({ readOnly: true, requestContextReady: false, approvalDataReady: false,
+    modelReady: false, contextReady: false, sessionRecoveryReady: false, contextRefreshing: true });
+  const observer = deriveInteractionState(facts);
+  assert.equal(observer.phase, 'idle');
+  assert.equal(observer.canNavigate, true);
+  assert.equal(observer.canEdit, true, 'local drafts remain editable without execution authority');
+  assert.equal(observer.canSubmit, false);
+  assert.equal(observer.canCreateSession, false);
+  assert.equal(observer.canChangeContext, false);
+  assert.equal(observer.canCancel, false);
+  assert.equal(observer.waitingReason, undefined);
+  assert.equal(observer.blockingReason, undefined);
+  assert.equal(facts.approvalDataReady, false);
+  assert.equal(facts.requestContextReady, false);
+  assert.equal(deriveInteractionState({ ...facts, readOnly: false }).phase, 'preparing_context',
+    'writer preparation still requires its execution dependencies');
+
+  const loading = deriveInteractionState({ ...facts, sessionReady: false });
+  assert.equal(loading.phase, 'loading_session');
+  assert.equal(loading.canNavigate, false);
+  assert.equal(loading.canSubmit, false);
+  const coordinator = new InteractionCoordinator();
+  coordinator.begin('navigation', facts.sessionId, 'loading_session');
+  const navigating = coordinator.snapshot(facts);
+  assert.equal(navigating.phase, 'loading_session');
+  assert.equal(navigating.canNavigate, false, 'display readiness cannot steal a foreground reservation');
+  assert.equal(navigating.canSubmit, false);
+});
+
 test('diagnostics record phases, safe session identity and elapsed time without affecting owners', () => {
   let now = 10;
   const events: InteractionDiagnostic[] = [];
