@@ -1,4 +1,6 @@
 import './registerVscodeStub';
+import './freshBootStorage.test';
+import './freshSafetyStores.test';
 import './projectTasks.test';
 import './taskUsageSnapshot.test';
 import './approvalMode.test';
@@ -84,6 +86,7 @@ import './p1SubagentInheritance.test';
 import './validationAvailability.test';
 import './workspaceToolsSearch.test';
 import './startupPerformance.test';
+import './freshActivation.test';
 
 import './longRunningAgent.test';
 import './toolResultBudget.test';

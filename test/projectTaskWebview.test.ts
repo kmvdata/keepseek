@@ -8,7 +8,7 @@ function projectView(initialWebviewState: unknown = null) {
   view.receive({ type: 'state', revision: 1, state: { activeSessionId: 'legacy', language: 'en',
     startup: { interactiveReady: true, sideEffectsReady: true }, interaction: { sessionId: 'legacy',
       revision: 1, canEdit: true, canSubmit: false, canNavigate: false, canCancel: true, cancelOperationId: 'old', phase: 'running' } } });
-  view.receive({ type: 'projectTasksState', projectId: 'P', revision: 1, viewGeneration: 0, viewTaskId: null,
+  view.receive({ type: 'projectTasksState', capabilities: { canSubmit: true, canCreateTarget: true }, projectId: 'P', revision: 1, viewGeneration: 0, viewTaskId: null,
     messages: [], cards: [
       { id: 'A', title: 'Task A', sessionId: 'session-A', rootTaskId: 'root-A', status: 'running', progress: 'Reading code', usedMs: 9000,
         firstSubmittedAt: '2026-11-01T00:00:00.000Z', firstSubmittedAtSource: 'user_input' },
@@ -61,7 +61,7 @@ test('task drafts survive A to B to A and stale view publications cannot replace
   cardButton(view, 'B').click(); type(view, 'draft B');
   cardButton(view, 'A').click();
   assert.equal(view.element('promptInput').textContent, 'draft A');
-  view.receive({ type: 'projectTasksState', projectId: 'P', revision: 2, viewGeneration: 1, viewTaskId: 'B',
+  view.receive({ type: 'projectTasksState', capabilities: { canSubmit: true, canCreateTarget: true }, projectId: 'P', revision: 2, viewGeneration: 1, viewTaskId: 'B',
     messages: [{ id: 'late', role: 'assistant', content: 'wrong view' }] });
   assert.match(view.element('projectInputTarget').textContent, /Task A/);
   assert.equal(view.element('promptInput').textContent, 'draft A');
@@ -98,8 +98,8 @@ test('task view actions keep exact emission-time card identity, read-only still 
   assert.equal(stop.taskCardId, 'A'); assert.equal(stop.rootTaskId, 'root-A');
   cardButton(view, 'B').click();
   assert.equal(stop.taskCardId, 'A');
-  view.receive({ type: 'projectTasksState', projectId: 'P', revision: 3, viewGeneration: 2, viewTaskId: 'B', readOnly: true });
-  assert.equal(view.element('projectNewTask').disabled, true);
+  view.receive({ type: 'projectTasksState', projectId: 'P', revision: 3, viewGeneration: 2, viewTaskId: 'B', readOnly: true, capabilities: { canSubmit: false, canCreateTarget: true } });
+  assert.equal(view.element('projectNewTask').disabled, false);
   assert.equal(view.element('projectStopAll').disabled, true);
   assert.equal(view.element('promptInput').getAttribute('contenteditable'), 'true');
   openSidebar(view);
@@ -111,7 +111,7 @@ test('task view actions keep exact emission-time card identity, read-only still 
   assert.equal(view.posted.filter(item => /projectTask(?:Stop|Resume|Archive|Delete)$/u.test(item.type)).length, mutationCount);
   assert.ok(view.posted.some(item => item.type === 'projectTaskPainted' && item.taskCardId === 'B'));
   view.receive({ type: 'projectReadOnly', reason: 'another_owner' });
-  assert.match(view.element('statusText').textContent, /read-only/);
+  assert.match(view.element('statusText').textContent, /another_owner/);
 });
 
 test('a rejected input remains visible with its original target after switching tasks', () => {
@@ -147,12 +147,12 @@ test('Router overhead stays visible independently of the viewed task and preserv
   const view = projectView();
   cardButton(view, 'A').click();
   openSidebar(view);
-  view.receive({ type: 'projectTasksState', projectId: 'P', revision: 2, viewGeneration: 1, viewTaskId: 'A',
+  view.receive({ type: 'projectTasksState', capabilities: { canSubmit: true, canCreateTarget: true }, projectId: 'P', revision: 2, viewGeneration: 1, viewTaskId: 'A',
     routerUsage: [{ requestCount: 3, costByCurrency: { USD: 0.0024 }, incomplete: true }] });
   assert.match(view.element('projectRouterUsage').textContent, /Project Router: Reference cost USD 0.0024/);
   assert.match(view.element('projectRouterUsage').textContent, /3 requests/);
   assert.match(view.element('projectRouterUsage').textContent, /Incomplete usage/);
-  view.receive({ type: 'projectTasksState', projectId: 'P', revision: 3, viewGeneration: 1, viewTaskId: 'A',
+  view.receive({ type: 'projectTasksState', capabilities: { canSubmit: true, canCreateTarget: true }, projectId: 'P', revision: 3, viewGeneration: 1, viewTaskId: 'A',
     routerUsage: [{ requestCount: 1 }] });
   assert.match(view.element('projectRouterUsage').textContent, /Cost unknown/);
 });
@@ -183,7 +183,7 @@ test('deep history restores a bounded anchored hot page and Latest is a local de
   view.element('projectLatestMessages').click();
   const latest = view.posted.find(item => item.type === 'projectTaskLatest')!;
   assert.equal(latest.taskCardId, 'A'); assert.equal(latest.projectId, 'P');
-  view.receive({ type: 'projectTasksState', projectId: 'P', revision: 4, viewGeneration: 3, viewTaskId: 'A',
+  view.receive({ type: 'projectTasksState', capabilities: { canSubmit: true, canCreateTarget: true }, projectId: 'P', revision: 4, viewGeneration: 3, viewTaskId: 'A',
     messages: messages.slice(-30), hasOlderMessages: true, hasNewerMessages: false });
   assert.equal(view.state.messages.at(-1).id, 'deep-79');
   assert.equal(view.state.hasNewerMessages, false);
@@ -203,7 +203,7 @@ test('project drafts persist across Webview recreation and card-only progress ne
   assert.equal(restored.element('promptInput').textContent, 'persist this task draft');
   assert.equal(restored.element('transcript').scrollTop, 84);
   const before = restored.element('transcript').firstChild;
-  restored.receive({ type: 'projectTasksState', projectId: 'P', revision: 4, viewGeneration: 1, viewTaskId: 'A',
+  restored.receive({ type: 'projectTasksState', capabilities: { canSubmit: true, canCreateTarget: true }, projectId: 'P', revision: 4, viewGeneration: 1, viewTaskId: 'A',
     cards: [{ taskCardId: 'A', state: 'running', sessionId: 'session-A', title: 'Task A', progress: 'Further progress' }] });
   assert.equal(restored.element('transcript').firstChild, before);
   assert.equal(restored.element('promptInput').textContent, 'persist this task draft');
@@ -213,7 +213,7 @@ test('project drafts persist across Webview recreation and card-only progress ne
 
 test('legacy sessions retain normal input routing while project task controls remain available', () => {
   const view = projectView();
-  view.receive({ type: 'projectTasksState', projectId: 'P', enabled: false, viewMode: 'legacy', viewGeneration: 1 });
+  view.receive({ type: 'projectTasksState', capabilities: { canSubmit: true, canCreateTarget: true }, projectId: 'P', enabled: false, viewMode: 'legacy', viewGeneration: 1 });
   view.receive({ type: 'state', revision: 4, state: { activeSessionId: 'legacy', interaction: { sessionId: 'legacy', revision: 4,
     canEdit: true, canSubmit: true, canNavigate: true, canCancel: false, phase: 'idle' } } });
   type(view, 'ordinary session prompt'); submit(view);
@@ -315,7 +315,7 @@ function sidebarIds(view: ReturnType<typeof projectView>, id = 'projectTaskRailL
   return view.element(id).children.map(node => node.dataset.taskCardId).filter(Boolean);
 }
 function sidebarPublish(view: ReturnType<typeof projectView>, cards: ReturnType<typeof sidebarCard>[], revision: number) {
-  view.receive({ type: 'projectTasksState', projectId: 'P', revision, cards });
+  view.receive({ type: 'projectTasksState', capabilities: { canSubmit: true, canCreateTarget: true }, projectId: 'P', revision, cards });
 }
 
 test('sidebar starts collapsed and UI-only controls preserve transcript, target and unrelated persisted state', () => {
@@ -496,9 +496,9 @@ test('Escape dismisses the upper temporary interface before sidebar and sidebar 
   view.document.dispatchEvent({ type: 'keydown', key: 'Escape' });
   assert.equal(view.element('settingsMenu').classList.contains('hidden'), true);
   assert.equal(view.element('projectTaskSidebar').classList.contains('hidden'), false);
-  view.receive({ type: 'projectTasksState', projectId: 'Q', revision: 1, viewGeneration: 0, cards: [], messages: [] });
+  view.receive({ type: 'projectTasksState', capabilities: { canSubmit: true, canCreateTarget: true }, projectId: 'Q', revision: 1, viewGeneration: 0, cards: [], messages: [] });
   assert.equal(view.element('projectTaskSidebar').classList.contains('hidden'), true);
-  view.receive({ type: 'projectTasksState', projectId: 'P', revision: 3, viewGeneration: 0, cards: [], messages: [] });
+  view.receive({ type: 'projectTasksState', capabilities: { canSubmit: true, canCreateTarget: true }, projectId: 'P', revision: 3, viewGeneration: 0, cards: [], messages: [] });
   assert.equal(view.element('projectTaskSidebar').classList.contains('hidden'), false);
   view.document.dispatchEvent({ type: 'keydown', key: 'Escape' });
   assert.equal(view.element('projectTaskSidebar').classList.contains('hidden'), true);
@@ -564,7 +564,7 @@ test('ordinary sessions without a project defer new-session navigation while the
 test('first project publication respects new-task mode and never routes its first input to Router', () => {
   const view = createWebviewDomHarness();
   view.receive({ type: 'state', revision: 1, state: { activeSessionId: 'ordinary', language: 'en', messages: [] } });
-  view.receive({ type: 'projectTasksState', projectId: 'P', hostId: 'host-new', revision: 1, viewGeneration: 0,
+  view.receive({ type: 'projectTasksState', capabilities: { canSubmit: true, canCreateTarget: true }, projectId: 'P', hostId: 'host-new', revision: 1, viewGeneration: 0,
     viewTaskId: null, viewMode: 'new', cards: [], messages: [] });
   assert.match(view.element('projectInputTarget').textContent, /New task/);
   type(view, 'First independent task'); submit(view);
@@ -575,12 +575,12 @@ test('first project publication respects new-task mode and never routes its firs
 test('a replacement Host waits for IME settlement and invalidates an old-Host deferred task destination', () => {
   const view = projectView();
   const cards = [sidebarCard('A', 'running'), sidebarCard('B', 'waiting')];
-  view.receive({ type: 'projectTasksState', projectId: 'P', hostId: 'old-host', revision: 2,
+  view.receive({ type: 'projectTasksState', capabilities: { canSubmit: true, canCreateTarget: true }, projectId: 'P', hostId: 'old-host', revision: 2,
     viewGeneration: 1, viewTaskId: 'A', viewMode: 'task', cards, messages: [] });
   view.element('promptInput').dispatchEvent({ type: 'compositionstart' }); type(view, '旧目标最终中文');
   cardButton(view, 'B').click();
   const before = view.posted.filter(item => item.type === 'projectTaskView').length;
-  view.receive({ type: 'projectTasksState', projectId: 'P', hostId: 'replacement-host', revision: 1,
+  view.receive({ type: 'projectTasksState', capabilities: { canSubmit: true, canCreateTarget: true }, projectId: 'P', hostId: 'replacement-host', revision: 1,
     viewGeneration: 0, viewTaskId: null, viewMode: 'project', cards, messages: [] });
   assert.match(view.element('projectInputTarget').textContent, /Task A/);
   assert.equal(view.element('promptInput').textContent, '旧目标最终中文');
@@ -588,7 +588,7 @@ test('a replacement Host waits for IME settlement and invalidates an old-Host de
   assert.match(view.element('projectInputTarget').textContent, /Project assistant/);
   assert.equal(view.posted.filter(item => item.type === 'projectTaskView').length, before);
   assert.ok(view.posted.some(item => item.type === 'projectTaskDraft' && item.targetId === 'A' && item.markup.includes('旧目标最终中文')));
-  view.receive({ type: 'projectTasksState', projectId: 'P', hostId: 'old-host', revision: 100,
+  view.receive({ type: 'projectTasksState', capabilities: { canSubmit: true, canCreateTarget: true }, projectId: 'P', hostId: 'old-host', revision: 100,
     viewGeneration: 99, viewTaskId: 'B', cards, messages: [{ id: 'retired-host-message', role: 'assistant', content: 'Stale' }] });
   assert.match(view.element('projectInputTarget').textContent, /Project assistant/);
   assert.equal(view.state.messages.some((item: { id: string }) => item.id === 'retired-host-message'), false);
@@ -597,7 +597,7 @@ test('a replacement Host waits for IME settlement and invalidates an old-Host de
 test('legacy background metadata preserves transcript, composer and IME while updating task capabilities', () => {
   const view = projectView();
   const cards = [sidebarCard('A', 'running'), sidebarCard('B', 'waiting')];
-  view.receive({ type: 'projectTasksState', projectId: 'P', enabled: false, viewMode: 'legacy', revision: 2,
+  view.receive({ type: 'projectTasksState', capabilities: { canSubmit: true, canCreateTarget: true }, projectId: 'P', enabled: false, viewMode: 'legacy', revision: 2,
     viewGeneration: 0, readOnly: false, cards });
   view.receive({ type: 'state', revision: 20, state: { activeSessionId: 'ordinary-history', messages: [
     { id: 'ordinary-answer', role: 'assistant', content: 'Ordinary history stays mounted' }
@@ -609,7 +609,7 @@ test('legacy background metadata preserves transcript, composer and IME while up
   const draftNode = view.element('promptInput').firstChild;
   const metrics = view.domMetrics();
   for (let update = 0; update < 10; update++) {
-    view.receive({ type: 'projectTasksState', projectId: 'P', enabled: false, viewMode: 'legacy', revision: 3 + update,
+    view.receive({ type: 'projectTasksState', capabilities: { canSubmit: true, canCreateTarget: true }, projectId: 'P', enabled: false, viewMode: 'legacy', revision: 3 + update,
       viewGeneration: 0, readOnly: false, cards: cards.map(card => ({ ...card, progress: 'Background step ' + update })) });
   }
   assert.equal(view.element('transcript').firstChild, transcript);
@@ -618,12 +618,12 @@ test('legacy background metadata preserves transcript, composer and IME while up
   assert.equal(view.document.activeElement, view.element('promptInput'));
   assert.deepEqual(view.domMetrics(), metrics, 'legacy card-only updates do not recreate input menus or transcript elements');
   view.receive({ type: 'projectTasksState', projectId: 'P', enabled: false, revision: 13, viewGeneration: 0,
-    readOnly: true, cards });
-  assert.equal(view.element('projectNewTask').disabled, true);
+    readOnly: true, capabilities: { canSubmit: false, canCreateTarget: true }, cards });
+  assert.equal(view.element('projectNewTask').disabled, false);
   assert.equal(view.element('projectStopAll').disabled, true);
   assert.equal(view.element('promptInput').firstChild, draftNode, 'read-only capability refresh does not rewrite the composing draft');
-  view.receive({ type: 'projectTasksState', projectId: 'P', enabled: false, revision: 14, viewGeneration: 0, cards });
-  assert.equal(view.element('projectNewTask').disabled, true, 'partial metadata cannot clear read-only authority');
+  view.receive({ type: 'projectTasksState', capabilities: { canSubmit: true, canCreateTarget: true }, projectId: 'P', enabled: false, revision: 14, viewGeneration: 0, cards });
+  assert.equal(view.element('projectNewTask').disabled, false, 'partial metadata cannot clear read-only authority');
   view.element('promptInput').dispatchEvent({ type: 'compositionend' }); view.advance(0);
   assert.equal(view.element('transcript').firstChild, transcript, 'metadata was not deferred as a view replacement');
   assert.equal(view.element('promptInput').firstChild, draftNode);
@@ -633,13 +633,32 @@ test('legacy background metadata preserves transcript, composer and IME while up
 test('legacy publications reject old revisions without rolling back task metadata or read-only state', () => {
   const view = projectView();
   view.receive({ type: 'projectTasksState', projectId: 'P', enabled: false, revision: 10, viewGeneration: 0,
-    readOnly: true, cards: [sidebarCard('A', 'running', { title: 'Newest task title' })] });
+    readOnly: true, capabilities: { canSubmit: false, canCreateTarget: true }, cards: [sidebarCard('A', 'running', { title: 'Newest task title' })] });
   const transcript = view.element('transcript').firstChild;
-  view.receive({ type: 'projectTasksState', projectId: 'P', enabled: false, revision: 9, viewGeneration: 0,
+  view.receive({ type: 'projectTasksState', capabilities: { canSubmit: true, canCreateTarget: true }, projectId: 'P', enabled: false, revision: 9, viewGeneration: 0,
     readOnly: false, cards: [sidebarCard('A', 'failed', { title: 'Stale title' })] });
   assert.match(cardButton(view, 'A').getAttribute('aria-label') || '', /Newest task title/);
-  assert.equal(view.element('projectNewTask').disabled, true);
+  assert.equal(view.element('projectNewTask').disabled, false);
   assert.equal(view.element('transcript').firstChild, transcript);
+});
+
+test('older ownership generations cannot restore execution capability through newer card metadata', () => {
+  const view = projectView();
+  view.receive({ type: 'projectTasksState', projectId: 'P', revision: 10, viewGeneration: 0,
+    readOnly: true, reason: 'A live owner is active in another window',
+    ownerState: { revision: 8, status: 'owned_elsewhere', generation: 'current', reasonCode: 'live_owner' },
+    capabilities: { canSubmit: false, canCreateTarget: true } });
+  view.receive({ type: 'projectTasksState', projectId: 'P', revision: 11, viewGeneration: 0,
+    readOnly: false, reason: 'Outdated owner success',
+    ownerState: { revision: 7, status: 'owned', generation: 'retired', reasonCode: 'owned' },
+    capabilities: { canSubmit: true, canCreateTarget: true } });
+  assert.equal(view.element('projectStopAll').disabled, true);
+  assert.match(view.element('projectOwnerReason').textContent, /live owner/);
+  assert.equal(view.element('projectOwnerNotice').classList.contains('hidden'), false);
+  type(view, 'Kept local draft'); submit(view);
+  assert.equal(view.posted.some(item => item.type === 'projectAssistantSubmit'), false);
+  assert.equal(view.element('promptInput').textContent, 'Kept local draft');
+  assert.equal(view.element('projectNewTask').disabled, false);
 });
 
 test('a newer metadata revision cannot apply a stale legacy view generation over a local task selection', () => {
@@ -648,7 +667,7 @@ test('a newer metadata revision cannot apply a stale legacy view generation over
   const selection = view.posted.filter(item => item.type === 'projectTaskView').at(-1)!;
   const transcript = view.element('transcript').firstChild;
   const draftNode = view.element('promptInput').firstChild;
-  view.receive({ type: 'projectTasksState', projectId: 'P', enabled: false, viewMode: 'legacy', revision: 100,
+  view.receive({ type: 'projectTasksState', capabilities: { canSubmit: true, canCreateTarget: true }, projectId: 'P', enabled: false, viewMode: 'legacy', revision: 100,
     viewGeneration: selection.viewGeneration - 1, readOnly: false,
     cards: [sidebarCard('A', 'running'), sidebarCard('B', 'waiting', { progress: 'Fresh task metadata' })] });
   assert.match(view.element('projectInputTarget').textContent, /Task B/);
@@ -665,7 +684,7 @@ test('Host view replacement after compositionend waits for the final input event
   const view = projectView(); cardButton(view, 'A').click();
   view.element('promptInput').dispatchEvent({ type: 'compositionstart' }); type(view, '候选文字');
   view.element('promptInput').dispatchEvent({ type: 'compositionend' });
-  view.receive({ type: 'projectTasksState', projectId: 'P', revision: 3, viewGeneration: 2,
+  view.receive({ type: 'projectTasksState', capabilities: { canSubmit: true, canCreateTarget: true }, projectId: 'P', revision: 3, viewGeneration: 2,
     viewTaskId: 'B', viewMode: 'task', cards: [sidebarCard('A', 'running'), sidebarCard('B', 'waiting')],
     messages: [], draft: { targetId: 'B', revision: 1, markup: 'B existing draft' } });
   assert.match(view.element('projectInputTarget').textContent, /Task A/);
@@ -744,10 +763,10 @@ test('ordinary draft survives rail browsing and ordinary history never becomes t
       { id: 'ordinary-only-message', role: 'assistant', content: 'Only ordinary history' }
     ], interaction: { sessionId: 'session-A', revision: 40, canEdit: true, canSubmit: true, canNavigate: true, phase: 'idle' } } });
   };
-  view.receive({ type: 'projectTasksState', projectId: 'P', enabled: false, revision: 2, viewGeneration: 1 });
+  view.receive({ type: 'projectTasksState', capabilities: { canSubmit: true, canCreateTarget: true }, projectId: 'P', enabled: false, revision: 2, viewGeneration: 1 });
   ordinary(); type(view, 'ordinary session draft');
   cardButton(view, 'A').click(); type(view, 'worker task draft');
-  view.receive({ type: 'projectTasksState', projectId: 'P', enabled: false, revision: 3, viewGeneration: 3 });
+  view.receive({ type: 'projectTasksState', capabilities: { canSubmit: true, canCreateTarget: true }, projectId: 'P', enabled: false, revision: 3, viewGeneration: 3 });
   view.receive({ type: 'state', revision: 41, state: { activeSessionId: 'session-A', messages: [
     { id: 'ordinary-only-message', role: 'assistant', content: 'Only ordinary history' }
   ] } });
@@ -775,7 +794,7 @@ test('accepted ACK during composition before its first input cannot clear the ac
 
 test('task mutation gesture includes its complete observed Host and execution identity', () => {
   const view = projectView();
-  view.receive({ type: 'projectTasksState', projectId: 'P', hostId: 'host-P', revision: 2, viewGeneration: 0,
+  view.receive({ type: 'projectTasksState', capabilities: { canSubmit: true, canCreateTarget: true }, projectId: 'P', hostId: 'host-P', revision: 2, viewGeneration: 0,
     cards: [sidebarCard('A', 'running', { segmentId: 'segment-A', generation: 7 })], messages: [] });
   cardButton(view, 'A').click(); openSidebar(view);
   view.element('projectTaskDetail').querySelector('button')!.click();

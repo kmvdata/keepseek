@@ -126,9 +126,10 @@ export function getTemplate(extensionInfo?: Pick<KeepseekExtensionInfo, 'version
       ${getProjectTasksTemplate()}
       <div class="project-main">
         <div class="project-view-status">
-          <div id="projectOwnerNotice" class="project-owner-notice hidden" role="status" data-i18n="projectReadOnly">此窗口为只读，请在执行窗口处理任务。</div>
+          <div id="projectOwnerNotice" class="project-owner-notice hidden" role="status"><span id="projectOwnerReason" data-i18n="projectReadOnly">项目执行暂不可用，账号和草稿仍可使用。</span> <button id="projectOwnerCheck" type="button" class="secondary" data-i18n="projectOwnerCheck">检查与恢复</button></div>
           <button id="projectLatestMessages" type="button" class="secondary hidden" data-i18n="projectLatestMessages">最新消息</button>
         </div>
+        <div id="historyPreviewNotice" class="project-owner-notice hidden" role="status"><span id="historyPreviewReason"></span> <button id="historyPrepareContinue" type="button" class="secondary" data-i18n="historyPreviewPrepare">准备继续此会话</button></div>
         <div class="project-transcript-stage">
     <section id="transcript" class="transcript">
       <section id="planRegion" class="plan-region hidden" aria-label="计划 / 进度" data-i18n-aria-label="planProgress">

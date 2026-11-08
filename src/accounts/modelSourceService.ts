@@ -4,19 +4,7 @@ import {
   ModelSourceStore
 } from './accountStore';
 import { createModelCatalog } from './modelCatalog';
-import {
-  probeSourceConnection,
-  refreshSourceModelCache,
-  type RefreshSourceModelCacheOptions,
-  type RefreshSourceModelCacheResult,
-  type SourceConnectionProber
-} from './modelDiscovery';
-import {
-  isOfficialDeepSeekSource,
-  isOfficialGlmSource,
-  isOfficialKimiSource,
-  requiresModelSourceApiKey
-} from './sourceCapabilities';
+import { requiresModelSourceApiKey } from './sourceCapabilities';
 import type { ModelSource, ModelSourceModel, ModelSourceProvider } from './types';
 
 export interface AddModelInput {
@@ -33,102 +21,80 @@ export interface AddModelInput {
 export interface AddModelResult {
   source: ModelSource;
   reusedSource: boolean;
-  discovery?: RefreshSourceModelCacheResult;
-  modelDiscoveryUnavailable?: boolean;
 }
-
-export type SourceModelCacheRefresher = (
-  sourceStore: ModelSourceStore,
-  sourceId: string,
-  options: RefreshSourceModelCacheOptions
-) => Promise<RefreshSourceModelCacheResult>;
 
 export class ModelSourceService {
   public constructor(
-    private readonly sourceStore: ModelSourceStore,
-    private readonly refreshModelCache: SourceModelCacheRefresher = refreshSourceModelCache,
-    private readonly probeConnection: SourceConnectionProber = probeSourceConnection
+    private readonly sourceStore: ModelSourceStore
   ) {}
 
   public async addModel(input: AddModelInput): Promise<AddModelResult> {
-    const modelId = input.modelId?.trim() ?? '';
-    const existingById = input.sourceId?.trim()
-      ? await this.sourceStore.getSource(input.sourceId.trim())
-      : undefined;
-    let source = existingById;
-    let reusedSource = Boolean(source);
-    let modelDiscoveryUnavailable = false;
-    if (source && source.provider !== input.provider) {
-      throw new Error('An account API protocol cannot be changed. Create a new account for the other protocol.');
-    }
+    return this.sourceStore.transaction(async () => {
+      const modelId = input.modelId?.trim() ?? '';
+      const existingById = input.sourceId?.trim()
+        ? await this.sourceStore.getSource(input.sourceId.trim())
+        : undefined;
+      let source = existingById;
+      let reusedSource = Boolean(source);
+      if (source && source.provider !== input.provider) {
+        throw new Error('An account API protocol cannot be changed. Create a new account for the other protocol.');
+      }
 
-    if (!source) {
-      const name = normalizeRequiredSourceName(input.name);
-      const apiKey = input.apiKey.trim();
-      const baseUrl = normalizeRequiredBaseUrl(input.baseUrl);
-      assertRequiredHostedApiKey(input.provider, baseUrl, apiKey);
-      source = await this.findReusableSource(input.provider, apiKey, baseUrl);
-      reusedSource = Boolean(source);
       if (!source) {
-        await this.assertUniqueSourceName(name);
-        const probe = await this.probeConnection({ provider: input.provider, apiKey, baseUrl });
-        if (!probe.ok) {
-          throw new Error(probe.error || 'The Base URL is unreachable or authentication failed.');
+        const name = normalizeRequiredSourceName(input.name);
+        const apiKey = input.apiKey.trim();
+        const baseUrl = normalizeRequiredBaseUrl(input.baseUrl);
+        assertRequiredHostedApiKey(input.provider, baseUrl, apiKey);
+        source = await this.findReusableSource(input.provider, apiKey, baseUrl);
+        reusedSource = Boolean(source);
+        if (!source) {
+          await this.assertUniqueSourceName(name);
+          source = await this.sourceStore.createSource({
+            provider: input.provider,
+            name,
+            apiKey,
+            baseUrl,
+            models: []
+          });
         }
-        modelDiscoveryUnavailable = probe.modelDiscoveryUnavailable === true;
-        source = await this.sourceStore.createSource({
-          provider: input.provider,
-          name,
-          apiKey,
-          baseUrl,
-          models: []
+      }
+
+      if (!source.enabled) {
+        throw new Error('The selected model source is disabled.');
+      }
+      if (modelId) {
+        source = await this.upsertModel(source, modelId, {
+          contextWindowTokens: normalizeOptionalCapabilityTokens(
+            input.contextWindowTokens,
+            MAX_DISCOVERED_CONTEXT_WINDOW_TOKENS,
+            'contextWindowTokens'
+          ),
+          maxOutputTokens: normalizeOptionalCapabilityTokens(
+            input.maxOutputTokens,
+            MAX_DISCOVERED_OUTPUT_TOKENS,
+            'maxOutputTokens'
+          )
         });
       }
-    }
 
-    if (!source.enabled) {
-      throw new Error('The selected model source is disabled.');
-    }
-    if (modelId) {
-      source = await this.upsertModel(source, modelId, {
-        contextWindowTokens: normalizeOptionalCapabilityTokens(
-          input.contextWindowTokens,
-          MAX_DISCOVERED_CONTEXT_WINDOW_TOKENS,
-          'contextWindowTokens'
-        ),
-        maxOutputTokens: normalizeOptionalCapabilityTokens(
-          input.maxOutputTokens,
-          MAX_DISCOVERED_OUTPUT_TOKENS,
-          'maxOutputTokens'
-        )
-      });
-    }
-
-    const discovery = modelDiscoveryUnavailable
-      ? { status: 'failed' as const }
-      : !modelId && shouldRefreshAfterSave(source)
-        ? await this.refreshModelCache(this.sourceStore, source.id, { force: true })
-        : undefined;
-    return {
-      source: await this.sourceStore.getSource(source.id) ?? source,
-      reusedSource,
-      discovery,
-      ...(modelDiscoveryUnavailable ? { modelDiscoveryUnavailable: true } : {})
-    };
+      return { source: await this.sourceStore.getSource(source.id) ?? source, reusedSource };
+    });
   }
 
   public async removeModel(sourceId: string, modelId: string): Promise<ModelSource> {
-    const trimmedModelId = modelId.trim();
-    const source = await this.sourceStore.getSource(sourceId);
-    if (!source) {
-      throw new Error('Model source not found.');
-    }
-    const models = source.models.filter((model) => model.id !== trimmedModelId);
-    const updated = await this.sourceStore.updateSource(sourceId, { models });
-    if (!updated) {
-      throw new Error('Model source not found.');
-    }
-    return updated;
+    return this.sourceStore.transaction(async () => {
+      const trimmedModelId = modelId.trim();
+      const source = await this.sourceStore.getSource(sourceId);
+      if (!source) {
+        throw new Error('Model source not found.');
+      }
+      const models = source.models.filter((model) => model.id !== trimmedModelId);
+      const updated = await this.sourceStore.updateSource(sourceId, { models });
+      if (!updated) {
+        throw new Error('Model source not found.');
+      }
+      return updated;
+    });
   }
 
   public async setModelEnabled(
@@ -136,33 +102,35 @@ export class ModelSourceService {
     modelId: string,
     enabled: boolean
   ): Promise<ModelSource> {
-    const trimmedModelId = modelId.trim();
-    const source = await this.sourceStore.getSource(sourceId);
-    if (!source) {
-      throw new Error('Model source not found.');
-    }
-    const knownModel = createModelCatalog([source], { includeDisabledModels: true })
-      .find((model) => model.id === trimmedModelId);
-    if (!knownModel) {
-      throw new Error('Model not found in this source.');
-    }
-    if (enabled && knownModel.agentCompatible === false) {
-      throw new Error('This resource is not compatible with the text Agent.');
-    }
+    return this.sourceStore.transaction(async () => {
+      const trimmedModelId = modelId.trim();
+      const source = await this.sourceStore.getSource(sourceId);
+      if (!source) {
+        throw new Error('Model source not found.');
+      }
+      const knownModel = createModelCatalog([source], { includeDisabledModels: true })
+        .find((model) => model.id === trimmedModelId);
+      if (!knownModel) {
+        throw new Error('Model not found in this source.');
+      }
+      if (enabled && knownModel.agentCompatible === false) {
+        throw new Error('This resource is not compatible with the text Agent.');
+      }
 
-    const disabledModelIds = new Set(source.disabledModelIds ?? []);
-    if (enabled) {
-      disabledModelIds.delete(trimmedModelId);
-    } else {
-      disabledModelIds.add(trimmedModelId);
-    }
-    const updated = await this.sourceStore.updateSource(sourceId, {
-      disabledModelIds: [...disabledModelIds]
+      const disabledModelIds = new Set(source.disabledModelIds ?? []);
+      if (enabled) {
+        disabledModelIds.delete(trimmedModelId);
+      } else {
+        disabledModelIds.add(trimmedModelId);
+      }
+      const updated = await this.sourceStore.updateSource(sourceId, {
+        disabledModelIds: [...disabledModelIds]
+      });
+      if (!updated) {
+        throw new Error('Model source not found.');
+      }
+      return updated;
     });
-    if (!updated) {
-      throw new Error('Model source not found.');
-    }
-    return updated;
   }
 
   public async setModelContextWindowTokens(
@@ -170,45 +138,47 @@ export class ModelSourceService {
     modelId: string,
     contextWindowTokens: number
   ): Promise<ModelSource> {
-    const trimmedModelId = modelId.trim();
-    const normalizedContextWindowTokens = normalizeOptionalCapabilityTokens(
-      contextWindowTokens,
-      MAX_DISCOVERED_CONTEXT_WINDOW_TOKENS,
-      'contextWindowTokens'
-    );
-    const source = await this.sourceStore.getSource(sourceId);
-    if (!source) {
-      throw new Error('Model source not found.');
-    }
-    const knownModel = createModelCatalog([source], { includeDisabledModels: true })
-      .find((model) => model.id === trimmedModelId);
-    if (!knownModel) {
-      throw new Error('Model not found in this source.');
-    }
-    if (knownModel.agentCompatible === false) {
-      throw new Error('Token capabilities do not apply to this resource.');
-    }
+    return this.sourceStore.transaction(async () => {
+      const trimmedModelId = modelId.trim();
+      const normalizedContextWindowTokens = normalizeOptionalCapabilityTokens(
+        contextWindowTokens,
+        MAX_DISCOVERED_CONTEXT_WINDOW_TOKENS,
+        'contextWindowTokens'
+      );
+      const source = await this.sourceStore.getSource(sourceId);
+      if (!source) {
+        throw new Error('Model source not found.');
+      }
+      const knownModel = createModelCatalog([source], { includeDisabledModels: true })
+        .find((model) => model.id === trimmedModelId);
+      if (!knownModel) {
+        throw new Error('Model not found in this source.');
+      }
+      if (knownModel.agentCompatible === false) {
+        throw new Error('Token capabilities do not apply to this resource.');
+      }
 
-    const models: ModelSourceModel[] = source.models.map((model) => ({ ...model }));
-    const index = models.findIndex((model) => model.id === trimmedModelId);
-    const current = index >= 0 ? models[index] : undefined;
-    const next: ModelSourceModel = {
-      id: trimmedModelId,
-      ...(normalizedContextWindowTokens
-        ? { contextWindowTokens: normalizedContextWindowTokens }
-        : {}),
-      ...(current?.maxOutputTokens ? { maxOutputTokens: current.maxOutputTokens } : {})
-    };
-    if (index >= 0) {
-      models[index] = next;
-    } else {
-      models.push(next);
-    }
-    const updated = await this.sourceStore.updateSource(source.id, { models });
-    if (!updated) {
-      throw new Error('Model source not found.');
-    }
-    return updated;
+      const models: ModelSourceModel[] = source.models.map((model) => ({ ...model }));
+      const index = models.findIndex((model) => model.id === trimmedModelId);
+      const current = index >= 0 ? models[index] : undefined;
+      const next: ModelSourceModel = {
+        id: trimmedModelId,
+        ...(normalizedContextWindowTokens
+          ? { contextWindowTokens: normalizedContextWindowTokens }
+          : {}),
+        ...(current?.maxOutputTokens ? { maxOutputTokens: current.maxOutputTokens } : {})
+      };
+      if (index >= 0) {
+        models[index] = next;
+      } else {
+        models.push(next);
+      }
+      const updated = await this.sourceStore.updateSource(source.id, { models });
+      if (!updated) {
+        throw new Error('Model source not found.');
+      }
+      return updated;
+    });
   }
 
   public async setModelMaxOutputTokens(
@@ -216,43 +186,45 @@ export class ModelSourceService {
     modelId: string,
     maxOutputTokens: number
   ): Promise<ModelSource> {
-    const trimmedModelId = modelId.trim();
-    const normalizedMaxOutputTokens = normalizeOptionalCapabilityTokens(
-      maxOutputTokens,
-      MAX_DISCOVERED_OUTPUT_TOKENS,
-      'maxOutputTokens'
-    );
-    const source = await this.sourceStore.getSource(sourceId);
-    if (!source) {
-      throw new Error('Model source not found.');
-    }
-    const knownModel = createModelCatalog([source], { includeDisabledModels: true })
-      .find((model) => model.id === trimmedModelId);
-    if (!knownModel) {
-      throw new Error('Model not found in this source.');
-    }
-    if (knownModel.agentCompatible === false) {
-      throw new Error('Token capabilities do not apply to this resource.');
-    }
+    return this.sourceStore.transaction(async () => {
+      const trimmedModelId = modelId.trim();
+      const normalizedMaxOutputTokens = normalizeOptionalCapabilityTokens(
+        maxOutputTokens,
+        MAX_DISCOVERED_OUTPUT_TOKENS,
+        'maxOutputTokens'
+      );
+      const source = await this.sourceStore.getSource(sourceId);
+      if (!source) {
+        throw new Error('Model source not found.');
+      }
+      const knownModel = createModelCatalog([source], { includeDisabledModels: true })
+        .find((model) => model.id === trimmedModelId);
+      if (!knownModel) {
+        throw new Error('Model not found in this source.');
+      }
+      if (knownModel.agentCompatible === false) {
+        throw new Error('Token capabilities do not apply to this resource.');
+      }
 
-    const models: ModelSourceModel[] = source.models.map((model) => ({ ...model }));
-    const index = models.findIndex((model) => model.id === trimmedModelId);
-    const current = index >= 0 ? models[index] : undefined;
-    const next: ModelSourceModel = {
-      id: trimmedModelId,
-      ...(current?.contextWindowTokens ? { contextWindowTokens: current.contextWindowTokens } : {}),
-      ...(normalizedMaxOutputTokens ? { maxOutputTokens: normalizedMaxOutputTokens } : {})
-    };
-    if (index >= 0) {
-      models[index] = next;
-    } else {
-      models.push(next);
-    }
-    const updated = await this.sourceStore.updateSource(source.id, { models });
-    if (!updated) {
-      throw new Error('Model source not found.');
-    }
-    return updated;
+      const models: ModelSourceModel[] = source.models.map((model) => ({ ...model }));
+      const index = models.findIndex((model) => model.id === trimmedModelId);
+      const current = index >= 0 ? models[index] : undefined;
+      const next: ModelSourceModel = {
+        id: trimmedModelId,
+        ...(current?.contextWindowTokens ? { contextWindowTokens: current.contextWindowTokens } : {}),
+        ...(normalizedMaxOutputTokens ? { maxOutputTokens: normalizedMaxOutputTokens } : {})
+      };
+      if (index >= 0) {
+        models[index] = next;
+      } else {
+        models.push(next);
+      }
+      const updated = await this.sourceStore.updateSource(source.id, { models });
+      if (!updated) {
+        throw new Error('Model source not found.');
+      }
+      return updated;
+    });
   }
 
   public async saveSource(input: {
@@ -260,34 +232,33 @@ export class ModelSourceService {
     apiKey: string;
     baseUrl: string;
     name?: string;
-  }): Promise<{ source: ModelSource; connectionChanged: boolean; discovery?: RefreshSourceModelCacheResult }> {
-    const source = await this.sourceStore.getSource(input.sourceId);
-    if (!source) {
-      throw new Error('Model source not found.');
-    }
-    const name = input.name?.trim() || source.name;
-    await this.assertUniqueSourceName(name, source.id);
-    const apiKey = input.apiKey.trim();
-    const baseUrl = normalizeRequiredBaseUrl(input.baseUrl);
-    assertRequiredHostedApiKey(source.provider, baseUrl, apiKey);
-    const connectionChanged = source.apiKey !== apiKey || source.baseUrl !== baseUrl;
-    const updated = await this.sourceStore.updateSource(source.id, {
-      name,
-      apiKey,
-      baseUrl,
-      modelCache: connectionChanged ? undefined : source.modelCache
+    expectedUpdatedAt?: number;
+  }): Promise<{ source: ModelSource; connectionChanged: boolean }> {
+    return this.sourceStore.transaction(async () => {
+      const source = await this.sourceStore.getSource(input.sourceId);
+      if (!source) {
+        throw new Error('Model source not found.');
+      }
+      if (input.expectedUpdatedAt !== undefined && input.expectedUpdatedAt !== source.updatedAt) {
+        throw new Error('This account changed in another window. Reopen it before saving; your form was kept.');
+      }
+      const name = input.name?.trim() || source.name;
+      await this.assertUniqueSourceName(name, source.id);
+      const apiKey = input.apiKey.trim();
+      const baseUrl = normalizeRequiredBaseUrl(input.baseUrl);
+      assertRequiredHostedApiKey(source.provider, baseUrl, apiKey);
+      const connectionChanged = source.apiKey !== apiKey || source.baseUrl !== baseUrl;
+      const updated = await this.sourceStore.updateSource(source.id, {
+        name,
+        apiKey,
+        baseUrl,
+        modelCache: connectionChanged ? undefined : source.modelCache
+      });
+      if (!updated) {
+        throw new Error('Model source not found.');
+      }
+      return { source: await this.sourceStore.getSource(updated.id) ?? updated, connectionChanged };
     });
-    if (!updated) {
-      throw new Error('Model source not found.');
-    }
-    const discovery = shouldRefreshAfterSave(updated)
-      ? await this.refreshModelCache(this.sourceStore, updated.id, { force: true })
-      : undefined;
-    return {
-      source: await this.sourceStore.getSource(updated.id) ?? updated,
-      connectionChanged,
-      discovery
-    };
   }
 
   private async findReusableSource(
@@ -356,15 +327,6 @@ function normalizeOptionalCapabilityTokens(
     throw new Error(`${field} must be a positive integer no greater than ${max}.`);
   }
   return value;
-}
-
-function shouldRefreshAfterSave(source: Pick<ModelSource, 'provider' | 'baseUrl'>): boolean {
-  return isOfficialDeepSeekSource(source)
-    || isOfficialKimiSource(source)
-    || isOfficialGlmSource(source)
-    || source.provider === 'qwencloud'
-    || source.provider === 'openai-responses'
-    || source.provider === 'anthropic-compatible';
 }
 
 function assertRequiredHostedApiKey(

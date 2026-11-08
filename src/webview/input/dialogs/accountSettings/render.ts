@@ -403,7 +403,7 @@ export const accountSettingsRenderFragment: WebviewFragment = {
       function renderAccountSettings() {
         var account = getSettingsActiveAccount();
         var operationBusy = Boolean(settingsDialogBusyAction);
-        var runBusy = !canChangeContext() || isModelSelectionLocked();
+        var runBusy = !canManageAccounts();
         var controlsDisabled = operationBusy || runBusy;
         if (settingsDialog) {
           settingsDialog.setAttribute('aria-busy', operationBusy ? 'true' : 'false');
@@ -473,7 +473,7 @@ export const accountSettingsRenderFragment: WebviewFragment = {
             : (account ? t('save') : t('addAccount'));
           settingsSaveBtn.disabled = settingsSaveCompleted ? operationBusy : controlsDisabled;
         }
-        if (settingsCancelBtn) { settingsCancelBtn.disabled = operationBusy; }
+        if (settingsCancelBtn) { settingsCancelBtn.disabled = false; }
         renderSettingsAccountList(controlsDisabled);
         renderSettingsModelList(account, controlsDisabled);
       }

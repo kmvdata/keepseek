@@ -153,6 +153,8 @@ export const composerPublicApiFragment: WebviewFragment = {
         render: renderInputControls,
         renderUsage: renderContextProgress,
         showSettingsDialog: showSettingsDialog,
+        trackAccountRequest: trackAccountRequest,
+        accountOperationResult: accountOperationResult,
         showHistorySettingsDialog: showHistorySettingsDialog,
         showAboutDialog: showAboutDialog,
         onSkillDraftCreated: onSkillDraftCreated,

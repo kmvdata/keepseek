@@ -6,7 +6,7 @@
 
 真实事实分别表示：主任务/准备/内部续跑、导航事务、当前会话上下文就绪、必要持久化、文件/命令/审批操作。标题、余额和展示统计等后台工作有独立生命周期。可见阶段用于解释当前阻塞，不能取代这些可并存的事实。
 
-统一派生结果 `interaction` 包含 `sessionId/revision/operationId/phase`、`canEdit/canSubmit/canNavigate/canCreateSession/canCancel/canChangeContext`、`cancelOperationId`、`blockingReason` 与 `waitingReason`。`waitingReason` 区分模型、会话、操作恢复、项目上下文和必要保存；不能再把模型或恢复等待统一显示为 Skills 加载。导航、上下文准备和必要保存不表示模型正在生成；草稿在这些阶段保持可编辑。`canSubmit` 表示可接收一次提交准备，实际请求仍须跨过正确会话的安全、来源、上下文及耐久屏障。停止仅在宿主有实际可用的取消入口时出现。
+统一派生结果 `interaction` 包含 `sessionId/revision/operationId/phase`、`canEdit/canSubmit/canNavigate/canCreateSession/canCancel/canChangeContext/canReadAccounts/canManageAccounts`、`cancelOperationId`、`blockingReason` 与 `waitingReason`。账号能力不依赖 owner、模型和上下文。`waitingReason` 区分模型、会话、操作恢复、项目上下文和必要保存；不能再把模型或恢复等待统一显示为 Skills 加载。草稿在这些阶段保持可编辑。`canSubmit` 表示可接收一次提交准备，实际请求仍须跨过正确会话的安全、来源、上下文及耐久屏障。
 
 | 事实或兼容字段 | 所有权与用途 |
 | --- | --- |
@@ -67,15 +67,15 @@ Webview → Host 消息唯一入口仍是 `provider/webviewMessages.ts`；Host �
 
 正文安全可见、接收提交准备、实际发出请求与展示汇总完成是不同时间点。以下分类按实际消费者划分，不按模块名称猜测。
 
-### 新建空会话
+### 默认空白与新建空会话
 
-“新建会话”使用独立 `canCreateSession`，不等待旧活动会话的初始化、正文、来源或 Skills。宿主在首个 await 前取得导航 owner，生成真实空会话 UUID 并切换内存目标；现有分片路径只提交该会话与新的选择。保存期间准确显示“正在保存”，成功后立即发布空白正文和本地就绪，不再显示旧会话的“加载会话”。实际运行、待接受提交、必要保存和只读 owner 仍禁止冲突新建；历史列表的 `canNavigate` 不因此提前开放。
+每个新 extension host activation 调用一次 `initializeFreshBoot()`，生成普通空 UUID，不继承历史、Router/Worker、上下文、引用、Skills、滚动或草稿。未使用目标留在窗口内存，不新增永久空历史；重复 ready、隐藏重开和同宿主 Webview 重建保留当前目标。owner 检查独立异步，不挡住账号和编辑。旧 index、V1/Memento 迁移、任务 Registry、usage 与操作正文不在首屏或自动 idle 工作中读取。
 
-普通启动恢复或自动建立的空会话，在正文加载完成、无 pending approval/truncation 时也进入本地就绪，不等待模型与上下文准备。这只是展示/输入标记：恢复来的 UUID 仍可能有旧操作记录，首次发送必须恢复它自己的记录；只有本次明确生成的新 UUID 可跳过旧操作 hydration。只读 observer 加载完正文后可空闲查看和编辑本地草稿，不等待 owner 的请求准备，仍禁止发送、新建、上下文变更及副作用；轻量就绪状态先于项目助手的后续初始化发布。
+`canCreateSession` 与 `canNavigate` 分离。新建不需要旧正文、项目指令、Skills 或有效账号；observer 可以建立本地空目标和编辑草稿，执行仍受 owner 与硬检查限制。恢复来的旧 UUID 继续保留自己的操作恢复屏障，不能用新目标规则跳过历史恢复。
 
-新建不扫描项目来源、不生成标题、不请求模型，也不恢复旧会话的提案或批准。首次发送先同步取得 `preparing_task` owner，再等待共享安全存储初始化、真实模型来源和所属会话自身恢复/上下文；其它会话正文与旧上下文不是依赖。只有正文耐久接受后才返回 accepted 并允许前端清除对应草稿。准备失败保留草稿并报告真实错误，不将空白会话就绪当作审批、permit 或请求准入。
+首次发送同步取得 `preparing_task` owner，只准备当前目标的模型凭据、项目来源/Skills、安全存储 lane 和耐久正文，不读旧操作聚合正文。保存之后仍复核取消、目标与操作身份，匹配 accepted 才清稿；取消/失败保留草稿，精确已提交但未执行的 user tail 可在明确重试时复用，避免双消息。空白就绪不等于审批、permit 或请求准入。
 
-迟到的初始化只合并历史，保留新会话的原内存对象、已接受消息、脏 revision 与当前选择；旧启动的成功、失败和 finally 均不能锁回新会话或选择回 Router。分片存储通过现有协调事务合并索引；旧 V1 数据先安全迁移，不能用新会话的局部列表覆盖旧历史，也不保存加载前的占位会话。上述本地标记均为瞬态，不升级磁盘或请求协议。回归与本轮原生步骤见 [新建会话验收](keepseek-fresh-session-verification.md)。
+首次新消息通过 canonical 分片与独立 receipt 提交，不先迁移 V1，不用局部新列表覆盖旧索引。显式历史操作才幂等合并，旧原件保留；迟到结果不替换当前对象、选择或草稿。初始安全默认 ask，不扫描旧正文继承审批偏好。详见 [空白启动与所有权验收](keepseek-blank-startup-owner-verification.md)。
 
 旧 workspace Memento 导入在同一存储事务内比较最新索引，保留已存在的新选择和审批模式。当前记录在时间相同或更新时获胜，无关正文保持冷态；仅同 ID 且旧导入记录严格更新时，先核验当前正文后沿正常 hash/revision 边界保存，不绕过完整性检查。
 
@@ -84,7 +84,7 @@ Webview → Host 消息唯一入口仍是 `provider/webviewMessages.ts`；Host �
 | 工作 | 安全展示历史正文 | 实际请求/继续任务 | 分类依据 |
 | --- | --- | --- | --- |
 | 初始 session 初始化 / lazy session load | 必须完成 | 历史目标必须完成；新建不依赖旧正文 | 历史加载不得用占位会话覆盖旧数据；迟到结果须合并当前新建目标 |
-| 全局审批/ChangeSet/DraftRun 初始化及初始必要恢复 | 历史导航须等待该屏障 | 全局存储必须完成；仅恢复所属历史目标 | 独立 `startupNavigationReadyPromise`，新建首次发送共享全局初始化，但不继承旧目标恢复 |
+| 审批/ChangeSet/DraftRun 及必要恢复 | 有限页查看不等待执行恢复 | 历史继续恢复真实记录；新 UUID 使用独立安全 lane | 不在新任务准备中读取旧操作聚合正文 |
 | 模型目录、来源及必要选择保存 | 不阻止导航和正文 | 必须完成 | 模型解析与保存决定实际请求来源；余额磁盘展示不属于此屏障 |
 | 内存选择与持久化 activeSessionId | 选择已确定后可显示 | 必须完成 | 页面、内存及持久化选择一致，旧导航不可回写 |
 | ChangeSet/DraftRun session load | 可先显示正文，操作入口保持禁用 | 必须完成 | 旧提案、执行结果与历史归属需要复核 |
@@ -221,5 +221,5 @@ Webview → Host 消息唯一入口仍是 `provider/webviewMessages.ts`；Host �
 - `webviewMessages.ts` 集中增加可选 request/session/revision 与取消身份，增加显式 retry；Host 反馈独立。旧消息仍经宿主检查；新运行状态全部为进程内瞬态，无会话磁盘 schema 迁移、无旧运行租约恢复。
 - `sharedProjectSources.ts/skillStore.ts` 只缓存来源读取；`webview/**`、`shared/i18n.ts` 管呈现和中英文。`GlobalSessionStorage.flush()` 即使 pending 为空也跨已有 coordinator 屏障，等待已转移的在途提交。
 - `isBusy` 剩余消费者是实际模型用量/流、模型切换策略、运行审计和旧 Webview 兼容回退。`isStartingRun` 是 Coordinator 的只读互斥投影，供来源修改、设置和续跑门禁使用。标题另由 `deriveSessionTitleCapability()` 区分导航上下文准备与真实运行/保存冲突；两者均不负责重新拼装输入框能力。
-- `dispose()` 仍同步发出取消；突然退出依赖现有 checkpoint、prepared journal 与逐项耐久记录恢复，不能将页面关闭或进程退出解释成所有工作已成功保存。本次未做原生退出现场验证。
+- `dispose()` 发起幂等 `shutdown():Promise<void>`；`deactivate()` 返回它，等待 Worker/runtime 与必要保存后释放根 owner。突然退出仍依赖 checkpoint、prepared journal 与 operation journal；页面关闭不等于宿主关闭，进程退出不代表副作用成功。原生退出验证单独记录。
 - 本次未改审批模式、权限、预算口径、三协议请求合同、package.json、CHANGELOG.md、依赖与设置；改动留在工作树，未提交或发布。

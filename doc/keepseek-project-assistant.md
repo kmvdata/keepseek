@@ -137,9 +137,9 @@ hover/focus、浮层开合、范围切换、到期重算、查看、返回项目
 
 ## 所有权、资源与审批
 
-长期项目所有权独立于 session 短写锁。项目根先 realpath，并向仓库根归一化；锁保存在共享机器本地目录，以原子排他创建取得并核对进程、nonce、inode。心跳或文件年龄不授权抢占。无法证明锁后端、远端 authority 或旧副作用安全时只读，不默认双 owner。
+长期项目所有权独立于 session 短写锁。项目根 realpath 并向仓库根归一化；物理身份对应的内核排他监听在 verify→派发及操作结算期间连续持有，磁盘记录只作身份/兼容审计。小型 operation journal 先持久化 intent，命令启动门禁先记 PID/组再接收 IPC GO。心跳或文件年龄不授权抢占；活/未知操作保持执行隔离，结束但结果未知不自动重试。动态检查可重新竞争并同步 store/任务/UI；v1 缺证据诊断及 OS 重启证明见 [本轮验收](keepseek-blank-startup-owner-verification.md)。
 
-只读窗口可查看卡片/会话和保存本窗口草稿，不能执行 Provider、自动标题、迁移写回或其他旧入口副作用。关闭 Webview 不结束宿主任务；关闭 VS Code 后不承诺继续运行，也不自动恢复进程。
+observer 可查看卡片/会话、编辑本窗口草稿、建立本地空目标并配置用户账号；Provider、自动标题和项目副作用仍须执行 owner。默认 activation 不读 Registry/usage/旧草稿，不恢复 viewMode/viewTaskId；用户展开侧栏后才读 summary，选中目标只读有限页，不创建 Worker。用户明确执行/继续才恢复完整邮箱、checkpoint 与安全记录。关闭 Webview 不结束宿主任务；退出以根 shutdown 等待收口，崩溃依赖 journal，不自动恢复进程。
 
 Apply、命令和固定 validation 通过项目资源租约。嵌套服务透传并核验同一 token，避免重复获取造成自锁；真正取得资源后重新核对信任、取消、hash/spec/permit 和基线。等待用户、审批、预算、依赖、Router 或 child 时不持工作区修改租约。外部编辑器/进程不受调度器约束，SafeFileEditor 的脏编辑器、原子写及 read-back 检查仍不可省略。
 

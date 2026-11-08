@@ -176,7 +176,7 @@ test('migration progress is observable and cancellation before commit preserves 
   assert.equal(await readFile(join(root, 'session.json.objects', 'legacy-v2.json'), 'utf8'), original);
 });
 
-test('empty, damaged and stale writer locks fail closed without unlinking another writer authority', async t => {
+test('unverified and live legacy writers stay protected; a dead file writer recovers under kernel exclusion', async t => {
   const root = await mkdtemp(join(tmpdir(), 'keepseek-lock-inspect-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const uri = vscode.Uri.file(join(root, 'session.json')) as never;
@@ -184,11 +184,15 @@ test('empty, damaged and stale writer locks fail closed without unlinking anothe
   const storage = new SessionObjectStore(uri);
   await storage.save(session);
   const lock = join(root, 'session.json.objects', 'writer.lock');
-  for (const owner of ['', '{', 'null', '{}', JSON.stringify({ pid: process.pid }), JSON.stringify({ pid: 2147483647 })]) {
+  for (const owner of ['', '{', 'null', '{}', JSON.stringify({ pid: process.pid })]) {
     await writeFile(lock, owner);
     await assert.rejects(() => storage.save(session), /lock|active writer/);
     assert.equal(await readFile(lock, 'utf8'), owner);
   }
+  await writeFile(lock, JSON.stringify({ pid: 2147483647 }));
+  await storage.save(session);
+  await assert.rejects(readFile(lock), { code: 'ENOENT' });
+  assert.equal((await new SessionObjectStore(uri).load(JSON.parse(await readFile(join(root, 'session.json'), 'utf8')))).id, 's');
 });
 
 test('a shallow-frozen native tree is isolated before persistence and recursively frozen on decode', async t => {

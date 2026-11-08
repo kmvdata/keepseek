@@ -62,6 +62,10 @@ export const accountSettingsStateFragment: WebviewFragment = {
       var settingsDefaultModelSelection = null;
       var settingsOriginalFormSignature = '';
       var settingsRunBusyStatusVisible = false;
+      var settingsDialogRequestId = '';
+      var settingsDialogGeneration = 0;
+      var settingsDialogDismissed = false;
+      var settingsFormDraft = null;
 `.slice(1)
 };
 
@@ -204,6 +208,7 @@ export const accountSettingsHelpersFragment: WebviewFragment = {
           disabledModelIds: disabledModelIds,
           enabled: rawSource.enabled !== false,
           isOfficialDeepSeek: rawSource.isOfficialDeepSeek === true,
+          updatedAt: typeof rawSource.updatedAt === 'number' ? rawSource.updatedAt : undefined,
           sortIndex: index
         };
       }
@@ -309,28 +314,46 @@ export const accountSettingsHelpersFragment: WebviewFragment = {
         settingsDialogStatus.classList.toggle('hidden', !message);
       }
 
+      function canManageAccounts() {
+        var capability = state.interaction;
+        return !capability || capability.canManageAccounts !== false;
+      }
+
       function blockAccountSettingsWhileRunBusy() {
-        if (canChangeContext() && !isModelSelectionLocked()) { return false; }
+        if (canManageAccounts()) { return false; }
         settingsRunBusyStatusVisible = true;
-        setSettingsDialogStatus(t(isModelSelectionLocked()
-          ? 'modelSelectionLockedByBackground'
-          : 'modelSettingsReadonlyWhileBusy'));
-        if (settingsDialogStatus) { settingsDialogStatus.focus(); }
+        setSettingsDialogStatus(t('accountSettingsUnavailable'));
         return true;
       }
 
       function syncAccountSettingsRunBusyStatus(runBusy, operationBusy) {
         if (runBusy && !operationBusy) {
           settingsRunBusyStatusVisible = true;
-          setSettingsDialogStatus(t(isModelSelectionLocked()
-            ? 'modelSelectionLockedByBackground'
-            : 'modelSettingsReadonlyWhileBusy'));
-          return;
-        }
-        if (settingsRunBusyStatusVisible) {
+          setSettingsDialogStatus(t('accountSettingsUnavailable'));
+        } else if (settingsRunBusyStatusVisible) {
           settingsRunBusyStatusVisible = false;
           setSettingsDialogStatus('');
         }
+      }
+
+      function trackAccountRequest(message) {
+        if (message.type === 'openApiSettings') { settingsDialogGeneration += 1; settingsDialogDismissed = false; }
+        message.accountDialogGeneration = settingsDialogGeneration;
+        settingsDialogRequestId = message.requestId || '';
+      }
+
+      function accountOperationResult(message) {
+        if (!message.requestId || message.requestId !== settingsDialogRequestId || settingsDialogDismissed) return;
+        if (message.accountDialogGeneration !== undefined && message.accountDialogGeneration !== settingsDialogGeneration) return;
+        clearSettingsDialogBusy();
+        settingsDialogRequestId = '';
+        if (!message.ok) { setSettingsDialogStatus(message.error || t('accountOperationTimedOut')); }
+        renderAccountSettings();
+      }
+
+      function rememberSettingsForm() {
+        settingsFormDraft = { sourceId: settingsSelectedSourceId, name: settingsAccountName?.value || '',
+          apiKey: settingsApiKey?.value || '', baseUrl: settingsBaseUrl?.value || '', dirty: settingsDialogDirty };
       }
 
       function clearSettingsDialogBusy() {
@@ -350,8 +373,13 @@ export const accountSettingsHelpersFragment: WebviewFragment = {
         if (settingsDialogStatus) { settingsDialogStatus.focus(); }
         settingsDialogBusyTimer = setTimeout(function() {
           settingsDialogBusyTimer = null;
-          setSettingsDialogStatus(t('modelOperationStillPending'));
-        }, 15000);
+          var requestId = settingsDialogRequestId;
+          settingsDialogRequestId = '';
+          settingsDialogBusyAction = '';
+          if (requestId) vscode.postMessage({ type: 'cancelAccountOperation', requestId: requestId });
+          setSettingsDialogStatus(t('accountOperationTimedOut'));
+          renderAccountSettings();
+        }, 32000);
       }
 
 `.slice(1)
@@ -363,6 +391,11 @@ export const accountSettingsOpenFragment: WebviewFragment = {
       function showSettingsDialog(settings) {
         if (!settingsOverlay || !settingsApiKey || !settingsBaseUrl) { return; }
         var values = settings && typeof settings === 'object' ? settings : {};
+        if (settingsDialogDismissed) return;
+        if (values.requestId && values.requestId !== settingsDialogRequestId) return;
+        if (values.accountDialogGeneration !== undefined && values.accountDialogGeneration !== settingsDialogGeneration) return;
+        var preserveForm = settingsDialogDirty && !values.settingsSaved;
+        if (preserveForm) rememberSettingsForm();
         var rawSources = Array.isArray(values.sources) ? values.sources : [];
         settingsDefaultModelSelection = values.defaultModelSelection || null;
         settingsSources = rawSources.map(normalizeSettingsSource).filter(Boolean);
@@ -380,11 +413,19 @@ export const accountSettingsOpenFragment: WebviewFragment = {
         settingsRunBusyStatusVisible = false;
         setSettingsDialogStatus('');
         populateSettingsAccount(getSettingsActiveAccount());
+        if (!values.settingsSaved && settingsFormDraft?.dirty && settingsFormDraft.sourceId === settingsSelectedSourceId) {
+          if (settingsAccountName) settingsAccountName.value = settingsFormDraft.name;
+          if (settingsApiKey) settingsApiKey.value = settingsFormDraft.apiKey;
+          if (settingsBaseUrl) settingsBaseUrl.value = settingsFormDraft.baseUrl;
+          updateSettingsDialogDirtyState();
+        }
+        if (values.settingsSaved) settingsFormDraft = null;
+        if (values.loading) setSettingsDialogStatus(t('accountSettingsLoading'));
         if (settingsModelList) { settingsModelList.innerHTML = ''; }
         setApiKeyVisible(false, false);
         renderAccountSettings();
         settingsOverlay.classList.remove('hidden');
-        if (!canChangeContext() && settingsDialogStatus) {
+        if (!canManageAccounts() && settingsDialogStatus) {
           settingsDialogStatus.focus();
         } else if (settingsAccountName && getSettingsActiveAccount()) {
           settingsAccountName.focus();
@@ -402,10 +443,11 @@ export const accountSettingsCloseFragment: WebviewFragment = {
   source: `
       function hideSettingsDialog() {
         if (!settingsOverlay) { return; }
-        if (settingsDialogBusyAction) {
-          setSettingsDialogStatus(t('modelOperationStillPending'));
-          return;
-        }
+        rememberSettingsForm();
+        if (settingsDialogRequestId) vscode.postMessage({ type: 'cancelAccountOperation', requestId: settingsDialogRequestId });
+        settingsDialogRequestId = '';
+        settingsDialogGeneration += 1;
+        settingsDialogDismissed = true;
         clearSettingsDialogBusy();
         settingsSaveCompleted = false;
         settingsRunBusyStatusVisible = false;
@@ -474,6 +516,7 @@ export const accountSettingsBindingsFragment: WebviewFragment = {
             vscode.postMessage({
               type: 'saveModelSource',
               sourceId: source.id,
+              expectedUpdatedAt: source.updatedAt,
               name: name,
               apiKey: apiKey,
               baseUrl: baseUrl

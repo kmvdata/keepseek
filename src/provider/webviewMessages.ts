@@ -56,11 +56,12 @@ export interface ProjectTaskDraftInput {
   expanded?: boolean;
 }
 
-export type WebviewMessage = WebviewMessagePayload & TaskMessageTarget;
+export type WebviewMessage = WebviewMessagePayload & TaskMessageTarget & { requestId?: string; accountDialogGeneration?: number };
 
 type WebviewMessagePayload =
   | ({ type: 'projectTaskCreate' | 'projectAssistantSubmit' } & ProjectTaskPromptInput)
   | ({ type: 'projectTaskSubmit'; taskCardId: string; inputKind?: 'supplement' | 'followup' } & ProjectTaskPromptInput)
+  | { type: 'projectTaskOpen'; projectId: string }
   | { type: 'projectTaskView'; projectId: string; taskCardId: string | null; mode?: 'project' | 'new' | 'task'; viewGeneration: number }
   | { type: 'projectTaskLatest'; projectId: string; taskCardId: string | null; viewGeneration?: number }
   | { type: 'projectTaskReconcile'; projectId: string; targetId: string; requestId: string }
@@ -76,6 +77,9 @@ type WebviewMessagePayload =
   | { type: 'setApprovalMode'; mode: ApprovalMode }
   | { type: 'setExecutionMode'; mode: ExecutionMode }
   | { type: 'resolvePlanDecision'; planId: string; action: 'start_execution' | 'revise_plan' | 'exit_plan' }
+  | { type: 'checkProjectOwnership'; requestId?: string }
+  | { type: 'loadSessionHistory' }
+  | { type: 'cancelAccountOperation'; requestId: string }
   | { type: 'ready' }
   | { type: 'retryInteraction' }
   | { type: 'startupRendered'; revision?: number }
@@ -88,6 +92,7 @@ type WebviewMessagePayload =
   | { type: 'continueRepair' }
   | { type: 'newSession' }
   | { type: 'selectSession'; sessionId: string }
+  | { type: 'prepareHistorySession'; sessionId: string; viewGeneration: number; requestId: string }
   | { type: 'toggleSessionFavorite'; sessionId: string }
   | { type: 'renameSession'; sessionId: string; title: string }
   | { type: 'regenerateSessionTitle'; sessionId: string; requestId: string }
@@ -129,7 +134,7 @@ type WebviewMessagePayload =
   | { type: 'setDefaultModel'; sourceId: string; modelId: string }
   | { type: 'setModelContextWindow'; sourceId: string; modelId: string; contextWindowTokens: number }
   | { type: 'setModelMaxOutput'; sourceId: string; modelId: string; maxOutputTokens: number }
-  | { type: 'saveModelSource'; sourceId: string; name?: string; apiKey: string; baseUrl: string }
+  | { type: 'saveModelSource'; sourceId: string; name?: string; apiKey: string; baseUrl: string; expectedUpdatedAt?: number }
   | { type: 'deleteModelSource'; sourceId: string }
   | { type: 'refreshSourceModels'; sourceId: string }
   | { type: 'testSourceConnection'; provider: ModelSourceProvider; apiKey: string; baseUrl: string }
@@ -176,3 +181,136 @@ type WebviewMessagePayload =
   | { type: 'cloneDraftRun'; id: string }
   | { type: 'authorizeDraftRunCwd'; id: string }
   | { type: 'openDraftRunTerminal'; id: string };
+
+/** Shared Host/Webview routing authority. Every new message must declare scope. */
+export type WebviewMessageScope = 'user' | 'window' | 'history' | 'session' | 'project' | 'execution';
+export const WEBVIEW_MESSAGE_SCOPES: Readonly<Record<WebviewMessage['type'], WebviewMessageScope>> = {
+  projectTaskCreate: 'project',
+  projectAssistantSubmit: 'project',
+  projectTaskSubmit: 'project',
+  projectTaskOpen: 'project',
+  projectTaskView: 'project',
+  projectTaskLatest: 'project',
+  projectTaskReconcile: 'project',
+  projectTaskPrefetch: 'project',
+  projectTaskStop: 'project',
+  projectTaskResume: 'project',
+  projectTaskArchive: 'project',
+  projectTaskDelete: 'project',
+  projectTaskStopAll: 'project',
+  projectTaskAssociate: 'project',
+  projectTaskDraft: 'project',
+  projectTaskPainted: 'project',
+  resumeApprovalProcessing: 'execution',
+  resolveValidationApproval: 'execution',
+  setApprovalMode: 'session',
+  setExecutionMode: 'session',
+  resolvePlanDecision: 'execution',
+  checkProjectOwnership: 'window',
+  loadSessionHistory: 'history',
+  cancelAccountOperation: 'user',
+  ready: 'window',
+  retryInteraction: 'window',
+  startupRendered: 'window',
+  loadOlderMessages: 'session',
+  refreshBalance: 'user',
+  sendPrompt: 'execution',
+  editUserPrompt: 'execution',
+  abortPrompt: 'execution',
+  continueAgentTask: 'execution',
+  continueRepair: 'execution',
+  newSession: 'history',
+  selectSession: 'history',
+  prepareHistorySession: 'execution',
+  toggleSessionFavorite: 'history',
+  renameSession: 'history',
+  regenerateSessionTitle: 'session',
+  deleteSessions: 'history',
+  listOtherWorkspaces: 'history',
+  loadOtherWorkspaceSessions: 'history',
+  copyOtherWorkspaceSession: 'history',
+  deleteOtherWorkspaceSessions: 'history',
+  deleteOtherWorkspace: 'history',
+  setSelectedModel: 'session',
+  configureApprovalModel: 'user',
+  setApprovalModel: 'user',
+  setSubagentModel: 'user',
+  cancelPendingModelSelection: 'session',
+  setAgentSettings: 'session',
+  setDebugMode: 'user',
+  openCurrentSessionLog: 'session',
+  openRunTrace: 'session',
+  openSubagentDiagnostic: 'session',
+  startBackgroundRun: 'execution',
+  resumeBackgroundRun: 'execution',
+  stopBackgroundRun: 'execution',
+  openApiSettings: 'user',
+  openHistorySettings: 'user',
+  setModelRequestTimeout: 'user',
+  addModel: 'user',
+  deleteModel: 'user',
+  setModelEnabled: 'user',
+  setDefaultModel: 'user',
+  setModelContextWindow: 'user',
+  setModelMaxOutput: 'user',
+  saveModelSource: 'user',
+  deleteModelSource: 'user',
+  refreshSourceModels: 'user',
+  testSourceConnection: 'user',
+  saveHistorySettings: 'user',
+  setLanguage: 'user',
+  addCurrentFile: 'session',
+  pickWorkspaceFiles: 'session',
+  pickExternalFiles: 'session',
+  pickExternalFileReferences: 'session',
+  insertDroppedFileReferences: 'session',
+  requestReferenceResources: 'session',
+  requestSkills: 'session',
+  selectProjectScope: 'session',
+  useSkill: 'session',
+  removeActiveSkill: 'session',
+  openSkill: 'session',
+  setSkillWorkspaceDefault: 'session',
+  createSkillDraft: 'session',
+  requestClipboardText: 'window',
+  writeClipboardText: 'window',
+  readPath: 'session',
+  openFileReference: 'window',
+  openDirectoryReference: 'window',
+  removeContextFile: 'session',
+  clearContext: 'session',
+  applyDraftEdit: 'execution',
+  discardDraftEdit: 'execution',
+  openDraftDiff: 'session',
+  openDraftEditFile: 'session',
+  applyChangeSet: 'execution',
+  discardChangeSet: 'execution',
+  revertDraftEdit: 'execution',
+  revertChangeSet: 'execution',
+  applyAllDraftEdits: 'execution',
+  discardAllDraftEdits: 'execution',
+  approveDraftRun: 'execution',
+  approveDraftRunBatch: 'execution',
+  cancelDraftRunBatch: 'execution',
+  rejectDraftRun: 'execution',
+  cancelDraftRun: 'execution',
+  cloneDraftRun: 'execution',
+  authorizeDraftRunCwd: 'execution',
+  openDraftRunTerminal: 'session',
+};
+
+export function webviewMessageScope(type: string): WebviewMessageScope | undefined {
+  return Object.prototype.hasOwnProperty.call(WEBVIEW_MESSAGE_SCOPES, type)
+    ? WEBVIEW_MESSAGE_SCOPES[type as WebviewMessage['type']] : undefined;
+}
+
+export function isRootWebviewMessage(type: string): boolean {
+  const scope = webviewMessageScope(type);
+  return scope === 'user' || scope === 'window';
+}
+
+export function isAccountWebviewMessage(type: string): boolean {
+  return ['openApiSettings', 'setModelRequestTimeout', 'addModel', 'deleteModel', 'setModelEnabled',
+    'setDefaultModel', 'setModelContextWindow', 'setModelMaxOutput', 'saveModelSource', 'deleteModelSource',
+    'refreshSourceModels', 'testSourceConnection'].includes(type);
+}

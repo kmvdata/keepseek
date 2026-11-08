@@ -268,6 +268,7 @@ test('consolidates previously persisted split ChangeSets for one Agent run', asy
     history: [],
     checkpoints: []
   }));
+  const originalAudit = await readFile(path.join(root, 'change-sets.json'), 'utf8');
 
   const fixture = createStoreFixture(root);
   await fixture.store.initialize();
@@ -282,7 +283,8 @@ test('consolidates previously persisted split ChangeSets for one Agent run', asy
     entries?: Array<{ kind?: string }>;
   };
   assert.equal(persisted.entries?.filter((entry) => entry.kind === 'runtime').length, 1);
-  await assert.rejects(readFile(path.join(root, 'change-sets.json'), 'utf8'));
+  assert.equal(await readFile(path.join(root, 'change-sets.json'), 'utf8'), originalAudit,
+    'canonical consolidation retains the intact original audit');
 });
 
 test('keeps multiple rounds associated with their assistant message and omits newText from Webview state', async () => {

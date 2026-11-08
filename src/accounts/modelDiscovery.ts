@@ -213,7 +213,7 @@ export type SourceConnectionProber = (
 ) => Promise<ProbeSourceConnectionResult>;
 
 /**
- * Lightweight connectivity probe run before creating a new source. With an
+ * Explicit user-requested connectivity probe; saving an account never calls it. With an
  * API key the probe requires a 2xx response (authentication succeeded).
  * Without a key any HTTP response proves the Base URL is reachable, which
  * matches local models that need no credentials.
@@ -378,28 +378,23 @@ export async function refreshSourceModelCache(
       status: 'failed'
     };
   }
-  const latestSource = await sourceStore.getSource(source.id);
-  if (!latestSource) {
-    return { status: 'missing-source' };
-  }
-  if (
-    latestSource.provider !== source.provider
-    || latestSource.apiKey !== source.apiKey
-    || latestSource.baseUrl !== source.baseUrl
-  ) {
-    // A slow response from the previous connection must not populate the cache
-    // after the user has saved a different key or endpoint.
-    return {
-      cache: latestSource.modelCache ? cloneCache(latestSource.modelCache) : undefined,
-      status: 'failed'
-    };
-  }
   try {
-    await sourceStore.updateSource(source.id, { modelCache: discovered });
+    return await sourceStore.transaction(async () => {
+      const latestSource = await sourceStore.getSource(source.id);
+      if (!latestSource) return { status: 'missing-source' as const };
+      if (options.signal?.aborted || latestSource.provider !== source.provider
+        || latestSource.apiKey !== source.apiKey || latestSource.baseUrl !== source.baseUrl) {
+        return { cache: latestSource.modelCache ? cloneCache(latestSource.modelCache) : undefined, status: 'failed' as const };
+      }
+      // Recheck credentials and persist under the same cross-window transaction.
+      // A late discovery response cannot restore a cache for a replaced endpoint.
+      await sourceStore.updateSource(source.id, { modelCache: discovered });
+      return { cache: cloneCache(discovered), status: 'fresh' as const };
+    });
   } catch {
-    // The newly fetched result is still useful for the current UI render.
+    // A verified response is still displayable; failure never creates an account.
+    return { cache: cloneCache(discovered), status: 'fresh' };
   }
-  return { cache: cloneCache(discovered), status: 'fresh' };
 }
 
 export function createModelDiscoveryHeaders(

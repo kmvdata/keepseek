@@ -8,7 +8,8 @@ import * as vscode from 'vscode';
 import type { DraftRun, ExecutionPermit } from '../shared/types';
 import { analyzeCommand } from '../approvals/authorization/commandSemantics';
 import { interpretGitQueryResult, type GitQueryResult } from './gitQueryResult';
-import { assertProjectMutationLease, markProjectOperationUncertain, withProjectMutationPhase } from '../tasks/projectResources';
+import { assertProjectMutationLease, beginProjectDurableOperation, getProjectExecutionContext, markProjectOperationUncertain, withProjectMutationPhase } from '../tasks/projectResources';
+import { spawnDurablyGated } from './durableSpawn';
 
 const RESTRICTED_OUTPUT_LIMIT_BYTES = 8_192;
 const EXIT_STREAM_CLOSE_GRACE_MS = 1_500;
@@ -125,14 +126,27 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
     validatePermit(input.draftRun, input.permit);
     if (!vscode.workspace.isTrusted) throw new Error('DraftRun cannot execute in an untrusted workspace.');
     if (input.signal?.aborted) return { started: false, phase: 'not_dispatched', timedOut: false, cancelled: true };
-    const child = spawn(restricted?.executable ?? input.verifiedLaunch?.executable ?? input.draftRun.spec.executable, input.draftRun.spec.args, {
-      cwd: restricted?.cwd ?? input.verifiedLaunch?.cwd ?? vscode.Uri.parse(input.draftRun.spec.cwdUri).fsPath,
-      env: restricted ? {} : input.verifiedLaunch?.env ?? createControlledEnvironment(input.draftRun.spec.env),
-      shell: false,
-      windowsHide: true,
-      detached: process.platform !== 'win32',
-      stdio: [restricted ? 'pipe' : 'ignore', 'pipe', 'pipe']
+    const operation = await beginProjectDurableOperation({
+      id: input.draftRun.id, kind: 'command', specHash: input.draftRun.specHash,
+      resourceScope: input.draftRun.spec.cwdUri, gated: true
     });
+    const launch = {
+      executable: restricted?.executable ?? input.verifiedLaunch?.executable ?? input.draftRun.spec.executable,
+      args: input.draftRun.spec.args,
+      cwd: restricted?.cwd ?? input.verifiedLaunch?.cwd ?? vscode.Uri.parse(input.draftRun.spec.cwdUri).fsPath,
+      env: restricted ? {} : input.verifiedLaunch?.env ?? createControlledEnvironment(input.draftRun.spec.env)
+    };
+    let child: ChildProcess;
+    let gated: ReturnType<typeof spawnDurablyGated> | undefined;
+    try {
+      gated = getProjectExecutionContext() ? spawnDurablyGated({
+        ...launch, journal: operation, signal: input.signal, stdin: restricted?.stdin
+      }) : undefined;
+      child = gated?.child ?? spawn(launch.executable, launch.args, {
+        cwd: launch.cwd, env: launch.env, shell: false, windowsHide: true,
+        detached: process.platform !== 'win32', stdio: [restricted ? 'pipe' : 'ignore', 'pipe', 'pipe']
+      });
+    } catch (error) { await operation.settle('not_dispatched'); throw error; }
     const running: RunningProcess = {
       child,
       terminal,
@@ -141,15 +155,16 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
       timedOut: false
     };
     this.running.set(input.draftRun.id, running);
-    return await new Promise<DraftRunExecutionOutcome>((resolve) => {
+    const outcome = await new Promise<DraftRunExecutionOutcome>((resolve) => {
       let settled = false;
       let started = false;
       let spawnFailed = false;
-      child.once('spawn', () => { started = true; });
+      child.once('spawn', () => { if (!gated) started = true; });
       let exitCloseTimer: ReturnType<typeof setTimeout> | undefined;
       let terminationSettleTimer: ReturnType<typeof setTimeout> | undefined;
       let exitCode: number | undefined;
       let exitSignal: string | undefined;
+      let commandExited = false;
       let outputBytes = 0;
       let outputLimitError: string | undefined;
       let remoteStdout = '';
@@ -248,8 +263,11 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
         this.running.delete(input.draftRun.id);
         pty.write(`\r\n[KeepSeek DraftRun ${formatOutcomeLabel(outcome)}]\r\n`);
         pty.finishRun();
-        resolve({ ...outcome, started: started ? true : spawnFailed ? false : undefined,
-          phase: spawnFailed ? 'spawn_failed' : outcome.exitCode !== undefined || outcome.signal
+        const actuallyStarted = gated?.started ?? started;
+        const failedLaunch = spawnFailed || Boolean(gated?.commandFailed);
+        const dispatchUnknown = gated && gated.authorized && !actuallyStarted && !gated.commandFailed;
+        resolve({ ...outcome, error: outcome.error ?? gated?.launchError, started: actuallyStarted ? true : failedLaunch || (gated && !gated.authorized) ? false : undefined,
+          phase: gated && !gated.authorized ? 'not_dispatched' : dispatchUnknown ? 'result_unknown' : failedLaunch ? 'spawn_failed' : outcome.exitCode !== undefined || outcome.signal
             ? 'exited' : 'result_unknown' });
       };
       const currentOutcome = (error?: string): DraftRunExecutionOutcome => ({
@@ -296,12 +314,15 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
         spawnFailed = !started && child.pid === undefined;
         finish({ timedOut: running.timedOut, cancelled: running.cancelRequested, error: error.message });
       });
-      child.once('exit', (code, signal) => {
+      const onProcessExit = (code: number | null, signal: NodeJS.Signals | null, fromCommand = false) => {
+        if (gated && commandExited && !fromCommand) return;
+        if (fromCommand) commandExited = true;
         if (settled) {
           return;
         }
         exitCode = typeof code === 'number' ? code : undefined;
         exitSignal = signal ?? undefined;
+        if (exitCloseTimer) clearTimeout(exitCloseTimer);
         exitCloseTimer = setTimeout(() => {
           // A descendant may keep inherited stdout/stderr descriptors open after
           // the approved executable exits. Do not let that pin the DraftRun and
@@ -313,8 +334,13 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
           ));
         }, EXIT_STREAM_CLOSE_GRACE_MS);
         exitCloseTimer.unref?.();
+      };
+      child.once('exit', onProcessExit);
+      if (gated) child.on('message', message => {
+        const record = message as { type?: string; code?: number; signal?: NodeJS.Signals };
+        if (record.type === 'command-exit') onProcessExit(record.code ?? null, record.signal ?? null, true);
       });
-      if (restricted) {
+      if (restricted && !gated) {
         child.stdin?.on('error', () => {
           // Exit or cancellation can close the pipe before all input is sent.
           // The child lifecycle determines the actual result.
@@ -322,13 +348,17 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
         child.stdin?.end(restricted.stdin, 'utf8');
       }
       child.once('close', (code, signal) => finish({
-        exitCode: typeof code === 'number' ? code : undefined,
-        signal: signal ?? undefined,
+        exitCode: commandExited ? exitCode : typeof code === 'number' ? code : undefined,
+        signal: commandExited ? exitSignal : signal ?? undefined,
         timedOut: running.timedOut,
         cancelled: running.cancelRequested,
         error: outputLimitError
       }));
     });
+    await gated?.dispatch;
+    await operation.settle(outcome.started === false ? 'not_dispatched'
+      : outcome.phase === 'result_unknown' || outcome.error === OUTPUT_STREAM_CLOSE_ERROR ? 'result_unknown' : 'completed');
+    return outcome;
   }
 
   public cancel(draftRunId: string): boolean {

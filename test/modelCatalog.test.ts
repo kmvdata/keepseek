@@ -215,22 +215,14 @@ describe('ModelSourceService', () => {
     await rm(storageRoot, { recursive: true, force: true });
   });
 
-  it('automatically discovers official DeepSeek models after add', async () => {
+  it('saves official DeepSeek accounts locally without connection or discovery requests', async () => {
     const store = new ModelSourceStore(vscode.Uri.file(storageRoot), { now: () => NOW, createId: () => 'official' });
-    const refreshCalls: Array<{ sourceId: string; force?: boolean }> = [];
-    const service = new ModelSourceService(store, async (_store, sourceId, options) => {
-      refreshCalls.push({ sourceId, force: options.force });
-      await store.updateSource(sourceId, {
-        modelCache: { fetchedAt: NOW, models: [{ id: 'deepseek-chat' }] }
-      });
-      return { status: 'fresh', cache: { fetchedAt: NOW, models: [{ id: 'deepseek-chat' }] } };
-    }, async () => ({ ok: true, status: 200 }));
+    const service = new ModelSourceService(store);
 
     const result = await service.addModel({
       provider: 'deepseek', name: 'DeepSeek', apiKey: 'key', baseUrl: 'https://api.deepseek.com', modelId: ''
     });
-    assert.deepEqual(refreshCalls, [{ sourceId: 'official', force: true }]);
-    assert.deepEqual(result.source.modelCache?.models, [{ id: 'deepseek-chat' }]);
+    assert.equal(result.source.modelCache, undefined);
   });
 
   it('creates sources without API keys or model IDs and reuses matching credentials', async () => {
@@ -239,18 +231,8 @@ describe('ModelSourceService', () => {
       now: () => NOW,
       createId: () => ids.shift() ?? 'fallback'
     });
-    let refreshCount = 0;
-    let probeCount = 0;
     const service = new ModelSourceService(
-      store,
-      async () => {
-        refreshCount += 1;
-        return { status: 'failed' };
-      },
-      async () => {
-        probeCount += 1;
-        return { ok: true, status: 200 };
-      }
+      store
     );
 
     // A source name is required before creating an account.
@@ -275,8 +257,6 @@ describe('ModelSourceService', () => {
     assert.equal(second.reusedSource, true);
     assert.deepEqual(second.source.models.map((model) => model.id), ['two']);
     assert.equal((await store.listSources()).length, 1);
-    assert.equal(refreshCount, 0);
-    assert.equal(probeCount, 1);
   });
 
   it('persists per-model availability and re-enables a model when it is added again', async () => {
@@ -396,33 +376,26 @@ describe('ModelSourceService', () => {
     );
   });
 
-  it('rejects account creation when the Base URL probe fails', async () => {
+  it('keeps invalid remote credentials configurable offline without probing on save', async () => {
     const store = new ModelSourceStore(vscode.Uri.file(storageRoot), { now: () => NOW });
     const service = new ModelSourceService(
-      store,
-      async () => ({ status: 'failed' }),
-      async () => ({ ok: false, status: 401, error: 'Authentication failed (HTTP 401). Check the API Key and Base URL.' })
+      store
     );
-    await assert.rejects(service.addModel({
+    const saved = await service.addModel({
       provider: 'openai-compatible', name: 'Proxy', apiKey: 'bad-key', baseUrl: 'https://proxy.example/v1'
-    }), /HTTP 401/u);
-    assert.equal((await store.listSources()).length, 0);
+    });
+    assert.equal(saved.source.name, 'Proxy');
+    assert.equal((await store.listSources()).length, 1);
   });
 
-  it('keeps Chat Completions and Responses credentials in distinct accounts and refreshes Responses models', async () => {
+  it('keeps Chat Completions and Responses credentials in distinct accounts without automatic discovery', async () => {
     const ids = ['chat-account', 'responses-account'];
     const store = new ModelSourceStore(vscode.Uri.file(storageRoot), {
       now: () => NOW,
       createId: () => ids.shift() ?? 'fallback'
     });
-    const refreshCalls: string[] = [];
     const service = new ModelSourceService(
-      store,
-      async (_store, sourceId) => {
-        refreshCalls.push(sourceId);
-        return { status: 'fresh', cache: { fetchedAt: NOW, models: [{ id: 'model' }] } };
-      },
-      async () => ({ ok: true, status: 200 })
+      store
     );
     const chat = await service.addModel({
       provider: 'openai-compatible', name: 'Chat', apiKey: 'same-key', baseUrl: 'https://api.example/v1'
@@ -440,7 +413,6 @@ describe('ModelSourceService', () => {
     });
     assert.equal(reusedResponses.source.id, responses.source.id);
     assert.equal(reusedResponses.reusedSource, true);
-    assert.deepEqual(refreshCalls, ['responses-account', 'responses-account']);
     await assert.rejects(service.addModel({
       sourceId: responses.source.id,
       provider: 'openai-compatible',

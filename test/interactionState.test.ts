@@ -1,7 +1,7 @@
 import './registerVscodeStub';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { InteractionCoordinator, deriveInteractionState, deriveSessionTitleCapability,
+import { InteractionCoordinator, deriveInteractionState, deriveProjectInteractionState, deriveSessionTitleCapability,
   type InteractionFacts, type InteractionDiagnostic, type SessionTitleCapabilityFacts } from '../src/provider/interactionState';
 import { localize, WEBVIEW_TRANSLATIONS } from '../src/shared/i18n';
 
@@ -9,6 +9,18 @@ function ready(overrides: Partial<InteractionFacts> = {}): InteractionFacts {
   return { sessionId: 'A', revision: 1, sessionReady: true, requestContextReady: true,
     approvalDataReady: true, ...overrides };
 }
+
+test('project target capabilities keep account repair, viewing and drafts available when execution has another owner', () => {
+  const observer = deriveProjectInteractionState({ disposed: false, owned: false, viewMode: 'task', targetPresent: true, stopping: false });
+  assert.equal(observer.canSubmit, false);
+  assert.equal(observer.canReadAccounts, true);
+  assert.equal(observer.canManageAccounts, true);
+  assert.equal(observer.canEdit, true);
+  assert.equal(observer.canView, true);
+  assert.equal(observer.canCreateTarget, true);
+  assert.equal(deriveProjectInteractionState({ disposed: false, owned: true, viewMode: 'new', targetPresent: true, stopping: false }).canSubmit, true);
+  assert.equal(deriveProjectInteractionState({ disposed: false, owned: true, viewMode: 'task', targetPresent: false, stopping: false }).canSubmit, false);
+});
 
 test('Host title feedback and Webview disabled reasons use the same real bilingual catalog', () => {
   const outcomes = ['updated', 'unchanged', 'no_material', 'unavailable', 'busy', 'cancelled', 'stale', 'invalid', 'timeout', 'failed', 'save_failed'];
@@ -186,7 +198,7 @@ test('new-session creation can escape historical loading but never an execution 
   coordinator.begin('navigation', 'A', 'loading_session');
   assert.equal(coordinator.snapshot(loading).canCreateSession, false, 'another session owner cannot be stolen');
   const observer = deriveInteractionState(ready({ freshSession: true, readOnly: true }));
-  assert.equal(observer.canCreateSession, false);
+  assert.equal(observer.canCreateSession, true, 'a local empty target is independent of execution ownership');
   assert.equal(observer.canSubmit, false);
   assert.equal(observer.canChangeContext, false);
   assert.equal(observer.canNavigate, true);
@@ -201,7 +213,7 @@ test('loaded observer history is idle without execution readiness and retains re
   assert.equal(observer.canNavigate, true);
   assert.equal(observer.canEdit, true, 'local drafts remain editable without execution authority');
   assert.equal(observer.canSubmit, false);
-  assert.equal(observer.canCreateSession, false);
+  assert.equal(observer.canCreateSession, true);
   assert.equal(observer.canChangeContext, false);
   assert.equal(observer.canCancel, false);
   assert.equal(observer.waitingReason, undefined);

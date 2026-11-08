@@ -16,6 +16,15 @@ import type { ChangeSetStore } from '../src/edits/changeSetStore';
 import type { InteractionSnapshot } from '../src/provider/interactionState';
 import type { WebviewMessage } from '../src/provider/webviewMessages';
 import type { AgentResponse, ChatMessage, ChatSession } from '../src/shared/types';
+import { createWebviewDomHarness } from './webviewDomHarness';
+
+// Execution-recovery tests explicitly prepare after the finite history view.
+// Selecting history alone is covered separately below and must remain passive.
+async function openSessionForContinuation(host: NavigationHost, sessionId: string): Promise<void> {
+  await host.handleMessage({ type: 'selectSession', sessionId });
+  await host.handleMessage({ type: 'prepareHistorySession', sessionId,
+    viewGeneration: host.observerViewGeneration, requestId: `prepare-${sessionId}-${host.observerViewGeneration}` });
+}
 
 function deferred<T = void>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -25,6 +34,7 @@ function deferred<T = void>() {
 
 interface NavigationHost {
   handleMessage(message: WebviewMessage): Promise<void>;
+  observerViewGeneration: number;
   initializeAfterWebviewReady(): Promise<void>;
   ensureSessionNavigationReady(): Promise<void>;
   refreshWorkspaceScope(): Promise<void>;
@@ -70,6 +80,7 @@ interface PostedState {
   changeSets?: Array<{ id: string }>;
   skills?: { items: Array<{ name: string }> };
   usageMetrics?: { displayReadiness?: 'loading' | 'ready' | 'incomplete' };
+  historyPreview?: { sessionId: string; generation: number; loading: boolean; error?: string; canContinue: boolean } | null;
 }
 
 interface HostPost {
@@ -82,6 +93,72 @@ interface HostPost {
   state?: PostedState;
 }
 
+test('owner history selection is a finite passive view; only explicit preparation restores its execution authority', async t => {
+  const { host, store, storage, first, second, posts, publish } = await fixture(t, { historyMessages: 120 });
+  const view = createWebviewDomHarness();
+  host.views.add({ webview: { postMessage(message: Record<string, unknown>) { view.receive(message); return Promise.resolve(true); } } });
+  let fullReads = 0, pageReads = 0, recoveryReads = 0, sourceReads = 0, skillReads = 0, requests = 0;
+  const load = storage.loadSession.bind(storage), page = store.viewSessionPage.bind(store);
+  const recovery = host.changeSets.loadSession!.bind(host.changeSets);
+  const sources = host.sharedProjectSources.refresh.bind(host.sharedProjectSources);
+  const skills = host.skillStore.resolveAndLoadSkills.bind(host.skillStore);
+  const previousFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = previousFetch; });
+  globalThis.fetch = async () => { requests++; throw new Error('Passive history cannot call a model'); };
+  storage.loadSession = async (...args) => { fullReads++; return load(...args); };
+  store.viewSessionPage = async (...args) => { pageReads++; return page(...args); };
+  host.changeSets.loadSession = async (...args) => { recoveryReads++; return recovery(...args); };
+  host.sharedProjectSources.refresh = async (...args) => { sourceReads++; return sources(...args); };
+  host.skillStore.resolveAndLoadSkills = async input => { skillReads++; return skills(input); };
+
+  await host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  const preview = lastState(posts).historyPreview!;
+  assert.equal(preview.sessionId, second.id);
+  assert.equal(lastState(posts).messages?.length, 30);
+  assert.equal(lastState(posts).interaction?.canEdit, true);
+  assert.equal(lastState(posts).interaction?.canSubmit, false);
+  assert.equal(view.element('historyPrepareContinue').disabled, false);
+  assert.equal(store.activeSessionId, first.id, 'view selection cannot retarget execution');
+  assert.equal(pageReads, 1); assert.equal(fullReads, 0); assert.equal(recoveryReads, 0);
+  assert.equal(sourceReads, 0); assert.equal(skillReads, 0); assert.equal(requests, 0);
+  publish(); host.postLightweightState();
+  assert.equal(lastState(posts).activeSessionId, second.id, 'old startup publications retain the selected finite view');
+  await host.handleMessage(submission(second.id, 'passive-old-send'));
+  assert.equal(posts.find(post => post.requestId === 'passive-old-send')?.status, 'rejected');
+  assert.equal(store.activeSessionId, first.id);
+
+  view.element('historyPrepareContinue').click();
+  const prepare = view.posted.find(message => message.type === 'prepareHistorySession')!;
+  assert.equal(prepare.sessionId, second.id); assert.equal(prepare.viewGeneration, preview.generation);
+  assert.equal(prepare.taskCardId, undefined);
+  await host.handleMessage(prepare as WebviewMessage);
+  assert.equal(store.activeSessionId, second.id);
+  assert.ok(fullReads > 0); assert.ok(recoveryReads > 0); assert.ok(sourceReads > 0); assert.ok(skillReads > 0);
+  assert.equal(requests, 0, 'preparing history restores safety and context without executing a request');
+  assert.equal(lastState(posts).historyPreview, null);
+  assert.equal(lastState(posts).interaction?.canSubmit, true);
+  assert.equal(posts.find(post => post.type === 'historyPreviewResult' && post.requestId === prepare.requestId)?.status, 'ready');
+});
+
+test('history preparation keeps generation ownership across a delayed owner check and cannot supersede a new blank target', async t => {
+  const { host, store, second, posts } = await fixture(t);
+  await host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  const generation = host.observerViewGeneration;
+  const entered = deferred(), release = deferred();
+  t.after(() => release.resolve());
+  const internal = host as unknown as { ownerReadiness: Promise<void> };
+  internal.ownerReadiness = (async () => { entered.resolve(); await release.promise; })();
+  const preparation = host.handleMessage({ type: 'prepareHistorySession', sessionId: second.id, viewGeneration: generation, requestId: 'late-history-owner' });
+  await entered.promise;
+  await host.handleMessage({ type: 'newSession' });
+  const freshId = store.activeSessionId;
+  release.resolve(); await preparation;
+  assert.notEqual(freshId, second.id);
+  assert.equal(store.activeSessionId, freshId);
+  assert.deepEqual(store.getActiveSession().messages, []);
+  assert.equal(posts.find(post => post.requestId === 'late-history-owner')?.status, 'rejected');
+});
+
 test('navigation preparation never advertises a running task or a Stop action', async t => {
   const { host, second, publish, posts } = await fixture(t);
   const reading = deferred();
@@ -89,7 +166,7 @@ test('navigation preparation never advertises a running task or a Stop action', 
   t.after(() => release.resolve());
   const refresh = host.sharedProjectSources.refresh.bind(host.sharedProjectSources);
   host.sharedProjectSources.refresh = async (...args) => { reading.resolve(); await release.promise; return refresh(...args); };
-  const navigation = host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  const navigation = openSessionForContinuation(host, second.id);
   await reading.promise;
   publish();
   const during = posts.at(-1)?.state as { isBusy?: boolean; interaction?: { phase: string; canCancel: boolean; canSubmit: boolean; canEdit: boolean; canNavigate: boolean } };
@@ -120,7 +197,7 @@ test('safe history selection allows another navigation while old context is pend
     }
     return result;
   };
-  const oldNavigation = host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  const oldNavigation = openSessionForContinuation(host, second.id);
   await oldContextEntered.promise;
   publish();
   assert.equal(store.activeSessionId, second.id);
@@ -132,7 +209,7 @@ test('safe history selection allows another navigation while old context is pend
     if (sessionId === first.id) { newRecoveryEntered.resolve(); await releaseNewRecovery.promise; }
     await load(sessionId);
   };
-  const newNavigation = host.handleMessage({ type: 'selectSession', sessionId: first.id });
+  const newNavigation = openSessionForContinuation(host, first.id);
   await newRecoveryEntered.promise;
   publish();
   const owner = lastState(posts).interaction?.operationId;
@@ -154,7 +231,7 @@ test('safe history selection allows another navigation while old context is pend
 
 test('A to B to A context preparation ignores the previous A generation failure and completion publication', async t => {
   const { host, store, first, second, posts, publish, errors } = await fixture(t);
-  await host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  await openSessionForContinuation(host, second.id);
   const entered = deferred(); const release = deferred();
   t.after(() => release.resolve());
   const resolveSkills = host.skillStore.resolveAndLoadSkills.bind(host.skillStore);
@@ -167,10 +244,10 @@ test('A to B to A context preparation ignores the previous A generation failure 
     }
     return result;
   };
-  const previousA = host.handleMessage({ type: 'selectSession', sessionId: first.id });
+  const previousA = openSessionForContinuation(host, first.id);
   await entered.promise;
-  await host.handleMessage({ type: 'selectSession', sessionId: second.id });
-  await host.handleMessage({ type: 'selectSession', sessionId: first.id });
+  await openSessionForContinuation(host, second.id);
+  await openSessionForContinuation(host, first.id);
   publish();
   assert.equal(lastState(posts).interaction?.canSubmit, true);
   const entryFloor = host.activeSessionEntryRevision;
@@ -210,7 +287,7 @@ test('copyOtherWorkspaceSession releases navigation after safe selection while i
   assert.equal(lastState(posts).interaction?.canNavigate, true);
   assert.equal(lastState(posts).interaction?.canEdit, true);
   assert.equal(lastState(posts).interaction?.canSubmit, false);
-  await host.handleMessage({ type: 'selectSession', sessionId: first.id });
+  await openSessionForContinuation(host, first.id);
   const entryFloor = host.activeSessionEntryRevision;
   release.resolve(); await preparing;
   publish();
@@ -644,7 +721,7 @@ test('cold startup context for the previous session cannot hold or overwrite a r
   await started.promise;
   await host.ensureSessionNavigationReady();
   assert.equal(host.requestContextReady, false, 'old startup context is still required for the old session');
-  await host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  await openSessionForContinuation(host, second.id);
   publish();
   assert.equal(store.activeSessionId, second.id);
   assert.equal(lastState(posts).interaction?.canSubmit, true, 'target is ready before the unrelated old promise ends');
@@ -771,7 +848,7 @@ test('target operation recovery failure is retried before submission becomes ava
     if (sessionId === second.id && ++attempts === 1) throw new Error('target recovery read failed');
     await originalLoad(sessionId);
   };
-  await host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  await openSessionForContinuation(host, second.id);
   publish();
   assert.equal(host.sessionRecoveryReady, false);
   assert.equal(lastState(posts).interaction?.canSubmit, false);
@@ -813,7 +890,7 @@ function messages(taskId: string): ChatMessage[] {
 }
 
 async function fixture(t: TestContext, options: {
-  delayLoad?: boolean; loadFailure?: boolean; skipStartup?: boolean; initialEmpty?: 'restored' | 'created';
+  delayLoad?: boolean; loadFailure?: boolean; skipStartup?: boolean; initialEmpty?: 'restored' | 'created'; historyMessages?: number;
 } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'keepseek-session-navigation-'));
   const uri = vscode.Uri.file(root);
@@ -827,7 +904,7 @@ async function fixture(t: TestContext, options: {
     first.messages = messages('task-first');
     await seed.persist();
     second = await seed.createNewSession();
-    second.messages = messages('task-second');
+    second.messages = options.historyMessages ? Array.from({ length: options.historyMessages }, (_, i) => ({ id: `history-${i}`, role: i % 2 ? 'assistant' as const : 'user' as const, content: `History ${i}`, createdAt: new Date(i * 1000).toISOString() })) : messages('task-second');
     await seed.persist();
     await seed.selectSession(first.id);
     if (options.initialEmpty === 'restored') {
@@ -871,7 +948,7 @@ async function fixture(t: TestContext, options: {
   t.after(async () => {
     releaseLoad.resolve();
     await initialization.catch(() => undefined);
-    provider.dispose();
+    await provider.shutdown();
     await storage.cleanupExpiredSessions({ currentWorkspaceKey: scope.key, currentActiveSessionId: store.activeSessionId });
     await storage.flush();
     Object.assign(vscode.window, previousWindow);
@@ -926,7 +1003,7 @@ for (const kind of ['sendPrompt', 'editUserPrompt'] as const) {
       await host.handleMessage(request); // Same transport request is still pending.
       await host.handleMessage(submission(first.id, 'conflicting-send'));
       await host.handleMessage(submission(first.id, 'conflicting-edit', first.messages[0].id));
-      await host.handleMessage({ type: 'selectSession', sessionId: second.id });
+      await openSessionForContinuation(host, second.id);
       await host.handleMessage({ type: 'newSession' });
       publish();
       const pending = lastState(posts);
@@ -998,7 +1075,7 @@ test('a preparation cancel must match its owner and cannot release still-pending
     const stopping = lastState(posts);
     assert.equal(stopping.interaction?.canCancel, false);
     assert.equal(stopping.interaction?.canSubmit, false, 'an abort signal cannot prove the pending read has settled');
-    await host.handleMessage({ type: 'selectSession', sessionId: second.id });
+    await openSessionForContinuation(host, second.id);
     assert.equal(store.activeSessionId, first.id);
   } finally { release.resolve(true); await pending; }
   assert.equal(calls.length, 0);
@@ -1014,16 +1091,16 @@ test('rapid history navigation drops concurrent targets and persists the same fi
   t.after(() => release.resolve());
   const save = storage.saveSessionChanges.bind(storage);
   storage.saveSessionChanges = async (...args) => { entered.resolve(); await release.promise; return save(...args); };
-  const navigating = host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  const navigating = openSessionForContinuation(host, second.id);
   await entered.promise;
   try {
-    await host.handleMessage({ type: 'selectSession', sessionId: first.id });
-    await host.handleMessage({ type: 'selectSession', sessionId: second.id });
+    await openSessionForContinuation(host, first.id);
+    await openSessionForContinuation(host, second.id);
     await host.handleMessage({ type: 'newSession' });
     assert.equal(store.activeSessionId, second.id, 'selection persistence retains navigation ownership');
   } finally { release.resolve(); await navigating; }
-  await host.handleMessage({ type: 'selectSession', sessionId: first.id });
-  await host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  await openSessionForContinuation(host, first.id);
+  await openSessionForContinuation(host, second.id);
   assert.equal(store.activeSessionId, second.id);
   assert.equal(lastState(posts).activeSessionId, second.id);
   const durable = await storage.loadWorkspace(scope);
@@ -1053,7 +1130,7 @@ test('final durability keeps admission and settlement pending with Saving, then 
     assert.equal(during.interaction?.canCancel, false);
     assert.equal(during.interaction?.canSubmit, false);
     await host.handleMessage(submission(first.id, 'during-save'));
-    await host.handleMessage({ type: 'selectSession', sessionId: second.id });
+    await openSessionForContinuation(host, second.id);
     await Promise.resolve();
     assert.equal(completed, false, 'scope changes must still await necessary durability');
     assert.equal(store.activeSessionId, first.id);
@@ -1107,7 +1184,7 @@ test('display ledger and child summaries can stay pending while critical operati
   host.recoverSubagentUsage = async () => { summaryReads++; await summaries.promise; };
   const loadOperations = host.changeSets.loadSession!.bind(host.changeSets);
   host.changeSets.loadSession = async sessionId => { recoveryStarted.resolve(); await recovery.promise; await loadOperations(sessionId); };
-  const navigation = host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  const navigation = openSessionForContinuation(host, second.id);
   await recoveryStarted.promise;
   try {
     publish();
@@ -1122,7 +1199,7 @@ test('display ledger and child summaries can stay pending while critical operati
   assert.equal(summaryReads, 1);
   assert.equal(lastState(posts).interaction?.canSubmit, true);
   assert.equal(lastState(posts).usageMetrics?.displayReadiness, 'loading', 'pending statistics are not invented as complete zeroes');
-  await host.handleMessage({ type: 'selectSession', sessionId: first.id });
+  await openSessionForContinuation(host, first.id);
   assert.equal(store.activeSessionId, first.id, 'the next session does not await old display work');
   ledger.resolve(); summaries.resolve();
   await new Promise<void>(resolve => setImmediate(resolve));
@@ -1169,8 +1246,8 @@ test('A to B to A rejects submissions from the previous entry revision without l
   const calls = acceptedRun(host, store);
   publish();
   const revision = lastState(posts).interaction!.revision;
-  await host.handleMessage({ type: 'selectSession', sessionId: second.id });
-  await host.handleMessage({ type: 'selectSession', sessionId: first.id });
+  await openSessionForContinuation(host, second.id);
+  await openSessionForContinuation(host, first.id);
   await host.handleMessage({ ...submission(first.id, 'old-entry'), stateRevision: revision });
   assert.equal(posts.find(post => post.requestId === 'old-entry')?.status, 'rejected');
   assert.equal(calls.length, 0);
@@ -1182,9 +1259,12 @@ test('A to B to A rejects submissions from the previous entry revision without l
 test('failed startup safety recovery cannot be bypassed through navigation into a store flush', async t => {
   const { host, store, first, second, posts } = await fixture(t);
   host.approvalDataReady = false;
+  const failedSafety = Promise.reject(new Error('Safety recovery failed. Reload the window to retry.'));
+  void failedSafety.catch(() => undefined);
+  Object.assign(host, { approvalStoresInitialization: failedSafety });
   let loads = 0;
   host.changeSets.loadSession = async () => { loads++; };
-  await host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  await openSessionForContinuation(host, second.id);
   assert.equal(store.activeSessionId, first.id);
   assert.equal(loads, 0, 'a failed safety store must not be flushed from partial in-memory data');
   assert.equal(lastState(posts).interaction?.canSubmit, false);
@@ -1196,7 +1276,7 @@ test('history selection waits for the initial persisted session load', async t =
   let writes = 0;
   const originalSave = storage.saveSessionChanges.bind(storage);
   storage.saveSessionChanges = async (...args) => { writes++; await originalSave(...args); };
-  const navigation = host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  const navigation = openSessionForContinuation(host, second.id);
   const writesBeforeLoad = writes;
   releaseLoad.resolve();
   await Promise.all([initialization, navigation]);
@@ -1295,7 +1375,7 @@ test('persisted selectSession is published and unlocked when its context refresh
   // Fault injection at the context-source dependency, without replacing Host
   // navigation, state construction, persistence, or approval/runtime services.
   host.sharedProjectSources.refresh = async () => { throw new Error('injected context read failure'); };
-  await host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  await openSessionForContinuation(host, second.id);
   assert.notEqual(store.activeSessionId, first.id);
   assert.equal(host.isStartingRun, false);
   assert.equal(errors.length, 1);
@@ -1318,7 +1398,7 @@ test('an in-flight automatic title does not block or get cancelled by session na
   });
   await requested.promise;
   await host.handleMessage({ type: 'newSession' });
-  await host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  await openSessionForContinuation(host, second.id);
   assert.equal(store.activeSessionId, second.id);
   assert.equal(titleSignal?.aborted, false);
   response.resolve('{"decision":"set","title":"会话切换排查"}');
@@ -1333,7 +1413,7 @@ test('session navigation retains the main-run busy guard', async t => {
   const { host, store, first, second } = await fixture(t);
   host.isBusy = true;
   await host.handleMessage({ type: 'newSession' });
-  await host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  await openSessionForContinuation(host, second.id);
   assert.equal(store.activeSessionId, first.id);
   host.isBusy = false;
 });

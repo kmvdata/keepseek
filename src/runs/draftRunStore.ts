@@ -4,6 +4,7 @@ import { normalizeDraftRunPlan } from './draftRunProposal';
 import { inspectDraftRunDependencies, inspectDraftRunDependencyFacts, inspectGitAncestorPrerequisite } from './draftRunDependencies';
 import { isSuccessfulDraftRunOutcome, normalizeGitQueryResult } from './gitQueryResult';
 import { writeJsonAtomic } from '../shared/atomicStorage';
+import { readSessionAuditLanes, sessionAuditLaneUri } from '../shared/sessionAuditLanes';
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { getConfiguredDraftRunMaxTranscriptBytes } from '../shared/config';
@@ -78,6 +79,8 @@ export class DraftRunStore {
   private persistenceQueue: Promise<void> = Promise.resolve();
   private persistenceTimer: ReturnType<typeof setTimeout> | undefined;
   private initialized = false;
+  private readonly sessionLanesUri: vscode.Uri;
+  private readonly freshSessionIds = new Set<string>();
   private readonly approving = new Set<string>();
   /** Current-host tombstones reject late proposal callbacks after a committed edit. */
   private readonly historyInvalidations = new Map<string, HistoryTruncationScope>();
@@ -89,6 +92,12 @@ export class DraftRunStore {
     private readonly onEvent?: (event: DraftRunStoreEvent) => void
   ) {
     this.storageUri = vscode.Uri.joinPath(globalStorageUri, 'draft-runs.json');
+    this.sessionLanesUri = vscode.Uri.joinPath(globalStorageUri, 'draft-runs', 'sessions');
+  }
+
+  public async initializeFreshSession(sessionId: string): Promise<void> {
+    sessionAuditLaneUri(this.sessionLanesUri, sessionId);
+    this.freshSessionIds.add(sessionId);
   }
 
   public async initialize(): Promise<void> {
@@ -97,12 +106,35 @@ export class DraftRunStore {
     }
     this.initialized = true;
     try {
-      const content = new TextDecoder('utf-8', { fatal: false }).decode(
-        await vscode.workspace.fs.readFile(this.storageUri)
-      );
-      const parsed = JSON.parse(content) as { version?: number; draftRuns?: unknown[]; batchDisplays?: unknown[] };
+      let parsed: { version?: number; draftRuns?: unknown[]; batchDisplays?: unknown[] } = { version: 1 };
+      let bytesRead = 0;
+      try {
+        const bytes = await vscode.workspace.fs.readFile(this.storageUri);
+        bytesRead = bytes.byteLength;
+        const legacy = JSON.parse(new TextDecoder().decode(bytes));
+        if (legacy?.version === 1) parsed = legacy;
+      } catch { /* A damaged aggregate cannot hide independently committed lanes. */ }
+      const records = new Map<string, unknown>();
+      for (const value of parsed.draftRuns ?? []) {
+        const record = normalizeStoredDraftRun(value);
+        if (record) records.set(record.id, value);
+      }
+      const displays = [...(parsed.batchDisplays ?? [])];
+      for (const lane of await readSessionAuditLanes(this.sessionLanesUri)) {
+        this.freshSessionIds.add(lane.sessionId);
+        for (const value of Array.isArray(lane.draftRuns) ? lane.draftRuns : []) {
+          const record = normalizeStoredDraftRun(value);
+          const previous = record && normalizeStoredDraftRun(records.get(record.id));
+          if (record?.sessionId === lane.sessionId && (!previous
+            || previous.sessionId === record.sessionId && previous.specHash === record.specHash)) records.set(record.id, value);
+        }
+        for (const display of Array.isArray(lane.batchDisplays) ? lane.batchDisplays : []) {
+          if (display && typeof display === 'object' && (display as DraftRunBatchDisplay).sessionId === lane.sessionId) displays.push(display);
+        }
+      }
+      parsed = { version: 1, draftRuns: [...records.values()], batchDisplays: displays };
       console.debug('KeepSeek startup: draft-run-storage-read', {
-        bytesRead: Buffer.byteLength(content, 'utf8'),
+        bytesRead,
         entries: parsed.draftRuns?.length ?? 0
       });
       if (parsed.version !== 1) {
@@ -115,6 +147,7 @@ export class DraftRunStore {
         if (!draftRun) {
           continue;
         }
+        if (this.draftRuns.has(draftRun.id)) continue;
         if (draftRun.status === 'approved' || draftRun.status === 'running' || (draftRun.status === 'pending' && draftRun.spec.restricted)) {
           const wasRunning = draftRun.status === 'running';
           draftRun.status = 'failed';
@@ -134,10 +167,10 @@ export class DraftRunStore {
         }
         this.draftRuns.set(draftRun.id, draftRun);
       }
-      const displays = Array.isArray(parsed.batchDisplays) ? parsed.batchDisplays : [];
-      const repeatedOperationIds = repeatedDisplayIds(displays, 'operationId');
-      const repeatedSnapshotIds = repeatedDisplayIds(displays, 'snapshotId');
-      for (const value of displays.slice(-MAX_DRAFT_RUN_HISTORY)) {
+      const storedDisplays = Array.isArray(parsed.batchDisplays) ? parsed.batchDisplays : [];
+      const repeatedOperationIds = repeatedDisplayIds(storedDisplays, 'operationId');
+      const repeatedSnapshotIds = repeatedDisplayIds(storedDisplays, 'snapshotId');
+      for (const value of storedDisplays.slice(-MAX_DRAFT_RUN_HISTORY)) {
         const display = normalizeBatchDisplay(value, this.draftRuns, true);
         if (!display || repeatedOperationIds.has(display.operationId) || repeatedSnapshotIds.has(display.snapshotId)) continue;
         this.batchDisplays.set(display.operationId, display);
@@ -225,9 +258,8 @@ export class DraftRunStore {
       .filter((record): record is DraftRunBatchDisplay => record !== undefined);
   }
 
-  public async loadSession(_sessionId: string): Promise<void> {
-    // DraftRuns are capped and remain in one small fail-closed recovery file.
-    // This hook keeps session switching aligned with sharded ChangeSets.
+  public async loadSession(sessionId: string): Promise<void> {
+    if (!this.freshSessionIds.has(sessionId)) await this.initialize();
   }
 
   public getProtectedSessionIds(): string[] {
@@ -948,6 +980,7 @@ export class DraftRunStore {
       clearTimeout(this.persistenceTimer);
       this.persistenceTimer = undefined;
     }
+    if (!this.initialized && !this.draftRuns.size && !this.batchDisplays.size) return;
     const retainedIds = new Set(Array.from(this.draftRuns.values())
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
       .slice(0, MAX_DRAFT_RUN_HISTORY)
@@ -960,7 +993,18 @@ export class DraftRunStore {
     const batchDisplays = Array.from(this.batchDisplays.values())
       .map((record) => normalizeBatchDisplay(record, this.draftRuns, false))
       .filter((record): record is DraftRunBatchDisplay => record !== undefined);
-    const write = this.persistenceQueue.catch(() => undefined).then(() => writeJsonAtomic(this.storageUri, { version: 1, draftRuns, batchDisplays }));
+    const write = this.persistenceQueue.catch(() => undefined).then(async () => {
+      const legacyRuns = draftRuns.filter(run => !this.freshSessionIds.has(run.sessionId));
+      const legacyDisplays = batchDisplays.filter(display => !this.freshSessionIds.has(display.sessionId));
+      if (legacyRuns.length || legacyDisplays.length || !this.freshSessionIds.size) {
+        await writeJsonAtomic(this.storageUri, { version: 1, draftRuns: legacyRuns, batchDisplays: legacyDisplays });
+      }
+      for (const sessionId of this.freshSessionIds) {
+        await writeJsonAtomic(sessionAuditLaneUri(this.sessionLanesUri, sessionId), { version: 1, sessionId,
+          draftRuns: draftRuns.filter(run => run.sessionId === sessionId),
+          batchDisplays: batchDisplays.filter(display => display.sessionId === sessionId) }, { durable: true });
+      }
+    });
     this.persistenceQueue = write;
     await write; // In particular, approval persistence failure must prevent spawn.
 

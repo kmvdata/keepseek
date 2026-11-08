@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { writeJsonAtomic } from '../shared/atomicStorage';
+import { readSessionAuditLanes, sessionAuditLaneUri } from '../shared/sessionAuditLanes';
 import type { HistoryTruncationScope } from '../sessions/historyTruncation';
 import {
   policyVersionFor,
@@ -19,9 +20,17 @@ export class ApprovalReviewStore {
   private readonly records = new Map<string, ApprovalReviewRecord>();
   private persistenceQueue: Promise<void> = Promise.resolve();
   private initialized = false;
+  private readonly sessionLanesUri: vscode.Uri;
+  private readonly freshSessionIds = new Set<string>();
 
   public constructor(globalStorageUri: vscode.Uri) {
     this.storageUri = vscode.Uri.joinPath(globalStorageUri, 'approval-reviews.json');
+    this.sessionLanesUri = vscode.Uri.joinPath(globalStorageUri, 'approval-reviews', 'sessions');
+  }
+
+  public async initializeFreshSession(sessionId: string): Promise<void> {
+    sessionAuditLaneUri(this.sessionLanesUri, sessionId);
+    this.freshSessionIds.add(sessionId);
   }
 
   public async initialize(): Promise<void> {
@@ -34,13 +43,19 @@ export class ApprovalReviewStore {
         bytesRead: bytes.byteLength,
         entries: parsed.records?.length ?? 0
       });
-      if (parsed.version !== 1) return;
-      for (const value of parsed.records ?? []) {
+      for (const value of parsed.version === 1 ? parsed.records ?? [] : []) {
         const record = normalizeRecord(value);
-        if (record) this.records.set(record.reviewId, record);
+        if (record && !this.records.has(record.reviewId)) this.records.set(record.reviewId, record);
       }
     } catch {
       // Missing or malformed review history never authorizes an operation.
+    }
+    for (const lane of await readSessionAuditLanes(this.sessionLanesUri)) {
+      this.freshSessionIds.add(lane.sessionId);
+      for (const value of Array.isArray(lane.records) ? lane.records : []) {
+        const record = normalizeRecord(value);
+        if (record?.sessionId === lane.sessionId && !this.records.has(record.reviewId)) this.records.set(record.reviewId, record);
+      }
     }
   }
 
@@ -53,7 +68,7 @@ export class ApprovalReviewStore {
     };
     this.records.set(record.reviewId, record);
     this.compact();
-    await this.persist();
+    await this.persist(record.sessionId);
     return structuredClone(record);
   }
 
@@ -73,7 +88,7 @@ export class ApprovalReviewStore {
       changed = true;
     }
     // Persist even on retry: a prior write may have failed after the in-memory mark.
-    if (changed || [...this.records.values()].some(record => record.historyInvalidatedBy === scope.id)) await this.persist();
+    if (changed || [...this.records.values()].some(record => record.historyInvalidatedBy === scope.id)) await this.persist(scope.sessionId);
   }
 
   public matchesSnapshot(reviewId: string, request: ApprovalReviewRequest): boolean {
@@ -134,7 +149,7 @@ export class ApprovalReviewStore {
       throw new Error('No current matching approval record exists for this exact operation.');
     }
     record.consumedAt = new Date().toISOString();
-    await this.persist();
+    await this.persist(record.sessionId);
     return structuredClone(record);
   }
 
@@ -158,11 +173,17 @@ export class ApprovalReviewStore {
     remove.forEach((record) => this.records.delete(record.reviewId));
   }
 
-  private async persist(): Promise<void> {
-    const write = async () => await writeJsonAtomic(this.storageUri, {
-      version: 1,
-      records: [...this.records.values()]
-    });
+  private async persist(changedSessionId: string): Promise<void> {
+    const snapshot = [...this.records.values()].map(record => structuredClone(record));
+    const write = async () => {
+      const legacy = snapshot.filter(record => !this.freshSessionIds.has(record.sessionId));
+      if (!this.freshSessionIds.has(changedSessionId)) await writeJsonAtomic(this.storageUri, { version: 1, records: legacy });
+      for (const sessionId of this.freshSessionIds.has(changedSessionId) ? [changedSessionId] : []) {
+        await writeJsonAtomic(sessionAuditLaneUri(this.sessionLanesUri, sessionId), {
+          version: 1, sessionId, records: snapshot.filter(record => record.sessionId === sessionId)
+        }, { durable: true });
+      }
+    };
     this.persistenceQueue = this.persistenceQueue.then(write, write);
     await this.persistenceQueue;
   }

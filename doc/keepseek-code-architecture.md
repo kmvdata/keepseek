@@ -4,7 +4,7 @@
 
 ## 1. 启动与依赖方向
 
-KeepSeek 在 VS Code Extension Host 内运行。`package.json` 定义 commands/views/keybindings/menus、配置和 `main: ./out/extension.js`；[extension.ts](../src/extension.ts) 的 `activate()` 创建 `GlobalSessionStorage`、`ChatSessionStore`、`KeepseekChatViewProvider`，尽早注册 `keepseek.chat`，取得同物理项目的执行 owner 后再异步迁移并初始化会话；非 owner 保持只读。项目任务 session 使用 `project:<projectId>` 存储 scope，旧普通会话仍属于原 workspace，显式关联不搬移历史。配置、工作区、信任与文件事件由这里接线，不在激活入口放业务规则。
+KeepSeek 在 VS Code Extension Host 内运行。`package.json` 定义 commands/views/keybindings/menus、配置和 `main: ./out/extension.js`；[extension.ts](../src/extension.ts) 的 `activate()` 创建存储门面和 Provider，`initializeFreshBoot()` 每宿主只建立一次内存空目标，立即注册 `keepseek.chat`。owner 检查独立异步进行；历史 index、正文、Memento/V1 迁移和项目 Registry 均等待用户主动操作。非 owner 仍可编辑本地草稿、新空目标、账号和查看。项目任务 session 使用 `project:<projectId>` scope，旧普通会话属于原 workspace，关联不搬移历史。完整存储与恢复合同见 [本轮验收](keepseek-blank-startup-owner-verification.md)。
 
 ```mermaid
 flowchart TD
@@ -40,7 +40,7 @@ flowchart TD
 
 Webview 是字符串生成的页面，不是独立前端应用。`input/composer/` 管编辑/序列化，`references/` 管引用与拖拽，`commandMenu/` 管菜单，`usage/` 管用量详情，`dialogs/` 管各设置对话框。样式、模板、行为保持各自 fragment 所有权。
 
-首次 `ready` 先获得轻量状态；会话与副作用恢复未就绪时拒绝相关写操作。消息 type、DOM id、引用格式、CSP/转义和公开控制接口都是行为契约。
+首次 `ready` 获得空白轻量状态；同宿主重复 ready 不新建或恢复旧目标。`webviewMessages.ts` 的穷举 scope 同时用于 Webview 身份附加和 Host 分发；用户级账号消息不进入 Worker，执行仍核对目标身份、owner 和副作用屏障。消息 type、DOM id、引用格式、CSP/转义和公开接口都是行为契约。
 
 轻量状态、完整状态和 patch 共用宿主派生的 `interaction`：编辑、提交、导航和取消分别表达；导航/准备/保存不等于模型运行。状态与提交反馈绑定会话和 revision/requestId，持续提示跟随有效操作而不依赖通知计时器。`isStartingRun` 只读派生互斥；旧 `isBusy` 兼容字段不能重新成为输入框权威。标题刷新单独消费 Host 的 `titleRegenerationCapability`，不把当前上下文等待等同于命名不可用；所有状态补丁定点同步历史行按钮。首次导航只跨 session/安全初始化屏障，余额磁盘展示在模型目录关键路径之外。具体拥有者、接受屏障和后台工作规则见 [交互生命周期](keepseek-interaction-lifecycle.md)。
 
@@ -53,7 +53,7 @@ Webview 是字符串生成的页面，不是独立前端应用。`input/composer
 | [projectTasks.ts](../src/tasks/projectTasks.ts) | 卡片、耐久邮箱、幂等、依赖、结果及恢复；默认两个根 Worker；物理 Registry 2 引用不可变正文对象，逻辑记录 1 |
 | [taskRuntime.ts](../src/tasks/taskRuntime.ts) | 独立控制器与 `project/card/session/root/segment/generation` 身份，单 session 单 writer；不从正在查看的卡推断写入归属 |
 | [taskRouter.ts](../src/agent/taskRouter.ts) | 独立 Router role/toolset 1，固定调度工具及宿主校验；dispatch 耐久入队即返回，不等待 Worker |
-| [projectOwner.ts](../src/tasks/projectOwner.ts) | 同物理项目跨进程长期 owner；与 workspaceKey 和 session 写锁独立，超时不授权抢占 |
+| [projectOwner.ts](../src/tasks/projectOwner.ts)、[localKernelMutex.ts](../src/tasks/localKernelMutex.ts)、[projectOperationJournal.ts](../src/tasks/projectOperationJournal.ts) | 同物理项目内核连续互斥、动态角色与小型耐久派发审计；超时不授权抢占，v1 缺证据保留隔离 |
 | [projectResources.ts](../src/tasks/projectResources.ts) | 修改/验证阶段租约、固定获取顺序、嵌套 token 传递、基线失效；不跨人工/审批/child 等待持有修改租约 |
 | [requestAdmission.ts](../src/tasks/requestAdmission.ts) | 项目及来源的真实请求池、根任务与 child 准入、Router 有界优先级；request permit 不覆盖工具/审批等待 |
 
@@ -150,7 +150,7 @@ ask 由用户逐项/批量批准；delegate 对符合宿主规则的常规操作
 
 任务视图调用 `viewSessionPage()` 而非执行选择 `selectSession()`。`SessionViewPage` 与完整 `ChatSession` 是不同类型，不能把局部页回写成历史。执行 scope、必要保存、待消费输入、审批/恢复的 pin 不受普通查看 LRU 或空会话过滤影响。规范项目 scope 与旧会话原 scope 分别保留，`findSessionScope()` 只定位原身份，不复制或重写关联 session。
 
-默认存储由各 Store 通过 `globalStorageUri` 解析。来源/子代理设置、`chat-sessions/v2` 索引及 shard、兼容 `chat-sessions/v1` evidence/child、`usage-ledger/v2`、`change-sets/v4`、DraftRun 和审批文件各由所属 Store 管理。业务层不拼版本路径，也不在项目仓库保存密钥或真实会话。JSON 优先 `writeJsonAtomic()`；未知副作用不自动重试，迁移与恢复在副本验证。
+默认存储由各 Store 通过 `globalStorageUri` 解析。fresh boot 不读取旧历史；首次发送用 canonical shard 和独立 commit receipt，显式历史操作才幂等合并索引。新会话 DraftRun/审批分会话存储，ChangeSet 复用 V4 shard/session-index receipt；旧原件保留。来源、子代理、usage/evidence 与历史各由所属 Store 管理。业务层不拼版本路径，不在项目仓库保存密钥或真实会话。JSON 优先 `writeJsonAtomic()`；未知副作用不自动重试。根 Host `shutdown()` 统筹 Worker、保存及 owner 释放，`deactivate()` 返回真实 Promise。
 
 ## 8. 改动与测试路由
 

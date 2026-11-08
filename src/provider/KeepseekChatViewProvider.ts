@@ -1,7 +1,7 @@
 import type { AgentRequest } from '../shared/types';
 import type { TaskContextUsageOrigin, UsageSource } from '../shared/types';
 import { taskUsageFingerprint, taskUsageLaneFingerprint } from '../tasks/taskUsageSnapshot';
-import { InteractionCoordinator, deriveSessionTitleCapability, type InteractionOperation, type InteractionPhase } from './interactionState';
+import { InteractionCoordinator, deriveInteractionState, deriveSessionTitleCapability, type InteractionOperation, type InteractionPhase } from './interactionState';
 import { SessionTitleCoordinator, type SessionTitleRequest, type SessionTitleRegenerationOutcome } from '../sessions/sessionTitleCoordinator';
 import { buildSessionTitleRegenerationMaterial, getSessionTitleRegenerationTaskId, parseSessionTitleResult } from '../sessions/sessionTitle';
 import { captureSessionTitleCompletion, checkSessionTitleCompletion, type SessionTitleCompletion } from './sessionTitleCompletion';
@@ -163,6 +163,7 @@ import { ContextUsageEstimateCache, createContextUsageCacheKey } from '../agent/
 import { focusView } from './focusView';
 import { saveModelRequestTimeout } from './requestTimeoutSettings';
 import type { DroppedFileReferenceInput, PromptReferenceInput, WebviewMessage } from './webviewMessages';
+import { isAccountWebviewMessage, isRootWebviewMessage, webviewMessageScope } from './webviewMessages';
 import { InteractionTraceLogService } from '../agent/logging/interactionTrace';
 import { applyChangeSetEventToRunDetails } from '../agent/logging/runDetails';
 import { fetchModelSourceBalance } from '../agent/balance';
@@ -570,11 +571,59 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private observerViewedSessionId?: string;
   private observerViewGeneration = 0;
   private observerViewMessages: ChatMessage[] = [];
+  private observerViewLoading = false;
+  private observerViewError?: string;
+  private observerViewTitle?: string;
   private observerViewStartIndex = 0;
   private projectScopeInvalidated = false;
   private projectInitializationFailed = false;
   private projectViewPreparation?: Promise<void>;
   private readonly rootAdmission = new AsyncLocalStorage<{ active: boolean }>();
+  private shutdownPromise?: Promise<void>;
+  private historyLoader?: () => Promise<void>;
+  private historyLoadPromise?: Promise<void>;
+  private historyOpened = false;
+  private ownerReadiness: Promise<unknown> = Promise.resolve();
+  private projectAssistantInitialization?: Promise<void>;
+  private lastReconciledOwnerGeneration?: string;
+
+  public setHistoryLoader(load: () => Promise<void>): void { this.historyLoader = load; }
+  public setOwnerReadiness(ready: Promise<unknown>): void { this.ownerReadiness = ready; }
+
+  public publishOwnershipChanged(): void {
+    if (this.titleLifecycleDisposed) return;
+    const generation = this.projectOptions?.owner.state?.generation;
+    if (generation && generation !== this.lastReconciledOwnerGeneration
+      && this.projectOptions?.owner.isOwner && !this.projectOptions.owner.hasUncertainOperations) {
+      this.projectOptions.resources.reconcileOwnerRecovery(this.projectOptions.owner);
+      this.lastReconciledOwnerGeneration = generation;
+    }
+    this.projectAssistant?.publishOwnershipChanged();
+    this.postToWebview({ type: 'projectOwnerState', state: this.projectOptions?.owner.state });
+    this.postState({ immediate: true, omitMessages: true });
+  }
+
+  public async checkProjectOwnership(): Promise<void> {
+    const owner = this.projectOptions?.owner;
+    if (!owner || this.titleLifecycleDisposed) return;
+    await owner.retryAcquire();
+    if (this.titleLifecycleDisposed) return;
+    this.publishOwnershipChanged();
+    this.postToWebview({ type: 'projectOwnerState', state: owner.state, diagnostics: await owner.diagnostics() });
+  }
+
+  private async loadSessionHistory(): Promise<void> {
+    this.historyOpened = true;
+    try {
+      await (this.historyLoadPromise ??= (this.historyLoader?.() ?? this.sessionStore.loadHistoryMetadata()));
+      this.postState({ immediate: true, forceFull: true });
+      this.postToWebview({ type: 'sessionHistoryResult', status: 'ready' });
+    } catch (error) {
+      this.historyLoadPromise = undefined;
+      this.postToWebview({ type: 'sessionHistoryResult', status: 'failed', reason: getErrorMessage(error) });
+      throw error;
+    }
+  }
 
   private async withProjectRoot<T>(work: () => Promise<T>): Promise<T> {
     if (!this.projectOptions || this.projectBinding || this.rootAdmission.getStore()?.active) return work();
@@ -767,7 +816,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     await this.sessionTitles.flush();
     await Promise.all([...this.usageLedgerFlushes.values()]);
     await Promise.all([this.changeSets.flush(), this.draftRuns.flush(), this.sessionStore.flush()]);
-    this.dispose();
+    await this.shutdown();
   }
 
   public constructor(
@@ -891,18 +940,32 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     );
     this.draftRunBatches = new DraftRunBatchCoordinator(this.draftRuns, () => this.postState());
     this.sessionCleanupTimer = setInterval(() => {
-      void this.cleanupExpiredSessions();
+      void this.cleanupExpiredSessions().catch(() => console.warn('[KeepSeek] history cleanup failed'));
     }, SESSION_CLEANUP_INTERVAL_MS);
   }
 
-  public dispose(): void {
-    const closing = this.projectAssistant?.dispose();
-    if (this.projectOptions && !this.projectBinding) void Promise.resolve(closing).then(async () => {
+  public shutdown(): Promise<void> {
+    return this.shutdownPromise ??= (async () => {
+      this.disposeLocalResources();
+      await this.projectAssistant?.dispose();
+      await this.projectViewPreparation;
       await this.activeRunSettled;
-      await this.projectOptions?.owner.dispose();
-    }).catch(error => console.warn('[KeepSeek] project shutdown', getErrorMessage(error)));
+      await this.interactions.whenSettled();
+      await this.sessionTitles?.flush();
+      await Promise.all([...this.usageLedgerFlushes.values()]);
+      await Promise.all([this.changeSets.flush(), this.draftRuns.flush(), this.sessionStore.flush()]);
+      if (this.projectOptions && !this.projectBinding) await this.projectOptions.owner.dispose();
+    })();
+  }
+
+  public dispose(): void {
+    void this.shutdown().catch(() => console.warn('[KeepSeek] project shutdown failed; durable recovery retained'));
+  }
+
+  private disposeLocalResources(): void {
     if (this.projectBinding) this.sessionStore.disposeSessionScope();
     this.titleLifecycleDisposed = true;
+    for (const controller of this.accountOperations.values()) controller.abort();
     this.cancelAllSessionTitleWork();
     this.sessionTitles?.dispose();
     this.sharedProjectSources?.dispose();
@@ -933,7 +996,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   public refreshConfiguration(): void {
-    if (this.projectOptions?.owner.isOwner === false) return;
     if (this.modelSelectionPersistenceDepth > 0) {
       return;
     }
@@ -1019,7 +1081,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       : this.getHtmlForWebview(webviewView.webview);
     webviewView.webview.html = html;
     webviewView.webview.onDidReceiveMessage((message: WebviewMessage) => {
-      void this.handleMessage(message);
+      void this.handleMessage(message).catch(error => {
+        const reason = getErrorMessage(error);
+        if (message.type === 'sendPrompt' || message.type === 'editUserPrompt') {
+          this.postToWebview({ type: 'submissionResult', requestId: message.requestId,
+            sessionId: message.sessionId, status: 'failed', reason });
+        } else this.postToWebview({ type: 'projectTaskError', requestId: message.requestId, reason });
+      });
     });
     webviewView.onDidDispose(() => {
       this.views.delete(webviewView);
@@ -1390,8 +1458,16 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     // sendPrompt takes its owner synchronously, before this call can yield.
     if (requestId) (this.pendingSubmissionIds ??= new Set()).add(key);
     try {
+      // A cancelled/failed durability wait may have committed the exact user
+      // tail without ever reaching a model. Reuse that input on explicit retry;
+      // never append it twice or silently re-expand its frozen request bytes.
+      const tail = this.sessionStore.getActiveSession().messages.at(-1);
+      const prepared = message.type === 'sendPrompt' && tail?.role === 'user'
+        && tail.content === message.prompt.trim() && tail.userTask ? tail : undefined;
       await this.sendPrompt(message.prompt, message.sourceId, message.modelId, message.settings, {
         ...(message.type === 'editUserPrompt' ? { replaceMessageId: message.messageId } : {}),
+        ...(prepared ? { userMessageId: prepared.id, userTask: prepared.userTask,
+          existingAcceptedUserMessageId: prepared.id, preparedUserMessage: prepared } : {}),
         references: message.references, skillIds: message.skillIds,
         onSubmissionAccepted: () => feedback('accepted')
       });
@@ -1435,6 +1511,27 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleMessage(message: WebviewMessage): Promise<void> {
+    if (this.titleLifecycleDisposed) return;
+    if (message.type === 'cancelAccountOperation') { this.cancelAccountOperation(message.requestId); return; }
+    if (message.type === 'retryInteraction' && this.observerViewedSessionId) {
+      if (this.observerViewTitle === undefined) await this.viewHistorySession(this.observerViewedSessionId, false);
+      else await this.prepareHistorySession({ type: 'prepareHistorySession', sessionId: this.observerViewedSessionId, viewGeneration: this.observerViewGeneration, requestId: message.requestId ?? randomUUID() });
+      return;
+    }
+    if (isRootWebviewMessage(message.type)) {
+      if (message.type === 'ready' && this.projectAssistant) await this.projectAssistant.handleMessage(message);
+      if (isAccountWebviewMessage(message.type)) await this.runAccountOperation(message, () => this.handleMessageImpl(message));
+      else await this.handleMessageImpl(message);
+      return;
+    }
+    if (message.type === 'loadSessionHistory') { await this.loadSessionHistory(); return; }
+    if (webviewMessageScope(message.type) === 'project') {
+      if (!['projectTaskOpen', 'projectTaskView', 'projectTaskLatest', 'projectTaskDraft', 'projectTaskPrefetch',
+        'projectTaskPainted', 'projectTaskReconcile'].includes(message.type) && this.projectOptions?.owner.isOwner === false) {
+        await this.checkProjectOwnership();
+      }
+      await this.ensureProjectAssistant();
+    }
     if (this.projectInitializationFailed && isApprovalMutationMessage(message.type)) {
       this.postToWebview({ type: 'projectTaskError', reason: this.interactionFailure?.message });
       return;
@@ -1443,31 +1540,31 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.postToWebview({ type: 'projectTaskError', reason: this.interactionFailure?.message });
       return;
     }
-    if (this.projectAssistant && await this.projectAssistant.handleMessage(message)) return;
-    if (this.projectOptions?.owner.isOwner === false && (message.type === 'selectSession' || message.type === 'loadOlderMessages' || message.type === 'ready' && this.observerViewedSessionId)) {
-      const sessionId = message.type === 'selectSession' ? message.sessionId : this.observerViewedSessionId ?? this.sessionStore.activeSessionId;
-      this.observerViewedSessionId = sessionId;
-      const generation = message.type === 'selectSession' ? ++this.observerViewGeneration : this.observerViewGeneration;
-      if (message.type === 'selectSession') { this.observerViewMessages = []; this.observerViewStartIndex = 0; }
-      const previousMessages = this.observerViewMessages, previousStart = this.observerViewStartIndex;
-      try {
-        if (message.type !== 'ready') {
-          const page = await this.sessionStore.viewSessionPage(sessionId, message.type === 'loadOlderMessages'
-            ? { before: this.observerViewStartIndex, limit: MESSAGE_PAGE_SIZE } : { limit: INITIAL_VISIBLE_MESSAGE_COUNT });
-          if (!page) throw new Error(this.language === 'en' ? 'Session data is unavailable.' : '会话数据不可用。');
-          if (generation !== this.observerViewGeneration || this.observerViewedSessionId !== sessionId) return;
-          if (message.type === 'loadOlderMessages' && (this.observerViewMessages !== previousMessages || this.observerViewStartIndex !== previousStart)) return;
-          this.observerViewMessages = message.type === 'loadOlderMessages' ? [...page.messages, ...this.observerViewMessages] : [...page.messages];
-          this.observerViewStartIndex = page.startIndex;
-        }
-        this.publishWebview({ type: 'state', revision: ++this.stateRevision,
-          state: { activeSessionId: sessionId, messages: this.observerViewMessages, hasOlderMessages: this.observerViewStartIndex > 0,
-            sessionSummaries: this.sessionStore.getSessionSummaries(), interaction: { sessionId, revision: this.stateRevision,
-              canEdit: true, canSubmit: false, canNavigate: true, canCancel: false, canChangeContext: false, phase: 'idle', blockingReason: this.projectOptions.owner.reason } } });
-      } catch (error) { this.publishWebview({ type: 'projectTaskError', reason: getErrorMessage(error) }); }
+    if (message.type === 'prepareHistorySession') { await this.prepareHistorySession(message); return; }
+    if (this.projectAssistant && await this.projectAssistant.handleMessage(message)) {
+      if (message.type === 'selectSession' || message.type === 'projectTaskView') this.clearHistoryPreview();
       return;
     }
-    if (this.projectOptions?.owner?.isOwner === false && !['ready', 'startupRendered', 'loadOlderMessages', 'selectSession', 'openFileReference', 'openDraftDiff', 'openDraftEditFile'].includes(message.type)) {
+    if (message.type === 'selectSession' || message.type === 'loadOlderMessages' && this.observerViewedSessionId) {
+      if (message.type === 'selectSession' && this.sessionReady && !this.interactionSnapshot(this.stateRevision).canNavigate) return;
+      await this.viewHistorySession(message.type === 'selectSession' ? message.sessionId : this.observerViewedSessionId!, message.type === 'loadOlderMessages');
+      return;
+    }
+    if (this.observerViewedSessionId && ['session', 'execution'].includes(webviewMessageScope(message.type) ?? '')) {
+      const reason = this.t('historyPreviewPrepareHint');
+      if (message.type === 'sendPrompt' || message.type === 'editUserPrompt') this.postToWebview({ type: 'submissionResult',
+        requestId: message.requestId, sessionId: message.sessionId ?? this.observerViewedSessionId, status: 'rejected', reason });
+      else if (message.type === 'regenerateSessionTitle') this.postToWebview({ type: 'sessionTitleRegeneration', requestId: message.requestId, sessionId: message.sessionId, running: false, outcome: 'unavailable', reason });
+      else if (isChangeActionMessage(message)) this.postChangeActionFeedback(message, 'failed', reason);
+      else this.postToWebview({ type: 'historyPreviewResult', requestId: message.requestId, sessionId: this.observerViewedSessionId, status: 'rejected', reason });
+      return;
+    }
+    if ((message.type === 'sendPrompt' || message.type === 'editUserPrompt') && this.projectOptions?.owner.isOwner === false) {
+      try { await this.checkProjectOwnership(); }
+      catch { /* The matching submission result below preserves the draft. */ }
+    }
+    if (this.projectOptions?.owner?.isOwner === false && webviewMessageScope(message.type) !== 'history'
+      && !['newSession', 'loadOlderMessages', 'selectSession', 'openFileReference', 'openDraftDiff', 'openDraftEditFile'].includes(message.type)) {
       if (message.type === 'sendPrompt' || message.type === 'editUserPrompt') this.publishWebview({ type: 'submissionResult',
         requestId: message.requestId, sessionId: message.sessionId ?? this.observerViewedSessionId ?? this.sessionStore.activeSessionId,
         status: 'rejected', reason: this.projectOptions.owner.reason });
@@ -1530,6 +1627,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     switch (message.type) {
+      case 'checkProjectOwnership':
+        await this.checkProjectOwnership();
+        return;
       case 'ready':
         this.startupTrace?.mark('webview-ready');
         for (const [sessionId, requestId] of this.manualSessionTitleRequests) {
@@ -1763,7 +1863,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         await this.stopBackgroundRun();
         return;
       case 'openApiSettings': {
-        await this.refreshModelSourceState();
+        this.postModelSettingsDialog({ loading: true });
+        await this.refreshModelSourceState({ persistSelection: false, hydrateBalance: false });
         this.postModelSettingsDialog();
         return;
       }
@@ -1829,9 +1930,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           provider: message.provider,
           apiKey: message.apiKey,
           baseUrl: message.baseUrl
-        });
+        }, { signal: this.accountOperationSignal() });
+        if (!probeResult.ok) this.failAccountOperation(new Error(probeResult.error || 'Connection failed. / 连接失败。'));
         this.postToWebview({
-          type: 'sourceConnectionTestResult',
+          type: 'sourceConnectionTestResult', requestId: this.accountOperationContext?.getStore()?.requestId,
           ok: probeResult.ok,
           status: probeResult.status,
           error: probeResult.error,
@@ -1848,7 +1950,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           DEFAULT_HISTORY_RETENTION_DAYS
         );
         await config.update('historyRetentionDays', historyRetentionDays, vscode.ConfigurationTarget.Global);
-        await this.cleanupExpiredSessions({ post: false, force: true });
+        if (this.projectOptions?.owner.isOwner !== false) await this.cleanupExpiredSessions({ post: false, force: true });
         this.postState();
         vscode.window.showInformationMessage(this.t('historySettingsSaved'));
         return;
@@ -1858,7 +1960,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         const config = vscode.workspace.getConfiguration('keepseek');
         await config.update('language', language, vscode.ConfigurationTarget.Global);
         this.language = language;
-        await this.sessionStore.relocalizeEmptySessionTitles(language);
+        if (this.projectOptions?.owner.isOwner !== false) await this.sessionStore.relocalizeEmptySessionTitles(language);
         this.postState();
         vscode.window.showInformationMessage(
           this.t('languageSaved', { language: getKeepseekLanguageName(language, language) })
@@ -2918,6 +3020,104 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     return selected ?? getConfiguredModels()[0];
   }
 
+  private clearHistoryPreview(): void {
+    this.observerViewedSessionId = undefined;
+    this.observerViewGeneration += 1;
+    this.observerViewMessages = []; this.observerViewStartIndex = 0;
+    this.observerViewLoading = false; this.observerViewError = undefined; this.observerViewTitle = undefined;
+  }
+
+  private async viewHistorySession(sessionId: string, older: boolean): Promise<void> {
+    if (!older) {
+      this.observerViewedSessionId = sessionId; this.observerViewGeneration += 1;
+      this.observerViewMessages = []; this.observerViewStartIndex = 0; this.observerViewTitle = undefined;
+    }
+    const generation = this.observerViewGeneration;
+    const previousMessages = this.observerViewMessages, previousStart = this.observerViewStartIndex;
+    let applied = false;
+    this.observerViewLoading = true; this.observerViewError = undefined;
+    this.postHistoryPreviewState();
+    try {
+      const page = await this.sessionStore.viewSessionPage(sessionId, older
+        ? { before: previousStart, limit: MESSAGE_PAGE_SIZE } : { limit: INITIAL_VISIBLE_MESSAGE_COUNT });
+      if (generation !== this.observerViewGeneration || this.observerViewedSessionId !== sessionId) return;
+      if (older && (this.observerViewMessages !== previousMessages || this.observerViewStartIndex !== previousStart)) return;
+      if (!page) throw new Error(this.language === 'en' ? 'Session data is unavailable.' : '会话数据不可用。');
+      this.observerViewMessages = older ? [...page.messages, ...previousMessages] : [...page.messages];
+      this.observerViewStartIndex = page.startIndex; this.observerViewTitle = page.title; applied = true;
+    } catch (error) {
+      if (generation === this.observerViewGeneration && this.observerViewedSessionId === sessionId) this.observerViewError = getErrorMessage(error);
+    } finally {
+      if (generation === this.observerViewGeneration && this.observerViewedSessionId === sessionId
+        && (!older || applied || this.observerViewMessages === previousMessages && this.observerViewStartIndex === previousStart)) {
+        this.observerViewLoading = false; this.postHistoryPreviewState();
+      }
+    }
+  }
+
+  private postHistoryPreviewState(): void {
+    const sessionId = this.observerViewedSessionId;
+    if (!sessionId || this.titleLifecycleDisposed) return;
+    const revision = ++this.stateRevision;
+    const owned = this.projectOptions?.owner.isOwner !== false;
+    const interaction = deriveInteractionState({ sessionId, revision, sessionReady: true,
+      readOnly: true, requestContextReady: false, approvalDataReady: false,
+      failure: this.observerViewError });
+    this.publishWebview({ type: 'state', revision, state: {
+      activeSessionId: sessionId, messages: this.observerViewMessages,
+      hasOlderMessages: this.observerViewStartIndex > 0, hasNewerMessages: false,
+      sessionSummaries: this.sessionStore.getSessionSummaries(), interaction,
+      historyPreview: { sessionId, generation: this.observerViewGeneration, title: this.observerViewTitle,
+        loading: this.observerViewLoading, error: this.observerViewError,
+        canContinue: owned && !this.observerViewLoading && this.observerViewTitle !== undefined,
+        reason: !owned ? this.projectOptions?.owner.reason : undefined },
+      titleRegenerationCapability: { available: false, reason: 'recovering' },
+      isBusy: false, changeSets: [], draftRuns: [], taskPlan: null, repairLoop: null,
+      usageMetrics: { displayReadiness: 'incomplete', sessionUsageStats: null, lastTurnUsage: null, supportsBilling: false, balance: null },
+      planWorkflows: [], backgroundRun: null, subagents: [], contextFiles: [],
+      startup: { phase: 'ready', interactiveReady: true, sideEffectsReady: false },
+      language: this.language, extensionInfo: this.extensionInfo, isMac: process.platform === 'darwin'
+    } });
+  }
+
+  private async prepareHistorySession(message: Extract<WebviewMessage, { type: 'prepareHistorySession' }>): Promise<void> {
+    const sessionId = message.sessionId, generation = this.observerViewGeneration;
+    const matches = () => this.observerViewedSessionId === sessionId && message.viewGeneration === generation
+      && this.observerViewGeneration === generation;
+    const result = (status: 'ready' | 'failed' | 'rejected', reason?: string) => this.postToWebview({
+      type: 'historyPreviewResult', sessionId, requestId: message.requestId, viewGeneration: generation, status, reason });
+    if (!matches() || this.observerViewLoading) { result('rejected', this.t('historyPreviewStale')); return; }
+    const snapshot = { messages: this.observerViewMessages, start: this.observerViewStartIndex, title: this.observerViewTitle };
+    let clearedGeneration: number | undefined;
+    this.observerViewLoading = true; this.postHistoryPreviewState();
+    try {
+      await this.ownerReadiness;
+      if (this.projectOptions?.owner.isOwner === false) await this.checkProjectOwnership();
+      if (!matches()) { result('rejected', this.t('historyPreviewStale')); return; }
+      if (this.projectOptions?.owner.isOwner === false) throw new Error(this.projectOptions.owner.reason ?? this.t('projectReadOnly'));
+      await this.projectOptions?.owner.verify();
+      if (!matches()) { result('rejected', this.t('historyPreviewStale')); return; }
+      this.clearHistoryPreview(); clearedGeneration = this.observerViewGeneration;
+      const previousFailure = this.interactionFailure;
+      await this.selectSession(sessionId);
+      if (this.sessionStore.activeSessionId !== sessionId || !this.sessionRecoveryReady || this.interactionFailure?.sessionId === sessionId) {
+        throw new Error(this.interactionFailure && (this.interactionFailure !== previousFailure || this.interactionFailure.sessionId === sessionId)
+          ? this.interactionFailure.message : this.t('historyPreviewPreparationFailed'));
+      }
+      result('ready');
+    } catch (error) {
+      if (clearedGeneration !== undefined && this.observerViewGeneration === clearedGeneration && !this.observerViewedSessionId) {
+        this.observerViewedSessionId = sessionId;
+        this.observerViewMessages = snapshot.messages; this.observerViewStartIndex = snapshot.start; this.observerViewTitle = snapshot.title;
+        this.observerViewError = getErrorMessage(error); this.observerViewLoading = false; this.postHistoryPreviewState();
+      }
+      if (matches()) this.observerViewError = getErrorMessage(error);
+      result('failed', getErrorMessage(error));
+    } finally {
+      if (matches()) { this.observerViewLoading = false; this.postHistoryPreviewState(); }
+    }
+  }
+
   private async createNewSession(): Promise<void> {
     if (!this.interactionSnapshot(this.stateRevision).canCreateSession) return;
     if (this.isBusy || this.isStartingRun || this.activeDraftRunId || this.activeChangeActions.size || this.hasActiveBackgroundRun()) {
@@ -2925,6 +3125,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
     const operation = this.interactions.begin('navigation', this.sessionStore.activeSessionId, 'saving');
     if (!operation) return;
+    this.clearHistoryPreview();
     this.initialProjectViewMode = 'legacy';
     try {
       this.clearSessionTransientState();
@@ -2962,7 +3163,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       // display work are deliberately outside this navigation barrier.
       if (!this.startupNavigationReadyPromise && !this.sessionReady) await this.sessionInitialization;
       await this.startupNavigationReadyPromise;
-      if (!this.approvalDataReady) throw new Error(this.language === 'en'
+      if (!this.approvalDataReady && !this.sessionStore.isFreshBoot) throw new Error(this.language === 'en'
         ? 'Safety recovery failed. Reload the window before changing sessions.'
         : '操作记录恢复失败，请重新加载窗口后再切换会话。');
     }
@@ -2983,7 +3184,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     if (!operation) return;
     this.postState({ immediate: true });
     try {
+      if (this.sessionStore.isFreshBoot && !this.historyLoadPromise) await this.loadSessionHistory();
       await this.ensureSessionNavigationReady();
+      if (!this.approvalDataReady) await this.ensureApprovalStoresInitialized();
+      this.approvalDataReady = true;
       if (this.isBusy || this.hasActiveBackgroundRun()) return;
       const wasActiveSession = sessionId === this.sessionStore.activeSessionId;
       const session = await this.sessionStore.selectSession(sessionId, targetId => {
@@ -2992,7 +3196,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       });
       if (!session) return;
 
-      if (!wasActiveSession) {
+      if (!wasActiveSession || !this.sessionRecoveryReady || this.interactionFailure?.sessionId === session.id) {
         this.freshSessionId = undefined;
         this.interactionFailure = undefined;
         this.clearSessionTransientState();
@@ -3509,6 +3713,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   public async refreshBackgroundRunAvailability(options: { post?: boolean } = {}): Promise<void> {
+    if (this.hasDeferredEmptyContext()) return;
     this.backgroundAvailableScripts = await getAvailableSafeValidationScripts();
     if (options.post !== false) {
       this.postState();
@@ -3726,6 +3931,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   private async refreshModelSourceState(options: {
     preserveAuthoritativeSelection?: boolean;
+    persistSelection?: boolean;
+    hydrateBalance?: boolean;
     onResolved?: () => void;
   } = {}): Promise<void> {
     const generation = ++this.modelSourceStateRefreshGeneration;
@@ -3765,7 +3972,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       if (selectedModel?.sourceId) {
         this.balanceStore.selectSource(this.getBalanceSourceScope(selectedModel.sourceId));
       }
-      if (selectedModel?.sourceId && selectedModel.supportsBilling) {
+      if (options.hydrateBalance !== false && !this.accountOperationContext?.getStore() && selectedModel?.sourceId && selectedModel.supportsBilling) {
         const sourceId = selectedModel.sourceId;
         const scope = this.getBalanceSourceScope(sourceId);
         // Display-only disk hydration cannot hold catalog publication or model
@@ -3783,7 +3990,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       // Adopting a default is a one-time project choice. Persist the complete
       // identity, including legacy modelId-only selections. Interaction remains
       // disabled until this completes, so a failed adoption can safely roll back.
-      if (selectedModel?.sourceId && (savedSelection.sourceId !== selectedModel.sourceId
+      if (options.persistSelection !== false && !this.accountOperationContext?.getStore() && this.projectOptions?.owner.isOwner !== false && selectedModel?.sourceId && (savedSelection.sourceId !== selectedModel.sourceId
         || savedSelection.modelId !== selectedModel.id) && vscode.workspace.workspaceFolders?.length) {
         await this.measureInteractionStage('model-selection-save', this.sessionStore?.activeSessionId ?? '',
           () => this.persistModelSelection(selectedModel.sourceId!, selectedModel.id, previousSelection));
@@ -3821,8 +4028,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     };
   }
 
-  private postModelSettingsDialog(outcome: { settingsSaved?: boolean } = {}): void {
+  private postModelSettingsDialog(outcome: { settingsSaved?: boolean; loading?: boolean } = {}): void {
+    const operation = this.accountOperationContext?.getStore();
+    if (operation?.error || operation?.controller.signal.aborted) return;
     this.postToWebview({
+      requestId: operation?.requestId, requestType: operation?.type,
+      accountDialogGeneration: operation?.dialogGeneration, loading: outcome.loading === true,
       type: 'showSettingsDialog',
       settingsSaved: outcome.settingsSaved === true,
       selectedSourceId: this.selectedSourceId,
@@ -3925,7 +4136,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     modelId?: string,
     profile?: 'research' | 'review' | 'proposal'
   ): Promise<void> {
-    if (this.rejectModelSourceMutationWhileBusy()) {
+    if (this.isBusy || this.hasActiveBackgroundRun()) {
+      void vscode.window.showInformationMessage(this.t(this.hasActiveBackgroundRun() ? 'modelSelectionLockedByBackground' : 'modelSettingsReadonlyWhileBusy'));
+      this.postState();
       return;
     }
     if (mode === 'fixed') {
@@ -3958,20 +4171,71 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     return { version: 2, default: await store.load(), profiles: {} };
   }
 
-  private async waitForBalanceRefresh(): Promise<void> {
-    if (this.balanceRefreshPromise) {
-      await this.balanceRefreshPromise;
+  private readonly accountOperationContext = new AsyncLocalStorage<{ requestId: string; type: string; dialogGeneration?: number; controller: AbortController; error?: string; responses: unknown[] }>();
+  private readonly accountOperations = new Map<string, AbortController>();
+  private readonly accountOperationFingerprints = new Map<string, string>();
+  private readonly accountOperationResults = new Map<string, { fingerprint: string; responses: unknown[] }>();
+
+  /** Account configuration is user-scoped. Every request gets its own terminal
+   * response and cancellation identity, independent of project/session readiness. */
+  private async runAccountOperation(message: WebviewMessage, work: () => Promise<void>): Promise<void> {
+    const requestId = message.requestId || randomUUID();
+    // Only a hash is retained: credentials never enter diagnostics or replay caches.
+    const targetFields = new Set(['requestId', 'projectId', 'hostId', 'taskCardId', 'sessionId', 'rootTaskId', 'segmentId', 'generation', 'viewGeneration']);
+    const payload = Object.fromEntries(Object.entries(message).filter(([key]) => !targetFields.has(key)).sort(([a], [b]) => a.localeCompare(b)));
+    const fingerprint = createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+    const completed = this.accountOperationResults.get(requestId);
+    const previous = completed?.fingerprint ?? this.accountOperationFingerprints.get(requestId);
+    if (previous !== undefined) {
+      if (previous !== fingerprint) this.postToWebview({ type: 'accountOperationResult', requestId, requestType: message.type,
+        accountDialogGeneration: message.accountDialogGeneration, ok: false,
+        error: 'This account request ID was already used for a different operation. Retry with a new request. / 此账号请求标识已用于其他操作，请重新发起。' });
+      else if (completed) for (const response of completed.responses) this.postToWebview(response);
+      return;
+    }
+    const controller = new AbortController();
+    this.accountOperations.set(requestId, controller);
+    this.accountOperationFingerprints.set(requestId, fingerprint);
+    const context = { requestId, type: message.type, dialogGeneration: message.accountDialogGeneration,
+      controller, error: undefined as string | undefined, responses: [] as unknown[] };
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await this.accountOperationContext.run(context, async () => {
+        await Promise.race([work(), new Promise<never>((_resolve, reject) => {
+          const fail = () => reject(new Error('Account operation cancelled or timed out. / 账号操作已取消或超时。'));
+          controller.signal.addEventListener('abort', fail, { once: true });
+          timeout = setTimeout(() => controller.abort(), 30000);
+        })]);
+      });
+    } catch (error) { context.error = getErrorMessage(error); }
+    finally {
+      if (timeout) clearTimeout(timeout);
+      this.accountOperations.delete(requestId); this.accountOperationFingerprints.delete(requestId);
+      const terminal = { type: 'accountOperationResult', requestId, requestType: message.type,
+        accountDialogGeneration: message.accountDialogGeneration, ok: !context.error, error: context.error };
+      this.accountOperationResults.set(requestId, { fingerprint, responses: [...context.responses, terminal] });
+      while (this.accountOperationResults.size > 64) this.accountOperationResults.delete(this.accountOperationResults.keys().next().value!);
+      this.postToWebview(terminal);
     }
   }
 
-  private rejectModelSourceMutationWhileBusy(): boolean {
-    if (!this.isBusy && !this.hasActiveBackgroundRun()) {
-      return false;
-    }
-    void vscode.window.showInformationMessage(this.t(
-      this.hasActiveBackgroundRun() ? 'modelSelectionLockedByBackground' : 'modelSettingsReadonlyWhileBusy'
-    ));
-    this.postModelSettingsDialog();
+  private accountOperationSignal(): AbortSignal | undefined { return this.accountOperationContext?.getStore()?.controller.signal; }
+  private cancelAccountOperation(requestId: string): void { this.accountOperations.get(requestId)?.abort(); }
+  private failAccountOperation(error: unknown): void {
+    const operation = this.accountOperationContext?.getStore();
+    if (operation) operation.error = getErrorMessage(error);
+  }
+
+  private rejectModelSourceMutationWhileBusy(sourceId?: string): boolean {
+    if (!sourceId) return false;
+    const currentSourceId = this.modelSelectionTransactions.getSnapshot().currentRun?.sourceId ?? this.frozenProjectSource?.sourceId;
+    const blocked = ((this.isBusy || this.isStartingRun || this.hasActiveBackgroundRun()) && currentSourceId === sourceId)
+      || this.projectAssistant?.isSourceInUse(sourceId);
+    if (!blocked) return false;
+    const reason = this.language === 'en' ? 'This account is in use. Stop its task before changing it; other accounts remain editable.'
+      : '该账号正在被任务使用，请先停止对应任务后修改；其它账号仍可编辑。';
+    this.failAccountOperation(new Error(reason));
+    void vscode.window.showInformationMessage(reason);
     return true;
   }
 
@@ -3985,42 +4249,25 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     contextWindowTokens?: number;
     maxOutputTokens?: number;
   }): Promise<void> {
-    if (this.rejectModelSourceMutationWhileBusy()) {
+    if (this.rejectModelSourceMutationWhileBusy(input.sourceId)) {
       return;
     }
     try {
-      await this.waitForBalanceRefresh();
       const result = await this.modelSourceService.addModel(input);
       await this.refreshModelSourceState();
-      const selected = findModelBySelection(this.availableModels, {
-        sourceId: result.source.id,
-        modelId: input.modelId?.trim()
-      }) ?? this.availableModels.find((model) => model.sourceId === result.source.id);
-      if (selected?.sourceId) {
-        await this.persistModelSelection(selected.sourceId, selected.id);
-      }
       this.postState();
       this.postModelSettingsDialog({ settingsSaved: true });
       this.postToWebview({
-        type: 'addModelResult',
+        type: 'addModelResult', requestId: this.accountOperationContext?.getStore()?.requestId,
         ok: true,
         reusedSource: result.reusedSource
       });
-      if (result.modelDiscoveryUnavailable) {
-        vscode.window.showWarningMessage(this.language === 'en'
-          ? 'The account was saved, but this Anthropic-compatible endpoint does not provide a model list. Add a model ID manually in account settings.'
-          : '账号已保存，但此 Anthropic 兼容端点不提供模型列表。请在账号设置中手动添加模型 ID。');
-      } else if (result.discovery?.status === 'failed') {
-        vscode.window.showWarningMessage(this.language === 'en'
-          ? 'The model was saved, but automatic model discovery failed. You can refresh it manually.'
-          : '模型已保存，但自动获取模型失败；可稍后手动刷新。');
-      }
-      void this.refreshBalance({ force: true });
     } catch (error) {
+      this.failAccountOperation(error);
       const errorMessage = getErrorMessage(error);
       vscode.window.showErrorMessage(this.t('modelOperationFailed', { message: errorMessage }));
       this.postToWebview({
-        type: 'addModelResult',
+        type: 'addModelResult', requestId: this.accountOperationContext?.getStore()?.requestId,
         ok: false,
         error: errorMessage
       });
@@ -4028,11 +4275,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async deleteModel(input: { sourceId: string; modelId: string }): Promise<void> {
-    if (this.rejectModelSourceMutationWhileBusy()) {
+    if (this.rejectModelSourceMutationWhileBusy(input.sourceId)) {
       return;
     }
     try {
-      await this.waitForBalanceRefresh();
       const source = await this.sourceStore.getSource(input.sourceId);
       if (!source) {
         throw new Error(this.t('modelSourceNotFound'));
@@ -4043,15 +4289,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.postState();
       this.postModelSettingsDialog();
     } catch (error) {
+      this.failAccountOperation(error);
       vscode.window.showErrorMessage(this.t('modelOperationFailed', { message: getErrorMessage(error) }));
       this.postModelSettingsDialog();
     }
   }
 
   private async setDefaultModel(input: { sourceId: string; modelId: string }): Promise<void> {
-    if (this.rejectModelSourceMutationWhileBusy()) {
-      return;
-    }
     const requestGeneration = ++this.defaultModelRequestGeneration;
     this.defaultModelPending = true;
     try {
@@ -4059,12 +4303,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       // before initial loading completed. Changing this preference never switches
       // an already valid project selection or the running request snapshot.
       await this.refreshModelSourceState();
-      if (requestGeneration !== this.defaultModelRequestGeneration || this.rejectModelSourceMutationWhileBusy()) {
+      if (requestGeneration !== this.defaultModelRequestGeneration) {
         return;
       }
       await this.defaultModelStore.set(input);
       await this.refreshModelSourceState();
     } catch (error) {
+      this.failAccountOperation(error);
       if (requestGeneration === this.defaultModelRequestGeneration) {
         vscode.window.showErrorMessage(this.t('modelOperationFailed', { message: getErrorMessage(error) }));
       }
@@ -4082,21 +4327,20 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     modelId: string;
     enabled: boolean;
   }): Promise<void> {
-    if (this.rejectModelSourceMutationWhileBusy()) {
+    if (this.rejectModelSourceMutationWhileBusy(input.sourceId)) {
       return;
     }
     try {
-      await this.waitForBalanceRefresh();
       await this.modelSourceService.setModelEnabled(
         input.sourceId,
         input.modelId,
         input.enabled
       );
       await this.refreshModelSourceState();
-      await this.persistModelSelection(this.selectedSourceId, this.selectedModelId);
       this.postState();
       this.postModelSettingsDialog();
     } catch (error) {
+      this.failAccountOperation(error);
       vscode.window.showErrorMessage(this.t('modelOperationFailed', { message: getErrorMessage(error) }));
       this.postModelSettingsDialog();
     }
@@ -4107,11 +4351,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     modelId: string;
     contextWindowTokens: number;
   }): Promise<void> {
-    if (this.rejectModelSourceMutationWhileBusy()) {
+    if (this.rejectModelSourceMutationWhileBusy(input.sourceId)) {
       return;
     }
     try {
-      await this.waitForBalanceRefresh();
       await this.modelSourceService.setModelContextWindowTokens(
         input.sourceId,
         input.modelId,
@@ -4121,6 +4364,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.postState();
       this.postModelSettingsDialog();
     } catch (error) {
+      this.failAccountOperation(error);
       vscode.window.showErrorMessage(this.t('modelOperationFailed', { message: getErrorMessage(error) }));
       this.postModelSettingsDialog();
     }
@@ -4131,11 +4375,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     modelId: string;
     maxOutputTokens: number;
   }): Promise<void> {
-    if (this.rejectModelSourceMutationWhileBusy()) {
+    if (this.rejectModelSourceMutationWhileBusy(input.sourceId)) {
       return;
     }
     try {
-      await this.waitForBalanceRefresh();
       await this.modelSourceService.setModelMaxOutputTokens(
         input.sourceId,
         input.modelId,
@@ -4145,6 +4388,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.postState();
       this.postModelSettingsDialog();
     } catch (error) {
+      this.failAccountOperation(error);
       vscode.window.showErrorMessage(this.t('modelOperationFailed', { message: getErrorMessage(error) }));
       this.postModelSettingsDialog();
     }
@@ -4155,8 +4399,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     name?: string;
     apiKey: string;
     baseUrl: string;
+    expectedUpdatedAt?: number;
   }): Promise<void> {
-    if (this.rejectModelSourceMutationWhileBusy()) {
+    if (this.rejectModelSourceMutationWhileBusy(input.sourceId)) {
       return;
     }
     try {
@@ -4164,7 +4409,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       if (!source) {
         throw new Error(this.t('modelSourceNotFound'));
       }
-      await this.waitForBalanceRefresh();
       const result = await this.modelSourceService.saveSource(input);
       if (result.connectionChanged) {
         await this.balanceStore.clear({ provider: source.provider, sourceId: source.id });
@@ -4172,22 +4416,15 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       await this.refreshModelSourceState();
       this.postState();
       this.postModelSettingsDialog({ settingsSaved: true });
-      if (result.discovery?.status === 'failed') {
-        vscode.window.showWarningMessage(this.language === 'en'
-          ? 'The source was saved, but automatic model discovery failed. You can refresh it manually.'
-          : '来源已保存，但自动获取模型失败；可稍后手动刷新。');
-      }
-      if (this.selectedSourceId === source.id) {
-        void this.refreshBalance({ force: result.connectionChanged });
-      }
     } catch (error) {
+      this.failAccountOperation(error);
       vscode.window.showErrorMessage(this.t('modelOperationFailed', { message: getErrorMessage(error) }));
       this.postModelSettingsDialog();
     }
   }
 
   private async deleteModelSource(sourceId: string): Promise<void> {
-    if (this.rejectModelSourceMutationWhileBusy()) {
+    if (this.rejectModelSourceMutationWhileBusy(sourceId)) {
       return;
     }
     const source = await this.sourceStore.getSource(sourceId);
@@ -4208,7 +4445,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
     let sourceRemoved = false;
     try {
-      await this.waitForBalanceRefresh();
       await this.balanceStore.deleteSource({ provider: source.provider, sourceId: source.id });
       await this.sourceStore.deleteSource(source.id);
       sourceRemoved = true;
@@ -4216,8 +4452,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       await this.refreshModelSourceState();
       this.postState();
       this.postModelSettingsDialog();
-      void this.refreshBalance({ force: true });
     } catch (error) {
+      this.failAccountOperation(error);
       try {
         await this.refreshModelSourceState();
       } catch {
@@ -4250,20 +4486,22 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async refreshSourceModels(sourceId: string): Promise<void> {
-    if (this.rejectModelSourceMutationWhileBusy()) {
+    if (this.rejectModelSourceMutationWhileBusy(sourceId)) {
       return;
     }
     try {
-      const result = await refreshSourceModelCache(this.sourceStore, sourceId, { force: true });
+      const result = await refreshSourceModelCache(this.sourceStore, sourceId, { force: true, signal: this.accountOperationSignal() });
       await this.refreshModelSourceState();
       this.postState();
       this.postModelSettingsDialog();
       if (result.status === 'failed') {
+        this.failAccountOperation(new Error(this.language === 'en' ? 'Model discovery failed; the previous model list was kept.' : '获取模型失败，已保留原模型列表。'));
         vscode.window.showWarningMessage(this.language === 'en'
           ? 'Model discovery failed. The previous model list was kept.'
           : '获取模型失败，已保留原模型列表。');
       }
     } catch (error) {
+      this.failAccountOperation(error);
       vscode.window.showErrorMessage(this.t('modelOperationFailed', { message: getErrorMessage(error) }));
       this.postModelSettingsDialog();
     }
@@ -6711,6 +6949,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
       if (!existingAcceptedUser) activeSession.updatedAt = now;
       await this.sessionStore.persist();
+      if (abortController.signal.aborted || this.sessionStore.activeSessionId !== activeSession.id
+        || options?.interactionOperation && !this.interactions.owns(options.interactionOperation)) return;
       await options?.onSubmissionAccepted?.();
       this.postState();
       if (options?.userTask?.reason !== 'supplement') await this.refreshContextCompressionBeforeRun(
@@ -7306,7 +7546,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   private async prepareFreshSessionForSend(session: ChatSession, signal: AbortSignal): Promise<void> {
     const generation = this.sessionContextGeneration ?? 0;
-    await Promise.all([this.ensureApprovalStoresInitialized(), this.refreshModelSourceState()]);
+    const safety = session.id === this.locallyCreatedSessionId
+      ? Promise.all([this.approvalReviews.initializeFreshSession(session.id), this.changeSets.initializeFreshSession(session.id), this.draftRuns.initializeFreshSession(session.id)])
+      : this.ensureApprovalStoresInitialized();
+    await Promise.all([safety, this.refreshModelSourceState()]);
     if (signal.aborted) return;
     this.assertSessionContextOwner(session, generation);
     this.approvalDataReady = true;
@@ -7348,6 +7591,28 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         throw sessionResult[0].reason;
       }
       const initialSession = this.sessionStore.getActiveSession();
+      if (!this.projectBinding && this.sessionStore.isFreshBoot) {
+        this.freshSessionId = initialSession.id;
+        this.locallyCreatedSessionId = initialSession.id;
+        this.sessionReady = true;
+        this.sessionRecoveryReady = true;
+        this.commandSettingsReadiness.executionMode = 'ready';
+        this.commandSettingsReadiness.approvalMode = 'ready';
+        this.syncConfiguredState();
+        navigationReady();
+        this.postLightweightState();
+        // Only local account/model preferences belong to blank bootstrap.
+        void this.ensureProjectAssistant().catch(() => console.warn('[KeepSeek] project entry unavailable'));
+        await Promise.allSettled([
+          this.refreshModelSourceState({ persistSelection: false, hydrateBalance: false }).then(() => { this.commandSettingsReadiness.mainModel = 'ready'; }),
+          this.loadSubagentModelSettings().then(settings => {
+            this.subagentModelSettings = settings; this.subagentModelSetting = settings.default;
+            this.commandSettingsReadiness.subagentModel = 'ready';
+          })
+        ]);
+        if (!this.titleLifecycleDisposed) this.postState({ immediate: true, forceFull: true });
+        return;
+      }
       if (!this.projectBinding && !this.locallyCreatedSessionId && this.projectOptions?.owner.isOwner !== false && !initialSession.messages.length
         && !initialSession.pendingHistoryTruncation && !initialSession.pendingApproval) this.freshSessionId = initialSession.id;
       if (sessionResult[0]?.status === 'fulfilled' && !this.hasDeferredEmptyContext() && this.usageLedgerStore && this.usageLedgerFlushes && this.projectOptions?.owner.isOwner !== false) {
@@ -7521,7 +7786,14 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async ensureProjectAssistant(): Promise<void> {
+    await this.ownerReadiness;
     if (!this.projectOptions || this.projectBinding || this.projectAssistant) return;
+    if (this.projectAssistantInitialization) return this.projectAssistantInitialization;
+    return this.projectAssistantInitialization = this.initializeProjectAssistant();
+  }
+
+  private async initializeProjectAssistant(): Promise<void> {
+    if (!this.projectOptions || this.titleLifecycleDisposed) return;
     if (this.projectOptions.owner.isOwner && this.commandSettingsReadiness.mainModel === 'ready') {
       try { this.captureProjectDefaults(); } catch { /* Viewing remains available without a model. Input fails visibly. */ }
     }
@@ -7577,6 +7849,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private postStartupSettingsPatch(): void {
+    if (this.observerViewedSessionId) { this.postHistoryPreviewState(); return; }
     if (!this.sessionReady) {
       this.postLightweightState();
       return;
@@ -7604,6 +7877,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         approvalProcessing: activeSession.approvalProcessing,
         commandSettingsReadiness: { ...this.commandSettingsReadiness },
         activeSessionId: this.sessionStore.activeSessionId,
+        historyPreview: null,
         interaction: this.interactionSnapshot(revision),
         titleRegenerationCapability: this.sessionTitleCapability(),
         isBusy: this.isBusy && !this.activeDraftRunId,
@@ -7628,6 +7902,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private postLightweightState(): void {
+    if (this.observerViewedSessionId) { this.postHistoryPreviewState(); return; }
     // A late old-history startup publication must not replace live operation
     // cards with the bootstrap's empty arrays after the new target is usable.
     if (this.locallyCreatedSessionId && this.sessionReady && this.fullStateSent) {
@@ -7645,6 +7920,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       revision,
       state: {
         activeSessionId: activeSession?.id ?? '',
+        historyPreview: null,
         interaction: this.interactionSnapshot(revision),
         titleRegenerationCapability: this.sessionTitleCapability(),
         isBusy: this.isBusy && !this.activeDraftRunId,
@@ -7673,6 +7949,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async cleanupExpiredSessions(options: { post?: boolean; force?: boolean } = {}): Promise<void> {
+    if (!this.historyOpened && options.force !== true) return;
     if (!this.approvalDataReady) return;
     const protectedSessionIds = [
       ...this.changeSets.getProtectedSessionIds(),
@@ -7708,6 +7985,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private postStateNow(options: { forceFull?: boolean; omitMessages?: boolean } = {}): void {
+    if (this.observerViewedSessionId) { this.postHistoryPreviewState(); return; }
     if (!this.sessionReady) {
       this.postLightweightState();
       return;
@@ -7797,6 +8075,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           hasOlderMessages: this.messages.length > visibleMessages.length
         } : {}),
         activeSessionId: this.sessionStore.activeSessionId,
+        historyPreview: null,
         workspaceFolders: (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath || folder.uri.toString()),
         sessionSummaries: this.sessionStore.getSessionSummaries(),
         contextFiles: contextFiles.map(({ content: _content, ...file }) => file),
@@ -9500,6 +9779,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private postToWebview(message: unknown): void {
+    const accountOperation = this.accountOperationContext?.getStore();
+    if (accountOperation && !accountOperation.controller.signal.aborted && ['addModelResult', 'sourceConnectionTestResult'].includes((message as { type?: string }).type ?? '')) accountOperation.responses.push(message);
     if (this.projectBinding) {
       const value = message as { type?: string };
       if (['state', 'statePatch', 'taskTiming', 'sessionTitleUsageUpdated'].includes(value.type ?? '')) {

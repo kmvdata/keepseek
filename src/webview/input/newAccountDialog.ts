@@ -22,7 +22,7 @@ export function getNewAccountDialogTemplate(): string {
           <span class="new-account-dialog-title" data-i18n="newAccountDialogTitle">添加账号</span>
         </div>
         <div class="new-account-dialog-body">
-          <p class="new-account-dialog-desc" data-i18n="newAccountDialogDesc">选择模型协议或服务商，填写 API Key 与 Base URL；保存后账号与第一个模型会一起创建。</p>
+          <p class="new-account-dialog-desc" data-i18n="newAccountDialogDesc">先保存本地账号，可随后测试连接、刷新模型或手动配置模型 ID。</p>
           <div id="newAccountDialogStatus" class="new-account-dialog-status hidden" role="status" aria-live="polite" tabindex="-1"></div>
           <label class="new-account-field">
             <span class="new-account-field-label" data-i18n="modelProviderLabel">模型协议或服务商</span>
@@ -384,6 +384,8 @@ export function getNewAccountDialogScript(): string {
       var cancelBtn = document.getElementById('newAccountCancelBtn');
       var saveBtn = document.getElementById('newAccountSaveBtn');
       var busyAction = '';
+      var pendingRequestId = '';
+      var openedBefore = false;
       var busyTimer = null;
       var apiKeyVisible = false;
 
@@ -554,8 +556,13 @@ export function getNewAccountDialogScript(): string {
         if (statusEl) { statusEl.focus(); }
         busyTimer = setTimeout(function() {
           busyTimer = null;
-          setStatus(t('modelOperationStillPending'));
-        }, 15000);
+          var requestId = pendingRequestId;
+          pendingRequestId = '';
+          busyAction = '';
+          if (requestId) vscode.postMessage({ type: 'cancelAccountOperation', requestId: requestId });
+          setStatus(t('accountOperationTimedOut'));
+          render();
+        }, 32000);
       }
 
       function render() {
@@ -569,7 +576,7 @@ export function getNewAccountDialogScript(): string {
           testBtn.disabled = busy;
         }
         if (saveBtn) { saveBtn.disabled = busy; }
-        if (cancelBtn) { cancelBtn.disabled = busy; }
+        if (cancelBtn) { cancelBtn.disabled = false; }
         if (dialog) {
           dialog.setAttribute('aria-busy', busy ? 'true' : 'false');
         }
@@ -616,12 +623,16 @@ export function getNewAccountDialogScript(): string {
         if (!overlay) { return; }
         clearBusy();
         buildProviderMenu();
-        if (providerSelect) { providerSelect.value = 'deepseek'; }
+        if (!openedBefore) {
+          if (providerSelect) { providerSelect.value = 'deepseek'; }
+          if (nameInput) { nameInput.value = ''; }
+          if (apiKeyInput) { apiKeyInput.value = ''; }
+          applyProviderPreset('deepseek', true);
+        }
+        openedBefore = true;
+        pendingRequestId = '';
         closeProviderMenu();
         syncProviderTrigger();
-        if (nameInput) { nameInput.value = ''; }
-        if (apiKeyInput) { apiKeyInput.value = ''; }
-        applyProviderPreset('deepseek', true);
         setApiKeyVisible(false, false);
         setStatus('');
         render();
@@ -629,8 +640,11 @@ export function getNewAccountDialogScript(): string {
         if (nameInput) { nameInput.focus(); }
       }
 
-      function close() {
+      function close(completed) {
         if (!overlay) { return; }
+        if (completed !== true && pendingRequestId) vscode.postMessage({ type: 'cancelAccountOperation', requestId: pendingRequestId });
+        pendingRequestId = '';
+        if (completed === true) openedBefore = false;
         clearBusy();
         setStatus('');
         overlay.classList.add('hidden');
@@ -647,7 +661,7 @@ export function getNewAccountDialogScript(): string {
           if (baseUrlInput) { baseUrlInput.focus(); }
           return;
         }
-        vscode.postMessage({
+        pendingRequestId = vscode.postMessage({
           type: 'testSourceConnection',
           provider: provider,
           apiKey: apiKey,
@@ -673,7 +687,7 @@ export function getNewAccountDialogScript(): string {
           if (baseUrlInput) { baseUrlInput.focus(); }
           return;
         }
-        vscode.postMessage({
+        pendingRequestId = vscode.postMessage({
           type: 'addModel',
           provider: provider,
           name: name,
@@ -686,6 +700,12 @@ export function getNewAccountDialogScript(): string {
       window.addEventListener('message', function(event) {
         var message = event.data;
         if (!message || typeof message !== 'object') { return; }
+        if (['sourceConnectionTestResult', 'addModelResult', 'accountOperationResult'].includes(message.type)
+          && (!pendingRequestId || message.requestId && message.requestId !== pendingRequestId || overlay?.classList.contains('hidden'))) return;
+        if (message.type === 'accountOperationResult') {
+          if (!message.ok) { clearBusy(); pendingRequestId = ''; setStatus(message.error || t('accountOperationTimedOut')); render(); }
+          return;
+        }
         if (message.type === 'sourceConnectionTestResult') {
           if (busyAction !== 'test-connection') { return; }
           clearBusy();
@@ -706,7 +726,7 @@ export function getNewAccountDialogScript(): string {
               setStatus(t('newAccountReused'));
               render();
             } else {
-              close();
+              close(true);
             }
           } else {
             var reason = typeof message.error === 'string' ? message.error : '';

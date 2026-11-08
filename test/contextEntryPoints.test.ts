@@ -732,12 +732,11 @@ test('model settings dialog manages flat logo-led accounts and per-source models
   assert.match(inputScript, /function blockAccountSettingsWhileRunBusy/u);
   assert.match(inputScript, /function syncAccountSettingsRunBusyStatus/u);
   assert.match(inputScript, /function trapSettingsDialogFocus/u);
-  assert.match(inputScript, /var runBusy = !canChangeContext\(\) \|\| isModelSelectionLocked\(\)/u);
+  assert.match(inputScript, /var runBusy = !canManageAccounts\(\)/u);
+  assert.doesNotMatch(inputScript, /var runBusy = !canChangeContext\(\) \|\| isModelSelectionLocked\(\)/u);
   assert.match(inputScript, /var controlsDisabled = operationBusy \|\| runBusy/u);
   assert.match(inputScript, /button\.disabled = controlsDisabled \|\| !account\.enabled/u);
-  assert.match(inputScript, /settingsCancelBtn\.disabled = operationBusy/u);
-  assert.match(inputScript, /modelSettingsReadonlyWhileBusy/u);
-  assert.match(inputScript, /modelSelectionLockedByBackground/u);
+  assert.match(inputScript, /settingsCancelBtn\.disabled = false/u);
   assert.ok((inputScript.match(/blockAccountSettingsWhileRunBusy\(\)/gu) ?? []).length >= 9);
   assert.match(i18nSource, /modelSettingsReadonlyWhileBusy: '当前操作完成并且会话就绪后可修改模型设置。'/u);
   assert.match(inputScript, /var settingsSaveCompleted = false/u);
@@ -747,12 +746,12 @@ test('model settings dialog manages flat logo-led accounts and per-source models
   assert.match(i18nSource, /closeWindow: '关闭窗口'/u);
   assert.match(i18nSource, /closeWindow: 'Close window'/u);
   assert.ok(providerSource.includes('settingsSaved: outcome.settingsSaved === true'));
-  assert.ok(providerSource.includes('private postModelSettingsDialog(outcome: { settingsSaved?: boolean } = {}): void'));
+  assert.ok(providerSource.includes('private postModelSettingsDialog(outcome: { settingsSaved?: boolean; loading?: boolean } = {}): void'));
   assert.ok((providerSource.match(/settingsSaved: true/gu) ?? []).length >= 2);
   assert.match(i18nSource, /modelSettingsReadonlyWhileBusy: 'Model settings are available when the current operation finishes and the conversation is ready\.'/u);
   assert.match(
     inputScript,
-    /settingsDialogBusyTimer = setTimeout\(function\(\) \{[\s\S]*?setSettingsDialogStatus\(t\('modelOperationStillPending'\)\)[\s\S]*?\}, 15000\)/u
+    /settingsDialogBusyTimer = setTimeout\(function\(\) \{[\s\S]*?cancelAccountOperation[\s\S]*?accountOperationTimedOut[\s\S]*?\}, 32000\)/u
   );
   assert.doesNotMatch(inputScript, /settings-account-group/u);
   assert.doesNotMatch(styles, /\.settings-account-group/u);

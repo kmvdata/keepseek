@@ -53,6 +53,7 @@ async function fixture(t: TestContext) {
   };
   let host = new ProjectAssistantHost(options);
   await host.initialize();
+  await host.handleMessage({ type: 'projectTaskOpen', projectId: owner.projectId } as never);
   t.after(async () => {
     try { await host.dispose(); await storage.flush(); sources.dispose(); await owner.dispose(); }
     finally {
@@ -64,8 +65,67 @@ async function fixture(t: TestContext) {
     }
   });
   return { view, posts, session, before, store, options, get host() { return host; },
-    reopen: async () => { await host.dispose(); host = new ProjectAssistantHost(options); await host.initialize(); return host; } };
+    reopen: async (loadHistory = true) => { await host.dispose(); host = new ProjectAssistantHost(options); await host.initialize();
+      if (loadHistory) await host.handleMessage({ type: 'projectTaskOpen', projectId: owner.projectId } as never); return host; } };
 }
+
+test('new project host stays blank and performs no historical I/O through repeated ready and idle', async t => {
+  const f = await fixture(t);
+  await f.host.handleMessage({ type: 'projectTaskAssociate', projectId: f.options.owner.projectId, sessionId: f.session.id });
+  await f.host.dispose();
+  const previousRead = vscode.workspace.fs.readFile;
+  const previousFetch = globalThis.fetch;
+  const reads: string[] = [];
+  let requests = 0;
+  vscode.workspace.fs.readFile = async uri => { reads.push(uri.toString()); return previousRead(uri); };
+  globalThis.fetch = async () => { requests++; throw new Error('Blank boot must stay offline'); };
+  try {
+    await f.reopen(false);
+    await f.host.handleMessage({ type: 'ready' });
+    await f.host.handleMessage({ type: 'ready' });
+    await new Promise(resolve => setTimeout(resolve, 30));
+    const state = f.posts.filter(event => event.type === 'projectTasksState').at(-1)!;
+    assert.equal(state.viewMode, 'legacy');
+    assert.equal(state.enabled, false);
+    assert.equal(state.historyReady, false);
+    assert.deepEqual(state.cards, []);
+    assert.equal(reads.length, 0, 'no Registry, usage, draft, scope/index, transcript or prefetch reads');
+    assert.equal((f.host as unknown as { workers: Map<string, unknown> }).workers.size, 0);
+    assert.equal(requests, 0);
+    await f.host.handleMessage({ type: 'projectTaskOpen', projectId: f.options.owner.projectId } as never);
+    assert.equal(f.host.tasks.list().length, 1, 'only an explicit history action reads cards');
+    assert.equal((f.host as unknown as { workers: Map<string, unknown> }).workers.size, 0);
+  } finally { vscode.workspace.fs.readFile = previousRead; globalThis.fetch = previousFetch; }
+});
+
+test('a delayed explicit task view cannot replace a newer blank target', async t => {
+  const f = await fixture(t);
+  await f.host.handleMessage({ type: 'projectTaskAssociate', projectId: f.options.owner.projectId, sessionId: f.session.id });
+  const card = f.host.tasks.list()[0];
+  const registryUri = (f.host.tasks as unknown as { uri: vscode.Uri }).uri.toString();
+  await f.reopen(false);
+  const previousRead = vscode.workspace.fs.readFile;
+  let enter!: () => void, release!: () => void;
+  const entered = new Promise<void>(resolve => { enter = resolve; });
+  const released = new Promise<void>(resolve => { release = resolve; });
+  vscode.workspace.fs.readFile = async uri => {
+    if (uri.toString() === registryUri) { enter(); await released; }
+    return previousRead(uri);
+  };
+  try {
+    const viewing = f.host.handleMessage({ type: 'projectTaskView', projectId: f.options.owner.projectId,
+      taskCardId: card.taskCardId, mode: 'task', viewGeneration: 5 });
+    await entered;
+    assert.equal(await f.host.handleMessage({ type: 'newSession' }), false, 'the root Host owns the new blank target');
+    release(); await viewing;
+    const state = f.posts.filter(event => event.type === 'projectTasksState').at(-1)!;
+    assert.equal(state.viewMode, 'legacy');
+    assert.equal(state.viewTaskId, null);
+    assert.equal(state.enabled, false);
+    assert.equal(state.messages, undefined, 'late history metadata never publishes the old transcript');
+    assert.equal((f.host as unknown as { workers: Map<string, unknown> }).workers.size, 0);
+  } finally { release(); vscode.workspace.fs.readFile = previousRead; }
+});
 
 test('history association uses complete-session first input and real finish evidence without renewing a shutdown record', async t => {
   const f = await fixture(t);
@@ -104,6 +164,7 @@ test('real ProjectAssistantHost publishes task cards and finite session views wi
   }
   await f.host.handleMessage({ type: 'ready' });
   assert.equal(providerRequests, 0);
+  assert.equal((f.host as unknown as { workers: Map<string, unknown> }).workers.size, 0, 'viewing a task never constructs its execution Worker');
   assert.equal(JSON.stringify(f.store.getSessionById(f.session.id)), f.before, 'viewing/association preserve Worker history and frozen context bytes');
 });
 
@@ -203,10 +264,21 @@ test('real Host persists task-local drafts and restores the newest revision acro
   assert.deepEqual(snapshot.draft.skillIds, ['selected-skill']);
   assert.equal(f.view.element('promptInput').textContent, draft.markup);
   assert.equal(f.view.element('transcript').scrollTop, 72);
+  await f.host.handleMessage({ ...draft, targetId: '$new', revision: 100, markup: 'Saved explicit new-task draft' });
+  await f.reopen();
+  await f.host.handleMessage({ type: 'projectTaskView', projectId: f.options.owner.projectId, taskCardId: null, mode: 'new', viewGeneration: 6 });
+  const newTarget = f.posts.filter(item => item.type === 'projectTasksState' && item.viewMode === 'new').at(-1)!;
+  assert.equal(newTarget.draft.revision, 100, 'explicit new-task entry hydrates its saved revision before accepting edits');
+  assert.equal(newTarget.draft.markup, 'Saved explicit new-task draft');
+  await f.host.handleMessage({ ...draft, targetId: '$new', revision: 101, markup: 'Newest explicit new-task draft' });
+  await f.reopen();
+  await f.host.handleMessage({ type: 'projectTaskView', projectId: f.options.owner.projectId, taskCardId: null, mode: 'new', viewGeneration: 7 });
+  assert.equal(f.posts.filter(item => item.type === 'projectTasksState' && item.viewMode === 'new').at(-1)!.draft.markup, 'Newest explicit new-task draft');
 });
 
 test('sidebar actions reject retired Hosts and stale full task identities before any mutation', async t => {
   const f = await fixture(t);
+  await (f.host as unknown as { ensureExecutionLoaded(): Promise<void> }).ensureExecutionLoaded();
   const card = await f.host.tasks.associateSession({ sessionId: f.session.id, title: 'Identity fixture',
     requestId: 'identity-association', snapshot: f.options.defaults() });
   const hostId = f.posts.filter(event => event.type === 'projectTasksState').at(-1)!.hostId;
@@ -282,7 +354,7 @@ test('a real read-only Host settles stamped legacy inputs, title requests and ac
   observer = new ProjectAssistantHost({ ...f.options, owner: observerOwner, sessionStore: observerStore,
     windowId: 'read-only-contract', publish: event => {
       const value = event as Record<string, any>; posts.push(value);
-      if (value.type === 'projectTasksState' && value.readOnly && !watcherInjectionScheduled) {
+      if (value.type === 'projectTasksState' && value.historyReady && value.readOnly && !watcherInjectionScheduled) {
         watcherInjectionScheduled = true;
         // Schedule before fs.watch's possible native error delivery, but after
         // initialize has created its actual watcher and attached the listener.
@@ -302,6 +374,7 @@ test('a real read-only Host settles stamped legacy inputs, title requests and ac
     const beforeSession = JSON.stringify(await observerStorage.loadSession(f.store.workspaceKey, f.session.id));
     const beforeCards = JSON.stringify(f.host.tasks.list());
     await observer.initialize();
+    await observer.handleMessage({ type: 'projectTaskOpen', projectId: observerOwner.projectId });
     await watcherInjection;
     const watcherError = posts.find(event => event.type === 'projectTaskError'
       && (watcherErrorInjected ? /injected observer watcher failure/u : /EMFILE|too many open files/iu).test(String(event.reason)));

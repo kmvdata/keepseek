@@ -26,6 +26,7 @@ import { createChangeSet } from './changeSet';
 import { ChangeArtifactStore } from './changeArtifactStore';
 import { getDraftEditBase, getDraftEditKind, getDraftEditResult } from './draftEdit';
 import { getConfiguredPatchSettings } from '../shared/config';
+import { readSessionAuditLanes, sessionAuditLaneUri } from '../shared/sessionAuditLanes';
 
 type Translator = (key: string, values?: Record<string, string | number>) => string;
 type ChangeSetTraceHandler = (changeSet: ChangeSet, event: Record<string, unknown>) => void;
@@ -104,6 +105,8 @@ export class ChangeSetStore {
   private readonly activeEditOperations = new Set<string>();
   private readonly historyInvalidations = new Map<string, HistoryTruncationScope[]>();
   private initialized = false;
+  private readonly sessionIndexesUri: vscode.Uri;
+  private readonly freshSessionIds = new Set<string>();
 
   public constructor(
     private readonly safeFileEditor: SafeFileEditor,
@@ -120,11 +123,40 @@ export class ChangeSetStore {
     this.runtimeUri = vscode.Uri.joinPath(this.shardedRootUri, 'runtime');
     this.historyUri = vscode.Uri.joinPath(this.shardedRootUri, 'history');
     this.checkpointsUri = vscode.Uri.joinPath(this.shardedRootUri, 'checkpoints');
+    this.sessionIndexesUri = vscode.Uri.joinPath(this.shardedRootUri, 'session-indexes');
     this.artifactStore = new ChangeArtifactStore(globalStorageUri);
     this.safeFileEditor.configureArtifactStore?.(this.artifactStore);
   }
 
   public async initialize(): Promise<void> {
+    if (this.initialized) return;
+    await this.initializeLegacyStorage();
+    const lanes = await readSessionAuditLanes(this.sessionIndexesUri);
+    const entries = [...this.storageIndex.entries];
+    for (const lane of lanes) for (const value of Array.isArray(lane.entries) ? lane.entries : []) {
+      const entry = normalizeIndexEntry(value);
+      const previous = entry && entries.find(candidate => candidate.id === entry.id);
+      if (entry?.sessionId === lane.sessionId && (!previous || previous.sessionId === entry.sessionId)) entries.push(entry);
+    }
+    if (lanes.length) {
+      this.storageIndex = { version: 4, entries: dedupeIndexEntries(entries) };
+      await writeJsonAtomic(this.indexUri, this.storageIndex, { durable: true });
+      // Receipt removal follows the canonical index commit. A crash before
+      // removal simply merges the same metadata again on explicit recovery.
+      for (const lane of lanes) await Promise.resolve(vscode.workspace.fs.delete(sessionAuditLaneUri(this.sessionIndexesUri, lane.sessionId),
+        { useTrash: false })).catch(() => undefined);
+      this.freshSessionIds.clear();
+      await this.loadSession(this.sessionStore.activeSessionId || this.sessionStore.getActiveSession().id);
+    }
+  }
+
+  public async initializeFreshSession(sessionId: string): Promise<void> {
+    sessionAuditLaneUri(this.sessionIndexesUri, sessionId);
+    this.freshSessionIds.add(sessionId);
+    this.loadedSessionIds.add(sessionId);
+  }
+
+  private async initializeLegacyStorage(): Promise<void> {
     if (this.initialized) {
       return;
     }
@@ -202,13 +234,7 @@ export class ChangeSetStore {
       await this.persistShardedNow();
       await this.reconcileInterruptedFiles();
       this.supersedeStaleDrafts();
-      // The V4 index is the atomic commit marker. Delete the monolith only
-      // after that commit; any migration failure above leaves it untouched.
-      try {
-        await vscode.workspace.fs.delete(this.storageUri, { recursive: false, useTrash: false });
-      } catch {
-        // Keeping a redundant legacy copy is safe; V4 remains authoritative.
-      }
+      // Keep the original legacy audit intact after the V4 commit.
       this.scheduleArtifactGarbageCollection();
     } catch {
       // Missing or malformed checkpoint storage must not block the chat view.
@@ -378,6 +404,7 @@ export class ChangeSetStore {
 
   public async loadSession(sessionId: string): Promise<void> {
     if (!sessionId || this.loadedSessionIds.has(sessionId)) return;
+    if (!this.initialized) await this.initialize();
     const entries = this.storageIndex.entries.filter((entry) => entry.sessionId === sessionId);
     for (const entry of entries) {
       const value = await readJsonFile(entry.kind === 'runtime'
@@ -1155,6 +1182,12 @@ export class ChangeSetStore {
         || current.sessionId !== storedChangeSet.sessionId
         || !sameStringSet(current.checkpointIds, checkpointIds);
       if (needsIndexCommit) {
+        if (!this.initialized && this.freshSessionIds.has(storedChangeSet.sessionId)) {
+          await this.commitIncrementalIndexEntry({ id: storedChangeSet.id, sessionId: storedChangeSet.sessionId,
+            kind: 'runtime', storageFile: `runtime/${fileNameForId(storedChangeSet.id)}`, checkpointIds,
+            updatedAt: storedChangeSet.updatedAt });
+          return;
+        }
         const latest = await this.readShardedIndex() ?? this.storageIndex;
         const entries = latest.entries.filter((entry) => entry.id !== storedChangeSet.id);
         entries.push({
@@ -1224,6 +1257,12 @@ export class ChangeSetStore {
   }
 
   private async commitIncrementalIndexEntry(entry: ChangeSetIndexEntry): Promise<void> {
+    if (!this.initialized && this.freshSessionIds.has(entry.sessionId)) {
+      this.storageIndex = { version: 4,
+        entries: dedupeIndexEntries([...this.storageIndex.entries.filter(item => item.id !== entry.id), entry]) };
+      await this.writeFreshSessionIndexes(this.storageIndex.entries);
+      return;
+    }
     const latest = await this.readShardedIndex() ?? this.storageIndex;
     const index: ChangeSetStorageIndex = {
       version: 4,
@@ -1265,7 +1304,8 @@ export class ChangeSetStore {
     // Re-read immediately before commit and preserve other windows' sessions.
     // Orphan reconciliation on the next load recovers the narrow simultaneous
     // index-write race without ever discarding a record file.
-    const latest = await this.readShardedIndex() ?? this.storageIndex;
+    const freshOnly = !this.initialized && this.freshSessionIds.size > 0;
+    const latest = freshOnly ? this.storageIndex : await this.readShardedIndex() ?? this.storageIndex;
     const entries = latest.entries.filter((entry) => !input.loadedSessionIds.has(entry.sessionId));
     for (const changeSet of input.changeSets) {
       entries.push({
@@ -1289,8 +1329,14 @@ export class ChangeSetStore {
       });
     }
     const index: ChangeSetStorageIndex = { version: 4, entries: dedupeIndexEntries(entries) };
-    await writeJsonAtomic(this.indexUri, index);
+    if (freshOnly) await this.writeFreshSessionIndexes(index.entries);
+    else await writeJsonAtomic(this.indexUri, index);
     this.storageIndex = index;
+  }
+
+  private async writeFreshSessionIndexes(entries: readonly ChangeSetIndexEntry[]): Promise<void> {
+    for (const sessionId of this.freshSessionIds) await writeJsonAtomic(sessionAuditLaneUri(this.sessionIndexesUri, sessionId),
+      { version: 1, sessionId, entries: entries.filter(entry => entry.sessionId === sessionId) }, { durable: true });
   }
 
   private async readShardedIndex(recordDiagnostics = false): Promise<ChangeSetStorageIndex | undefined> {
@@ -1436,6 +1482,9 @@ export class ChangeSetStore {
   }
 
   private scheduleArtifactGarbageCollection(): void {
+    // Fresh scopes have intentionally not read historical references; a global
+    // GC here could both scan old bodies and collect their live checkpoints.
+    if (!this.initialized && this.freshSessionIds.size > 0) return;
     this.artifactGcQueued = true;
     if (this.artifactGcTimer) clearTimeout(this.artifactGcTimer);
     this.artifactGcTimer = setTimeout(() => {

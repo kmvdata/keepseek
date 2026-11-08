@@ -6,6 +6,9 @@ import * as vscode from 'vscode';
 import { analyzeDraftRunEffects } from '../src/approvals/authorization';
 import { DraftRunAuthorizationService } from '../src/runs/draftRunAuthorization';
 import { SpawnDraftRunExecutor } from '../src/runs/draftRunExecutor';
+import { spawnDurablyGated } from '../src/runs/durableSpawn';
+import { ProjectExecutionOwner } from '../src/tasks/projectOwner';
+import { ProjectResourceCoordinator, runProjectExecution } from '../src/tasks/projectResources';
 import { hashDraftRunSpec } from '../src/runs/draftRunProposal';
 import type { DraftRun, DraftRunSpec } from '../src/shared/types';
 import type { ApprovalRecordMatch } from '../src/approvals/approvalReviewTypes';
@@ -329,3 +332,116 @@ function createDraftRun(args: string[], timeoutMs = 5_000): DraftRun {
     updatedAt: now
   };
 }
+
+test('durable launch gate waits for recorded PID before it invokes literal target argv', async () => {
+  const { mkdtemp, access, rm } = await import('node:fs/promises');
+  const { join } = await import('node:path');
+  const directory = await mkdtemp(join(os.tmpdir(), 'keepseek-dispatch-gate-'));
+  const target = join(directory, 'dispatched.txt');
+  let recorded!: () => void;
+  let allow!: () => void;
+  const recording = new Promise<void>(resolve => { recorded = resolve; });
+  const barrier = new Promise<void>(resolve => { allow = resolve; });
+  const gate = spawnDurablyGated({
+    executable: process.execPath, args: ['-e', 'require("node:fs").writeFileSync(process.argv[1],"literal;$(untouched)")', target],
+    cwd: directory, env: process.env,
+    journal: { dispatched: async ({ pid, processGroup }) => {
+      assert.ok(pid && pid > 0);
+      if (process.platform !== 'win32') assert.equal(processGroup, pid);
+      recorded(); await barrier;
+    } }
+  });
+  const closed = new Promise<number | null>(resolve => gate.child.once('close', resolve));
+  try {
+    await recording;
+    await assert.rejects(access(target));
+    assert.equal(gate.started, false);
+    allow();
+    await gate.dispatch;
+    assert.equal(await closed, 0);
+    assert.equal(gate.started, true);
+    const { readFile } = await import('node:fs/promises');
+    assert.equal(await readFile(target, 'utf8'), 'literal;$(untouched)');
+  } finally { allow(); gate.child.kill(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('durable launch gate never starts a target after journal failure or pre-dispatch cancellation', async () => {
+  const { mkdtemp, access, rm } = await import('node:fs/promises');
+  const { join } = await import('node:path');
+  for (const mode of ['journal-failed', 'cancelled'] as const) {
+    const directory = await mkdtemp(join(os.tmpdir(), 'keepseek-dispatch-gate-'));
+    const target = join(directory, 'must-not-exist');
+    const signal = new AbortController();
+    let gate!: ReturnType<typeof spawnDurablyGated>;
+    gate = spawnDurablyGated({
+      executable: process.execPath, args: ['-e', 'require("node:fs").writeFileSync(process.argv[1],"unexpected")', target],
+      cwd: directory, env: process.env, signal: signal.signal,
+      journal: { dispatched: async () => {
+        if (mode === 'journal-failed') throw new Error('fixture journal write failed');
+        signal.abort();
+      } }
+    });
+    const closed = new Promise<void>(resolve => gate.child.once('close', () => resolve()));
+    try {
+      await gate.dispatch;
+      await closed;
+      assert.equal(gate.authorized, false);
+      assert.equal(gate.started, false);
+      assert.match(gate.launchError!, /journal write failed|cancelled/u);
+      await assert.rejects(access(target));
+    } finally { gate.child.kill(); await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
+
+test('actual project execution settles the durable command receipt without leaving the owner blocked', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { join } = await import('node:path');
+  const directory = await mkdtemp(join(os.tmpdir(), 'keepseek-command-receipt-'));
+  const owner = await ProjectExecutionOwner.acquire({ projectUri: directory, lockRoot: join(directory, 'locks') });
+  const executor = new SpawnDraftRunExecutor();
+  try {
+    assert.equal(owner.isOwner, true, owner.reason);
+    const resources = new ProjectResourceCoordinator(owner.projectId);
+    for (const failed of [false, true]) {
+      const draftRun = createDraftRun(['-e', 'process.stdout.write("journalled")']);
+      draftRun.id = failed ? 'durable-launch-failed' : 'durable-launch-ok';
+      draftRun.spec.cwdUri = vscode.Uri.file(directory).toString();
+      if (failed) draftRun.spec.executable = join(directory, 'nonexistent-executable');
+      draftRun.specHash = hashDraftRunSpec(draftRun.spec);
+      const permit = new DraftRunAuthorizationService().createUserClickPermit(draftRun);
+      let output = '';
+      const result = await runProjectExecution({ owner, resources, scope: {
+        sessionId: draftRun.sessionId, rootTaskId: draftRun.agentRunId, segmentId: 'segment', runtimeId: 'runtime'
+      } }, () => executor.execute({ draftRun, permit, onOutput: chunk => { output += chunk.text; } }));
+      assert.equal(result.started, !failed);
+      assert.equal(result.phase, failed ? 'spawn_failed' : 'exited');
+      assert.equal(output, failed ? '' : 'journalled');
+      const receipt = (await owner.diagnostics()).operations.find(operation => operation.id === draftRun.id);
+      assert.ok(receipt);
+      assert.equal(receipt.state, failed ? 'not_dispatched' : 'completed');
+      assert.ok(receipt.processId);
+      assert.equal(owner.isOwner, true);
+      await owner.verify();
+    }
+  } finally { executor.dispose(); await owner.dispose(); await rm(directory, { recursive: true, force: true }); }
+});
+
+
+test('a host exit before granting the launch gate cannot invoke the target', async () => {
+  const { mkdtemp, access, rm } = await import('node:fs/promises');
+  const { join } = await import('node:path');
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const directory = await mkdtemp(join(os.tmpdir(), 'keepseek-dispatch-parent-exit-'));
+  const target = join(directory, 'must-not-exist');
+  try {
+    await promisify(execFile)(process.execPath, ['-e', `
+      require(process.argv[1]);
+      const {spawnDurablyGated}=require(process.argv[2]);
+      spawnDurablyGated({executable:process.execPath,args:['-e','require("node:fs").writeFileSync(process.argv[1],"unexpected")',process.argv[3]],
+        cwd:process.cwd(),env:process.env,journal:{dispatched:async()=>{process.exit(0)}}});
+    `, require.resolve('./registerVscodeStub'), require.resolve('../src/runs/durableSpawn'), target], { timeout: 5_000 });
+    await assert.rejects(access(target));
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

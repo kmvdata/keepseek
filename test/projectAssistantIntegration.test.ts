@@ -517,6 +517,7 @@ async function fixture(t: TestContext, provider: ModelSourceProvider = 'openai-c
       const uri = vscode.Uri.file(path);
       activeStorageUri = uri; storage = new GlobalSessionStorage(uri); store = new ChatSessionStore(storage, 'en', workspaceScope);
       await store.initialize(); host = createHost(uri); hostDrained = false; await host.initialize();
+      await host.handleMessage({ type: 'projectTaskOpen', projectId: owner.projectId });
     },
     evidence: async (name: string, assertions: Record<string, unknown>) => {
       if (!process.env.KEEPSEEK_REQUEST_EVIDENCE_PATH) return;

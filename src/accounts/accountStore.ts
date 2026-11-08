@@ -1,3 +1,7 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { realpath } from 'node:fs/promises';
+import { LocalKernelMutex } from '../tasks/localKernelMutex';
+import { withStorageCoordinator, writeJsonAtomic } from '../shared/atomicStorage';
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { DEFAULT_DEEPSEEK_BASE_URL } from '../shared/config';
@@ -27,6 +31,8 @@ export const DEFAULT_KIMI_BASE_URL = 'https://api.moonshot.cn/v1';
 export const DEFAULT_GLM_BASE_URL = 'https://open.bigmodel.cn/api/paas/v4';
 export const DEFAULT_QWEN_CLOUD_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
 
+const accountTransactions = new AsyncLocalStorage<ReadonlySet<string>>();
+
 const ACCOUNT_FILE_EXTENSION = '.json';
 const ACCOUNT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const MAX_ACCOUNT_NAME_LENGTH = 200;
@@ -48,7 +54,6 @@ export interface NormalizeModelSourceOptions {
 
 export class ModelSourceStore {
   private readonly accountsRootUri: vscode.Uri;
-  private readonly encoder = new TextEncoder();
   private readonly decoder = new TextDecoder();
   private readonly now: () => number;
   private readonly createId: () => string;
@@ -99,7 +104,38 @@ export class ModelSourceStore {
     return await this.readSourceFile(provider, sourceId);
   }
 
-  public async createSource(input: CreateModelSourceInput): Promise<ModelSource> {
+  /** One account transaction spans read/modify/write, including nested service operations.
+   * Kernel ownership expires with the process. A contending window receives a
+   * bounded retryable conflict; no stale file is removed and no update is lost. */
+  public async transaction<T>(work: () => Promise<T>): Promise<T> {
+    const key = this.accountsRootUri.toString();
+    if (accountTransactions.getStore()?.has(key)) return work();
+    return withStorageCoordinator(`account-transaction:${key}`, async () => {
+      if (this.accountsRootUri.scheme !== 'file') throw new Error('Account writes require verified local storage.');
+      await vscode.workspace.fs.createDirectory(this.accountsRootUri);
+      const canonical = await realpath(this.accountsRootUri.fsPath);
+      const lease = await LocalKernelMutex.acquire(`keepseek-accounts:${canonical}`, { timeoutMs: 3000 });
+      if (!lease) throw new Error('Another window is saving account settings. Retry after it finishes.');
+      try {
+        return await accountTransactions.run(new Set([...(accountTransactions.getStore() ?? []), key]), work);
+      } finally { await lease.release(); }
+    });
+  }
+
+  public createSource(input: CreateModelSourceInput): Promise<ModelSource> {
+    return this.transaction(() => this.createSourceInTransaction(input));
+  }
+  public saveSource(source: ModelSource): Promise<ModelSource> {
+    return this.transaction(() => this.saveSourceInTransaction(source));
+  }
+  public updateSource(sourceId: string, patch: UpdateModelSourceInput): Promise<ModelSource | undefined> {
+    return this.transaction(() => this.updateSourceInTransaction(sourceId, patch));
+  }
+  public deleteSource(sourceId: string): Promise<ModelSource | undefined> {
+    return this.transaction(() => this.deleteSourceInTransaction(sourceId));
+  }
+
+  private async createSourceInTransaction(input: CreateModelSourceInput): Promise<ModelSource> {
     if (!isModelSourceProvider(input.provider)) {
       throw new Error('Unsupported KeepSeek model source provider.');
     }
@@ -134,7 +170,7 @@ export class ModelSourceStore {
     return source;
   }
 
-  public async saveSource(source: ModelSource): Promise<ModelSource> {
+  private async saveSourceInTransaction(source: ModelSource): Promise<ModelSource> {
     const normalized = normalizeModelSource(source, {
       expectedId: source.id,
       expectedProvider: source.provider,
@@ -147,7 +183,7 @@ export class ModelSourceStore {
     return normalized;
   }
 
-  public async updateSource(
+  private async updateSourceInTransaction(
     sourceId: string,
     patch: UpdateModelSourceInput
   ): Promise<ModelSource | undefined> {
@@ -155,7 +191,7 @@ export class ModelSourceStore {
     if (!current) {
       return undefined;
     }
-    const timestamp = Math.max(current.updatedAt, normalizeTimestamp(this.now(), Date.now()));
+    const timestamp = Math.max(current.updatedAt + 1, normalizeTimestamp(this.now(), Date.now()));
     const candidate: ModelSource = {
       ...current,
       name: patch.name ?? current.name,
@@ -172,7 +208,7 @@ export class ModelSourceStore {
     return await this.saveSource(candidate);
   }
 
-  public async deleteSource(sourceId: string): Promise<ModelSource | undefined> {
+  private async deleteSourceInTransaction(sourceId: string): Promise<ModelSource | undefined> {
     const source = await this.getSource(sourceId);
     if (!source) {
       return undefined;
@@ -204,8 +240,9 @@ export class ModelSourceStore {
     let entries: Array<[string, vscode.FileType]>;
     try {
       entries = await vscode.workspace.fs.readDirectory(providerUri);
-    } catch {
-      return [];
+    } catch (error) {
+      if (isMissingAccountFile(error)) return [];
+      throw new Error('Cannot read local account settings. / 无法读取本地账号设置。');
     }
 
     const sourceFileNames = entries
@@ -244,10 +281,7 @@ export class ModelSourceStore {
   private async writeSource(source: ModelSource): Promise<void> {
     const providerUri = this.getProviderDirectoryUri(source.provider);
     await vscode.workspace.fs.createDirectory(providerUri);
-    await vscode.workspace.fs.writeFile(
-      this.getSourceFileUri(source.provider, source.id),
-      this.encoder.encode(`${JSON.stringify(source, null, 2)}\n`)
-    );
+    await writeJsonAtomic(this.getSourceFileUri(source.provider, source.id), source, { durable: true });
   }
 
 }
@@ -473,4 +507,9 @@ function normalizeBoundedPositiveInteger(value: unknown, max: number): number | 
   return typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= max
     ? Math.floor(value)
     : undefined;
+}
+
+function isMissingAccountFile(error: unknown): boolean {
+  const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+  return code === 'ENOENT' || code === 'FileNotFound';
 }

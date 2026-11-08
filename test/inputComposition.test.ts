@@ -73,7 +73,7 @@ test('new session remains reachable while history loads and immediately accepts 
   assert.equal(view.posted.filter(message => message.type === 'newSession').length, 1);
 });
 
-test('new session stays disabled for the current execution owner and observer windows', () => {
+test('new session stays disabled during execution but observer can create a local blank target', () => {
   const view = readyView();
   view.receive({ type: 'state', revision: 2, state: { isBusy: true,
     interaction: deriveInteractionState({ sessionId: 'A', revision: 2, sessionReady: true,
@@ -84,7 +84,7 @@ test('new session stays disabled for the current execution owner and observer wi
   view.receive({ type: 'state', revision: 3, state: { isBusy: false,
     interaction: deriveInteractionState({ sessionId: 'A', revision: 3, sessionReady: true,
       requestContextReady: true, approvalDataReady: true, readOnly: true }) } });
-  assert.equal(view.element('newChatTab').disabled, true);
+  assert.equal(view.element('newChatTab').disabled, false);
   assert.equal(view.element('historyTab').disabled, false);
 });
 
@@ -260,7 +260,7 @@ test('input feature fragments compose deterministically and exactly once', () =>
 });
 
 test('modular input assembly preserves reviewed task-aware input bytes', () => {
-  assert.equal(hash(getInputScript()), 'bfe5d6ac0fe2dde67da4ac58f6f4432f261cb93bf4b8de039e4e8ee5d708986f');
+  assert.equal(hash(getInputScript()), '620c9714c5ef40ec9c890ed5d94e81edb485e5a1689b9c628e562150cb31203a');
   assert.equal(hash(getInputStyles()), '6868e318f8c2fb409ded9fb9becf3a4b97a2701b08851d6fa3114197908e8604');
   assert.equal(hash(getInputTemplate()), '4ae8bf2c5d83421754c9c506d3e5b7eabb76c434486dd574feef7ae4b53b1311');
 });

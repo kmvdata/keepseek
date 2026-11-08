@@ -13,7 +13,7 @@ import type { ChangeCheckpoint, DraftEdit, FileContentIdentity, TextPatchV1 } fr
 import { ChangeArtifactStore } from './changeArtifactStore';
 import { getDraftEditBase, getDraftEditFullText, getDraftEditKind, getDraftEditResult } from './draftEdit';
 import { applyTextPatchToBytes, createInverseTextPatch, hashBytes, validateCanonicalTextPatch } from './textPatch';
-import { assertProjectMutationLease, markProjectOperationUncertain, withProjectMutationPhase } from '../tasks/projectResources';
+import { assertProjectMutationLease, beginProjectDurableOperation, markProjectOperationUncertain, withProjectMutationPhase } from '../tasks/projectResources';
 
 type Translator = (key: string, values?: Record<string, string | number>) => string;
 
@@ -104,6 +104,7 @@ export class SafeFileEditor {
     const uri = vscode.Uri.parse(edit.uri);
     let checkpoint: ChangeCheckpoint | undefined;
     let mutationStarted = false;
+    let operation: Awaited<ReturnType<typeof beginProjectDurableOperation>> | undefined;
     try {
       await this.assertCommonPreconditions(uri, edit, approval);
       const snapshot = edit.kind === 'text_patch_v1'
@@ -128,6 +129,13 @@ export class SafeFileEditor {
       this.checkApproval(edit, approval);
       await assertProjectMutationLease();
       this.checkApproval(edit, approval);
+      operation = await beginProjectDurableOperation({
+        id: `apply-${edit.id}-${randomUUID()}`, kind: 'apply', resourceScope: edit.uri,
+        targetUri: edit.uri, baseHash: checkpoint.originalTextHash, resultHash: checkpoint.appliedTextHash
+      });
+      await operation.dispatched();
+      await assertProjectMutationLease();
+      this.checkApproval(edit, approval);
       mutationStarted = true;
 
       await this.applyMutation(edit, uri);
@@ -136,8 +144,10 @@ export class SafeFileEditor {
       checkpoint.state = 'applied';
       checkpoint.appliedAt = new Date().toISOString();
       await journal?.persist(checkpoint);
+      await operation.settle('completed');
       return checkpoint;
     } catch (error) {
+      await operation?.settle(mutationStarted ? 'result_unknown' : 'not_dispatched');
       if (checkpoint) {
         checkpoint.state = mutationStarted ? 'uncertain' : 'interrupted';
         await journal?.persist(checkpoint).catch(() => undefined);
@@ -168,8 +178,17 @@ export class SafeFileEditor {
     checkpoint.operation = 'revert';
     checkpoint.applyingAt = new Date().toISOString();
     await journal?.persist(checkpoint);
+    let operation: Awaited<ReturnType<typeof beginProjectDurableOperation>> | undefined;
+    let mutationStarted = false;
     try {
       await assertProjectMutationLease();
+      operation = await beginProjectDurableOperation({
+        id: `revert-${checkpoint.id}-${randomUUID()}`, kind: 'apply', resourceScope: checkpoint.uri,
+        targetUri: checkpoint.uri, baseHash: checkpoint.appliedTextHash, resultHash: checkpoint.originalTextHash
+      });
+      await operation.dispatched();
+      await assertProjectMutationLease();
+      mutationStarted = true;
       if (checkpoint.draftKind === 'text_patch_v1' && checkpoint.inversePatch) {
         await this.writePatchedFile(uri, checkpoint.inversePatch);
       } else if (checkpoint.draftKind === 'move_v1' && checkpoint.targetUri) {
@@ -192,8 +211,10 @@ export class SafeFileEditor {
       checkpoint.state = 'reverted';
       checkpoint.revertedAt = new Date().toISOString();
       await journal?.persist(checkpoint);
+      await operation.settle('completed');
       return checkpoint;
     } catch (error) {
+      await operation?.settle(mutationStarted ? 'result_unknown' : 'not_dispatched');
       checkpoint.state = 'uncertain';
       await journal?.persist(checkpoint).catch(() => undefined);
       throw new SafeFileEditError(error instanceof Error ? error.message : String(error), checkpoint);

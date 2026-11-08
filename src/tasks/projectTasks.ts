@@ -182,6 +182,7 @@ export class ProjectTaskService {
   private serial: Promise<unknown> = Promise.resolve();
   private persistenceError?: unknown;
   private initialized = false;
+  private summariesOnly = false;
   private readOnly = false;
   private disposed = false;
   private closing = false;
@@ -205,10 +206,11 @@ export class ProjectTaskService {
     this.registry = { version: 1, projectId: options.projectId, revision: 0, cards: [], inputs: [], events: [] };
   }
 
-  async initialize(options: { readOnly?: boolean } = {}): Promise<void> {
-    this.readOnly = options.readOnly === true;
+  async initialize(options: { readOnly?: boolean; summariesOnly?: boolean } = {}): Promise<void> {
+    this.summariesOnly = options.summariesOnly === true;
+    this.readOnly = this.summariesOnly || options.readOnly === true;
     try {
-      this.registry = await this.readRegistry();
+      this.registry = this.summariesOnly ? await this.readSummaryRegistry() : await this.readRegistry();
     } catch (error) { if (!isMissing(error)) throw error; }
     this.initialized = true;
     // Saved running is an interrupted process, never an executable queue.
@@ -217,7 +219,8 @@ export class ProjectTaskService {
         card.state = 'interrupted'; card.waitingReason = 'restart_requires_continue'; card.revision = incrementCounter(card.revision);
       }
     };
-    if (!this.readOnly && this.registry.cards.some(card => ACTIVE.has(card.state) || card.state === 'queued')) await this.transaction(recover);
+    if (this.summariesOnly && options.readOnly !== true) recover(this.registry);
+    else if (!this.readOnly && this.registry.cards.some(card => ACTIVE.has(card.state) || card.state === 'queued')) await this.transaction(recover);
     this.publish();
   }
 
@@ -226,7 +229,7 @@ export class ProjectTaskService {
   async reload(): Promise<boolean> {
     if (!this.initialized) throw new Error('task_service_not_initialized');
     if (!this.readOnly) throw new Error('task_observer_reload_requires_read_only');
-    const next = await this.readRegistry();
+    const next = this.summariesOnly ? await this.readSummaryRegistry() : await this.readRegistry();
     if (next.revision <= this.registry.revision) return false;
     this.registry = next; this.publish(); return true;
   }
@@ -779,6 +782,45 @@ export class ProjectTaskService {
       return { ...metadata, content: body.content };
     }));
     return normalizeTaskRegistry({ ...manifest, version: 1, inputs, events }, this.options.projectId);
+  }
+
+  /** A rail/history view reads the manifest only. Mailbox/result bodies and
+   * recovery transactions belong to explicit execution preparation. These
+   * cards cannot be mutated until initialize() loads the full authority. */
+  private async readSummaryRegistry(): Promise<TaskRegistry> {
+    const value: unknown = JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(this.uri)));
+    if (!isPlainRecord(value) || ![1, 2].includes(Number(value.version)) || value.projectId !== this.options.projectId
+      || !Array.isArray(value.cards) || !validCounter(value.revision)) throw new Error('task_registry_invalid');
+    const originals = value.cards as ProjectTaskCard[];
+    const registry = normalizeTaskRegistry({ version: 1, projectId: value.projectId, revision: value.revision,
+      cards: originals.map(card => ({ ...card, inputIds: [], resultEventId: undefined })), inputs: [], events: [] }, this.options.projectId);
+    const byId = new Map(originals.map(card => [card.taskCardId, card]));
+    const firstInputs = new Map<string, string>(), activities = new Map<string, string>();
+    const activity = (id: unknown, at: unknown) => {
+      if (typeof id !== 'string' || !validTimestamp(at)) return;
+      const previous = activities.get(id);
+      if (!previous || Date.parse(at) > Date.parse(previous)) activities.set(id, at);
+    };
+    if (Array.isArray(value.inputs)) for (const input of value.inputs) if (isPlainRecord(input)) {
+      activity(input.taskCardId, input.createdAt); activity(input.taskCardId, input.incorporatedAt); activity(input.taskCardId, input.settledAt);
+      if (input.kind === 'new' && typeof input.taskCardId === 'string' && validTimestamp(input.createdAt)) {
+        const previous = firstInputs.get(input.taskCardId);
+        if (!previous || Date.parse(input.createdAt) < Date.parse(previous)) firstInputs.set(input.taskCardId, input.createdAt);
+      }
+    }
+    if (Array.isArray(value.events)) for (const event of value.events) if (isPlainRecord(event)) activity(event.taskCardId, event.createdAt);
+    for (const card of registry.cards) {
+      const original = byId.get(card.taskCardId)!;
+      card.inputIds = []; // Opaque mailbox identities are not a view dependency.
+      card.lastActivityAt = original.lastActivityAt ?? card.lastActivityAt;
+      const first = firstInputs.get(card.taskCardId);
+      if (!validTimestamp(original.firstSubmittedAt) && !card.associationRequestId && first) {
+        card.firstSubmittedAt = first; card.firstSubmittedAtSource = 'user_input';
+      }
+      const at = activities.get(card.taskCardId);
+      if (at && (!card.lastActivityAt || Date.parse(at) > Date.parse(card.lastActivityAt))) card.lastActivityAt = at;
+    }
+    return registry;
   }
 
   private async persistRegistry(registry: TaskRegistry): Promise<void> {

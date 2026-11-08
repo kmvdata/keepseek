@@ -137,6 +137,7 @@ class WebviewNode {
   }
   click(): void { if (!this.disabled && !this.closest('[inert]')) this.dispatchEvent({ type: 'click', target: this }); }
   focus(): void { if (this.owner) this.owner.activeElement = this; }
+  select(): void { this.focus(); this.selectionStart = 0; this.selectionEnd = String(this.value).length; }
   blur(): void { if (this.owner) this.owner.activeElement = this.owner.body; this.dispatchEvent({ type: 'blur' }); }
   getBoundingClientRect(): object { return { left: 0, right: 400, top: 0, bottom: 40, width: 400, height: 40 }; }
   cloneNode(deep = false): WebviewNode {

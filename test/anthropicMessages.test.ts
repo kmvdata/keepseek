@@ -273,11 +273,8 @@ describe('Anthropic Messages compatible protocol', () => {
     assert.match(mismatch.error ?? '', /Provider mismatch.*Anthropic Messages compatible/iu);
 
     const store = new ModelSourceStore(vscode.Uri.file(storageRoot));
-    let probes = 0;
     const service = new ModelSourceService(
-      store,
-      async () => ({ status: 'failed' }),
-      async () => { probes += 1; return { ok: true, status: 200 }; }
+      store
     );
     await assert.rejects(service.addModel({
       provider: 'anthropic-compatible', name: 'Official', apiKey: '', baseUrl: DEFAULT_ANTHROPIC_COMPATIBLE_BASE_URL
@@ -294,7 +291,6 @@ describe('Anthropic Messages compatible protocol', () => {
     assert.equal(reused.reusedSource, true);
     assert.equal(reused.source.id, first.source.id);
     assert.notEqual(otherProtocol.source.id, first.source.id);
-    assert.equal(probes, 2);
 
     const manual = await service.addModel({
       sourceId: first.source.id,
@@ -340,14 +336,8 @@ describe('Anthropic Messages compatible protocol', () => {
     });
 
     const store = new ModelSourceStore(vscode.Uri.file(storageRoot), { createId: () => 'messages-only' });
-    let refreshes = 0;
     const service = new ModelSourceService(
-      store,
-      async () => {
-        refreshes += 1;
-        return { status: 'failed' };
-      },
-      async () => probe
+      store
     );
     const added = await service.addModel({
       provider: 'anthropic-compatible',
@@ -355,9 +345,6 @@ describe('Anthropic Messages compatible protocol', () => {
       apiKey: 'key',
       baseUrl: gatewayBaseUrl
     });
-    assert.equal(added.modelDiscoveryUnavailable, true);
-    assert.equal(added.discovery?.status, 'failed');
-    assert.equal(refreshes, 0);
     assert.equal(added.source.provider, 'anthropic-compatible');
     assert.deepEqual(added.source.models, []);
 
@@ -369,9 +356,6 @@ describe('Anthropic Messages compatible protocol', () => {
       baseUrl: gatewayBaseUrl,
       modelId: 'qwen3.7-max'
     });
-    assert.equal(manual.discovery, undefined);
-    assert.equal(manual.modelDiscoveryUnavailable, undefined);
-    assert.equal(refreshes, 0);
     assert.deepEqual(manual.source.models, [{ id: 'qwen3.7-max' }]);
 
     const dialog = getNewAccountDialogScript();

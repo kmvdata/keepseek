@@ -144,13 +144,14 @@ test('cold storage starts with one usable empty session without creating a monol
   await assert.rejects(stat(path.join(root, 'chat-sessions', 'v1', 'workspaces', `${getWorkspaceHash(scope.key)}.json`)));
 });
 
-test('large V1 projects migrate atomically and load only summaries plus the active session', async (t) => {
+test('explicit V1 initialization migrates atomically, preserves the original and loads summaries plus the selected session', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-large-session-start-'));
   t.after(async () => await rm(root, { recursive: true, force: true }));
   const scope = workspaceScope('large');
   const sessions = Array.from({ length: 120 }, (_, index) => session(`s-${index}`, scope, 30, index));
   const legacyPath = await writeLegacyWorkspace(root, scope, sessions, sessions[0].id);
-  const legacyBytes = (await stat(legacyPath)).size;
+  const legacyContents = await readFile(legacyPath, 'utf8');
+  const legacyBytes = Buffer.byteLength(legacyContents);
 
   const store = new ChatSessionStore(new GlobalSessionStorage(vscode.Uri.file(root) as never), 'en', scope);
   await store.initialize();
@@ -159,7 +160,7 @@ test('large V1 projects migrate atomically and load only summaries plus the acti
   assert.equal(store.messages.length, 30);
   const indexPath = path.join(root, 'chat-sessions', 'v2', 'workspaces', getWorkspaceHash(scope.key), 'index.json');
   assert.ok((await stat(indexPath)).size < legacyBytes / 5);
-  await assert.rejects(stat(legacyPath));
+  assert.equal(await readFile(legacyPath, 'utf8'), legacyContents, 'explicit migration retains the intact V1 recovery original');
 
   const selected = await store.selectSession('s-119');
   assert.ok(selected?.messages[0]?.content.startsWith('message 119-0'));

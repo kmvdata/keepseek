@@ -101,6 +101,20 @@ export class ProjectResourceCoordinator {
     }
   }
 
+  /** The owner can publish a new executable generation only after its durable
+   * journal proves no blocking operation remains and every prior runtime drained. */
+  public reconcileOwnerRecovery(owner: ProjectExecutionOwner): void {
+    owner.assertOwner();
+    if (owner.projectId !== this.projectId || owner.hasUncertainOperations || this.active) {
+      throw new Error('Project recovery has not reached a settled resource boundary. / 项目恢复尚未到达已结算资源边界。');
+    }
+    if (this.uncertainOperations.size) {
+      this.uncertainOperations.clear();
+      this.revision += 1;
+      this.pump();
+    }
+  }
+
   /** Call on explicit supplement/cancel/config boundaries; dispatched work still
    * owns its lease until settlement, but no nested new side effect may start.
    */
@@ -210,6 +224,28 @@ export function markProjectOperationUncertain(operationId: string): void {
   const context = executionContext.getStore();
   context?.owner.markUncertainOperation(operationId);
   context?.resources.blockUncertain(operationId);
+}
+
+/** Durable dispatch records are independent of session hydration. The caller
+ * must await this barrier before launching a process or committing a file. */
+export async function beginProjectDurableOperation(input: {
+  id: string;
+  kind: 'command' | 'validation' | 'apply';
+  specHash?: string;
+  resourceScope?: string;
+  targetUri?: string;
+  baseHash?: string;
+  resultHash?: string;
+  gated?: true;
+}): Promise<{
+  dispatched(process?: { pid?: number; processGroup?: number }): Promise<void>;
+  settle(state: 'completed' | 'not_dispatched' | 'result_unknown'): Promise<void>;
+}> {
+  await assertProjectMutationLease();
+  const context = executionContext.getStore();
+  if (!context) return { dispatched: async () => undefined, settle: async () => undefined };
+  const operation = await context.owner.beginDurableOperation(input);
+  return { dispatched: (process = {}) => operation.dispatched(process), settle: state => operation.settle(state) };
 }
 
 /** Use only around bounded dispatch/Apply/validation, never around approval,

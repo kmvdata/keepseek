@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { open, unlink } from 'node:fs/promises';
+import { lstat, open, realpath, unlink } from 'node:fs/promises';
 import * as vscode from 'vscode';
 import { writeBytesAtomic, writeJsonAtomic } from '../shared/atomicStorage';
 import type { ChatMessage, ChatSession } from '../shared/types';
@@ -7,6 +7,7 @@ import { getVisibleMessages, sessionViewPageBounds, type SessionViewPageOptions 
 import { freezeTree, isFrozenTree, isPackedPersistenceTree, persistenceMessageBody } from './persistenceSnapshot';
 import { recordLocalPerformance } from '../agent/logging/performanceTrace';
 import { getConfiguredKeepseekLanguage, localize } from '../shared/i18n';
+import { LocalKernelMutex } from '../tasks/localKernelMutex';
 
 type Encoded = null | string | number | boolean | { ref: string } | { inline: ObjectNode };
 type ObjectNode = { kind: 'array'; values: Encoded[] } | { kind: 'object'; entries: Array<[string, Encoded]> } | { kind: 'text'; text: string }
@@ -381,23 +382,55 @@ export class SessionObjectStore {
   private async withWriterLock<T>(work: () => Promise<T>): Promise<T> {
     if (this.shard.scheme !== 'file') return work(); // outer URI coordinator serializes provider writes
     await vscode.workspace.fs.createDirectory(this.directory());
+    const physical = await realpath(this.directory().fsPath);
+    const lease = await LocalKernelMutex.acquire(`session-object-writer:${physical}`, { timeoutMs: 1000 });
+    if (!lease) throw new Error('Session already has an active writer');
     const lock = vscode.Uri.joinPath(this.directory(), 'writer.lock').fsPath;
-    let handle;
-    try { handle = await open(lock, 'wx'); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      let owner: { pid: number };
-      try { owner = JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(vscode.Uri.file(lock)))) as { pid: number }; }
-      catch { throw new Error(`Session writer lock cannot be verified. Close all writers, back up the data and inspect: ${lock}`); }
-      if (!owner || !Number.isSafeInteger(owner.pid) || owner.pid <= 0) throw new Error(`Session writer lock needs inspection: ${lock}`);
-      try { process.kill(owner.pid, 0); throw new Error('Session already has an active writer'); }
-      catch (probe) { if ((probe as NodeJS.ErrnoException).code !== 'ESRCH') throw probe; }
-      // Automatic unlink after an ESRCH probe races another stale-lock
-      // reclaimer: it can remove that process's newly acquired active lock.
-      throw new Error(`Stale session writer lock. Close all writers and back up the data before removing: ${lock}`);
+    let ownFile: Awaited<ReturnType<typeof open>> | undefined;
+    let ownIdentity: { dev: number; ino: number } | undefined;
+    try {
+      // Older releases cannot acquire the kernel mutex. Retain their file as
+      // an additional compatibility guard, refusing live or unverified owners.
+      let bytes: Uint8Array | undefined;
+      try { bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(lock)); }
+      catch (error) { if (!isMissing(error)) throw error; }
+      if (bytes) {
+        const identity = await lstat(lock);
+        if (!identity.isFile() || identity.isSymbolicLink()) throw new Error('Session writer lock needs inspection.');
+        let owner: { pid: number };
+        try { owner = JSON.parse(new TextDecoder().decode(bytes)) as { pid: number }; }
+        catch { throw new Error('Session writer lock cannot be verified.'); }
+        if (!owner || !Number.isSafeInteger(owner.pid) || owner.pid <= 0) throw new Error('Session writer lock needs inspection.');
+        try { process.kill(owner.pid, 0); throw new Error('Session already has an active writer'); }
+        catch (probe) { if ((probe as NodeJS.ErrnoException).code !== 'ESRCH') throw probe; }
+        const latest = await vscode.workspace.fs.readFile(vscode.Uri.file(lock));
+        const latestIdentity = await lstat(lock);
+        if (!Buffer.from(latest).equals(Buffer.from(bytes)) || latestIdentity.ino !== identity.ino
+          || latestIdentity.dev !== identity.dev) throw new Error('Session writer lock changed during recovery.');
+        // Legacy saves contain no detached side effects. Under the continuous
+        // kernel exclusion a verified dead file writer can be retired safely.
+        await unlink(lock);
+      }
+      // Keep a compatibility marker while the kernel lease is held: older
+      // releases do not know the new backend and must still see a live writer.
+      ownFile = await open(lock, 'wx');
+      ownIdentity = await ownFile.stat();
+      await ownFile.writeFile(JSON.stringify({ pid: process.pid }));
+      await ownFile.sync();
+      return await work();
+    } finally {
+      try {
+        await ownFile?.close();
+        if (ownIdentity) await this.releaseWriterMarker(lock, ownIdentity);
+      } finally { await lease.release(); }
     }
-    try { await handle.writeFile(JSON.stringify({ pid: process.pid })); await handle.sync(); return await work(); }
-    finally { await handle.close(); await unlink(lock); }
+  }
+
+  private async releaseWriterMarker(lock: string, identity: { dev: number; ino: number }): Promise<void> {
+    try {
+      const current = await lstat(lock);
+      if (current.dev === identity.dev && current.ino === identity.ino) await unlink(lock);
+    } catch (error) { if (!isMissing(error)) throw error; }
   }
 }
 function isMissing(error: unknown): boolean { return ['ENOENT', 'FileNotFound'].includes(String((error as { code?: string })?.code)); }

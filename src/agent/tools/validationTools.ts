@@ -1,5 +1,7 @@
 import { redactSensitiveReviewText } from '../../approvals/approvalPolicy';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { spawnDurablyGated } from '../../runs/durableSpawn';
 import { terminateProcessTree } from '../../runs/draftRunExecutor';
 import { inspectValidationSnapshot, ValidationUnavailableError, type ValidationSnapshot } from './validationSnapshot';
 import * as vscode from 'vscode';
@@ -16,7 +18,7 @@ import type {
 } from '../../shared/types';
 import { RUN_VALIDATION_TOOL_NAME } from '../protocol';
 import { hasValidationBlockingRisk } from './validationRisk';
-import { assertProjectMutationLease, getProjectExecutionContext, withProjectMutationPhase } from '../../tasks/projectResources';
+import { assertProjectMutationLease, beginProjectDurableOperation, getProjectExecutionContext, withProjectMutationPhase } from '../../tasks/projectResources';
 
 const MAX_DIAGNOSTIC_ITEMS = 200;
 const SAFE_NPM_SCRIPT_ORDER: SafeNpmScript[] = ['compile', 'lint', 'test'];
@@ -351,17 +353,31 @@ function findWorkspaceFolder(requested: string | undefined): vscode.WorkspaceFol
   );
 }
 
-function executeValidation(snapshot: ValidationSnapshot, timeoutMs: number, signal?: AbortSignal):
+async function executeValidation(snapshot: ValidationSnapshot, timeoutMs: number, signal?: AbortSignal):
 Promise<{ exitCode?: number; timedOut: boolean; aborted: boolean; output?: string }> {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) { resolve({ timedOut: false, aborted: true }); return; }
-    const child = spawn(snapshot.executable, snapshot.argv, {
+  if (signal?.aborted) return { timedOut: false, aborted: true };
+  const operation = await beginProjectDurableOperation({
+    id: `validation-${randomUUID()}`, kind: 'validation', specHash: snapshot.fingerprint,
+    resourceScope: snapshot.cwd, gated: true
+  });
+  let child: ChildProcess;
+  let gated: ReturnType<typeof spawnDurablyGated> | undefined;
+  try {
+    gated = getProjectExecutionContext() ? spawnDurablyGated({
+      executable: snapshot.executable, args: snapshot.argv, cwd: snapshot.cwd, env: snapshot.env,
+      signal, journal: operation
+    }) : undefined;
+    child = gated?.child ?? spawn(snapshot.executable, snapshot.argv, {
       cwd: snapshot.cwd, env: snapshot.env, shell: false, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32'
     });
+  } catch (error) { await operation.settle('not_dispatched'); throw error; }
+  let closed = false;
+  let spawnFailed = false;
+  const outcome = await new Promise<{ exitCode?: number; timedOut: boolean; aborted: boolean; output?: string }>((resolve, reject) => {
     let output = '';
     const capture = (text: string) => { output = (output + text).slice(-8_000); };
-    child.stdout.setEncoding('utf8').on('data', capture);
-    child.stderr.setEncoding('utf8').on('data', capture);
+    child.stdout?.setEncoding('utf8').on('data', capture);
+    child.stderr?.setEncoding('utf8').on('data', capture);
     const cleanUp = () => {
       clearTimeout(timer);
       signal?.removeEventListener('abort', stop);
@@ -377,12 +393,21 @@ Promise<{ exitCode?: number; timedOut: boolean; aborted: boolean; output?: strin
       resolve({ timedOut: true, aborted: false });
     }, timeoutMs);
     signal?.addEventListener('abort', stop, { once: true });
-    child.once('error', error => { cleanUp(); reject(error); });
+    child.once('error', error => { spawnFailed = child.pid === undefined; cleanUp(); reject(error); });
     child.once('close', code => {
+      closed = true;
       cleanUp();
       resolve({ exitCode: code ?? undefined, timedOut: false, aborted: false, output: redactSensitiveReviewText(output, 8_000) });
     });
+    if (signal?.aborted) stop();
+  }).catch(async error => {
+    await operation.settle(spawnFailed ? 'not_dispatched' : 'result_unknown');
+    throw error;
   });
+  await gated?.dispatch;
+  await operation.settle(gated && !gated.authorized ? 'not_dispatched' : closed ? 'completed' : 'result_unknown');
+  if (gated?.launchError && !outcome.timedOut && !outcome.aborted) throw new Error(gated.launchError);
+  return outcome;
 }
 
 function localizeValidation(

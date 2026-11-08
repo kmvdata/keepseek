@@ -124,6 +124,7 @@ test('ordinary source Apply skips Skill discovery while context-source refresh b
     runContextRefreshPromise: undefined,
     runContextRefreshInFlight: false,
     runContextRefreshError: undefined,
+    sessionReady: true,
     commandSettingsReadiness: { mainModel: 'ready', subagentModel: 'ready', executionMode: 'ready', approvalMode: 'ready' },
     runContextReadiness: 'ready',
     fileContext: { getAll: () => [], refreshUris: async () => false },

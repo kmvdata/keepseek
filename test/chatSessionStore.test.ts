@@ -354,7 +354,7 @@ test('fresh sessions safely merge replacement-only adapters before initializatio
   assert.equal(store.getActiveSession(), fresh);
 });
 
-test('fresh sessions preserve V1 history when a delayed legacy migration resumes', async (t) => {
+test('fresh sessions preserve V1 history and safe approval while a delayed legacy migration resumes', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-fresh-legacy-'));
   const storage = new GlobalSessionStorage(vscode.Uri.file(root) as never);
   const originalRead = vscode.workspace.fs.readFile;
@@ -384,8 +384,8 @@ test('fresh sessions preserve V1 history when a delayed legacy migration resumes
   assert.equal(store.getActiveSession(), fresh);
   const disk = await new GlobalSessionStorage(vscode.Uri.file(root) as never).loadWorkspace(scope);
   assert.equal(disk.activeSessionId, fresh.id);
-  assert.equal(disk.approvalMode, 'delegate');
-  assert.equal(fresh.approvalMode, 'delegate');
+  assert.equal(disk.approvalMode, 'ask', 'a fresh target cannot read inline V1 bodies just to inherit broader approval');
+  assert.equal(fresh.approvalMode, 'ask');
   assert.deepEqual(new Set(disk.sessionSummaries?.map(session => session.id)), new Set([old.id, fresh.id]));
   assert.deepEqual((await storage.loadSession(scope.key, old.id))?.messages.map(message => message.content), ['message 0', 'message 1']);
 });

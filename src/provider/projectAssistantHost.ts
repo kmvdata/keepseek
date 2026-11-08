@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { KeepseekChatViewProvider } from './KeepseekChatViewProvider';
-import type { WebviewMessage } from './webviewMessages';
+import { isRootWebviewMessage, type WebviewMessage } from './webviewMessages';
 import { ChatSessionStore, getVisibleMessages } from '../sessions/chatSessionStore';
 import { ProjectTaskService, type ProjectTaskCard, type TaskActionIdentity, type TaskDefaultsSnapshot } from '../tasks/projectTasks';
 import type { TaskExecutionContext, TaskExecutionDriver } from '../tasks/taskRuntime';
@@ -16,6 +16,7 @@ import type { SharedProjectSources } from '../context/sharedProjectSources';
 import type { SkillStore } from '../skills/skillStore';
 import { watch, type FSWatcher } from 'node:fs';
 import { isAbsolute } from 'node:path';
+import { deriveProjectInteractionState } from './interactionState';
 
 export interface ProjectAssistantOptions {
   owner: ProjectExecutionOwner;
@@ -82,10 +83,19 @@ export class ProjectAssistantHost {
   private readonly viewDraftUri: vscode.Uri;
   private draftWriter: Promise<unknown> = Promise.resolve();
   private viewTaskId: string | null = null;
-  private viewMode: 'project' | 'new' | 'task' | 'legacy' = 'project';
+  private viewMode: 'project' | 'new' | 'task' | 'legacy' = 'legacy';
   private generation = 0;
   private revision = 0;
   private initialized = false;
+  private historyLoaded = false;
+  private historyLoading?: Promise<void>;
+  private draftsLoaded = false;
+  private draftsLoading?: Promise<void>;
+  private draftReadError?: unknown;
+  private executionLoaded = false;
+  private executionLoading?: Promise<void>;
+  private executionOwner = false;
+  private viewRequestGeneration = 0;
   private disposed = false;
   private draftTimer?: ReturnType<typeof setTimeout>;
   private readonly metrics: Array<{ stage: string; elapsedMs: number; taskCardId?: string; generation: number }> = [];
@@ -127,6 +137,7 @@ export class ProjectAssistantHost {
       assertExecutionOwner: () => options.owner.verify(),
       createSession: async (snapshot, sessionId) => {
         const store = await this.storeForSession(sessionId);
+        await store.loadHistoryMetadata();
         if (await store.loadSessionById(sessionId)) return;
         await store.createDetachedSession({ id: sessionId,
           title: router ? 'KeepSeek' : undefined, approvalMode: snapshot.approvalMode,
@@ -134,7 +145,7 @@ export class ProjectAssistantHost {
           ...(router ? { agentRole: { kind: 'project-router', version: 1, toolSchemaVersion: 1 } as const } : {}) });
       },
       driverFactory: card => this.driver(card, router),
-      onChange: () => { if (this.initialized) { this.syncPins(); this.publish(); void this.trimWorkers();
+      onChange: () => { if (this.initialized) { if (this.executionLoaded) this.syncPins(); this.publish(); void this.trimWorkers();
         if (!router && !this.tasks.list().some(card => ACTIVE.has(card.state))) void this.saveContextUsage(); } }
     });
     this.tasks = service(false);
@@ -143,25 +154,28 @@ export class ProjectAssistantHost {
   }
 
   async initialize(): Promise<void> {
+    // Activation creates only the rail entry. No persisted selection, task
+    // body, draft, Registry, usage metadata or observer watcher is opened.
+    if (this.initialized || this.disposed) return;
+    this.initialized = true;
+    this.publish();
+  }
+
+  private ensureHistoryLoaded(): Promise<void> {
+    if (this.historyLoaded) return Promise.resolve();
+    return this.historyLoading ??= this.loadHistory().finally(() => { this.historyLoading = undefined; });
+  }
+
+  private async loadHistory(): Promise<void> {
     this.projectStore = await this.options.sessionStore.createWorkspaceScope({ key: `project:${this.options.owner.projectId}`,
       name: 'KeepSeek', folderUris: [isAbsolute(this.options.owner.canonicalRoot)
-        ? vscode.Uri.file(this.options.owner.canonicalRoot).toString() : this.options.owner.canonicalRoot] });
-    await Promise.all([this.tasks.initialize({ readOnly: !this.options.owner.isOwner }), this.routerTasks.initialize({ readOnly: !this.options.owner.isOwner })]);
+        ? vscode.Uri.file(this.options.owner.canonicalRoot).toString() : this.options.owner.canonicalRoot] }, { lazy: true });
+    await Promise.all([this.tasks.initialize({ summariesOnly: true, readOnly: !this.options.owner.isOwner }),
+      this.routerTasks.initialize({ summariesOnly: true, readOnly: !this.options.owner.isOwner })]);
     await this.loadContextUsage();
-    try {
-      const raw = JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(this.viewDraftUri))) as { version: number; drafts: DraftRecord[]; viewTaskId?: string; viewMode?: string };
-      if (raw.version === 1 && Array.isArray(raw.drafts)) for (const draft of raw.drafts) {
-        if (typeof draft.targetId === 'string' && typeof draft.markup === 'string' && Number.isSafeInteger(draft.revision)) this.drafts.set(draft.targetId, draft);
-      }
-      if (raw.viewMode === 'task' && raw.viewTaskId && this.tasks.get(raw.viewTaskId)) { this.viewTaskId = raw.viewTaskId; this.viewMode = 'task'; }
-      else if (raw.viewMode === 'new' || raw.viewMode === 'legacy') this.viewMode = raw.viewMode;
-    } catch (error) { if (!isMissing(error)) this.options.publish({ type: 'projectTaskError', reason: errorText(error) }); }
-    if (this.options.initialViewMode?.() === 'legacy') { this.viewMode = 'legacy'; this.viewTaskId = null; }
-    this.initialized = true;
-    this.syncPins(); this.publish();
-    void this.showView().catch(error => this.options.publish({ type: 'projectTaskError', reason: errorText(error) }));
-    const recent = this.tasks.list().filter(card => !card.archived).slice(-2).map(card => card.sessionId);
-    void Promise.all(recent.map(async id => (await this.storeForSession(id)).prefetchSessionPages([id]))).catch(() => undefined);
+    if (this.disposed) return;
+    this.historyLoaded = true;
+    this.publish();
     if (!this.options.owner.isOwner && this.storageBase.scheme === 'file') {
       try {
         const watcher = watch(this.storageBase.fsPath, { recursive: false }, () => { void this.refreshObserver(); });
@@ -172,12 +186,46 @@ export class ProjectAssistantHost {
           if (!this.disposed) this.options.publish({ type: 'projectTaskError', reason: errorText(error) });
         });
       }
-      catch { /* ready/explicit view still refreshes read-only snapshots */ }
+      catch { /* explicit view still refreshes read-only snapshots */ }
     }
+  }
+
+  private ensureDraftsLoaded(): Promise<void> {
+    if (this.draftsLoaded && !this.draftReadError) return Promise.resolve();
+    return this.draftsLoading ??= this.loadDrafts().finally(() => { this.draftsLoading = undefined; });
+  }
+
+  private async loadDrafts(): Promise<void> {
+    this.draftReadError = undefined;
+    try {
+      const raw = JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(this.viewDraftUri))) as { version: number; drafts: DraftRecord[]; viewTaskId?: string; viewMode?: string };
+      if (raw.version === 1 && Array.isArray(raw.drafts)) for (const draft of raw.drafts) {
+        if (typeof draft.targetId === 'string' && typeof draft.markup === 'string' && Number.isSafeInteger(draft.revision)) this.drafts.set(draft.targetId, draft);
+      }
+    } catch (error) { if (!isMissing(error)) { this.draftReadError = error; this.options.publish({ type: 'projectTaskError', reason: errorText(error) }); } }
+    this.draftsLoaded = true;
+  }
+
+  private async ensureExecutionLoaded(): Promise<void> {
+    await this.ensureHistoryLoaded();
+    if (this.disposed) throw new Error('Project task host is closing. / 项目任务宿主正在关闭。');
+    // A read-only window can inspect card summaries and finite pages. It must
+    // not hydrate all execution mailboxes just to reject a denied mutation.
+    await this.options.owner.verify();
+    if (this.executionLoaded && this.executionOwner === this.options.owner.isOwner) return;
+    return this.executionLoading ??= (async () => {
+      const owned = this.options.owner.isOwner;
+      await Promise.all([this.tasks.initialize({ readOnly: !owned }), this.routerTasks.initialize({ readOnly: !owned })]);
+      this.executionLoaded = true; this.executionOwner = owned; this.syncPins();
+    })().finally(() => { this.executionLoading = undefined; });
   }
 
   get viewingTask(): boolean { return this.viewMode !== 'legacy'; }
   get selectedTaskId(): string | null { return this.viewTaskId; }
+  publishOwnershipChanged(): void { this.publish(); }
+  isSourceInUse(sourceId: string): boolean {
+    return [...this.tasks.list(), ...this.routerTasks.list()].some(card => ACTIVE.has(card.state) && card.snapshot.sourceId === sourceId);
+  }
   isTaskSession(sessionId: string): boolean { return this.tasks.list().some(card => card.sessionId === sessionId); }
   revokeSource(sourceId: string): void {
     for (const [service, cards] of [[this.tasks, this.tasks.list()], [this.routerTasks, this.routerTasks.list()]] as const) {
@@ -193,21 +241,22 @@ export class ProjectAssistantHost {
   }
 
   async handleMessage(message: WebviewMessage): Promise<boolean> {
+    if (isRootWebviewMessage(message.type) && message.type !== 'ready') return false;
     const data = message as WebviewMessage & Record<string, unknown>;
     if (data.projectId && data.projectId !== this.options.owner.projectId) return true;
-    if (message.type === 'ready') { if (this.initialized) { await this.refreshObserver(); this.publish(); await this.showView(); } return false; }
+    if (message.type === 'ready') { if (this.initialized) { this.publish(); if (this.historyLoaded && this.viewingTask) await this.showView(); } return false; }
     if (['selectSession', 'createSession', 'newSession'].includes(message.type)) {
+      this.viewRequestGeneration++;
       const card = this.tasks.list().find(card => card.sessionId === data.sessionId);
       if (card) { await this.selectView(card.taskCardId, 'task'); return true; }
-      this.viewMode = 'legacy'; this.viewTaskId = null; this.publish(); return false;
+      this.generation++; this.viewMode = 'legacy'; this.viewTaskId = null; this.viewPage = undefined; this.publish(); return false;
     }
     if (!message.type.startsWith('project')) {
       if (message.type === 'loadOlderMessages' && this.viewingTask) { await this.loadEarlierView(); return true; }
-      if (['saveModelSource', 'deleteModelSource', 'refreshSourceModels', 'testSourceConnection', 'setLanguage', 'saveHistorySettings',
-        'setDefaultModel', 'setModelEnabled', 'setModelContextWindow', 'setModelMaxOutput'].includes(message.type)) return false;
       const explicitCard = typeof data.sessionId === 'string' ? this.tasks.list().find(card => card.sessionId === data.sessionId) : undefined;
       if (explicitCard && ['regenerateSessionTitle', 'renameSession'].includes(message.type)) {
         if (!this.options.owner.isOwner) { this.rejectReadOnlyAction(data, explicitCard); return true; }
+        await this.ensureExecutionLoaded();
         await this.inExecution(explicitCard, async () => (await this.worker(explicitCard, false)).handleProjectMessage(message));
         if (message.type === 'renameSession' && typeof data.title === 'string') await this.tasks.rename(explicitCard.taskCardId, data.title);
         return true;
@@ -229,6 +278,7 @@ export class ProjectAssistantHost {
           return true;
         }
         if (!this.options.owner.isOwner) { this.rejectReadOnlyAction(data, card); return true; }
+        await this.ensureExecutionLoaded();
         if (['startBackgroundRun', 'resumeBackgroundRun'].includes(message.type)) {
           this.options.publish({ type: 'projectTaskError', reason: 'Use a task card for project execution. / 请使用任务卡执行项目工作。' });
           return true;
@@ -270,10 +320,24 @@ export class ProjectAssistantHost {
     }
     if (!this.initialized) return true;
     if (data.projectId && data.projectId !== this.options.owner.projectId) return true;
+    const viewRequest = message.type === 'projectTaskView' ? ++this.viewRequestGeneration : undefined;
     try {
+      if (message.type === 'projectTaskPainted') {
+        const generation = Number(data.viewGeneration);
+        const start = this.viewClicks.get(generation);
+        if (start !== undefined && generation === this.generation && data.taskCardId === this.viewTaskId) this.record('first_paint', performance.now() - start, this.viewTaskId ?? undefined);
+        return true;
+      }
+      await this.ensureHistoryLoaded();
+      if (viewRequest !== undefined && viewRequest !== this.viewRequestGeneration) return true;
+      if (!['projectTaskOpen', 'projectTaskView', 'projectTaskLatest', 'projectTaskDraft', 'projectTaskPrefetch', 'projectTaskReconcile'].includes(message.type)) {
+        await this.ensureExecutionLoaded();
+      }
       switch (message.type) {
+        case 'projectTaskOpen': this.publish(); return true;
         case 'projectTaskView':
           await this.refreshObserver();
+          if (viewRequest !== this.viewRequestGeneration) return true;
           await this.selectView(typeof data.taskCardId === 'string' ? data.taskCardId : null,
             data.mode === 'new' ? 'new' : typeof data.taskCardId === 'string' ? 'task' : 'project', Number(data.viewGeneration)); return true;
         case 'projectTaskLatest':
@@ -289,14 +353,6 @@ export class ProjectAssistantHost {
         case 'projectTaskPrefetch': {
           const card = typeof data.taskCardId === 'string' ? this.tasks.get(data.taskCardId) : undefined;
           if (card) void this.storeForSession(card.sessionId).then(store => store.prefetchSessionPages([card.sessionId])).catch(() => undefined);
-          return true;
-        }
-        case 'projectTaskPainted': {
-          const generation = Number(data.viewGeneration);
-          if (generation === this.generation && data.taskCardId === this.viewTaskId) {
-            const start = this.viewClicks.get(generation);
-            if (start !== undefined) this.record('first_paint', performance.now() - start, this.viewTaskId ?? undefined);
-          }
           return true;
         }
         case 'projectTaskCreate': case 'projectTaskSubmit': case 'projectAssistantSubmit':
@@ -437,12 +493,15 @@ export class ProjectAssistantHost {
   }
 
   private async worker(card: Readonly<ProjectTaskCard>, router: boolean): Promise<KeepseekChatViewProvider> {
+    await this.ensureExecutionLoaded();
     let existing = this.workers.get(card.taskCardId);
     if (!existing) {
       if (this.disposed) throw new Error('Project task host is closing. / 项目任务宿主正在关闭。');
       existing = (async () => {
         await this.drainingWorkers.get(card.taskCardId);
-        const store = await (await this.storeForSession(card.sessionId)).createSessionScope(card.sessionId);
+        const targetStore = await this.storeForSession(card.sessionId);
+        await targetStore.loadHistoryMetadata();
+        const store = await targetStore.createSessionScope(card.sessionId);
         const runtimeId = randomUUID();
         this.contextUsage.bindWorker(card.taskCardId, runtimeId);
         return new KeepseekChatViewProvider(this.options.extensionUri, store, this.options.storageUri, this.options.skillState,
@@ -538,11 +597,14 @@ export class ProjectAssistantHost {
     const start = performance.now();
     if (taskCardId && !this.tasks.get(taskCardId)) throw new Error('Task unavailable / 任务不存在');
     this.generation = Math.max(this.generation + 1, Number.isSafeInteger(requestedGeneration) ? requestedGeneration! : 0);
+    const generation = this.generation;
     this.viewTaskId = taskCardId; this.viewMode = mode;
     this.viewPage = undefined;
     this.viewClicks.set(this.generation, start);
     this.record('click_feedback', performance.now() - start, taskCardId ?? undefined);
     this.publish(); // Small card/title/draft snapshot before any cold body read.
+    await this.ensureDraftsLoaded();
+    if (this.disposed || generation !== this.generation) return;
     void this.persistDrafts().catch(error => this.options.publish({ type: 'projectTaskError', reason: errorText(error) }));
     await this.showView();
   }
@@ -565,13 +627,6 @@ export class ProjectAssistantHost {
     }
     const worker = this.workers.get(card.taskCardId);
     if (worker) (await worker).publishProjectView();
-    else if (this.options.owner.isOwner && this.viewMode === 'task') {
-      // Safety records load after the finite transcript. This local preparation
-      // performs no model request or project-source scan.
-      void this.worker(card, false).then(worker => this.inExecution(card, () => worker.prepareProjectView())).catch(error => {
-        if (generation === this.generation) this.options.publish({ type: 'projectTaskError', reason: errorText(error) });
-      });
-    }
     const start = this.viewClicks.get(generation);
     if (start !== undefined) this.record('host_body_publication', performance.now() - start, card.taskCardId);
   }
@@ -595,17 +650,24 @@ export class ProjectAssistantHost {
     const cards = this.tasks.list().map(card => {
       const live = this.liveAccounting.get(card.taskCardId);
       const contextUsageSnapshot = this.contextUsage.get(card);
-      return live ? { ...card, contextUsageSnapshot, currentEffectiveMs: live.usedMs, usedMs: live.usedMs ?? card.usedMs,
+      // Frozen request configuration can contain attached file contents. The
+      // rail needs only small identity/model metadata and measured usage.
+      const display = { ...card, snapshot: { ...card.snapshot, configuration: undefined } };
+      return live ? { ...display, contextUsageSnapshot, currentEffectiveMs: live.usedMs, usedMs: live.usedMs ?? card.usedMs,
         costByCurrency: live.costByCurrency ?? card.costByCurrency, requestCount: live.requestCount,
-        usageIncomplete: card.usageIncomplete || live.incomplete === true } : { ...card, contextUsageSnapshot };
+        usageIncomplete: card.usageIncomplete || live.incomplete === true } : { ...display, contextUsageSnapshot };
     });
     const start = Math.min(...cards.map(card => Date.parse(card.createdAt)));
     const last = Math.max(...cards.map(card => Date.parse(card.updatedAt)));
     const end = cards.some(card => ACTIVE.has(card.state)) ? Date.now() : last;
     this.options.publish({ type: 'projectTasksState', projectId: this.options.owner.projectId,
       hostId: this.runtimeId,
+      historyReady: this.historyLoaded,
       contextUsageDiagnostic: this.contextUsageDiagnostic,
       cards, viewTaskId: this.viewTaskId, viewMode: this.viewMode,
+      capabilities: deriveProjectInteractionState({ disposed: this.disposed, owned: this.options.owner.isOwner,
+        viewMode: this.viewMode, targetPresent: this.viewMode !== 'task' || Boolean(this.viewTaskId && this.tasks.get(this.viewTaskId)),
+        stopping: this.viewMode === 'task' && this.tasks.get(this.viewTaskId ?? '')?.state === 'stopping' }),
       timing: { projectElapsedMs: cards.length ? Math.max(0, end - start) : 0,
         totalEffectiveMs: cards.reduce((sum, card) => sum + card.usedMs, 0),
         incomplete: cards.some(card => card.usageIncomplete || ACTIVE.has(card.state) && !this.liveAccounting.has(card.taskCardId)) },
@@ -614,11 +676,15 @@ export class ProjectAssistantHost {
       enabled: this.viewMode !== 'legacy',
       viewGeneration: this.generation, revision: ++this.revision, readOnly: !this.options.owner.isOwner,
       reason: this.options.owner.reason, draft: this.drafts.get(targetId) ?? { targetId, revision: 0, markup: '' },
+      ownerState: this.options.owner.state,
       sessionId: this.viewTaskId ? this.tasks.get(this.viewTaskId)?.sessionId : this.routerTasks.list()[0]?.sessionId,
       ...(messages ? { messages, hasOlderMessages: hasOlderMessages === true, hasNewerMessages: hasNewerMessages === true } : {}), results: this.tasks.events().slice(-20), metrics: this.metrics.slice(-8) });
   }
 
   private async saveDraft(data: Record<string, unknown>): Promise<void> {
+    await this.ensureDraftsLoaded();
+    if (this.disposed) return;
+    if (this.draftReadError) throw this.draftReadError;
     const targetId = String(data.targetId);
     if (targetId !== '$project' && targetId !== '$new' && !this.tasks.get(targetId)) throw new Error('Invalid draft target');
     const revision = Number(data.revision);
@@ -633,6 +699,7 @@ export class ProjectAssistantHost {
   }
 
   private persistDrafts(): Promise<void> {
+    if (!this.draftsLoaded || this.draftReadError) return Promise.resolve();
     const snapshot = { version: 1, viewTaskId: this.viewTaskId, viewMode: this.viewMode, drafts: [...this.drafts.values()] };
     const operation = this.draftWriter.catch(() => undefined).then(() => writeJsonAtomic(this.viewDraftUri, snapshot));
     this.draftWriter = operation; return operation;
@@ -693,7 +760,7 @@ export class ProjectAssistantHost {
         const scope = await this.options.sessionStore.findSessionScope(sessionId);
         if (!scope || scope.key === this.projectStore?.workspaceKey) return this.projectStore!;
         if (scope.key === this.options.sessionStore.workspaceKey) return this.options.sessionStore;
-        return this.options.sessionStore.createWorkspaceScope(scope);
+        return this.options.sessionStore.createWorkspaceScope(scope, { lazy: true });
       })();
       this.sessionStores.set(sessionId, store);
     }
@@ -734,7 +801,7 @@ export class ProjectAssistantHost {
   }
 
   private refreshObserver(): Promise<void> {
-    if (this.options.owner.isOwner || !this.initialized) return Promise.resolve();
+    if (this.options.owner.isOwner || !this.historyLoaded) return Promise.resolve();
     return this.observerRefresh ??= Promise.all([this.tasks.reload(), this.routerTasks.reload()]).then(async changes => {
       await this.loadContextUsage();
       this.publish();

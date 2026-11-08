@@ -636,6 +636,29 @@ test('missing or corrupt referenced task objects fail closed instead of resettin
   } finally { await f.cleanup(); }
 });
 
+test('explicit task summaries read only the manifest; execution still verifies every durable input object', async () => {
+  const f = await fixture();
+  const originalRead = vscode.workspace.fs.readFile;
+  try {
+    const receipt = await f.service.createTask({ requestId: 'summary-only', content: 'Durable body must stay cold', snapshot });
+    await f.service.whenIdle();
+    const manifest = JSON.parse(await readFile(path.join(f.directory, 'project-tasks.json'), 'utf8'));
+    const hash = manifest.inputs[0].bodyRef.hash as string;
+    await writeFile(path.join(f.directory, 'task-objects', hash.slice(0, 2), `${hash}.json`), '{}');
+    const reads: string[] = [];
+    vscode.workspace.fs.readFile = async uri => { reads.push(uri.fsPath); return originalRead(uri); };
+    const view = new ProjectTaskService(f.options);
+    await view.initialize({ summariesOnly: true });
+    assert.equal(view.get(receipt.card.taskCardId)?.title, receipt.card.title);
+    assert.equal(view.events().length, 0);
+    assert.equal(view.inputs(receipt.card.taskCardId).length, 0);
+    assert.equal(reads.length, 1);
+    assert.ok(reads[0].endsWith('project-tasks.json'));
+    await assert.rejects(view.rename(receipt.card.taskCardId, 'Not execution authority'), /project_read_only/);
+    await assert.rejects(view.initialize(), /hash_mismatch/);
+  } finally { vscode.workspace.fs.readFile = originalRead; await f.cleanup(); }
+});
+
 test('persisted malformed identities, counters, accounting, dependencies and snapshots fail closed without guessing a root', async () => {
   const f = await fixture();
   type Manifest = { revision: unknown; cards: Array<Record<string, unknown>>; inputs: Array<Record<string, unknown>>; events: Array<Record<string, unknown>> };

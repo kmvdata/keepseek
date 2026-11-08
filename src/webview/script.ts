@@ -1,3 +1,4 @@
+import { WEBVIEW_MESSAGE_SCOPES } from '../provider/webviewMessages';
 import { getInputScript } from './input/script';
 import { getNewAccountDialogScript } from './input/newAccountDialog';
 import { getRichTextShortcutsScript } from './richTextShortcuts';
@@ -7,22 +8,28 @@ import { DEFAULT_MODEL_REQUEST_TIMEOUT_SECONDS, MODEL_REQUEST_TIMEOUT_PRESETS } 
 
 export function getScript(): string {
   return `
+    const webviewMessageScopes = ${JSON.stringify(WEBVIEW_MESSAGE_SCOPES)};
+    var accountRequestSequence = 0;
     const vscodeApi = window.keepseekVscode;
     const vscode = {
       postMessage: function(message) {
         if (['newSession', 'createSession', 'selectSession'].includes(message.type) && typeof projectCompositionActive !== 'undefined' && (projectCompositionActive || projectCompositionTimer)) {
           projectDeferNavigation(message); return;
         }
-        var globalHistory = ['ready', 'startupRendered', 'newSession', 'createSession', 'selectSession', 'toggleSessionFavorite', 'renameSession',
-          'deleteSessions', 'listOtherWorkspaces', 'loadOtherWorkspaceSessions', 'copyOtherWorkspaceSession', 'deleteOtherWorkspaceSessions', 'deleteOtherWorkspace'];
-        if (projectTasks && projectViewMode === 'task' && projectTasks.viewTaskId && !message.type.startsWith('project') && !globalHistory.includes(message.type)) {
+        var messageScope = webviewMessageScopes[message.type];
+        if (projectTasks && projectViewMode === 'task' && projectTasks.viewTaskId && (messageScope === 'session' || messageScope === 'execution')) {
           var targetCard = message.sessionId
             ? projectTasks.cards.find(function(card) { return card.sessionId === message.sessionId; })
             : projectCurrentCard();
           if (targetCard) message = Object.assign({ projectId: projectTasks.projectId, taskCardId: projectCardId(targetCard),
             sessionId: targetCard.sessionId, viewGeneration: projectViewGeneration }, message);
         }
+        if (messageScope === 'user' && ['openApiSettings', 'setModelRequestTimeout', 'addModel', 'deleteModel', 'setModelEnabled', 'setDefaultModel', 'setModelContextWindow', 'setModelMaxOutput', 'saveModelSource', 'deleteModelSource', 'refreshSourceModels', 'testSourceConnection'].includes(message.type)) {
+          message = Object.assign({}, message, { requestId: message.requestId || 'account-' + Date.now().toString(36) + '-' + (++accountRequestSequence) });
+          if (window.keepseekInputControls?.trackAccountRequest) window.keepseekInputControls.trackAccountRequest(message);
+        }
         vscodeApi.postMessage(message);
+        return message.requestId;
       },
       getState: typeof vscodeApi.getState === 'function' ? function() { return vscodeApi.getState(); } : undefined,
       setState: typeof vscodeApi.setState === 'function' ? function(value) { return vscodeApi.setState(value); } : undefined
@@ -147,6 +154,7 @@ export function getScript(): string {
         interactiveReady: false,
         sideEffectsReady: false
       }
+      ,historyPreview: null
       ,hasOlderMessages: false
       ,hasNewerMessages: false
     };
@@ -155,6 +163,7 @@ export function getScript(): string {
     var pendingSubmission = null;
     var submissionSequence = 0;
     var sessionPromptDrafts = new Map();
+    var pendingHistoryPreparation = null;
 
     function currentInteraction() {
       return state.interaction && state.interaction.sessionId === state.activeSessionId ? state.interaction : null;
@@ -174,7 +183,7 @@ export function getScript(): string {
     }
 
     function canCreateSession() {
-      if (pendingSubmission || (typeof projectTasks !== 'undefined' && projectTasks?.readOnly)) return false;
+      if (pendingSubmission) return false;
       if (projectTaskUiActive()) return true;
       var interaction = currentInteraction();
       return interaction ? (interaction.canCreateSession ?? interaction.canNavigate) === true
@@ -1376,13 +1385,40 @@ export function getScript(): string {
     ${getInputScript()}
     ${getNewAccountDialogScript()}
 
+    var historyPrepareContinue = document.getElementById('historyPrepareContinue');
+    if (historyPrepareContinue) historyPrepareContinue.addEventListener('click', function() {
+      var preview = state.historyPreview;
+      if (!preview || !preview.canContinue || preview.loading || pendingHistoryPreparation) return;
+      var requestId = 'history-prepare-' + Date.now().toString(36) + '-' + (++submissionSequence);
+      pendingHistoryPreparation = { requestId: requestId, sessionId: preview.sessionId, generation: preview.generation };
+      renderHistoryPreview();
+      vscode.postMessage({ type: 'prepareHistorySession', sessionId: preview.sessionId, viewGeneration: preview.generation, requestId: requestId });
+    });
+
+    function renderHistoryPreview() {
+      var preview = state.historyPreview;
+      var notice = document.getElementById('historyPreviewNotice');
+      var reason = document.getElementById('historyPreviewReason');
+      if (notice) notice.classList.toggle('hidden', !preview);
+      if (pendingHistoryPreparation && (!preview || preview.sessionId !== pendingHistoryPreparation.sessionId || preview.generation !== pendingHistoryPreparation.generation)) pendingHistoryPreparation = null;
+      if (reason) reason.textContent = preview ? String(preview.error || preview.reason || t(preview.loading ? 'historyPreviewLoading' : 'historyPreviewPrepareHint')) : '';
+      if (historyPrepareContinue) {
+        historyPrepareContinue.disabled = !preview || !preview.canContinue || preview.loading || Boolean(pendingHistoryPreparation);
+        historyPrepareContinue.textContent = t(pendingHistoryPreparation ? 'historyPreviewPreparing' : 'historyPreviewPrepare');
+      }
+    }
+
     function handleKeepseekHostMessage(event) {
       var message = event.data;
-      if (message.type === 'projectTasksState') { projectApplyState(message); return; }
+      if (message.type === 'projectTasksState') {
+        if (message.viewMode && message.viewMode !== 'legacy') state.historyPreview = null;
+        projectApplyState(message); renderHistoryPreview(); return;
+      }
       if (message.type === 'projectTaskSubmissionResult') { projectApplySubmissionResult(message); return; }
       if (typeof projectTasks !== 'undefined' && projectTasks?.hostId && message.hostId && message.hostId !== projectTasks.hostId) return;
       if (message.type === 'projectTaskError') { setTransientStatus(String(message.reason || message.error || t('submissionNotAccepted')), false, 'global'); return; }
-      if (message.type === 'projectReadOnly') { setTransientStatus(t('projectReadOnly'), false, 'global'); return; }
+      if (message.type === 'projectOwnerState') { projectApplyOwnerState(message); return; }
+      if (message.type === 'projectReadOnly') { setTransientStatus(String(message.reason || t('projectReadOnly')), false, 'global'); return; }
       if (message.type === 'projectTaskStopAuthorization') {
         if (typeof projectTasks !== 'undefined' && projectTasks && (!message.projectId || message.projectId === projectTasks.projectId)) {
           setTransientStatus(t('projectConfirmTaskStop', { title: String(message.title || t('projectUntitledTask')) }), false, 'global');
@@ -1393,6 +1429,13 @@ export function getScript(): string {
         && ['state', 'statePatch', 'agentRunDelta', 'agentRunAttemptReset', 'sessionChanged'].includes(message.type)) return;
       if (typeof projectTasks !== 'undefined' && projectTasks && typeof message.viewGeneration === 'number' && message.viewGeneration < projectViewGeneration
         && ['state', 'statePatch', 'agentRunDelta', 'agentRunAttemptReset', 'sessionChanged'].includes(message.type)) return;
+      if (message.type === 'historyPreviewResult') {
+        var pendingHistory = pendingHistoryPreparation;
+        if (!pendingHistory || pendingHistory.requestId !== message.requestId || pendingHistory.sessionId !== message.sessionId) return;
+        pendingHistoryPreparation = null;
+        if (message.status !== 'ready') setTransientStatus(String(message.reason || t('historyPreviewPreparationFailed')));
+        renderHistoryPreview(); return;
+      }
       if (message.type === 'submissionResult') {
         applySubmissionResult(message);
         return;
@@ -1542,6 +1585,8 @@ export function getScript(): string {
           window.keepseekInputControls.showStatus(t('planRevisionRequested'));
         }
         promptInput.focus();
+      } else if (message.type === 'accountOperationResult') {
+        window.keepseekInputControls?.accountOperationResult?.(message);
       } else if (message.type === 'showSettingsDialog') {
         if (window.keepseekInputControls && window.keepseekInputControls.showSettingsDialog) {
           window.keepseekInputControls.showSettingsDialog(message);
@@ -1650,6 +1695,7 @@ export function getScript(): string {
       }
       applyStaticTranslations();
       renderCurrentSessionTitle();
+      renderHistoryPreview();
       syncEditingState();
       renderSettingsControls();
       renderSessionControls();
@@ -1727,6 +1773,7 @@ export function getScript(): string {
           }
         }
       }
+      if (state.historyPreview && state.historyPreview.title) title = String(state.historyPreview.title);
       if (currentSessionTitle) {
         currentSessionTitle.textContent = title;
         currentSessionTitle.title = title;
@@ -2112,6 +2159,7 @@ export function getScript(): string {
       selectedSessionIds.clear();
       editingSessionTitleId = '';
       sessionMenuOpen = true;
+      vscode.postMessage({ type: 'loadSessionHistory' });
       renderSessionControls();
       vscode.postMessage({ type: 'listOtherWorkspaces' });
     }

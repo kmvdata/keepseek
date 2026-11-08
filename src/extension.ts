@@ -12,6 +12,8 @@ import { ProjectResourceCoordinator, configureProjectExecutionEnforcement } from
 import { ProjectRequestAdmission } from './tasks/requestAdmission';
 import { createHash, randomUUID } from 'node:crypto';
 
+let activeProvider: KeepseekChatViewProvider | undefined;
+
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const startupTrace = new StartupPerformanceTrace();
   startupTrace.mark('activate-start');
@@ -21,28 +23,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const globalSessionStorage = new GlobalSessionStorage(context.globalStorageUri, startupTrace);
   const workspaceScope = getCurrentWorkspaceSessionScope();
   const projectUri = vscode.workspace.workspaceFolders?.[0]?.uri;
-  const owner = projectUri ? await ProjectExecutionOwner.acquire({ projectUri }) : undefined;
+  const ownership = projectUri ? ProjectExecutionOwner.startAcquire({ projectUri }) : undefined;
+  const owner = ownership?.owner;
   const savedViewId = context.workspaceState.get<string>('keepseek.taskViewWindowId') ?? randomUUID();
   const observerViewId = `${savedViewId}-${createHash('sha256').update(`${vscode.env.sessionId}:${process.pid}`).digest('hex').slice(0, 12)}`;
   const projectOptions = owner ? { owner, resources: new ProjectResourceCoordinator(owner.projectId),
     admission: new ProjectRequestAdmission({ rootConcurrency: 2 }),
     windowId: owner.isOwner ? savedViewId : observerViewId } : undefined;
   if (projectOptions) {
-    if (owner?.isOwner) await context.workspaceState.update('keepseek.taskViewWindowId', savedViewId);
     configureProjectExecutionEnforcement(true);
-    globalSessionStorage.setReadOnly(!projectOptions.owner.isOwner);
+    globalSessionStorage.setReadOnly(!projectOptions.owner.canWriteStorage);
   }
   const sessionStore = new ChatSessionStore(globalSessionStorage, getConfiguredKeepseekLanguage(), workspaceScope);
-  if (owner) sessionStore.setReadOnly(!owner.isOwner);
-  let startSessionInitialization: (() => void) | undefined;
-  const sessionInitialization = new Promise<void>((resolve, reject) => {
-    startSessionInitialization = () => {
-      void startupTrace.measure('current-workspace-sessions-loaded', async () => {
-        if (owner?.isOwner !== false) await globalSessionStorage.migrateLegacyWorkspaceState(context.workspaceState, workspaceScope);
-        await sessionStore.initialize();
-      }, () => ({ entries: sessionStore.getSessionSummaries().length })).then(resolve, reject);
-    };
-  });
+  if (owner) sessionStore.setReadOnly(!owner.canWriteStorage);
+  // One in-memory target per activation. No legacy/index/body/Registry access.
+  sessionStore.initializeFreshBoot();
+  const sessionInitialization = Promise.resolve();
 
   const provider = new KeepseekChatViewProvider(
     context.extensionUri,
@@ -54,13 +50,30 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     startupTrace,
     projectOptions
   );
+  activeProvider = provider;
+  provider.setOwnerReadiness(ownership?.ready ?? Promise.resolve());
+  provider.setHistoryLoader(async () => {
+    await globalSessionStorage.migrateLegacyWorkspaceState(context.workspaceState, workspaceScope);
+    await sessionStore.loadHistoryMetadata();
+  });
+  owner?.onDidChange(() => {
+    if (projectOptions && projectOptions.resources.projectId !== owner.projectId) {
+      projectOptions.resources = new ProjectResourceCoordinator(owner.projectId);
+    }
+    if (projectOptions) projectOptions.windowId = owner.isOwner ? savedViewId : observerViewId;
+    globalSessionStorage.setReadOnly(!owner.canWriteStorage);
+    sessionStore.setReadOnly(!owner.canWriteStorage);
+    provider.publishOwnershipChanged();
+  });
+  void ownership?.ready.then(async () => {
+    if (owner?.isOwner) await context.workspaceState.update('keepseek.taskViewWindowId', savedViewId);
+  }).catch(() => console.warn('[KeepSeek] owner preference save failed'));
   const webviewProvider = vscode.window.registerWebviewViewProvider(KeepseekChatViewProvider.viewType, provider, {
     webviewOptions: {
       retainContextWhenHidden: true
     }
   });
   startupTrace.mark('provider-registered');
-  startSessionInitialization?.();
   // The package contribution is authoritative; this only performs the legacy
   // user-keybindings migration once and never blocks Provider registration.
   void ensureKeybindings(context);
@@ -112,7 +125,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
 }
 
-export function deactivate(): void {}
+export function deactivate(): Promise<void> {
+  const provider = activeProvider;
+  activeProvider = undefined;
+  return provider?.shutdown() ?? Promise.resolve();
+}
 
 function createExtensionInfo(context: vscode.ExtensionContext): KeepseekExtensionInfo {
   const packageJson = context.extension.packageJSON as Record<string, unknown>;

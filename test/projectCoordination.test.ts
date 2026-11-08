@@ -2,20 +2,30 @@ import './registerVscodeStub';
 import '../src/agent/providerRequestProjection';
 import { strict as assert } from 'node:assert';
 import { createHash } from 'node:crypto';
-import { describe, it } from 'node:test';
+import { describe, it, type TestContext } from 'node:test';
 import { mkdtemp, mkdir, readFile, rename, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
-import { ProjectExecutionOwner } from '../src/tasks/projectOwner';
+import { ProjectExecutionOwner, type ProjectOwnerOptions } from '../src/tasks/projectOwner';
+import { LocalKernelMutex } from '../src/tasks/localKernelMutex';
+import { configureProcessIdentityTestProbe } from '../src/tasks/projectOperationJournal';
 import { ProjectResourceCoordinator, runProjectExecution, withProjectMutationPhase, assertProjectMutationLease, type ProjectExecutionScope } from '../src/tasks/projectResources';
 import { ProjectRequestAdmission } from '../src/tasks/requestAdmission';
 import { SafeFileEditor } from '../src/edits/safeFileEditor';
 import { OpenAICompatibleClient } from '../src/agent/providers/openAiCompatibleClient';
 import * as vscode from './stubs/vscode';
 
+const testOwners = new Set<ProjectExecutionOwner>();
+async function acquire(options: ProjectOwnerOptions): Promise<ProjectExecutionOwner> {
+  const owner = await ProjectExecutionOwner.acquire(options); testOwners.add(owner); return owner;
+}
+async function nativeBackend(t: TestContext): Promise<boolean> {
+  try { const lease = await LocalKernelMutex.acquireNative(`native-test-${process.pid}`); await lease?.release(); return true; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'EPERM' || (error as NodeJS.ErrnoException).code === 'EACCES') { t.skip('Managed environment denies native local socket bind; process-lock contract remains unverified here.'); return false; } throw error; }
+}
 const execute = promisify(execFile);
 const ownerModule = require.resolve('../src/tasks/projectOwner');
 const scope = (name: string): ProjectExecutionScope => ({ sessionId: name, rootTaskId: `root-${name}`, segmentId: `segment-${name}`, runtimeId: `runtime-${name}` });
@@ -34,11 +44,12 @@ async function fixture() {
   const project = path.join(base, 'project');
   const locks = path.join(base, 'locks');
   await mkdir(path.join(project, '.git'), { recursive: true });
-  return { base, project, locks, cleanup: () => rm(base, { recursive: true, force: true }) };
+  return { base, project, locks, cleanup: async () => { for (const owner of testOwners) { if (owner.canonicalRoot.startsWith(base)) { await owner.dispose(); testOwners.delete(owner); } } await rm(base, { recursive: true, force: true }); } };
 }
 
 describe('physical project execution ownership', () => {
-  it('refuses a second live process, symlink aliases and different workspace roots', async () => {
+  it('refuses a second live process, symlink aliases and different workspace roots', async (t) => {
+    if (!await nativeBackend(t)) return;
     const f = await fixture();
     let owner: ProjectExecutionOwner | undefined;
     try {
@@ -46,7 +57,7 @@ describe('physical project execution ownership', () => {
       const alias = path.join(f.base, 'alias');
       await mkdir(nested);
       await symlink(f.project, alias, process.platform === 'win32' ? 'junction' : 'dir');
-      owner = await ProjectExecutionOwner.acquire({ projectUri: pathToFileURL(nested).toString(), lockRoot: f.locks });
+      owner = await acquire({ projectUri: pathToFileURL(nested).toString(), lockRoot: f.locks, mutexBackend: 'native' });
       if (!owner.isOwner && process.platform === 'win32') { assert.match(owner.reason!, /filesystem/u); return; }
       assert.equal(owner.isOwner, true);
       const competing = await execute(process.execPath, ['-e', `
@@ -61,62 +72,90 @@ describe('physical project execution ownership', () => {
       assert.match(state.reason, /Another window/u);
       const sibling = path.join(f.project, 'sibling');
       await mkdir(sibling);
-      const siblingView = await ProjectExecutionOwner.acquire({ projectUri: sibling, lockRoot: f.locks });
+      const siblingView = await acquire({ projectUri: sibling, lockRoot: f.locks, mutexBackend: 'native' });
       assert.equal(siblingView.isOwner, false);
       assert.equal(siblingView.projectId, owner.projectId);
       await owner.verify();
       await owner.dispose();
-      const successor = await ProjectExecutionOwner.acquire({ projectUri: f.project, lockRoot: f.locks });
+      const successor = await acquire({ projectUri: f.project, lockRoot: f.locks, mutexBackend: 'native' });
       assert.equal(successor.isOwner, true);
       await successor.dispose();
     } finally { if (owner?.isOwner) await owner.dispose(); await f.cleanup(); }
   });
 
-  it('atomically elects only one of two actual processes and never steals an exited owner', async () => {
+  it('atomically elects only one of two actual processes and recovers an exited clean owner', async (t) => {
+    if (!await nativeBackend(t)) return;
     const f = await fixture();
     try {
       const script = `const {ProjectExecutionOwner}=require(process.argv[1]);
         ProjectExecutionOwner.acquire({projectUri:process.argv[2],lockRoot:process.argv[3]})
-          .then(o=>console.log(JSON.stringify({owned:o.isOwner,reason:o.reason})))
+          .then(o=>{console.log(JSON.stringify({owned:o.isOwner,reason:o.reason}));setTimeout(()=>{},350)})
           .catch(e=>{console.error(e);process.exitCode=1});`;
       const results = await Promise.all([1, 2].map(() => execute(process.execPath, ['-e', script, ownerModule, f.project, f.locks])));
       const states = results.map((result) => JSON.parse(result.stdout) as { owned: boolean });
-      if (process.platform === 'win32') { assert.equal(states.filter((state) => state.owned).length, 0); return; }
       assert.equal(states.filter((state) => state.owned).length, 1);
-      const later = await ProjectExecutionOwner.acquire({ projectUri: f.project, lockRoot: f.locks });
-      assert.equal(later.isOwner, false);
-      assert.match(later.reason!, /inspect detached operations/u);
+      const later = await acquire({ projectUri: f.project, lockRoot: f.locks, mutexBackend: 'native' });
+      assert.equal(later.isOwner, true);
+      await later.dispose();
     } finally { await f.cleanup(); }
+  });
+
+  it('recovers after SIGKILL and elects only one of two simultaneous native recoverers', async (t) => {
+    if (!await nativeBackend(t)) return;
+    const f = await fixture();
+    const script = `const {ProjectExecutionOwner}=require(process.argv[1]);
+      ProjectExecutionOwner.acquire({projectUri:process.argv[2],lockRoot:process.argv[3]})
+        .then(o=>{console.log(JSON.stringify({owned:o.isOwner}));setInterval(()=>{},1000)})
+        .catch(e=>{console.error(e);process.exit(1)});`;
+    const child = spawn(process.execPath, ['-e', script, ownerModule, f.project, f.locks], { stdio: ['ignore', 'pipe', 'pipe'] });
+    try {
+      const first = await new Promise<{ owned: boolean }>((resolve, reject) => {
+        let output = ''; child.stdout.on('data', chunk => { output += String(chunk); if (output.includes('\n')) resolve(JSON.parse(output.trim())); });
+        child.once('error', reject); child.once('exit', () => { if (!output.includes('\n')) reject(new Error('Owner fixture exited before ready.')); });
+      });
+      assert.equal(first.owned, true);
+      const exited = new Promise<void>(resolve => child.once('close', () => resolve()));
+      child.kill('SIGKILL'); await exited;
+      const compete = `const {ProjectExecutionOwner}=require(process.argv[1]);
+        ProjectExecutionOwner.acquire({projectUri:process.argv[2],lockRoot:process.argv[3]})
+          .then(o=>{console.log(JSON.stringify({owned:o.isOwner}));setTimeout(()=>{},350)});`;
+      const results = await Promise.all([1, 2].map(() => execute(process.execPath, ['-e', compete, ownerModule, f.project, f.locks])));
+      assert.equal(results.filter(result => (JSON.parse(result.stdout) as { owned: boolean }).owned).length, 1);
+    } finally { child.kill('SIGKILL'); await f.cleanup(); }
   });
 
   it('fails closed on unreadable owner records, unsupported authorities and lock replacement', async () => {
     const f = await fixture();
     try {
-      const remote = await ProjectExecutionOwner.acquire({ projectUri: 'vscode-remote://ssh-remote+host/project', lockRoot: f.locks });
+      const remote = await acquire({ projectUri: 'vscode-remote://ssh-remote+host/project', lockRoot: f.locks });
       assert.equal(remote.isOwner, false);
-      const owner = await ProjectExecutionOwner.acquire({ projectUri: f.project, lockRoot: f.locks });
+      const owner = await acquire({ projectUri: f.project, lockRoot: f.locks });
       if (!owner.isOwner && process.platform === 'win32') return;
       await writeFile(path.join(f.locks, `${owner.projectId}.lock`), '{');
       await assert.rejects(() => owner.verify());
       assert.equal(owner.isOwner, false);
-      const contender = await ProjectExecutionOwner.acquire({ projectUri: f.project, lockRoot: f.locks });
+      const contender = await acquire({ projectUri: f.project, lockRoot: f.locks });
       assert.equal(contender.isOwner, false);
+      assert.equal(contender.state.status, 'owned_elsewhere', 'invalidated metadata does not release the continuous exclusion fence');
+      await owner.dispose();
+      await contender.retryAcquire();
       assert.match(contender.reason!, /incomplete|unreadable/u);
     } finally { await f.cleanup(); }
   });
 
-  it('retains ownership while operations are active and after unknown settlement', async () => {
+  it('retains the mutex while operations are active and preserves unknown settlement across shutdown', async () => {
     const f = await fixture();
     try {
-      const owner = await ProjectExecutionOwner.acquire({ projectUri: f.project, lockRoot: f.locks });
+      const owner = await acquire({ projectUri: f.project, lockRoot: f.locks });
       if (!owner.isOwner && process.platform === 'win32') return;
       const release = owner.beginOperation();
       await assert.rejects(() => owner.dispose(), /not settled/u);
       release();
       owner.markUncertainOperation('fixture-unknown');
-      await assert.rejects(() => owner.dispose(), /unknown side effects/u);
-      const contender = await ProjectExecutionOwner.acquire({ projectUri: f.project, lockRoot: f.locks });
+      await owner.dispose();
+      const contender = await acquire({ projectUri: f.project, lockRoot: f.locks });
       assert.equal(contender.isOwner, false);
+      assert.equal(contender.state.reasonCode, 'operation_unsettled');
     } finally { await f.cleanup(); }
   });
 
@@ -125,21 +164,22 @@ describe('physical project execution ownership', () => {
       const f = await fixture();
       let replacement: ProjectExecutionOwner | undefined;
       try {
-        const owner = await ProjectExecutionOwner.acquire({ projectUri: f.project, lockRoot: f.locks });
+        const owner = await acquire({ projectUri: f.project, lockRoot: f.locks });
         if (!owner.isOwner && process.platform === 'win32') return;
         const frozenId = owner.projectId;
         const moved = path.join(f.base, 'moved');
         await rename(f.project, moved);
         if (replace) {
           await mkdir(path.join(f.project, '.git'), { recursive: true });
-          replacement = await ProjectExecutionOwner.acquire({ projectUri: f.project, lockRoot: f.locks });
-          assert.equal(replacement.isOwner, true);
+          replacement = await acquire({ projectUri: f.project, lockRoot: f.locks });
+          assert.equal(replacement.isOwner, false, 'same path with a new inode still overlaps the live predecessor scope');
+          assert.equal(replacement.state.reasonCode, 'overlapping_project_scope');
           assert.notEqual(replacement.projectId, frozenId);
         }
         await assert.rejects(() => owner.verify());
         assert.equal(owner.isOwner, false);
         assert.equal(owner.projectId, frozenId, 'scope invalidation does not rewrite persisted project identity');
-        const aliasOfOldRoot = await ProjectExecutionOwner.acquire({ projectUri: moved, lockRoot: f.locks });
+        const aliasOfOldRoot = await acquire({ projectUri: moved, lockRoot: f.locks });
         assert.equal(aliasOfOldRoot.isOwner, false, 'old physical root retains its existing lock for inspection');
         assert.equal(aliasOfOldRoot.projectId, frozenId);
       } finally { if (replacement?.isOwner) await replacement.dispose(); await f.cleanup(); }
@@ -153,7 +193,7 @@ describe('physical project execution ownership', () => {
         if (change === 'ancestor') await rm(path.join(f.project, '.git'), { recursive: true });
         const nested = path.join(f.project, 'nested');
         await mkdir(nested);
-        const owner = await ProjectExecutionOwner.acquire({ projectUri: change === 'ancestor' ? f.project : nested, lockRoot: f.locks });
+        const owner = await acquire({ projectUri: change === 'ancestor' ? f.project : nested, lockRoot: f.locks });
         if (!owner.isOwner && process.platform === 'win32') return;
         if (change === 'ancestor') await mkdir(path.join(f.base, '.git'));
         else {
@@ -173,12 +213,165 @@ describe('physical project execution ownership', () => {
       const other = path.join(f.base, 'other');
       await mkdir(path.join(other, '.git'), { recursive: true });
       await symlink(f.project, alias, process.platform === 'win32' ? 'junction' : 'dir');
-      const owner = await ProjectExecutionOwner.acquire({ projectUri: alias, lockRoot: f.locks });
+      const owner = await acquire({ projectUri: alias, lockRoot: f.locks });
       if (!owner.isOwner && process.platform === 'win32') return;
       await unlink(alias);
       await symlink(other, alias, process.platform === 'win32' ? 'junction' : 'dir');
       await assert.rejects(() => owner.verify(), /Physical project root or Git scope changed/u);
       assert.equal(owner.isOwner, false);
+    } finally { await f.cleanup(); }
+  });
+
+  it('fences an ancestor Git regrouping while the old child scope is running work', async () => {
+    const f = await fixture();
+    try {
+      await rm(path.join(f.project, '.git'), { recursive: true });
+      const old = await acquire({ projectUri: f.project, lockRoot: f.locks });
+      const release = old.beginOperation();
+      await mkdir(path.join(f.base, '.git'));
+      const grouped = await acquire({ projectUri: f.project, lockRoot: f.locks });
+      assert.notEqual(grouped.projectId, old.projectId);
+      assert.equal(grouped.isOwner, false); assert.equal(grouped.state.reasonCode, 'overlapping_project_scope');
+      await assert.rejects(() => old.verify(), /scope changed/u);
+      await assert.rejects(() => old.dispose(), /not settled/u);
+      release(); await old.dispose();
+      await grouped.retryAcquire();
+      assert.equal(grouped.isOwner, true);
+    } finally { await f.cleanup(); }
+  });
+
+  it('keeps an overlapping crashed scope isolated until its recorded process group ends', async () => {
+    const f = await fixture();
+    const child = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { detached: process.platform !== 'win32', stdio: 'ignore' });
+    try {
+      await rm(path.join(f.project, '.git'), { recursive: true });
+      const old = await acquire({ projectUri: f.project, lockRoot: f.locks });
+      const operation = await old.beginDurableOperation({ id: 'old-scope-command', kind: 'command', gated: true });
+      await operation.dispatched({ pid: child.pid, processGroup: process.platform === 'win32' ? undefined : child.pid });
+      await old.dispose();
+      await mkdir(path.join(f.base, '.git'));
+      const grouped = await acquire({ projectUri: f.project, lockRoot: f.locks });
+      assert.equal(grouped.isOwner, false); assert.equal(grouped.state.reasonCode, 'overlapping_project_scope');
+      const exit = new Promise<void>(resolve => child.once('close', () => resolve())); child.kill('SIGKILL'); await exit;
+      await grouped.retryAcquire();
+      assert.equal(grouped.isOwner, true);
+    } finally { child.kill('SIGKILL'); await f.cleanup(); }
+  });
+
+  it('updates an existing observer after a clean owner shutdown without dispatching work', async () => {
+    const f = await fixture();
+    try {
+      const owner = await acquire({ projectUri: f.project, lockRoot: f.locks });
+      const observer = await acquire({ projectUri: f.project, lockRoot: f.locks });
+      const observed: string[] = [];
+      const stop = observer.onDidChange(state => observed.push(state.status));
+      assert.equal(observer.isOwner, false);
+      const revision = observer.state.revision;
+      await owner.dispose(); await owner.dispose();
+      await Promise.all([observer.retryAcquire(), observer.retryAcquire()]);
+      assert.equal(observer.isOwner, true); assert.equal(observer.canWriteStorage, true);
+      assert.ok(observer.state.revision > revision); assert.ok(observed.includes('recovering')); assert.equal(observed.at(-1), 'owned');
+      assert.deepEqual((await observer.diagnostics()).operations, []);
+      stop();
+    } finally { await f.cleanup(); }
+  });
+
+  it('recovers a gated pre-dispatch intent and preserves an in-process Apply unknown receipt', async () => {
+    const f = await fixture();
+    try {
+      const owner = await acquire({ projectUri: f.project, lockRoot: f.locks });
+      await owner.beginDurableOperation({ id: 'never-granted', kind: 'command', gated: true });
+      const apply = await owner.beginDurableOperation({ id: 'apply-interrupted', kind: 'apply', targetUri: pathToFileURL(path.join(f.project, 'a.txt')).toString(), baseHash: 'base', resultHash: 'result' });
+      await apply.dispatched({});
+      await owner.dispose();
+      const successor = await acquire({ projectUri: f.project, lockRoot: f.locks });
+      assert.equal(successor.isOwner, true);
+      const operations = (await successor.diagnostics()).operations;
+      assert.equal(operations.find(operation => operation.id === 'never-granted')?.state, 'not_dispatched');
+      assert.equal(operations.find(operation => operation.id === 'apply-interrupted')?.state, 'result_unknown');
+      assert.equal(operations.find(operation => operation.id === 'apply-interrupted')?.processState, 'ended');
+    } finally { await f.cleanup(); }
+  });
+
+  it('keeps a legacy same-boot owner isolated and recovers only with machine-reboot evidence', async () => {
+    for (const bootEvidence of ['missing', 'same-boot', 'rebooted', 'wrong-host'] as const) {
+      const f = await fixture();
+      try {
+        const initial = await acquire({ projectUri: f.project, lockRoot: f.locks });
+        const lock = path.join(f.locks, `${initial.projectId}.lock`);
+        const record = JSON.parse(await readFile(lock, 'utf8')) as Record<string, unknown>;
+        await initial.dispose();
+        record.version = 1; record.processId = 2147483647;
+        record.acquiredAt = new Date(Date.now() - 10_000).toISOString();
+        if (bootEvidence === 'wrong-host') record.hostname = 'different-host';
+        await writeFile(lock, JSON.stringify(record));
+        const recovered = await acquire({ projectUri: f.project, lockRoot: f.locks,
+          bootTimeProbe: async () => bootEvidence === 'missing' ? undefined : Date.now() - (bootEvidence === 'same-boot' ? 20_000 : 1_000) });
+        assert.equal(recovered.isOwner, bootEvidence === 'rebooted');
+        if (bootEvidence === 'rebooted') {
+          assert.equal((JSON.parse(await readFile(lock, 'utf8')) as { version: number }).version, 2);
+        } else assert.match(recovered.reason!, bootEvidence === 'wrong-host' ? /different scope or host/u : /restart the computer/u);
+      } finally { await f.cleanup(); }
+    }
+  });
+
+  it('keeps a live detached process group isolated and permits new work after verified termination', async () => {
+    const f = await fixture();
+    const child = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { detached: process.platform !== 'win32', stdio: 'ignore' });
+    try {
+      const owner = await acquire({ projectUri: f.project, lockRoot: f.locks });
+      const operation = await owner.beginDurableOperation({ id: 'detached', kind: 'command', gated: true });
+      await operation.dispatched({ pid: child.pid, processGroup: process.platform === 'win32' ? undefined : child.pid });
+      await owner.dispose();
+      const successor = await acquire({ projectUri: f.project, lockRoot: f.locks });
+      assert.equal(successor.isOwner, false); assert.equal(successor.state.reasonCode, 'operation_unsettled');
+      const exit = new Promise<void>(resolve => child.once('close', () => resolve()));
+      child.kill('SIGKILL'); await exit;
+      await successor.retryAcquire();
+      assert.equal(successor.isOwner, true);
+      const record = (await successor.diagnostics()).operations.find(item => item.id === 'detached');
+      assert.equal(record?.state, 'result_unknown'); assert.equal(record?.processState, 'ended');
+    } finally { child.kill('SIGKILL'); await f.cleanup(); }
+  });
+
+  it('uses controlled PID-reuse identity evidence and blocks denied liveness probes', async () => {
+    const f = await fixture();
+    const originalKill = process.kill;
+    configureProcessIdentityTestProbe(async pid => pid === process.pid ? 'current-process-identity' : undefined);
+    try {
+      const owner = await acquire({ projectUri: f.project, lockRoot: f.locks });
+      const operation = await owner.beginDurableOperation({ id: 'reused-pid', kind: 'command', gated: true });
+      await operation.dispatched({ pid: process.pid, processIdentity: 'previous-process-start-identity' });
+      await owner.dispose();
+      const successor = await acquire({ projectUri: f.project, lockRoot: f.locks });
+      assert.equal(successor.isOwner, true);
+      assert.equal((await successor.diagnostics()).operations.find(item => item.id === 'reused-pid')?.processState, 'ended');
+      const unknown = await successor.beginDurableOperation({ id: 'denied-probe', kind: 'command', gated: true });
+      await unknown.dispatched({ pid: process.pid }); await successor.dispose();
+      process.kill = ((pid: number, signal?: number | NodeJS.Signals) => {
+        if (pid === process.pid && signal === 0) { const error = new Error('denied') as NodeJS.ErrnoException; error.code = 'EPERM'; throw error; }
+        return originalKill(pid, signal);
+      }) as typeof process.kill;
+      const denied = await acquire({ projectUri: f.project, lockRoot: f.locks });
+      assert.equal(denied.isOwner, false); assert.equal(denied.state.reasonCode, 'operation_unsettled');
+    } finally { process.kill = originalKill; configureProcessIdentityTestProbe(); await f.cleanup(); }
+  });
+
+  it('bounds startup journal receipts while durable archived identifiers still reject replay', async () => {
+    const f = await fixture();
+    try {
+      const owner = await acquire({ projectUri: f.project, lockRoot: f.locks });
+      for (let index = 0; index < 67; index += 1) {
+        const operation = await owner.beginDurableOperation({ id: `receipt-${index}`, kind: 'command', gated: true });
+        await operation.settle('not_dispatched');
+      }
+      assert.equal((await owner.diagnostics()).operations.length, 64);
+      await assert.rejects(() => owner.beginDurableOperation({ id: 'receipt-0', kind: 'command', gated: true }), /archived operation identifier/u);
+      await owner.dispose();
+      const successor = await acquire({ projectUri: f.project, lockRoot: f.locks });
+      assert.equal(successor.isOwner, true);
+      assert.equal((await successor.diagnostics()).operations.length, 64);
+      await assert.rejects(() => successor.beginDurableOperation({ id: 'receipt-0', kind: 'command', gated: true }), /archived operation identifier/u);
     } finally { await f.cleanup(); }
   });
 });
@@ -230,7 +423,7 @@ describe('project modification and validation phases', () => {
     const f = await fixture();
     let owner: ProjectExecutionOwner | undefined;
     try {
-      owner = await ProjectExecutionOwner.acquire({ projectUri: f.project, lockRoot: f.locks });
+      owner = await acquire({ projectUri: f.project, lockRoot: f.locks });
       if (!owner.isOwner && process.platform === 'win32') return;
       const resources = new ProjectResourceCoordinator(owner.projectId);
       await runProjectExecution({ owner, resources, scope: scope('a') }, async () => {
@@ -255,7 +448,7 @@ describe('project modification and validation phases', () => {
     let owner: ProjectExecutionOwner | undefined;
     const finish = deferred();
     try {
-      owner = await ProjectExecutionOwner.acquire({ projectUri: f.project, lockRoot: f.locks });
+      owner = await acquire({ projectUri: f.project, lockRoot: f.locks });
       if (!owner.isOwner && process.platform === 'win32') return;
       vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file(f.project), name: 'project' }];
       vscode.workspace.isTrusted = true;
@@ -296,6 +489,22 @@ describe('project modification and validation phases', () => {
     await assert.rejects(() => resources.acquire(scope('c')), /unknown side effects/u);
     assert.equal(resources.activeScope, undefined);
   });
+
+  it('reconciles resource isolation only after the owner journal reaches a drained generation', async () => {
+    const f = await fixture();
+    try {
+      const owner = await acquire({ projectUri: f.project, lockRoot: f.locks });
+      const resources = new ProjectResourceCoordinator(owner.projectId);
+      const active = await resources.acquire(scope('a'));
+      assert.throws(() => resources.reconcileOwnerRecovery(owner), /settled resource boundary/u);
+      active.release(); resources.blockUncertain('old-result');
+      const revision = resources.resourceRevision;
+      resources.reconcileOwnerRecovery(owner);
+      assert.ok(resources.resourceRevision > revision);
+      const next = await resources.acquire(scope('b')); next.release();
+      assert.throws(() => new ProjectResourceCoordinator('other').reconcileOwnerRecovery(owner), /settled resource boundary/u);
+    } finally { await f.cleanup(); }
+  });
 });
 
 describe('project source and logical-root admission', () => {
@@ -326,7 +535,7 @@ describe('project source and logical-root admission', () => {
     const captured: string[] = [];
     const priorFetch = globalThis.fetch;
     try {
-      owner = await ProjectExecutionOwner.acquire({ projectUri: f.project, lockRoot: f.locks });
+      owner = await acquire({ projectUri: f.project, lockRoot: f.locks });
       if (!owner.isOwner && process.platform === 'win32') return;
       globalThis.fetch = async (_url, init) => {
         captured.push(String(init?.body));

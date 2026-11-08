@@ -77,6 +77,8 @@ export interface ChatSessionStorageAdapter {
   saveWorkspace(workspaceScope: WorkspaceSessionScope, state: StoredWorkspaceSessionState): Promise<void>;
   /** Incremental shard commit. An absent selection leaves the global viewing selection untouched. */
   saveSessionChanges?(workspaceScope: WorkspaceSessionScope, state: StoredWorkspaceSessionState, preserveSelection?: boolean): Promise<void>;
+  /** New activation/session commits without reading or migrating old history. */
+  saveFreshSessionChanges?(workspaceScope: WorkspaceSessionScope, state: StoredWorkspaceSessionState): Promise<void>;
   loadSessionPage?(workspaceKey: string, sessionId: string, options?: SessionViewPageOptions): Promise<SessionViewPage | undefined>;
   setReadOnly?(readOnly: boolean): void;
   findSessionScope?(sessionId: string): Promise<WorkspaceSessionScope | undefined>;
@@ -164,6 +166,9 @@ export class ChatSessionStore {
   private workspaceLoaded = false;
   private workspaceLoadRevision = 0;
   private workspaceLoadPending = false;
+  private freshBootInitialized = false;
+  private freshBootMode = false;
+  private readonly ephemeralSessions = new Set<string>();
   /** Explicit new sessions can become usable while the previous body is loading. */
   private readonly sessionsCreatedBeforeLoad = new Set<string>();
 
@@ -195,9 +200,11 @@ export class ChatSessionStore {
     this.markSessionDirty(sessionId); await this.queuePersistence(reason, false);
   }
 
-  public async createWorkspaceScope(scope: WorkspaceSessionScope): Promise<ChatSessionStore> {
+  public async createWorkspaceScope(scope: WorkspaceSessionScope, options: { lazy?: boolean } = {}): Promise<ChatSessionStore> {
     const store = new ChatSessionStore(this.sessionStorage, this.language, { ...scope, folderUris: [...scope.folderUris] });
-    store.readOnly = this.readOnly; await store.initialize(); return store;
+    store.readOnly = this.readOnly;
+    if (options.lazy) await store.initializeFreshBoot(); else await store.initialize();
+    return store;
   }
 
   public async findSessionScope(sessionId: string): Promise<WorkspaceSessionScope | undefined> {
@@ -217,6 +224,7 @@ export class ChatSessionStore {
       folderUris: [...this.workspaceScope.folderUris] });
     scoped.sessions = [session]; scoped.sessionSummaries.set(sessionId, toSessionSummary(session, this.language));
     scoped.activeSessionIdValue = sessionId; scoped.fixedSessionId = sessionId;
+    scoped.freshBootMode = this.freshBootMode;
     scoped.approvalModeValue = session.approvalMode ?? 'ask'; scoped.readOnly = this.readOnly;
     scoped.releaseScopePin = releasePin;
     scoped.sessionCommitted = live => {
@@ -472,6 +480,45 @@ export class ChatSessionStore {
     if (!this.fixedSessionId) await this.load();
   }
 
+  /** One blank target per extension-host activation. Repeated Webview ready is
+   * deliberately idempotent. No adapter, preference, index or body read occurs. */
+  public initializeFreshBoot(): void {
+    if (this.fixedSessionId) throw new Error('Task execution scope cannot use fresh boot.');
+    if (this.freshBootInitialized) return;
+    this.freshBootInitialized = true;
+    this.freshBootMode = true;
+    this.workspaceLoadRevision += 1;
+    this.workspaceLoadPending = false;
+    this.approvalModeValue = 'ask';
+    const session = createEmptySession(this.language, this.workspaceScope, 'ask', 'normal');
+    this.sessions = [session];
+    this.sessionSummaries.clear();
+    this.dirtySessions.clear();
+    this.ephemeralSessions.add(session.id);
+    this.sessionsCreatedBeforeLoad.add(session.id);
+    this.setActiveSessionId(session.id);
+  }
+
+  public get isFreshBoot(): boolean { return this.freshBootInitialized; }
+
+  /** Explicit history entry. Metadata loading never selects/restores the old
+   * active body and cannot replace the current draft or its exact live object. */
+  public async loadHistoryMetadata(): Promise<void> {
+    const scope = this.workspaceScope;
+    const revision = this.workspaceLoadRevision;
+    let summaries: ChatSessionSummary[];
+    if (this.sessionStorage.listWorkspaceSessionSummaries) summaries = await this.sessionStorage.listWorkspaceSessionSummaries(scope.key);
+    else {
+      const stored = await this.sessionStorage.loadWorkspace(scope);
+      summaries = stored.sessionSummaries ?? stored.sessions.map(session => toSessionSummary(session, this.language));
+    }
+    if (scope.key !== this.workspaceScope.key || revision !== this.workspaceLoadRevision) return;
+    for (const summary of summaries) if (summary.workspaceKey === scope.key
+      && !this.dirtySessions.has(summary.id) && !this.getSessionById(summary.id)) this.sessionSummaries.set(summary.id, summary);
+    this.freshBootMode = false;
+    this.workspaceLoaded = true;
+  }
+
   public get activeSessionId(): string {
     return this.activeSessionIdValue;
   }
@@ -529,16 +576,17 @@ export class ChatSessionStore {
   /** Starts from known empty authority, without waiting for historical bodies.
    * The sharded adapter commits only this session and the new selection. */
   public async createFreshSession(language: KeepseekLanguage = this.language, onSaving?: (sessionId: string) => void): Promise<ChatSession> {
-    this.assertWritable();
+    if (!this.freshBootInitialized) this.assertWritable();
     if (this.fixedSessionId) throw new Error('Task execution scope cannot create a different session.');
     // Before initial loading, getActiveSession() may only be a display placeholder.
     // It must never become a dirty authority shard as a side effect of New Chat.
     this.language = language;
     const scope = this.workspaceScope;
-    const readPreferences = !this.workspaceLoaded;
+    const readPreferences = !this.freshBootInitialized && !this.workspaceLoaded;
     const modeRevision = this.approvalModeRevision;
     const session = createEmptySession(language, this.workspaceScope, this.approvalModeValue, 'normal');
     this.sessions.unshift(session);
+    if (this.freshBootInitialized) this.ephemeralSessions.add(session.id);
     if (!this.workspaceLoaded || this.workspaceLoadPending) this.sessionsCreatedBeforeLoad.add(session.id);
     this.setActiveSessionId(session.id);
     onSaving?.(session.id);
@@ -787,11 +835,15 @@ export class ChatSessionStore {
   }
 
   private async queuePersistence(reason: string, _selectionChanged: boolean): Promise<void> {
-    this.assertWritable();
     const started = performance.now();
     const incremental = !!this.sessionStorage.saveSessionChanges;
-    const dirty = incremental || !this.workspaceLoaded
+    const candidates = incremental || !this.workspaceLoaded
       ? this.sessions.filter(session => this.dirtySessions.has(session.id)) : this.sessions;
+    const dirty = candidates.filter(session => !this.ephemeralSessions.has(session.id) || session.messages.length > 0);
+    // Settings/model choices on an unused target stay in memory; do not create
+    // an empty history record, and observer drafts need no project writer.
+    if (!dirty.length) return;
+    this.assertWritable();
     for (const session of dirty) {
       session.executionTime = reconcileExecutionTime(session.executionTime, session.messages);
       this.sessionSummaries.set(session.id, toSessionSummary(session, this.language));
@@ -872,7 +924,9 @@ export class ChatSessionStore {
           const summary = next.snapshot.sessionSummaries?.find(item => item.id === saved.id);
           if (summary) { summary.title = saved.title; summary.customTitle = saved.customTitle; }
         }
-        if (this.sessionStorage.saveSessionChanges) await this.sessionStorage.saveSessionChanges(next.scope, next.snapshot, !!this.fixedSessionId || next.reason === 'task_session_create');
+        if (this.freshBootMode && this.sessionStorage.saveFreshSessionChanges) {
+          await this.sessionStorage.saveFreshSessionChanges(next.scope, next.snapshot);
+        } else if (this.sessionStorage.saveSessionChanges) await this.sessionStorage.saveSessionChanges(next.scope, next.snapshot, !!this.fixedSessionId || next.reason === 'task_session_create');
         else if (this.fixedSessionId || next.mergeWorkspace) {
           // Small legacy/test adapters have replacement semantics. Preserve all
           // unrelated sessions and the viewing selection in that fallback too.
@@ -924,6 +978,7 @@ export class ChatSessionStore {
         if (this.dirtySessions.get(id) === version) this.dirtySessions.delete(id);
       }
       for (const saved of next.snapshot.sessions) {
+        this.ephemeralSessions.delete(saved.id);
         this.residentBytes.set(saved.id, Buffer.byteLength(JSON.stringify(saved)));
         const live = this.getSessionById(saved.id); if (live) this.sessionCommitted?.(live);
       }

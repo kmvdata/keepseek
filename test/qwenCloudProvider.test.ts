@@ -94,21 +94,12 @@ describe('QwenCloud provider preset', () => {
     });
   });
 
-  it('refreshes the QwenCloud model catalog immediately after account creation', async () => {
+  it('saves QwenCloud accounts locally and leaves discovery to an explicit request', async () => {
     const store = new ModelSourceStore(vscode.Uri.file(storageRoot), {
       createId: () => 'qwen-refresh-account'
     });
-    let refreshCount = 0;
     const service = new ModelSourceService(
-      store,
-      async () => {
-        refreshCount += 1;
-        return {
-          status: 'fresh',
-          cache: { models: [{ id: 'qwen-plus' }], fetchedAt: 1 }
-        };
-      },
-      async () => ({ ok: true })
+      store
     );
 
     const result = await service.addModel({
@@ -117,8 +108,7 @@ describe('QwenCloud provider preset', () => {
       apiKey: 'qwen-key',
       baseUrl: DEFAULT_QWEN_CLOUD_BASE_URL
     });
-    assert.equal(refreshCount, 1);
-    assert.equal(result.discovery?.status, 'fresh');
+    assert.equal(result.source.modelCache, undefined);
   });
 
   it('shows QwenCloud in account management and ships the protocol logo used by model switching', async () => {

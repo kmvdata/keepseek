@@ -156,8 +156,17 @@ export function getProjectTasksScript(): string {
     function projectCardId(card) { return String(card.id || card.taskCardId || ''); }
     function projectCardIsActive(card) { return ['queued', 'preparing', 'running', 'waiting', 'settling', 'stopping'].includes(card?.state || card?.status || card?.phase); }
     function projectCanSubmit() {
-      return !!projectTasks && !projectTasks.readOnly && !projectPendingInputs.has(projectTargetId())
-        && (projectViewMode !== 'task' || !!projectCurrentCard()) && (projectCurrentCard()?.state || projectCurrentCard()?.status || projectCurrentCard()?.phase) !== 'stopping';
+      return projectTasks?.capabilities?.canSubmit === true && !projectPendingInputs.has(projectTargetId());
+    }
+
+    function projectApplyOwnerState(message) {
+      if (!projectTasks || !message.state) return;
+      var current = projectTasks.ownerState;
+      if (current && Number(message.state.revision) < Number(current.revision)) return;
+      projectTasks.ownerState = message.state;
+      projectTasks.reason = String(message.state.reason || '');
+      renderProjectTasks();
+      if (Array.isArray(message.diagnostics?.checks)) setTransientStatus(message.diagnostics.checks.join('; '), false, 'global');
     }
 
     function projectSaveLocalDrafts() {
@@ -394,7 +403,9 @@ export function getProjectTasksScript(): string {
         var saved = null; try { saved = vscode.getState ? vscode.getState() : null; } catch (_error) { /* UI preference failure does not lock input. */ }
         projectSidebarPreferences = saved?.projectTaskSidebar && typeof saved.projectTaskSidebar === 'object' ? saved.projectTaskSidebar : {};
         var preference = projectSidebarPreferences[message.projectId];
-        projectSidebarOpen = preference?.open === true;
+        // A new activation never treats a saved expansion as consent to read
+        // task/history content. A same-host Webview rebuild may restore it.
+        projectSidebarOpen = message.historyReady !== false && preference?.open === true;
         projectSidebarScope = preference?.scope === 'all' ? 'all' : 'recent';
         projectSidebarScroll = Number.isFinite(preference?.scrollTop) ? Math.max(0, preference.scrollTop) : 0;
         document.getElementById('projectTaskScope').value = projectSidebarScope;
@@ -405,16 +416,20 @@ export function getProjectTasksScript(): string {
         if (projectAnnouncementTimer) { clearTimeout(projectAnnouncementTimer); projectAnnouncementTimer = null; }
         projectSetText(document.getElementById('projectTaskAnnouncements'), '');
         projectDetailKey = ''; projectHideTooltip(); projectDeferredView = null; projectDeferredNavigation = null; projectDeferredHostState = null;
-        if (Array.isArray(saved?.projectTaskDrafts)) saved.projectTaskDrafts.forEach(function(entry) { if (Array.isArray(entry) && entry.length === 2) projectDrafts.set(entry[0], entry[1]); });
-        if (Array.isArray(saved?.projectTaskPendingInputs)) saved.projectTaskPendingInputs.forEach(function(entry) {
+        if (message.historyReady !== false && Array.isArray(saved?.projectTaskDrafts)) saved.projectTaskDrafts.forEach(function(entry) { if (Array.isArray(entry) && entry.length === 2) projectDrafts.set(entry[0], entry[1]); });
+        if (message.historyReady !== false && Array.isArray(saved?.projectTaskPendingInputs)) saved.projectTaskPendingInputs.forEach(function(entry) {
           if (Array.isArray(entry) && entry.length === 2 && entry[1]?.projectId === message.projectId) projectPendingInputs.set(entry[0], entry[1]);
         });
         projectPendingInputs.forEach(function(pending) { vscode.postMessage({ type: 'projectTaskReconcile', projectId: message.projectId, targetId: pending.targetId, requestId: pending.requestId }); });
       }
       var revision = Number(message.revision) || 0;
       if (revision && revision < (projectTasks.revision || 0)) return;
+      var acceptsOwner = !message.ownerState || !projectTasks.ownerState || Number(message.ownerState.revision) >= Number(projectTasks.ownerState.revision);
+      if (message.ownerState && acceptsOwner) projectTasks.ownerState = message.ownerState;
+      if (acceptsOwner && Object.prototype.hasOwnProperty.call(message, 'reason')) projectTasks.reason = message.reason;
       var generation = Number(message.viewGeneration) || 0;
       var acceptsView = first || generation >= projectViewGeneration;
+      if (acceptsView && acceptsOwner && message.capabilities) projectTasks.capabilities = message.capabilities;
       if (message.enabled === false) {
         var enteringLegacy = acceptsView && projectViewMode !== 'legacy';
         if (enteringLegacy && (projectCompositionActive || projectCompositionTimer)) { projectDeferredHostState = message; return; }
@@ -427,7 +442,7 @@ export function getProjectTasksScript(): string {
         if (Array.isArray(message.results)) projectTasks.results = message.results;
         if (Array.isArray(message.routerUsage)) projectTasks.routerUsage = message.routerUsage;
         if (message.timing) projectTasks.timing = message.timing;
-        if (Object.prototype.hasOwnProperty.call(message, 'readOnly')) projectTasks.readOnly = message.readOnly === true;
+        if (acceptsOwner && Object.prototype.hasOwnProperty.call(message, 'readOnly')) projectTasks.readOnly = message.readOnly === true;
         if (revision) projectTasks.revision = revision;
         if (acceptsView && projectViewMode === 'legacy') projectViewGeneration = Math.max(projectViewGeneration, generation);
         // Ordinary history remains its own view. Background task metadata cannot
@@ -444,7 +459,7 @@ export function getProjectTasksScript(): string {
       if (Array.isArray(message.results)) projectTasks.results = message.results;
       if (Array.isArray(message.routerUsage)) projectTasks.routerUsage = message.routerUsage;
       if (message.timing) projectTasks.timing = message.timing;
-      if (Object.prototype.hasOwnProperty.call(message, 'readOnly')) projectTasks.readOnly = message.readOnly === true;
+      if (acceptsOwner && Object.prototype.hasOwnProperty.call(message, 'readOnly')) projectTasks.readOnly = message.readOnly === true;
       if (revision) projectTasks.revision = revision;
       if ((projectCompositionActive || projectCompositionTimer) && !first && generation >= projectViewGeneration &&
         (generation > projectViewGeneration || Object.prototype.hasOwnProperty.call(message, 'viewTaskId') && message.viewTaskId !== projectTasks.viewTaskId)) {
@@ -654,11 +669,13 @@ export function getProjectTasksScript(): string {
       } catch (_error) { /* Optional UI preferences cannot affect execution or drafts. */ }
     }
     function projectSetSidebarOpen(open, keyboard) {
+      var wasOpen = projectSidebarOpen;
       projectSidebarOpen = !!open; projectHideTooltip();
       document.getElementById('projectTaskSidebar').classList.toggle('hidden', !projectSidebarOpen || !projectTasks);
       document.getElementById('projectSidebarToggle').setAttribute('aria-expanded', projectSidebarOpen ? 'true' : 'false');
       if (!projectSidebarOpen) document.getElementById('projectTaskMore').open = false;
       projectSaveSidebar(); if (projectSidebarOpen) renderProjectTasks();
+      if (projectSidebarOpen && !wasOpen && projectTasks) vscode.postMessage({ type: 'projectTaskOpen', projectId: projectTasks.projectId });
       if (keyboard) (projectSidebarOpen ? document.getElementById('projectSidebarClose') : document.getElementById('projectSidebarToggle')).focus();
     }
     function projectRenderDetail(card, readOnly) {
@@ -706,7 +723,9 @@ export function getProjectTasksScript(): string {
       document.getElementById('projectSidebarToggle').setAttribute('aria-expanded', projectSidebarOpen ? 'true' : 'false');
       document.getElementById('projectLatestMessages').classList.toggle('hidden', !projectTaskUiActive() || !state.hasNewerMessages);
       document.getElementById('projectOwnerNotice').classList.toggle('hidden', !readOnly);
-      ['projectNewTask', 'projectStopAll', 'projectAssociateSession'].forEach(function(id) { document.getElementById(id).disabled = readOnly; });
+      projectSetText(document.getElementById('projectOwnerReason'), projectTasks.reason || t('projectReadOnly'));
+      document.getElementById('projectNewTask').disabled = projectTasks.capabilities?.canCreateTarget === false;
+      ['projectStopAll', 'projectAssociateSession'].forEach(function(id) { document.getElementById(id).disabled = readOnly; });
       projectSyncNodes(document.getElementById('projectTaskRailList'), ordered.filter(function(card) { return projectRecentCard(card, now, true); }), projectRailNodes, true, now);
       if (projectSidebarOpen) {
         var cards = ordered.filter(function(card) { return projectSidebarScope === 'all' ? !card.archived || document.getElementById('projectShowArchived').checked || projectCardIsActive(card) : projectRecentCard(card, now, true) || document.getElementById('projectShowArchived').checked && card.archived; });
@@ -743,6 +762,7 @@ export function getProjectTasksScript(): string {
     document.getElementById('projectTaskScope')?.addEventListener('change', function() { projectSidebarScope = document.getElementById('projectTaskScope').value === 'all' ? 'all' : 'recent'; projectSaveSidebar(); renderProjectTasks(); });
     document.getElementById('projectSidebarToggle')?.addEventListener('click', function() { projectSetSidebarOpen(!projectSidebarOpen, false); });
     document.getElementById('projectSidebarClose')?.addEventListener('click', function() { projectSetSidebarOpen(false, false); });
+    document.getElementById('projectOwnerCheck')?.addEventListener('click', function() { vscode.postMessage({ type: 'checkProjectOwnership' }); });
     document.getElementById('projectTaskHistory')?.addEventListener('click', function() { projectSidebarScope = 'all'; document.getElementById('projectTaskScope').value = 'all'; projectSetSidebarOpen(true, false); });
     document.getElementById('projectAssistantView')?.addEventListener('click', function() { projectSelectView(null, 'project'); });
     document.getElementById('projectNewTask')?.addEventListener('click', function() { projectSelectView(null, 'new'); });

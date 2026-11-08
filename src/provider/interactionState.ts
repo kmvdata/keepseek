@@ -64,7 +64,7 @@ export interface InteractionFacts {
   approvalDataReady: boolean;
   /** A committed, empty local session can accept a draft before historic recovery finishes. */
   freshSession?: boolean;
-  /** Observer windows can view sessions but cannot create or execute them. */
+  /** Observers may edit/create local draft targets; execution remains fenced. */
   readOnly?: boolean;
   /** Optional detailed readiness; old callers retain the aggregate readiness contract. */
   modelReady?: boolean;
@@ -89,6 +89,8 @@ export interface InteractionSnapshot {
   operationId?: string;
   phase: InteractionPhase;
   canEdit: boolean;
+  canReadAccounts?: boolean;
+  canManageAccounts?: boolean;
   canSubmit: boolean;
   /** Source, Skill and context changes use the same readiness boundary. */
   canChangeContext: boolean;
@@ -99,6 +101,17 @@ export interface InteractionSnapshot {
   cancelOperationId?: string;
   blockingReason?: string;
   waitingReason?: InteractionWaitingReason;
+}
+
+/** Project targets accept durable mailbox input independently of a Worker's
+ * request preparation. This Host snapshot grants UI affordances only. */
+export function deriveProjectInteractionState(facts: {
+  disposed: boolean; owned: boolean; viewMode: 'legacy' | 'project' | 'new' | 'task';
+  targetPresent: boolean; stopping: boolean;
+}): { canEdit: boolean; canView: boolean; canCreateTarget: boolean; canReadAccounts: boolean; canManageAccounts: boolean; canSubmit: boolean } {
+  return { canEdit: !facts.disposed, canView: !facts.disposed, canCreateTarget: !facts.disposed,
+    canReadAccounts: !facts.disposed, canManageAccounts: !facts.disposed,
+    canSubmit: !facts.disposed && facts.owned && facts.viewMode !== 'legacy' && facts.targetPresent && !facts.stopping };
 }
 
 export interface InteractionDiagnostic {
@@ -256,7 +269,9 @@ export function deriveInteractionState(facts: InteractionFacts, operation?: {
     canSubmit: ready && !pending && !facts.failure && !facts.readOnly,
     canChangeContext: ready && !pending && !facts.failure && !facts.readOnly,
     canNavigate: facts.sessionReady && !pending,
-    canCreateSession: !executing && !facts.readOnly,
+    canCreateSession: !executing,
+    canReadAccounts: true,
+    canManageAccounts: true,
     canCancel,
     ...(canCancel ? { cancelOperationId } : {}),
     ...(waitingReason ? { waitingReason } : {}),
