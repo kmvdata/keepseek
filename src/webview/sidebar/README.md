@@ -11,7 +11,7 @@ sidebar/
 │   ├─ tooltip.ts           悬浮说明浮层
 │   └─ index.ts             拼装：轨道原样返回；overlay = 抽屉 + "\n" + tooltip
 └─ styles/                  按容器与定制组件切分的样式 fragment
-    ├─ layout.ts            .project-workspace / -main / -transcript-stage
+    ├─ layout.ts            .project-workspace / -main / -transcript-stage / -input-region
     ├─ rail.ts              .project-tasks / .project-rail-control / .project-task-lamp
     ├─ drawer.ts            .project-task-sidebar / .project-sidebar-*
     ├─ card.ts              .project-task-card / -open / -copy / -title …
@@ -34,7 +34,8 @@ sidebar/
    拼装约定：**只有第一个 fragment 以换行开头**，其余 fragment 直接从本行缩进开始；每个 fragment 以自身换行结尾；只有最后一个 fragment 带收尾缩进 `\n  `。否则 `join('')` 会在片段之间插入空行。
 3. **fragment id 唯一**：`composeWebviewFragments()` 会对空 id 或重复 id 抛错。
 4. **级联位置**：`getProjectTasksStyles()` 仍需在 `getStyles()` 中紧跟 `getInputStyles()` 之后，否则 `.project-*` 覆盖关系可能变化。
-5. **模板拼装位置**：轨道由 `template.ts` 输出在 `.project-workspace` 内、`.project-main` 之前；overlay 输出在 `.project-transcript-stage` 内、`#projectInputTarget` 之前。
+5. **模板拼装位置**：轨道由 `template.ts` 输出在 `.project-workspace` 内、`.project-main` 之前；overlay 输出在 `.project-transcript-stage` 内。
+6. **输入区层级**：`#projectInputTarget` 与 composer 由 `template.ts` 输出在 `.project-workspace` 之后的 `.project-input-region` 内，是 `.shell` 的直接子元素。内容区（含轨道与抽屉）因此止于输入区上沿，composer 横向铺满整个面板。composer 的全宽规则只写在 `sidebar/styles/layout.ts`，不要写进 `input/` fragment —— `test/inputComposition.test.ts` 的三个 sha256 是输入层未被误伤的守卫。
 
 回归护栏见 `test/sidebarStructure.test.ts`。
 

@@ -183,9 +183,11 @@ export function getTemplate(extensionInfo?: Pick<KeepseekExtensionInfo, 'version
 
         ${getProjectTasksOverlayTemplate()}
         </div>
+      </div>
+    </div>
+    <div class="project-input-region">
     <div id="projectInputTarget" class="project-input-target hidden" role="status" aria-live="polite"></div>
     ${getInputTemplate()}
-      </div>
     </div>
   </main>`;
 }

@@ -140,6 +140,7 @@ function taskSidebarGeometry() {
     header: rect('.header'), rail: rect('#projectTasks'),
     transcript: rect('#transcript'), stage: rect('.project-transcript-stage'),
     target: rect('#projectInputTarget'), input: rect('#promptInput'),
+    inputRegion: rect('.project-input-region'),
     sidebar: rect('#projectTaskSidebar'),
     scrollTop: transcript?.scrollTop,
     firstVisibleMessage: [...(transcript?.querySelectorAll('[data-message-id]') || [])]
@@ -152,7 +153,7 @@ function taskSidebarGeometry() {
 console.log(taskSidebarGeometry());
 ```
 
-1. **几何和动态输入**：把面板调为 300、380、600px；每种宽度再测低高度、空输入、多行输入、引用/Skills 芯片。正文滚到中间，分别打开/关闭浮层各 5 次，记录上面数据和截图。header/transcript/input 的 x/y/width/height、scrollTop 与可见消息锚点应保持；浮层上缘不越过正文 stage，下缘止于输入目标提示，宽度不超过剩余区，无横向溢出。窄栏预留宽度与移除旧顶部任务区释放的高度分别记录，不能只比较整个窗口大小。
+1. **几何和动态输入**：把面板调为 300、380、600px；每种宽度再测低高度、空输入、多行输入、引用/Skills 芯片。正文滚到中间，分别打开/关闭浮层各 5 次，记录上面数据和截图。header/transcript/input 的 x/y/width/height、scrollTop 与可见消息锚点应保持；浮层上缘不越过正文 stage，下缘止于输入目标提示，宽度不超过剩余区，无横向溢出。输入区层级基线：`inputRegion.width` 等于 `viewport.width`；`rail.bottom` 与 `sidebar.bottom` 均不得越过 `inputRegion.top`（误差 ≤1px）；`horizontalOverflow` 为 false。窄栏预留宽度与移除旧顶部任务区释放的高度分别记录，不能只比较整个窗口大小。
 2. **任务顺序和状态**：受控创建 A/B，再新建 C。依次令 A running→waiting→completed，B failed/cancelled/interrupted，C queued；任务相对顺序始终按首次时间。检查所有状态的颜色、图标、tooltip、waiting reason 和 stopping 结算。归档仍运行的任务必须继续显示并可停止；终态完成不得让环变 100%。超过高度时滚到最后一项，Tab 也能达到。
 3. **独立用量**：A/B 使用不同来源/窗口的受控估算，在前台只查看 B 时更新 A；两环仅接受自身快照。交错投递旧 Host/generation/segment/lane/revision，确认不倒退覆盖。新 epoch/压缩后允许占用下降；无估算显示未知，真实 0 显示 0，超限在详情保留原始值；重建显示上次记录及时间。
 4. **范围和恢复**：用受控时钟/存储数据构造 24h 前后边界、跨午夜、长期 queued/waiting、长任务刚结束、缺失活动和旧历史关联。只查看的过期终态留在原位置并标当前查看；离开后隐藏。全部/归档可访问历史；到期不切输入目标、不删除审计。标题、统计、ready、归档/恢复和重启不能续期。

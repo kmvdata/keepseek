@@ -1,6 +1,7 @@
 import './registerVscodeStub';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { getInputStyles } from '../src/webview/input/styles';
 import { getStyles } from '../src/webview/styles';
 import { getTemplate } from '../src/webview/template';
 import {
@@ -90,4 +91,39 @@ test('sidebar fragments carry unique ids so composition cannot silently drop one
   ];
   assert.ok(ids.every((id) => id.length > 0), 'no empty fragment id');
   assert.equal(new Set(ids).size, ids.length, 'fragment ids are unique');
+});
+
+test('the composer leaves the project workspace so the rail and drawer stop above it', () => {
+  const markup = getTemplate();
+  const workspace = markup.indexOf('<div class="project-workspace">');
+  const stage = markup.indexOf('class="project-transcript-stage"');
+  const drawer = markup.indexOf('id="projectTaskSidebar"');
+  const inputRegion = markup.indexOf('<div class="project-input-region">');
+  const target = markup.indexOf('id="projectInputTarget"');
+  const composer = markup.indexOf('id="composer"');
+
+  assert.ok(workspace >= 0 && stage > workspace, 'the transcript stage stays inside the project workspace');
+  assert.ok(drawer > stage && drawer < inputRegion,
+    'the drawer is anchored to the stage and can never reach past the input region');
+  assert.ok(inputRegion > stage, 'the input region is a sibling after the whole project workspace');
+  assert.ok(markup.includes('</div>\n    <div class="project-input-region">'),
+    'the project workspace closes before the input region opens');
+  assert.ok(target > inputRegion && composer > target,
+    'the target label still precedes the composer inside the input region');
+  assert.ok(composer < markup.indexOf('</main>'), 'the composer renders before the shell closes');
+});
+
+test('the full-width input region lives in the sidebar cascade instead of the input fragments', () => {
+  const sidebar = getProjectTasksStyles();
+  const input = getInputStyles();
+  const full = getStyles();
+
+  assert.match(sidebar, /\.project-input-region \{ flex: 0 0 auto; width: 100%; min-width: 0;/u);
+  assert.match(sidebar, /\.project-input-region > \.composer \{ width: 100%; min-width: 0; \}/u);
+  assert.doesNotMatch(input, /\.project-input-region/u,
+    'the input fragments stay unaware of the project shell');
+  assert.doesNotMatch(input, /\.composer \{[^}]*width:/u,
+    'the composer width is owned by the sidebar cascade');
+  assert.ok(full.indexOf('.project-input-region {') > full.indexOf('.composer {'),
+    'the width override stays after the composer base rule');
 });
