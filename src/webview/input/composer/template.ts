@@ -4,8 +4,7 @@ export const composerTemplateFragment: WebviewFragment = {
   id: 'template.composer',
   source: `
     <form id="composer" class="composer">
-      <div class="composer-input-wrap">
-        <div class="composer-input-inner">
+      <div class="composer-input-inner">
           <div id="skillsBar" class="skills-bar hidden" aria-label="Using skills">
             <span class="skills-bar-label" data-i18n="skillsUsing">Using:</span>
             <span id="skillsBarList" class="skills-bar-list"></span>

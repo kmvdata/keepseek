@@ -3,22 +3,21 @@ import type { WebviewFragment } from '../composition';
 export const composerBaseStylesFragment: WebviewFragment = {
   id: 'styles.composer.base',
   source: `
+    /* The composer form itself is the positioning anchor for the command and
+       reference menus and the drag-and-drop area, so the extra zero-box
+       wrapper is unnecessary. */
     .composer {
+      position: relative;
       background: var(--vscode-sideBar-background);
       padding: var(--keepseek-composer-padding, 0);
-    }
-
-    .composer-input-wrap {
-      position: relative;
-      padding: 0;
     }
 
     .composer-input-inner {
       display: flex;
       flex-direction: column;
       min-height: 116px;
-      border: 1px solid var(--vscode-chat-requestBorder, var(--vscode-input-border, transparent));
-      border-radius: 6px;
+      border-top: 1px solid var(--vscode-chat-requestBorder, var(--vscode-input-border, transparent));
+      border-bottom: 1px solid var(--vscode-chat-requestBorder, var(--vscode-input-border, transparent));
       overflow: visible;
       background: var(--vscode-chat-requestBackground, var(--vscode-input-background));
     }
@@ -36,14 +35,14 @@ export const composerControlsStylesFragment: WebviewFragment = {
     .composer-input-inner .rich-input {
       flex: 0 0 auto;
       min-height: 74px;
-      padding: var(--keepseek-input-padding, 4px 4px 2px);
+      padding: var(--keepseek-input-padding, 4px 0 2px);
       background: transparent;
     }
 
     .composer-input-inner .rich-input.is-empty::before {
       top: 4px;
-      left: 4px;
-      right: 4px;
+      left: 0;
+      right: 0;
     }
 
     .composer-toolbar {
@@ -53,7 +52,7 @@ export const composerControlsStylesFragment: WebviewFragment = {
       justify-content: space-between;
       gap: 8px;
       min-height: 30px;
-      padding: var(--keepseek-toolbar-padding, 0 4px 4px);
+      padding: var(--keepseek-toolbar-padding, 0 0 4px);
     }
 
     .composer-model-selection-status {
@@ -62,7 +61,7 @@ export const composerControlsStylesFragment: WebviewFragment = {
       justify-content: space-between;
       gap: 8px;
       min-width: 0;
-      margin: 0 4px 3px;
+      margin: 0 0 3px;
       padding: 4px 6px;
       border-radius: 5px;
       color: var(--vscode-descriptionForeground);

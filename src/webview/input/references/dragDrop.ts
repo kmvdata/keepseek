@@ -4,7 +4,7 @@ export const dragDropDeclarationFragment: WebviewFragment = {
   id: 'references.drag-drop.declaration',
   source: `
       var dropZone = promptInput.closest('.composer-input-inner') || promptInput;
-      var dropArea = promptInput.closest('.composer-input-wrap') || dropZone;
+      var dropArea = promptInput.closest('.composer') || dropZone;
       var dragDepth = 0;
 `.slice(1)
 };

@@ -82,7 +82,7 @@ export const skillsBarStylesFragment: WebviewFragment = {
       align-items: center;
       gap: 5px;
       min-height: 28px;
-      padding: 4px 4px 0;
+      padding: 4px 0 0;
       color: var(--vscode-descriptionForeground);
       font-size: 11px;
       line-height: 1.25;
