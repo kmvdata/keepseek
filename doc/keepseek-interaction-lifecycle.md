@@ -117,7 +117,7 @@ Webview → Host 消息唯一入口仍是 `provider/webviewMessages.ts`；Host �
 
 在 session 尚未加载就绪或尚未首次发送的本地就绪空会话中，自动配置/信任刷新及 AGENTS/Skill watcher 只标记来源 dirty，不启动扫描或取得前台 owner；不能先对占位会话取得恢复锁而阻止新建。已选择附件发生变化时按 URI 有界去重保留待刷新项，忽略未附加文件；首次发送准备上下文后刷新这些附件，再构建真实输入。切换目标清理该延迟集合，不能把另一会话的附件带入请求。
 
-用户明确请求空会话的 Skills 清单时，可读取共享配置、项目指令来源和 Skill 目录；不激活或加载 Skill 提示词正文，不构建当前请求上下文，不取得输入 owner，输入仍就绪。Host 在读取后核验 session/generation，`SkillStore.refresh()` 最终发布前也通过可选 `isCurrent` 守卫：A 的目录发现期间切到 B 后，A 的结果不能装入 B；有效的不可变发现缓存可保留。当前目标的目录读取失败只显示警告，不写入上下文阻塞错误，也不影响之后首次发送的必要准备。
+用户明确请求空会话的 Skills 清单时，可读取共享配置、项目指令来源和 Skill 目录；不激活或加载 Skill 提示词正文，不构建当前请求上下文，不取得输入 owner，输入仍就绪。已有首次发送或其它 task/action owner 时直接忽略清单请求，也不将来源置 dirty。Host 在读取后核验 session/generation、空会话标记及 owner，`SkillStore.refresh()` 最终发布前也通过可选 `isCurrent` 守卫：A 的目录发现期间切到 B 后，A 的结果不能装入 B；目录晚于首次发送完成读取时，也不能进入清单发布、改变选择版本或打断 Skill 正文准备。有效的不可变发现缓存可保留。当前目标的目录读取失败只显示警告，不写入上下文阻塞错误，也不影响之后首次发送的必要准备。
 
 缓存与 UI 身份不进入 Provider 静态 system、旧 user、工具 schema 或 replay。未变化的 `contextInstructions` 原样复用；真实来源变化按现有受控边界生效。
 

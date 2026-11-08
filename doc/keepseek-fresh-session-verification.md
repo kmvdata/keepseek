@@ -1,6 +1,8 @@
 # 新建会话立即就绪：回归与现场验收
 
-首轮基线为 `276eb3f9053410a4b497faa5c83d7398df80f279`；本次续修基线为已包含首轮修复的 `ddd6f42a489f5517199ce57938fcafa4ea991bfb`，`package.json` 仍为 0.5.3。目标是新建以及恢复的普通空会话在自身必要保存/正文加载后立即可编辑，不被旧历史或空会话的自动维护锁回加载。行为合同见 [交互生命周期](keepseek-interaction-lifecycle.md#新建空会话)。本次续修保留在工作树，不提升版本。
+首轮基线为 `276eb3f9053410a4b497faa5c83d7398df80f279`；本次续修基线为已包含首轮修复的 `ddd6f42a489f5517199ce57938fcafa4ea991bfb`，`package.json` 仍为 0.5.3。目标是新建以及恢复的普通空会话在自身必要保存/正文加载后立即可编辑，不被旧历史或空会话的自动维护锁回加载。行为合同见 [交互生命周期](keepseek-interaction-lifecycle.md#新建空会话)。
+
+续修期间检测到外部提交 `758f755d1c3bbb13755ca55e2133d809315477e7`，随后现场 HEAD 为 `96e4eb7c63a6a3da567771ffe67a0a31ce120122`，已包含主体及首次发送目录竞态保护；本次代理未执行 Git 提交。这次文档补充留在工作树，最终状态以交付时 Git 检查为准；没有提升版本或发布。
 
 ## 实现与兼容
 
@@ -9,7 +11,7 @@
 - 新会话本地就绪允许编辑和接收发送准备；首次发送先取得 owner，完成真实安全存储、模型和自身上下文准备，再按原耐久 ACK 合同接收正文。失败保留草稿；旧批准、permit 和执行队列不复活。
 - 启动恢复/自动建立的普通空会话，无消息且无 pending approval/truncation 时也采用本地就绪。恢复 UUID 的首次发送仍加载自己的操作记录；仅本次显式新建 UUID 可跳过旧记录恢复。loaded observer 可空闲查看、编辑本地草稿，保持不能执行；其轻量状态先于项目助手后续初始化发布。
 - 自动配置/信任刷新、AGENTS/Skill watcher 在 session 未就绪或空会话首次发送前只标记来源 dirty，不扫描上下文或先锁住占位会话。已选附件的变化 URI 去重留存，首次发送前刷新；未附加文件不读，切换目标时清理。
-- 空会话中明确请求 Skills 清单可读取共享配置、项目指令来源和 Skill 目录；不激活/加载 Skill 提示词正文，不构建当前请求上下文，不占输入 owner。Host 和 `SkillStore.refresh()` 最终发布前的 `isCurrent` 守卫共同拒绝跨目标结果，A 发现期间切到 B 后不会把 A 目录装入 B；不可变发现缓存可保留。目录失败仅提示警告，不制造上下文阻塞错误。
+- 空会话中明确请求 Skills 清单可读取共享配置、项目指令来源和 Skill 目录；不激活/加载 Skill 提示词正文，不构建当前请求上下文，不占输入 owner。已有首次发送或其它 task/action owner 时忽略清单请求且不 dirty 来源；已发起目录若迟于首次发送，Host 的空会话/owner 检查丢弃它，不进入清单刷新并打断 Skill 正文准备。Host 和 `SkillStore.refresh()` 最终发布前的 `isCurrent` 守卫也共同拒绝跨目标结果，A 发现期间切到 B 后不会把 A 目录装入 B；不可变发现缓存可保留。目录失败仅提示警告，不制造上下文阻塞错误。
 - 普通历史校验/元数据 flush 无截断 journal 时不占前台 owner；真实 pending truncation 仍是阻塞提交的耐久操作。并发恢复按 session 合并，不能让另一会话的 Promise 代表当前目标已恢复。
 - 旧加载/重载完成时保留新会话原内存对象及其消息、脏 revision 和选择；旧初始化错误、上下文结果和项目助手初始化不重定向当前普通会话。
 - V2 分片与 workspace 索引沿用现有事务合并；新建保存前只读小型索引继承已存 ask/delegate 偏好，较新的明确模式选择优先，不打开旧活动正文。V1 旧内联数据沿现有迁移并与并发新建串行协调，不用局部新列表覆盖旧历史。没有新增持久化字段或 schema/request protocol 版本。
@@ -19,17 +21,22 @@
 
 使用临时存储、deferred 屏障与受控发送替身，不调用付费 Provider。测试源纳入默认 runner。首轮记录为 `sessionNavigation` 33/33、`chatSessionStore` 27/27、`interactionState`/`inputComposition` 合计 29/29，以及 compile/lint/build:test 退出 0；这些是首轮快照，不能替代本次续修的最终检查。
 
+续修的一次完整 `compile → lint → build:test → test → diff --check` 流水线已退出 0，测试耗时 `739280.862371ms`：1537 项，1536 通过、0 失败、1 跳过。唯一跳过是 sandbox 不允许本地 fault server 监听端口。日志当时写入 `/tmp/keepseek-fresh-final-ddd6f42-20261108.log`。该次全量加载的是最终目录读取/启动早期守卫之前的测试构建（`sessionNavigation` 41 项），不覆盖末尾目录与同目标首次发送竞态补丁。
+
+最终 `96e4eb7` 源码重新执行 compile、lint、build:test，均退出 0。重新构建后的 `sessionNavigation` 46/46 通过，退出 0，耗时 `42187.26ms`；另以官方 Node runner 执行 `chatSessionStore`、`interactionState`、`inputComposition`、`startupPerformance`、`skillDiscovery`、`skillActivationResolver`、`skillReference`、`currentRunContext` 八模块，122/122 通过、0 跳过，退出 0，耗时 `30979.341513ms`，日志为 `/tmp/keepseek-fresh-supplementary-96e4eb7-20261108.log`。这些补充回归覆盖末尾保护，与前述全量快照分别报告；并行样本的执行耗时不代表产品性能收益。
+
 | 入口 | 保护行为 | 本轮结果 |
 | --- | --- | --- |
-| `sessionNavigation` | 新建/恢复空会话就绪；自动维护不抢 owner；清单显式读取与迟到/失败；附件延迟刷新；各目标恢复与真实截断屏障；旧初始化、ACK、历史导航和运行互斥 | 本次续修待最终结果 |
-| `chatSessionStore` | 新建/加载合并；V1/V2 与 Memento 导入不覆盖新选择/模式；只核验严格更新同 ID 冲突；只读/Worker scope 拒绝新建 | 本次续修待最终结果 |
-| `interactionState`、`inputComposition` | 独立新建能力；恢复空会话输入；已加载 observer 空闲但不可执行；pending ACK 不能抢目标 | 本次续修待最终结果 |
-| `startupPerformance` | 已有对话的设置可用不等待项目上下文/完整启动；空会话延迟准备另由 `sessionNavigation` 覆盖 | 本次续修待最终结果 |
-| `bun run compile` | TypeScript 生产构建 | 本次续修待最终结果 |
-| `bun run lint` | 默认静态检查 | 本次续修待最终结果 |
-| `bun run build:test` | 默认测试构建 | 本次续修待最终结果 |
-| `bun run test`、`git diff --check` | 默认行为回归与补丁格式 | 本次续修待最终结果 |
-| `bun run package:market` | 市场包构建与依赖校验；不等于发布或安装 | 本次续修待执行结果 |
+| `sessionNavigation` | 新建/恢复空会话就绪；自动维护不抢 owner；清单显式读取与迟到/失败；附件延迟刷新；各目标恢复与真实截断屏障；旧初始化、ACK、历史导航和运行互斥 | 最终构建 46/46，通过，退出 0 |
+| `chatSessionStore` | 新建/加载合并；V1/V2 与 Memento 导入不覆盖新选择/模式；只核验严格更新同 ID 冲突；只读/Worker scope 拒绝新建 | 30/30 通过，包含在八模块 122 项中 |
+| `interactionState`、`inputComposition` | 独立新建能力；恢复空会话输入；已加载 observer 空闲但不可执行；pending ACK 不能抢目标 | 合计 30/30 通过，包含在八模块 122 项中 |
+| `startupPerformance` | 已有对话的设置可用不等待项目上下文/完整启动；空会话延迟准备另由 `sessionNavigation` 覆盖 | 19/19 通过，包含在八模块 122 项中 |
+| `bun run compile` | TypeScript 生产构建 | 最终源码退出 0 |
+| `bun run lint` | 默认静态检查 | 最终源码退出 0 |
+| `bun run build:test` | 默认测试构建 | 最终源码退出 0 |
+| `bun run test` | 默认行为回归 | 上述快照 1537 项：1536 pass、0 fail、1 环境 skip；末尾保护由重新构建后的补充回归通过 |
+| `git diff --check` | 补丁格式 | 上述全量流水线及当前文档检查均退出 0 |
+| `bun run package:market` | 市场包构建与依赖校验；不等于发布或安装 | 已退出 0，886 entries 校验成功，产物 `keepseek-0.5.3.vsix`；文档包含在包内，以文档收尾后生成的同名包为交付物 |
 
 受控发送只证明准备与请求归属边界，不证明真实 Provider 成功、缓存命中或费用改善。此前任务侧栏的原生截图/冒烟不是本轮新建路径的现场证据。
 
@@ -53,7 +60,7 @@
 5. 普通新建与窄栏“新任务 +”分别验收：前者是空白普通会话，后者仍是既有 Worker 新任务；项目助手入口仍打开 Router。新普通会话不继承旧任务 card/session/root，后台任务与原审批/Apply/Discard 目标不受影响。
 6. 主任务实际运行时点击新建应受原互斥保护；owner/observer 双窗口中 observer 保持只读。检查 pending ACK、中文 IME、引用/@/Skills 草稿及设置入口，确认新建能力不绕过已有输入与操作边界。
 7. 关闭重开及重启后核对新会话已存、旧会话仍可查看，V1/V2 历史未丢；重启仅恢复说明，不恢复批准/permit/执行队列。真实模型与副作用测试另行使用受控 transport/临时工程，不为取得证据调用付费模型。
-8. 分别恢复已存空会话与首次自动建立空会话；暂停模型/安全初始化时确认正文加载后即可编辑、没有上下文加载提示，首次发送仍等待自身操作恢复与真实准备。加载完成前和空输入就绪后分别修改测试 AGENTS/Skill 或触发配置/信任刷新，不能取得阻止新建的占位恢复锁；已选择附件的改动仅在首次受控发送前刷新。明确打开 Skills 清单时允许读取共享来源与目录，输入仍就绪；注入目录失败或在 A 的目录发现期间新建 B 后释放迟到目录，不锁回输入，也不把 A 的目录装入 B。
+8. 分别恢复已存空会话与首次自动建立空会话；暂停模型/安全初始化时确认正文加载后即可编辑、没有上下文加载提示，首次发送仍等待自身操作恢复与真实准备。加载完成前和空输入就绪后分别修改测试 AGENTS/Skill 或触发配置/信任刷新，不能取得阻止新建的占位恢复锁；已选择附件的改动仅在首次受控发送前刷新。明确打开 Skills 清单时允许读取共享来源与目录，输入仍就绪；注入目录失败或在 A 的目录发现期间新建 B 后释放迟到目录，不锁回输入，也不把 A 的目录装入 B。再暂停目录读取并开始首次受控发送，随后释放目录或再次请求清单，不能 dirty 当前来源、改变清单选择版本或打断 Skill 正文准备。
 9. 对无 journal 的历史校验暂停元数据 flush，确认它不占前台操作；再用临时 fixture 注入真实 pending truncation，完成耐久恢复前不能发送。导入旧 Memento fixture 后，新选择/审批模式与无关会话字节保持不变，仅严格更新的同 ID 冲突走核验后的导入。
 
 保存与旧 V1 首次分片迁移所需真实磁盘 I/O 仍是新建的必要屏障；旧 V1 导入可能读取并保存其内联历史，以免新索引覆盖旧数据。故障应明确报错，不能用假就绪掩盖。历史选择仍等待其真实加载与恢复，本次没有取消这条保护。
