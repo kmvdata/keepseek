@@ -103,6 +103,7 @@ export class ProjectAssistantHost {
   private readonly taskPins = new Map<string, () => void>();
   private projectStore?: ChatSessionStore;
   private readonly sessionStores = new Map<string, Promise<ChatSessionStore>>();
+  private readonly scopedStores = new Set<ChatSessionStore>();
   private observerWatcher?: FSWatcher;
   private observerRefresh?: Promise<void>;
   private readonly storageBase: vscode.Uri;
@@ -135,6 +136,7 @@ export class ProjectAssistantHost {
       allowQueuedFollowups: router,
       settleFailedInputs: router,
       assertExecutionOwner: () => options.owner.verify(),
+      assertStorageWriter: () => options.owner.verifyStorageWriter(),
       createSession: async (snapshot, sessionId) => {
         const store = await this.storeForSession(sessionId);
         await store.loadHistoryMetadata();
@@ -167,9 +169,9 @@ export class ProjectAssistantHost {
   }
 
   private async loadHistory(): Promise<void> {
-    this.projectStore = await this.options.sessionStore.createWorkspaceScope({ key: `project:${this.options.owner.projectId}`,
+    this.projectStore = this.trackStorage(await this.options.sessionStore.createWorkspaceScope({ key: `project:${this.options.owner.projectId}`,
       name: 'KeepSeek', folderUris: [isAbsolute(this.options.owner.canonicalRoot)
-        ? vscode.Uri.file(this.options.owner.canonicalRoot).toString() : this.options.owner.canonicalRoot] }, { lazy: true });
+        ? vscode.Uri.file(this.options.owner.canonicalRoot).toString() : this.options.owner.canonicalRoot] }, { lazy: true }));
     await Promise.all([this.tasks.initialize({ summariesOnly: true, readOnly: !this.options.owner.isOwner }),
       this.routerTasks.initialize({ summariesOnly: true, readOnly: !this.options.owner.isOwner })]);
     await this.loadContextUsage();
@@ -212,6 +214,7 @@ export class ProjectAssistantHost {
     // A read-only window can inspect card summaries and finite pages. It must
     // not hydrate all execution mailboxes just to reject a denied mutation.
     await this.options.owner.verify();
+    this.synchronizeStorageWriters();
     if (this.executionLoaded && this.executionOwner === this.options.owner.isOwner) return;
     return this.executionLoading ??= (async () => {
       const owned = this.options.owner.isOwner;
@@ -222,7 +225,28 @@ export class ProjectAssistantHost {
 
   get viewingTask(): boolean { return this.viewMode !== 'legacy'; }
   get selectedTaskId(): string | null { return this.viewTaskId; }
-  publishOwnershipChanged(): void { this.publish(); }
+  publishOwnershipChanged(): void { this.synchronizeStorageWriters(); this.publish(); }
+
+  /** Scoped stores copy their initial read-only flag. Retain each scope and
+   * synchronize it with the current fenced writer before any new dispatch;
+   * settlement remains writable when only execution is quarantined. */
+  private synchronizeStorageWriters(): void {
+    const readOnly = !this.options.owner.canWriteStorage;
+    this.options.sessionStore.setReadOnly(readOnly);
+    this.projectStore?.setReadOnly(readOnly);
+    for (const store of this.scopedStores) store.setReadOnly(readOnly);
+  }
+  private trackStorage(store: ChatSessionStore): ChatSessionStore {
+    if (this.disposed) {
+      // An old view lookup may resolve during root shutdown. It cannot revoke
+      // a shared store that another admitted runtime is still settling.
+      if (store !== this.options.sessionStore && !this.scopedStores.has(store)) store.setReadOnly(true);
+      return store;
+    }
+    store.setReadOnly(!this.options.owner.canWriteStorage);
+    this.scopedStores.add(store);
+    return store;
+  }
   isSourceInUse(sourceId: string): boolean {
     return [...this.tasks.list(), ...this.routerTasks.list()].some(card => ACTIVE.has(card.state) && card.snapshot.sourceId === sourceId);
   }
@@ -501,7 +525,10 @@ export class ProjectAssistantHost {
         await this.drainingWorkers.get(card.taskCardId);
         const targetStore = await this.storeForSession(card.sessionId);
         await targetStore.loadHistoryMetadata();
+        if (this.disposed) throw new Error('Project task host is closing. / 项目任务宿主正在关闭。');
         const store = await targetStore.createSessionScope(card.sessionId);
+        if (this.disposed) { store.disposeSessionScope(); throw new Error('Project task host is closing. / 项目任务宿主正在关闭。'); }
+        this.trackStorage(store);
         const runtimeId = randomUUID();
         this.contextUsage.bindWorker(card.taskCardId, runtimeId);
         return new KeepseekChatViewProvider(this.options.extensionUri, store, this.options.storageUri, this.options.skillState,
@@ -758,9 +785,9 @@ export class ProjectAssistantHost {
     if (!store) {
       store = (async () => {
         const scope = await this.options.sessionStore.findSessionScope(sessionId);
-        if (!scope || scope.key === this.projectStore?.workspaceKey) return this.projectStore!;
-        if (scope.key === this.options.sessionStore.workspaceKey) return this.options.sessionStore;
-        return this.options.sessionStore.createWorkspaceScope(scope, { lazy: true });
+        if (!scope || scope.key === this.projectStore?.workspaceKey) return this.trackStorage(this.projectStore!);
+        if (scope.key === this.options.sessionStore.workspaceKey) return this.trackStorage(this.options.sessionStore);
+        return this.trackStorage(await this.options.sessionStore.createWorkspaceScope(scope, { lazy: true }));
       })();
       this.sessionStores.set(sessionId, store);
     }

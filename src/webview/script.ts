@@ -621,6 +621,10 @@ export function getScript(): string {
     let backgroundRunDialogOpen = false;
     let dismissedBackgroundRunId = '';
     let sessionMenuOpen = false;
+    let sessionHistoryRequestSequence = 0;
+    let sessionHistoryRequestId = '';
+    let sessionHistoryLoading = false;
+    let sessionHistoryError = '';
     let sessionMenuRenderKey = '';
     let sessionMultiSelectMode = false;
     let sessionRangeDays = 1;
@@ -1410,6 +1414,12 @@ export function getScript(): string {
 
     function handleKeepseekHostMessage(event) {
       var message = event.data;
+      if (message.type === 'sessionHistoryResult') {
+        if (message.requestId !== sessionHistoryRequestId) return;
+        sessionHistoryLoading = message.status === 'loading';
+        sessionHistoryError = message.status === 'failed' ? String(message.reason || t('sessionLoadError')) : '';
+        renderSessionControls(); return;
+      }
       if (message.type === 'projectTasksState') {
         if (message.viewMode && message.viewMode !== 'legacy') state.historyPreview = null;
         projectApplyState(message); renderHistoryPreview(); return;
@@ -2159,7 +2169,9 @@ export function getScript(): string {
       selectedSessionIds.clear();
       editingSessionTitleId = '';
       sessionMenuOpen = true;
-      vscode.postMessage({ type: 'loadSessionHistory' });
+      sessionHistoryLoading = true; sessionHistoryError = '';
+      sessionHistoryRequestId = 'history-' + (++sessionHistoryRequestSequence);
+      vscode.postMessage({ type: 'loadSessionHistory', requestId: sessionHistoryRequestId });
       renderSessionControls();
       vscode.postMessage({ type: 'listOtherWorkspaces' });
     }
@@ -2174,7 +2186,7 @@ export function getScript(): string {
     }
 
     function getSessionMenuRenderKey(sessions) {
-      return JSON.stringify([getLanguage(), state.activeSessionId, activeWorkspaceTab,
+      return JSON.stringify([getLanguage(), state.activeSessionId, activeWorkspaceTab, sessionHistoryLoading, sessionHistoryError,
         sessionMultiSelectMode, sessionRangeDays, sessionFavoritesOnly, Array.from(selectedSessionIds),
         editingSessionTitleId, sessions, otherWorkspaces, otherWorkspacesError,
         otherWorkspaceSessionErrors[activeWorkspaceTab], hasOtherWorkspaceSessionsCache(activeWorkspaceTab)]);
@@ -2286,15 +2298,15 @@ export function getScript(): string {
         sessionMenu.append(bulk);
       }
 
-      if (activeOtherWorkspaceError) {
+      if (activeOtherWorkspaceError || currentTab && sessionHistoryError) {
         var loadError = document.createElement('div');
         loadError.className = 'session-menu-empty session-menu-error';
-        loadError.textContent = t('sessionLoadError') + ': ' + activeOtherWorkspaceError;
+        loadError.textContent = t('sessionLoadError') + ': ' + (activeOtherWorkspaceError || sessionHistoryError);
         sessionMenu.append(loadError);
         return;
       }
 
-      if (activeOtherWorkspaceLoading) {
+      if (activeOtherWorkspaceLoading || currentTab && sessionHistoryLoading) {
         var loading = document.createElement('div');
         loading.className = 'session-menu-empty';
         loading.textContent = t('loading') + '...';

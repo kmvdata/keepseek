@@ -1,0 +1,47 @@
+{
+  "environment": {
+    "node": "v24.15.0",
+    "platform": "darwin",
+    "ownership": "controlled test adapter; native exclusion is tested separately"
+  },
+  "fixtureSessions": 120,
+  "fixtureMessages": 3600,
+  "samples": [
+    {
+      "activateToRegisteredMs": 16.280414000000064,
+      "activateToReadyMs": 52.57928400000003,
+      "activateToAccountsMs": 117.11434700000007,
+      "oldReadCount": 0,
+      "oldReadBytes": 0,
+      "migrations": 0,
+      "workers": 0,
+      "remoteRequests": 0
+    }
+  ],
+  "baseline": {
+    "kind": "previous activation storage initialize path; not full native activation",
+    "storageInitializeMs": 4613.418602999998,
+    "oldReadCount": 5,
+    "oldReadAttempts": 11,
+    "oldReadBytes": 2120424,
+    "selectedMessages": 30,
+    "migrations": 1
+  },
+  "scope": "Controlled Node activation/Host/DOM/temporary-filesystem sample; baseline is the former storage initialize path, not native full startup",
+  "defaultHistoricalReadAttempts": 0,
+  "newSendAndCancelRetryOldHistoricalReadAttempts": 0,
+  "requestEvidence": {
+    "firstSend": {
+      "mainRequests": 1,
+      "persistedBytesBeforeAcceptedAndRequest": true
+    },
+    "cancelDuringReceipt": {
+      "requests": 0,
+      "draftRetained": true
+    },
+    "explicitRetry": {
+      "mainRequests": 1,
+      "userRows": 1
+    }
+  }
+}

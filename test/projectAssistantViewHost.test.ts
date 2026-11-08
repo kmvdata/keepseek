@@ -1,5 +1,6 @@
 import './registerVscodeStub';
 import assert from 'node:assert/strict';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,6 +18,7 @@ import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvid
 import { taskUsageFingerprint, taskUsageLaneFingerprint } from '../src/tasks/taskUsageSnapshot';
 import type { TaskContextUsageOrigin } from '../src/shared/types';
 import type { ProjectWorkerBinding } from '../src/provider/projectAssistantHost';
+import { ProjectTaskService } from '../src/tasks/projectTasks';
 
 async function fixture(t: TestContext) {
   const root = await mkdtemp(join(tmpdir(), 'keepseek-project-view-host-'));
@@ -243,6 +245,121 @@ test('usage updates coalesce independently; failed metadata save preserves durab
     vscode.workspace.fs.rename = previousRename;
     ChatSessionStore.prototype.loadSessionById = previousLoad;
     globalThis.fetch = previousFetch;
+  }
+});
+
+test('unknown command blocks new dispatch but fenced shutdown still commits task result and interruption audit', async t => {
+  const f = await fixture(t);
+  const previousExecute = KeepseekChatViewProvider.prototype.executeProjectInput;
+  let child: ChildProcess | undefined;
+  let dispatched = 0, started!: () => void;
+  const unknown = new Promise<void>(resolve => { started = resolve; });
+  KeepseekChatViewProvider.prototype.executeProjectInput = async function(context) {
+    await context.prepareInput(context.input.content, context.input.inputId);
+    await context.incorporated(context.input.inputId);
+    const operation = await f.options.owner.beginDurableOperation({ id: 'controlled-unsettled-command', kind: 'command' });
+    child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      cwd: f.options.owner.canonicalRoot, detached: process.platform !== 'win32', stdio: 'ignore'
+    });
+    await new Promise<void>((resolve, reject) => { child!.once('spawn', resolve); child!.once('error', reject); });
+    dispatched++;
+    await operation.dispatched({ pid: child.pid, processGroup: process.platform === 'win32' ? undefined : child.pid });
+    await operation.settle('result_unknown');
+    started();
+    if (!context.signal.aborted) await new Promise<void>(resolve => context.signal.addEventListener('abort', () => resolve(), { once: true }));
+    return { result: 'Controlled command outcome remains unknown; no replay is authorized.', usedMs: 17, usageIncomplete: true };
+  };
+  try {
+    await f.host.handleMessage({ type: 'projectTaskCreate', projectId: f.options.owner.projectId,
+      requestId: 'unknown-command-task', prompt: 'Controlled command fixture', draftRevision: 1,
+      targetId: '$new', sourceId: 'test-source', modelId: 'test-model' });
+    await Promise.race([unknown, f.host.tasks.whenIdle().then(() => { throw new Error('Controlled command did not reach the unknown-state barrier'); })]);
+    assert.equal(f.options.owner.isOwner, false);
+    assert.equal(f.options.owner.canWriteStorage, true, 'the same kernel-fenced host may still save its admitted result');
+    await f.host.handleMessage({ type: 'projectTaskCreate', projectId: f.options.owner.projectId,
+      requestId: 'denied-after-unknown', prompt: 'Must remain a draft', draftRevision: 2,
+      targetId: '$new', sourceId: 'test-source', modelId: 'test-model' });
+    assert.equal(f.posts.find(event => event.type === 'projectTaskSubmissionResult' && event.requestId === 'denied-after-unknown')?.status, 'failed');
+    assert.equal(dispatched, 1);
+    const card = f.host.tasks.list()[0];
+    const shutdown = f.host.dispose();
+    assert.equal(f.host.dispose(), shutdown, 'shutdown retains one awaited result');
+    await shutdown;
+    assert.equal(f.host.tasks.activeCount, 0);
+    assert.equal(f.host.tasks.get(card.taskCardId)?.state, 'interrupted');
+    assert.equal(f.host.tasks.get(card.taskCardId)?.usedMs, 17);
+    assert.equal(f.host.tasks.inputs(card.taskCardId)[0].state, 'incorporated', 'unknown side effects retain recovery evidence');
+    assert.match(f.host.tasks.events()[0].content, /no replay is authorized/);
+    const registryUri = (f.host.tasks as unknown as { uri: vscode.Uri }).uri;
+    const restored = new ProjectTaskService({ projectId: f.options.owner.projectId,
+      storageUri: vscode.Uri.file(join(registryUri.fsPath, '..')) as never,
+      createSession: async () => { throw new Error('Audit restore cannot create a session'); },
+      driverFactory: () => { throw new Error('Audit restore cannot dispatch a driver'); } });
+    await restored.initialize({ readOnly: true });
+    assert.equal(restored.get(card.taskCardId)?.state, 'interrupted');
+    assert.equal(restored.get(card.taskCardId)?.usedMs, 17);
+    assert.equal(restored.events()[0].content, f.host.tasks.events()[0].content);
+    await restored.dispose();
+    assert.equal(dispatched, 1, 'durable audit recovery never replays the unknown command');
+    const diagnosis = await f.options.owner.diagnostics();
+    assert.equal(diagnosis.operations.find(operation => operation.id === 'controlled-unsettled-command')?.state, 'result_unknown');
+    assert.equal(f.options.owner.isOwner, false);
+  } finally {
+    KeepseekChatViewProvider.prototype.executeProjectInput = previousExecute;
+    if (child && child.exitCode === null && child.signalCode === null) {
+      const exited = new Promise<void>(resolve => child!.once('exit', () => resolve()));
+      child.kill(); await exited;
+    }
+  }
+});
+
+test('observer summary scopes become writable only after promotion and can execute a new independent task', async t => {
+  const f = await fixture(t);
+  await f.host.handleMessage({ type: 'projectTaskAssociate', projectId: f.options.owner.projectId, sessionId: f.session.id });
+  const oldCard = f.host.tasks.list()[0];
+  const root = f.options.owner.canonicalRoot;
+  const observerOwner = await ProjectExecutionOwner.acquire({ projectUri: root, lockRoot: join(root, 'locks') });
+  assert.equal(observerOwner.isOwner, false);
+  const observerStorage = new GlobalSessionStorage(f.options.storageUri);
+  observerStorage.setReadOnly(true);
+  const observerStore = new ChatSessionStore(observerStorage, 'en', { key: f.store.workspaceKey, name: 'observer', folderUris: [vscode.Uri.file(root).toString()] });
+  observerStore.setReadOnly(true);
+  await observerStore.initializeFreshBoot();
+  const posts: Array<Record<string, any>> = [];
+  const observer = new ProjectAssistantHost({ ...f.options, owner: observerOwner, sessionStore: observerStore,
+    resources: new ProjectResourceCoordinator(observerOwner.projectId), windowId: 'promoted-observer', publish: event => posts.push(event as Record<string, any>) });
+  const previousExecute = KeepseekChatViewProvider.prototype.executeProjectInput;
+  let executions = 0;
+  KeepseekChatViewProvider.prototype.executeProjectInput = async function(context) {
+    executions++;
+    await context.prepareInput(context.input.content, context.input.inputId);
+    await context.incorporated(context.input.inputId);
+    return { result: 'New task completed after promotion' };
+  };
+  try {
+    await observer.initialize();
+    await observer.handleMessage({ type: 'projectTaskOpen', projectId: observerOwner.projectId });
+    await observer.handleMessage({ type: 'projectTaskView', projectId: observerOwner.projectId, taskCardId: oldCard.taskCardId, mode: 'task', viewGeneration: 3 });
+    assert.equal(executions, 0, 'viewing the old task remains a pure page read');
+    assert.equal((observer as unknown as { workers: Map<string, unknown> }).workers.size, 0);
+    await f.host.dispose(); await f.options.owner.dispose();
+    await observerOwner.retryAcquire();
+    assert.equal(observerOwner.isOwner, true);
+    observerStorage.setReadOnly(!observerOwner.canWriteStorage); // Root activation synchronizes the shared adapter.
+    observer.publishOwnershipChanged();
+    await observer.handleMessage({ type: 'projectTaskCreate', projectId: observerOwner.projectId,
+      requestId: 'promoted-new-task', prompt: 'Fresh independent task', draftRevision: 1,
+      targetId: '$new', sourceId: 'test-source', modelId: 'test-model' });
+    await observer.tasks.whenIdle();
+    assert.equal(posts.find(event => event.type === 'projectTaskSubmissionResult' && event.requestId === 'promoted-new-task')?.status, 'accepted');
+    const created = observer.tasks.list().find(card => card.taskCardId !== oldCard.taskCardId)!;
+    assert.ok(created);
+    assert.equal(created.state, 'completed');
+    assert.equal(executions, 1);
+    assert.equal(JSON.stringify(f.store.getSessionById(f.session.id)), f.before, 'promotion never executes or rewrites the viewed old task');
+  } finally {
+    KeepseekChatViewProvider.prototype.executeProjectInput = previousExecute;
+    await observer.dispose(); await observerStorage.flush(); await observerOwner.dispose();
   }
 });
 

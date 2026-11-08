@@ -162,6 +162,10 @@ export interface ProjectTaskServiceOptions {
   driverFactory(card: Readonly<ProjectTaskCard>): TaskExecutionDriver;
   /** Enforced before every mutation/admission, including old execution entry points. */
   assertExecutionOwner?(): Promise<void> | void;
+  /** Narrow result/audit persistence fence for an already admitted runtime.
+   * Unknown side effects may block execution while this writer still owns
+   * the process-lifetime mutex. This capability never admits new work. */
+  assertStorageWriter?(): Promise<void> | void;
   onChange?(cards: readonly ProjectTaskCard[]): void;
   /** Storage adapter for deterministic failure injection. Production uses the
    * shared durable atomic writer; objects always commit before the manifest. */
@@ -638,7 +642,7 @@ export class ProjectTaskService {
           card.state = state; card.waitingReason = reason; this.activity(card); this.touch(card);
         })
       });
-      await this.executionTransaction(identity, (_r, card) => { if (card.state !== 'stopping') card.state = 'settling'; this.activity(card); this.touch(card); });
+      await this.executionTransaction(identity, (_r, card) => { if (card.state !== 'stopping') card.state = 'settling'; this.activity(card); this.touch(card); }, 'settlement');
       await this.finish(identity, input.inputId, result, runtime.controller.signal.aborted);
     } catch (error) {
       let advanceRouter = false;
@@ -659,7 +663,7 @@ export class ProjectTaskService {
             : !this.closing && target.state === 'failed' ? 'failed' : 'interrupted';
         }
         card.error = errorText(error); this.activity(card); this.touch(card);
-      }).catch(() => { advanceRouter = false; }); // The last durable state stays interrupted on restart.
+      }, 'settlement').catch(() => { advanceRouter = false; }); // The last durable state stays interrupted on restart.
       if (advanceRouter) this.eligible.add(identity.taskCardId); else this.eligible.delete(identity.taskCardId);
     } finally {
       await runtime.dispose().catch(() => undefined);
@@ -700,30 +704,32 @@ export class ProjectTaskService {
         card.resultEventId = eventId;
       }
       this.activity(card); this.touch(card);
-    });
+    }, 'settlement');
     const card = this.get(identity.taskCardId)!;
     if (card.state === 'completed') for (const dependent of this.registry.cards) if (dependent.dependencies.includes(card.taskCardId) && dependent.waitingReason?.startsWith('dependency:')) this.eligible.add(dependent.taskCardId);
     if (card.state !== 'queued') this.eligible.delete(identity.taskCardId);
   }
-  private executionTransaction(identity: Readonly<TaskExecutionIdentity>, work: (registry: TaskRegistry, card: ProjectTaskCard) => void): Promise<void> {
+  private executionTransaction(identity: Readonly<TaskExecutionIdentity>, work: (registry: TaskRegistry, card: ProjectTaskCard) => void,
+    authority: 'execution' | 'settlement' = 'execution'): Promise<void> {
     return this.transaction(r => {
       const card = this.requireCard(r, identity.taskCardId);
       const runtime = this.runtimes.get(identity.taskCardId);
       if (!runtime || runtime.identity !== identity || card.projectId !== identity.projectId || card.sessionId !== identity.sessionId
         || card.rootTaskId !== identity.rootTaskId || card.generation !== identity.generation) throw new Error('task_execution_identity_expired');
       work(r, card);
-    });
+    }, authority);
   }
   private currentExecutionIdentity(runtime: TaskRuntime): Readonly<TaskExecutionIdentity> {
     const card = this.registry.cards.find(item => item.taskCardId === runtime.identity.taskCardId);
     return Object.freeze({ ...runtime.identity, segmentId: card?.segmentId ?? runtime.identity.segmentId });
   }
-  private transaction(work: (registry: TaskRegistry) => void): Promise<void> {
+  private transaction(work: (registry: TaskRegistry) => void, authority: 'execution' | 'settlement' = 'execution'): Promise<void> {
     const operation = this.serial.catch(() => undefined).then(async () => {
       if (!this.initialized) throw new Error('task_service_not_initialized');
       if (this.readOnly) throw new Error('project_read_only');
       if (this.disposed) throw new Error('task_service_disposed');
-      await this.options.assertExecutionOwner?.();
+      if (authority === 'settlement' && this.options.assertStorageWriter) await this.options.assertStorageWriter();
+      else await this.options.assertExecutionOwner?.();
       const next = clone(this.registry);
       work(next); next.revision = incrementCounter(next.revision);
       try { await this.persistRegistry(next); this.persistenceError = undefined; }

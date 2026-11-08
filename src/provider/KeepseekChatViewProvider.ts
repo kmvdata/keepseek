@@ -612,15 +612,16 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.postToWebview({ type: 'projectOwnerState', state: owner.state, diagnostics: await owner.diagnostics() });
   }
 
-  private async loadSessionHistory(): Promise<void> {
+  private async loadSessionHistory(requestId?: string): Promise<void> {
     this.historyOpened = true;
+    this.postToWebview({ type: 'sessionHistoryResult', requestId, status: 'loading' });
     try {
       await (this.historyLoadPromise ??= (this.historyLoader?.() ?? this.sessionStore.loadHistoryMetadata()));
       this.postState({ immediate: true, forceFull: true });
-      this.postToWebview({ type: 'sessionHistoryResult', status: 'ready' });
+      this.postToWebview({ type: 'sessionHistoryResult', requestId, status: 'ready' });
     } catch (error) {
       this.historyLoadPromise = undefined;
-      this.postToWebview({ type: 'sessionHistoryResult', status: 'failed', reason: getErrorMessage(error) });
+      this.postToWebview({ type: 'sessionHistoryResult', requestId, status: 'failed', reason: getErrorMessage(error) });
       throw error;
     }
   }
@@ -1524,7 +1525,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       else await this.handleMessageImpl(message);
       return;
     }
-    if (message.type === 'loadSessionHistory') { await this.loadSessionHistory(); return; }
+    if (message.type === 'loadSessionHistory') { await this.loadSessionHistory(message.requestId); return; }
     if (webviewMessageScope(message.type) === 'project') {
       if (!['projectTaskOpen', 'projectTaskView', 'projectTaskLatest', 'projectTaskDraft', 'projectTaskPrefetch',
         'projectTaskPainted', 'projectTaskReconcile'].includes(message.type) && this.projectOptions?.owner.isOwner === false) {
@@ -7807,6 +7808,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       defaults: () => this.captureProjectDefaults(), publish: message => this.publishWebview(message) });
     try {
       await assistant.initialize();
+      if (this.titleLifecycleDisposed) { await assistant.dispose(); return; }
       this.projectAssistant = assistant;
     } catch (error) {
       this.projectInitializationFailed = true;

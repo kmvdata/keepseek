@@ -115,11 +115,11 @@ export class DraftRunStore {
         if (legacy?.version === 1) parsed = legacy;
       } catch { /* A damaged aggregate cannot hide independently committed lanes. */ }
       const records = new Map<string, unknown>();
-      for (const value of parsed.draftRuns ?? []) {
+      for (const value of Array.isArray(parsed.draftRuns) ? parsed.draftRuns : []) {
         const record = normalizeStoredDraftRun(value);
         if (record) records.set(record.id, value);
       }
-      const displays = [...(parsed.batchDisplays ?? [])];
+      const displays = [...(Array.isArray(parsed.batchDisplays) ? parsed.batchDisplays : [])];
       for (const lane of await readSessionAuditLanes(this.sessionLanesUri)) {
         this.freshSessionIds.add(lane.sessionId);
         for (const value of Array.isArray(lane.draftRuns) ? lane.draftRuns : []) {

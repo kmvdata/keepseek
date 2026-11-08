@@ -73,7 +73,7 @@ export class ProjectExecutionOwner {
   /** Audit/result saves remain legal for the fenced current host after an
    * unknown outcome disables further execution. A recovering successor does
    * not acquire this capability until its own identity is published. */
-  public get canWriteStorage(): boolean { return !this.closed && Boolean(this.identity && this.mutex?.isHeld); }
+  public get canWriteStorage(): boolean { return !this.closed && this.current.reasonCode !== 'fence_invalidated' && Boolean(this.identity && this.mutex?.isHeld); }
   public get reason(): string | undefined { return this.isOwner ? undefined : this.current.reason; }
   public get state(): ProjectOwnerState { return { ...this.current }; }
   public get hasUncertainOperations(): boolean {
@@ -275,6 +275,14 @@ export class ProjectExecutionOwner {
    * throughout active work. No nonce read or heartbeat is used as exclusion. */
   public async verify(): Promise<void> {
     this.assertOwner();
+    await this.verifyStorageWriter();
+  }
+
+  /** Terminal/audit saves may settle an already dispatched operation while its
+   * unknown outcome blocks every new request and side effect. This verifies
+   * the same physical/metadata fence without granting execution capability. */
+  public async verifyStorageWriter(): Promise<void> {
+    if (!this.canWriteStorage) throw new Error(this.reason ?? 'Project storage writer fence is unavailable. / 项目存储写入身份不可用。');
     try {
       const scope = this.projectScope;
       if (!scope) throw new Error('Project physical identity is unavailable. / 无法验证项目物理身份。');
