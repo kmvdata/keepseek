@@ -378,27 +378,31 @@ async function sidebarDisplayActions(f: Awaited<ReturnType<typeof fixture>>): Pr
   const view = f.view!;
   const operations: string[] = [];
   const toggle = view.element('projectSidebarToggle');
-  assert.ok(toggle, 'the actual generated Webview has the sidebar toggle');
+  assert.ok(toggle, 'the actual generated Webview has the blank rail handle');
+  // The rail carries no product buttons; redesigned controls use this API.
+  const rail = (view.window as unknown as { keepseekProjectTasks: {
+    openSidebar(): void; closeSidebar(): void; toggleSidebar(): void;
+    selectView(taskCardId: string | null, mode?: string): void; } }).keepseekProjectTasks;
   const targetBefore = view.element('projectInputTarget').textContent;
   const viewRequestsBefore = view.posted.filter(item => item.type === 'projectTaskView').length;
   toggle.click(); toggle.click(); operations.push('open', 'close');
-  const history = view.element('projectTaskHistory'); history.click(); operations.push('all_history');
+  rail.openSidebar(); operations.push('open_sidebar_api');
   const scope = view.element('projectTaskScope');
   scope.value = 'recent'; scope.dispatchEvent({ type: 'change' }); operations.push('recent');
   scope.value = 'all'; scope.dispatchEvent({ type: 'change' }); operations.push('all');
   const archived = view.element('projectShowArchived');
   archived.checked = true; archived.dispatchEvent({ type: 'change' });
   archived.checked = false; archived.dispatchEvent({ type: 'change' }); operations.push('archived_range');
-  const rail = view.element('projectTaskRailList');
-  const button = rail.querySelector('button'); assert.ok(button);
-  button.dispatchEvent({ type: 'mouseenter' }); button.dispatchEvent({ type: 'focus' });
-  button.dispatchEvent({ type: 'focusin' }); button.dispatchEvent({ type: 'mouseleave' }); operations.push('hover', 'focus');
+  const list = view.element('projectTaskList');
+  const row = list.querySelector('button'); assert.ok(row);
+  row.dispatchEvent({ type: 'mouseenter' }); row.dispatchEvent({ type: 'focus' });
+  row.dispatchEvent({ type: 'focusin' }); row.dispatchEvent({ type: 'mouseleave' }); operations.push('hover', 'focus');
   assert.equal(view.element('projectInputTarget').textContent, targetBefore, 'display-only gestures preserve input target');
   assert.equal(view.posted.filter(item => item.type === 'projectTaskView').length, viewRequestsBefore);
   await f.flushViewMessages();
   const ids = f.host.tasks.list().map(card => card.taskCardId);
   for (const id of [ids[0], ids[1], ids[0]]) {
-    const node = rail.querySelector('[data-task-card-id="' + id + '"]');
+    const node = list.querySelector('[data-task-card-id="' + id + '"]');
     assert.ok(node); (node.tagName === 'BUTTON' ? node : node.querySelector('button'))!.click();
     await f.flushViewMessages();
   }
@@ -407,7 +411,7 @@ async function sidebarDisplayActions(f: Awaited<ReturnType<typeof fixture>>): Pr
   const current = f.posts.filter(post => post.type === 'projectTasksState').at(-1)!;
   await f.send({ type: 'projectTaskLatest', taskCardId: f.host.selectedTaskId, viewGeneration: current.viewGeneration });
   operations.push('latest_local_page');
-  view.element('projectAssistantView').click(); await f.flushViewMessages(); operations.push('view_project_assistant');
+  rail.selectView(null, 'project'); await f.flushViewMessages(); operations.push('view_project_assistant');
   await f.send({ type: 'ready' }); operations.push('ready_reconnect');
   view.advance(60_001); await f.flushViewMessages(); operations.push('expiry_recalculation');
   assert.equal(view.posted.filter(item => ['projectAssistantSubmit', 'projectTaskCreate', 'projectTaskSubmit', 'sendPrompt'].includes(item.type)).length, 0);

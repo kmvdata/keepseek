@@ -25,7 +25,6 @@ export function getProjectTasksScript(): string {
     var projectSidebarOpen = false;
     var projectSidebarScope = 'recent';
     var projectSidebarPreferences = {};
-    var projectRailNodes = new Map();
     var projectRowNodes = new Map();
     var projectTooltipTarget = null;
     var projectTooltipHideTimer = null;
@@ -316,7 +315,6 @@ export function getProjectTasksScript(): string {
         projectSidebarScroll = Number.isFinite(preference?.scrollTop) ? Math.max(0, preference.scrollTop) : 0;
         document.getElementById('projectTaskScope').value = projectSidebarScope;
         document.getElementById('projectShowArchived').checked = preference?.showArchived === true;
-        projectRailNodes.forEach(function(node) { node.remove(); }); projectRailNodes.clear();
         projectRowNodes.forEach(function(node) { node.remove(); }); projectRowNodes.clear();
         projectAnnouncedStates.clear(); projectPendingAnnouncements.clear();
         if (projectAnnouncementTimer) { clearTimeout(projectAnnouncementTimer); projectAnnouncementTimer = null; }
@@ -528,18 +526,16 @@ export function getProjectTasksScript(): string {
       button.addEventListener('focus', function() { if (button._card) projectShowTooltip(button, button._card); });
       button.addEventListener('mouseleave', projectScheduleTooltipHide); button.addEventListener('blur', projectScheduleTooltipHide);
     }
-    function projectCreateTaskNode(card, rail) {
-      var id = projectCardId(card), node = document.createElement('article'); node.dataset.taskCardId = id; node.setAttribute('role', 'listitem'); node.className = rail ? 'project-task-rail-item' : 'project-task-card';
-      var button = document.createElement('button'); button.type = 'button'; button.className = rail ? 'project-task-lamp' : 'project-task-open';
+    function projectCreateTaskNode(card) {
+      var id = projectCardId(card), node = document.createElement('article'); node.dataset.taskCardId = id; node.setAttribute('role', 'listitem'); node.className = 'project-task-card';
+      var button = document.createElement('button'); button.type = 'button'; button.className = 'project-task-open';
       var ring = projectCreateRing(); button.append(ring); node._ring = ring; node._button = button;
-      if (!rail) {
-        var copy = document.createElement('span'); copy.className = 'project-task-copy';
-        ['title', 'phase', 'first', 'progress', 'metrics', 'current'].forEach(function(field) { var text = document.createElement('span'); text.className = 'project-task-' + field; text.style.display = field === 'title' || field === 'progress' ? '' : 'block'; node['_' + field] = text; copy.append(text); }); button.append(copy);
-      }
+      var copy = document.createElement('span'); copy.className = 'project-task-copy';
+      ['title', 'phase', 'first', 'progress', 'metrics', 'current'].forEach(function(field) { var text = document.createElement('span'); text.className = 'project-task-' + field; text.style.display = field === 'title' || field === 'progress' ? '' : 'block'; node['_' + field] = text; copy.append(text); }); button.append(copy);
       button.addEventListener('click', function(event) { if (event.isComposing || event.keyCode === 229) return; projectHideTooltip(); projectSelectView(id, 'task'); });
       projectAttachTooltip(button); node.append(button); return node;
     }
-    function projectUpdateTaskNode(node, card, rail, now) {
+    function projectUpdateTaskNode(node, card, now) {
       var id = projectCardId(card), selected = projectViewMode === 'task' && projectTasks.viewTaskId === id;
       node._button._card = card;
       var signature = JSON.stringify([state.language, selected, selected && !projectRecentCard(card, now, false), card.customTitle, card.title, card.state, card.status, card.phase, card.waitingReason, card.progress, card.error, card.lastProgress, card.lastError, card.firstSubmittedAt, card.firstSubmittedAtSource, card.createdAt, card.usedMs, card.currentEffectiveMs, card.effectiveMs, card.costByCurrency, card.requestCount, card.totalTokens, card.usageIncomplete, card.contextUsageSnapshot ? [card.contextUsageSnapshot.status, card.contextUsageSnapshot.usage, card.contextUsageSnapshot.status === 'current' ? null : card.contextUsageSnapshot.recordedAt] : null]);
@@ -547,23 +543,23 @@ export function getProjectTasksScript(): string {
       node.classList.toggle('is-selected', selected); node._button.classList.toggle('is-selected', selected); node._button._card = card;
       node._button.setAttribute('aria-pressed', selected ? 'true' : 'false'); node._button.setAttribute('aria-label', projectTooltipText(card) + (selected && !projectRecentCard(card, now, false) && !card.archived ? '\\n' + t('projectCurrentlyViewing') : ''));
       projectUpdateRing(node._ring, card);
-      if (!rail) { projectSetText(node._title, projectTaskTitle(card)); projectSetText(node._phase, projectPhase(card)); projectSetText(node._first, projectFirstTime(card)); projectSetText(node._progress, projectProgress(card)); projectSetText(node._metrics, projectMetrics(card)); projectSetText(node._current, selected && !projectRecentCard(card, now, false) && !card.archived ? t('projectCurrentlyViewing') : ''); }
+      projectSetText(node._title, projectTaskTitle(card)); projectSetText(node._phase, projectPhase(card)); projectSetText(node._first, projectFirstTime(card)); projectSetText(node._progress, projectProgress(card)); projectSetText(node._metrics, projectMetrics(card)); projectSetText(node._current, selected && !projectRecentCard(card, now, false) && !card.archived ? t('projectCurrentlyViewing') : '');
       if (projectTooltipTarget?.button === node._button) projectShowTooltip(node._button, card);
     }
-    function projectSyncNodes(parent, cards, cache, rail, now) {
+    function projectSyncNodes(parent, cards, cache, now) {
       var wanted = new Set(cards.map(projectCardId));
       cache.forEach(function(node, id) { if (!wanted.has(id)) { if (projectTooltipTarget?.button === node._button) projectHideTooltip(); node.remove(); cache.delete(id); } });
       var empty = parent.querySelector('.project-task-empty'); if (empty) empty.remove();
       var nextNode = parent.firstChild;
       cards.forEach(function(card) {
-        var id = projectCardId(card), node = cache.get(id); if (!node) { node = projectCreateTaskNode(card, rail); cache.set(id, node); }
-        projectUpdateTaskNode(node, card, rail, now);
+        var id = projectCardId(card), node = cache.get(id); if (!node) { node = projectCreateTaskNode(card); cache.set(id, node); }
+        projectUpdateTaskNode(node, card, now);
         // Walk the existing sibling chain once. Do not recreate a live children
         // collection per row or move an already correctly positioned focus node.
         if (nextNode !== node) parent.insertBefore(node, nextNode || null);
         nextNode = node.nextSibling;
       });
-      if (!cards.length) { var hint = document.createElement('span'); hint.className = 'project-task-empty project-task-progress'; hint.textContent = rail ? '' : t('projectNoTasks'); hint.setAttribute('aria-label', t('projectNoTasks')); parent.append(hint); }
+      if (!cards.length) { var hint = document.createElement('span'); hint.className = 'project-task-empty project-task-progress'; hint.textContent = t('projectNoTasks'); hint.setAttribute('aria-label', t('projectNoTasks')); parent.append(hint); }
     }
     function projectSaveSidebar() {
       if (!projectTasks || !vscode.setState) return;
@@ -578,11 +574,11 @@ export function getProjectTasksScript(): string {
       var wasOpen = projectSidebarOpen;
       projectSidebarOpen = !!open; projectHideTooltip();
       document.getElementById('projectTaskSidebar').classList.toggle('hidden', !projectSidebarOpen || !projectTasks);
-      document.getElementById('projectSidebarToggle').setAttribute('aria-expanded', projectSidebarOpen ? 'true' : 'false');
-      if (!projectSidebarOpen) document.getElementById('projectTaskMore').open = false;
+      document.getElementById('projectSidebarToggle')?.setAttribute('aria-expanded', projectSidebarOpen ? 'true' : 'false');
+      if (!projectSidebarOpen) { var more = document.getElementById('projectTaskMore'); if (more) more.open = false; }
       projectSaveSidebar(); if (projectSidebarOpen) renderProjectTasks();
       if (projectSidebarOpen && !wasOpen && projectTasks) vscode.postMessage({ type: 'projectTaskOpen', projectId: projectTasks.projectId });
-      if (keyboard) (projectSidebarOpen ? document.getElementById('projectSidebarClose') : document.getElementById('projectSidebarToggle')).focus();
+      if (keyboard) (projectSidebarOpen ? document.getElementById('projectSidebarClose') : document.getElementById('projectSidebarToggle'))?.focus();
     }
     function projectRenderDetail(card, readOnly) {
       var detail = document.getElementById('projectTaskDetail');
@@ -626,16 +622,14 @@ export function getProjectTasksScript(): string {
       var readOnly = projectTasks.readOnly, now = Date.now(), ordered = projectOrderedCards();
       projectAnnounceTaskStates(ordered);
       document.getElementById('projectTaskSidebar').classList.toggle('hidden', !projectSidebarOpen);
-      document.getElementById('projectSidebarToggle').setAttribute('aria-expanded', projectSidebarOpen ? 'true' : 'false');
+      document.getElementById('projectSidebarToggle')?.setAttribute('aria-expanded', projectSidebarOpen ? 'true' : 'false');
       document.getElementById('projectLatestMessages').classList.toggle('hidden', !projectTaskUiActive() || !state.hasNewerMessages);
       document.getElementById('projectOwnerNotice').classList.toggle('hidden', !readOnly);
       projectSetText(document.getElementById('projectOwnerReason'), projectTasks.reason || t('projectReadOnly'));
-      document.getElementById('projectNewTask').disabled = projectTasks.capabilities?.canCreateTarget === false;
       ['projectStopAll', 'projectAssociateSession'].forEach(function(id) { document.getElementById(id).disabled = readOnly; });
-      projectSyncNodes(document.getElementById('projectTaskRailList'), ordered.filter(function(card) { return projectRecentCard(card, now, true); }), projectRailNodes, true, now);
       if (projectSidebarOpen) {
         var cards = ordered.filter(function(card) { return projectSidebarScope === 'all' ? !card.archived || document.getElementById('projectShowArchived').checked || projectCardIsActive(card) : projectRecentCard(card, now, true) || document.getElementById('projectShowArchived').checked && card.archived; });
-        projectSyncNodes(document.getElementById('projectTaskList'), cards, projectRowNodes, false, now);
+        projectSyncNodes(document.getElementById('projectTaskList'), cards, projectRowNodes, now);
         var timing = projectTasks.timing, timingNode = document.getElementById('projectTiming'); timingNode.classList.toggle('hidden', !timing);
         if (timing) projectSetText(timingNode, t('projectElapsedTime') + ': ' + projectFormatTime(timing.projectElapsedMs) + ' · ' + t('projectEffectiveTotal') + ': ' + (timing.incomplete ? '≥ ' : '') + projectFormatTime(timing.totalEffectiveMs));
         var routerUsage = projectTasks.routerUsage || [], routerNode = document.getElementById('projectRouterUsage'); routerNode.classList.toggle('hidden', !routerUsage.length);
@@ -669,20 +663,25 @@ export function getProjectTasksScript(): string {
     document.getElementById('projectSidebarToggle')?.addEventListener('click', function() { projectSetSidebarOpen(!projectSidebarOpen, false); });
     document.getElementById('projectSidebarClose')?.addEventListener('click', function() { projectSetSidebarOpen(false, false); });
     document.getElementById('projectOwnerCheck')?.addEventListener('click', function() { vscode.postMessage({ type: 'checkProjectOwnership' }); });
-    document.getElementById('projectTaskHistory')?.addEventListener('click', function() { projectSidebarScope = 'all'; document.getElementById('projectTaskScope').value = 'all'; projectSetSidebarOpen(true, false); });
-    document.getElementById('projectAssistantView')?.addEventListener('click', function() { projectSelectView(null, 'project'); });
-    document.getElementById('projectNewTask')?.addEventListener('click', function() { projectSelectView(null, 'new'); });
     document.getElementById('projectStopAll')?.addEventListener('click', function() { if (!projectTasks || projectTasks.readOnly) return; vscode.postMessage({ type: 'projectTaskStopAll', projectId: projectTasks.projectId }); });
     document.getElementById('projectAssociateSession')?.addEventListener('click', function() { if (!projectTasks || projectTasks.readOnly) return; vscode.postMessage({ type: 'projectTaskAssociate', projectId: projectTasks.projectId, sessionId: state.activeSessionId }); });
     document.getElementById('projectLatestMessages')?.addEventListener('click', projectShowLatestMessages);
     document.querySelector('.project-sidebar-content')?.addEventListener('scroll', function() { projectHideTooltip(); projectSaveSidebar(); });
-    document.getElementById('projectTaskRailList')?.addEventListener('scroll', projectHideTooltip);
     document.getElementById('projectTaskTooltip')?.addEventListener('mouseenter', function() { if (projectTooltipHideTimer) { clearTimeout(projectTooltipHideTimer); projectTooltipHideTimer = null; } });
     document.getElementById('projectTaskTooltip')?.addEventListener('mouseleave', projectScheduleTooltipHide);
+    // The rail is intentionally empty. Redesigned rail buttons call this API
+    // instead of depending on per-button DOM ids that no longer exist.
+    window.keepseekProjectTasks = {
+      openSidebar: function() { projectSetSidebarOpen(true, false); },
+      closeSidebar: function() { projectSetSidebarOpen(false, false); },
+      toggleSidebar: function() { projectSetSidebarOpen(!projectSidebarOpen, false); },
+      isSidebarOpen: function() { return projectSidebarOpen; },
+      selectView: function(taskCardId, mode) { projectSelectView(taskCardId || null, mode || (taskCardId ? 'task' : 'project')); }
+    };
     document.addEventListener('mousedown', function(event) {
       if (!projectSidebarOpen || !projectTasks) return;
       var target = event.target instanceof Element ? event.target : null;
-      if (!target || document.getElementById('projectTaskSidebar').contains(target) || document.getElementById('projectSidebarToggle').contains(target) || document.getElementById('projectTaskTooltip').contains(target)) return;
+      if (!target || document.getElementById('projectTaskSidebar').contains(target) || document.getElementById('projectSidebarToggle')?.contains(target) || document.getElementById('projectTaskTooltip').contains(target)) return;
       // No backdrop, preventDefault or synthetic click: the original target works once.
       projectSetSidebarOpen(false, false);
     });
@@ -731,7 +730,7 @@ export function getProjectTasksScript(): string {
       projectSidebarDisposed = true; projectHideTooltip();
       if (projectExpiryTimer) clearTimeout(projectExpiryTimer); if (projectDraftTimer) clearTimeout(projectDraftTimer); if (projectCompositionTimer) clearTimeout(projectCompositionTimer);
       if (projectAnnouncementTimer) clearTimeout(projectAnnouncementTimer); projectPendingAnnouncements.clear(); projectAnnouncedStates.clear();
-      projectRailNodes.clear(); projectRowNodes.clear(); projectHotViews.clear(); projectDeferredView = null; projectDeferredNavigation = null; projectDeferredHostState = null;
+      projectRowNodes.clear(); projectHotViews.clear(); projectDeferredView = null; projectDeferredNavigation = null; projectDeferredHostState = null;
       projectDeferredSubmissionResults.clear();
     });
   `;

@@ -19,10 +19,6 @@ import { tooltipTemplateFragment } from '../src/webview/sidebar/templates/toolti
 const SIDEBAR_DOM_IDS = [
   'projectTasks',
   'projectSidebarToggle',
-  'projectAssistantView',
-  'projectNewTask',
-  'projectTaskRailList',
-  'projectTaskHistory',
   'projectTaskAnnouncements',
   'projectTaskSidebar',
   'projectSidebarClose',
@@ -47,6 +43,25 @@ test('sidebar templates keep their exact byte boundaries', () => {
   assert.equal(overlay, drawerTemplateFragment.source + '\n' + tooltipTemplateFragment.source);
   assert.ok(overlay.startsWith('\n    <aside id="projectTaskSidebar"'), 'drawer opens on its original indent');
   assert.ok(overlay.endsWith('role="tooltip"></div>'), 'tooltip closes the overlay');
+});
+
+// The rail is now a blank drawer handle. Removing these ids is the contract:
+// a reintroduced per-button id would silently re-couple the host script.
+const REMOVED_RAIL_IDS = ['projectAssistantView', 'projectNewTask', 'projectTaskRailList', 'projectTaskHistory'] as const;
+
+test('the rail stays a blank 32px drawer handle with a single expand button', () => {
+  const rail = getProjectTasksTemplate();
+  for (const id of REMOVED_RAIL_IDS) {
+    assert.doesNotMatch(rail, new RegExp(`id="${id}"`, 'u'), `${id} must stay removed from the rail`);
+  }
+  assert.doesNotMatch(rail, /class="project-rail-control"[^>]*>✦/u, 'the rail carries no view-switch buttons');
+  assert.doesNotMatch(rail, /class="project-task-rail-list"/u, 'the rail carries no task lamp list');
+
+  const styles = getProjectTasksStyles();
+  assert.match(styles, /\.project-tasks \{ flex: 0 0 32px; width: 32px;/u, 'the rail is exactly 32px wide');
+  assert.doesNotMatch(styles, /\.project-task-lamp/u, 'lamp styles are gone with the lamp list');
+  assert.match(styles, /\.project-task-sidebar \{[^}]*width: min\(180px, 100%\);/u,
+    'the drawer expands to 180px and never past the panel width');
 });
 
 test('every sidebar DOM id survives the split and keeps its legacy position', () => {

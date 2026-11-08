@@ -18,13 +18,20 @@ function projectView(initialWebviewState: unknown = null) {
   return view;
 }
 
+// Task rows live only in the drawer list now; the rail keeps no lamp list.
 function cardButton(view: ReturnType<typeof projectView>, id: string) {
-  const rail = view.element('projectTaskRailList');
-  const node = rail.querySelector('[data-task-card-id="' + id + '"]')!;
+  openSidebar(view);
+  const node = view.element('projectTaskList').querySelector('[data-task-card-id="' + id + '"]')!;
   return node.tagName === 'BUTTON' ? node : node.querySelector('button')!;
 }
 function openSidebar(view: ReturnType<typeof projectView>) {
   if (view.element('projectTaskSidebar').classList.contains('hidden')) view.element('projectSidebarToggle').click();
+}
+// Redesigned rail buttons drive the view through the exposed host API.
+function rail(view: ReturnType<typeof projectView>) {
+  return (view.window as unknown as { keepseekProjectTasks: {
+    openSidebar(): void; closeSidebar(): void; toggleSidebar(): void; isSidebarOpen(): boolean;
+    selectView(taskCardId: string | null, mode?: string): void; } }).keepseekProjectTasks;
 }
 function type(view: ReturnType<typeof projectView>, text: string) {
   view.element('promptInput').textContent = text;
@@ -40,7 +47,7 @@ test('project tasks render live cards, deterministic new/task inputs bypass Rout
   assert.match(view.element('projectTaskList').textContent, /Task A/);
   assert.match(view.element('projectTaskList').textContent, /Reading code/);
   assert.equal(view.element('projectTaskList').children[0].dataset.taskCardId, 'A', 'first submission order is independent of task state');
-  view.element('projectNewTask').click();
+  rail(view).selectView(null, 'new');
   type(view, 'Create a new task'); submit(view);
   const create = view.posted.find(item => item.type === 'projectTaskCreate')!;
   assert.ok(create); assert.equal(create.targetId, '$new');
@@ -99,7 +106,6 @@ test('task view actions keep exact emission-time card identity, read-only still 
   cardButton(view, 'B').click();
   assert.equal(stop.taskCardId, 'A');
   view.receive({ type: 'projectTasksState', projectId: 'P', revision: 3, viewGeneration: 2, viewTaskId: 'B', readOnly: true, capabilities: { canSubmit: false, canCreateTarget: true } });
-  assert.equal(view.element('projectNewTask').disabled, false);
   assert.equal(view.element('projectStopAll').disabled, true);
   assert.equal(view.element('promptInput').getAttribute('contenteditable'), 'true');
   openSidebar(view);
@@ -219,7 +225,7 @@ test('legacy sessions retain normal input routing while project task controls re
   type(view, 'ordinary session prompt'); submit(view);
   assert.equal(view.posted.filter(item => item.type === 'sendPrompt').length, 1);
   assert.equal(view.posted.filter(item => item.type === 'projectAssistantSubmit').length, 0);
-  view.element('projectNewTask').click();
+  rail(view).selectView(null, 'new');
   assert.match(view.element('projectInputTarget').textContent, /New task/);
 });
 
@@ -257,7 +263,7 @@ test('independent Worker state revision sequences never suppress another task or
   view.receive({ type: 'state', taskCardId: 'B', viewGeneration: 2, revision: 2,
     state: { activeSessionId: 'session-B', messages: [{ id: 'answer-B', role: 'assistant', content: 'B' }] } });
   assert.equal(view.state.messages[0]?.id, 'answer-B');
-  view.element('projectAssistantView').click();
+  rail(view).selectView(null, 'project');
   view.receive({ type: 'state', taskCardId: 'router-card', viewGeneration: 3, revision: 1,
     state: { activeSessionId: 'router-session', messages: [{ id: 'router-first', role: 'assistant', content: 'Router' }] } });
   assert.equal(view.state.messages[0]?.id, 'router-first');
@@ -311,7 +317,8 @@ function sidebarCard(id: string, state = 'completed', extra: Record<string, unkn
     state, firstSubmittedAt: '2026-11-01T00:00:00.000Z', firstSubmittedAtSource: 'user_input',
     lastActivityAt: '2026-11-08T00:00:00.000Z', usedMs: 1000, ...extra };
 }
-function sidebarIds(view: ReturnType<typeof projectView>, id = 'projectTaskRailList') {
+function sidebarIds(view: ReturnType<typeof projectView>, id = 'projectTaskList') {
+  openSidebar(view);
   return view.element(id).children.map(node => node.dataset.taskCardId).filter(Boolean);
 }
 function sidebarPublish(view: ReturnType<typeof projectView>, cards: ReturnType<typeof sidebarCard>[], revision: number) {
@@ -329,8 +336,9 @@ test('sidebar starts collapsed and UI-only controls preserve transcript, target 
   assert.equal(view.element('projectTaskSidebar').classList.contains('hidden'), false);
   view.element('projectTaskScope').value = 'all'; view.element('projectTaskScope').dispatchEvent({ type: 'change' });
   view.element('projectShowArchived').checked = true; view.element('projectShowArchived').dispatchEvent({ type: 'change' });
-  cardButton(view, 'A').dispatchEvent({ type: 'mouseenter' });
-  cardButton(view, 'A').dispatchEvent({ type: 'focus' });
+  const firstCard = cardButton(view, 'A');
+  firstCard.dispatchEvent({ type: 'mouseenter' });
+  firstCard.dispatchEvent({ type: 'focus' });
   view.element('projectSidebarClose').click();
   assert.equal(view.element('projectTaskSidebar').classList.contains('hidden'), true);
   assert.equal(view.element('transcript').firstChild, transcript);
@@ -348,7 +356,6 @@ test('sidebar uses immutable first-time order, Registry tie order and keyed node
   const cards = [sidebarCard('C', 'running', { firstSubmittedAt: '2026-11-03T00:00:00.000Z' }),
     sidebarCard('A', 'running'), sidebarCard('B', 'waiting')];
   sidebarPublish(view, cards, 2); openSidebar(view);
-  assert.deepEqual(sidebarIds(view), ['A', 'B', 'C']);
   assert.deepEqual(sidebarIds(view, 'projectTaskList'), ['A', 'B', 'C']);
   const buttons = ['A', 'B', 'C'].map(id => cardButton(view, id));
   buttons[0].focus();
@@ -360,7 +367,7 @@ test('sidebar uses immutable first-time order, Registry tie order and keyed node
       state: ['running', 'waiting', 'completed', 'failed', 'cancelled', 'interrupted'][(index + cardIndex) % 6],
       title: 'Changed ' + card.taskCardId + ' ' + index, progress: 'Step ' + index,
       costByCurrency: { USD: index / 1000 } })), index + 3);
-    assert.deepEqual(sidebarIds(view), ['A', 'B', 'C']);
+    assert.deepEqual(sidebarIds(view, 'projectTaskList'), ['A', 'B', 'C']);
   }
   assert.equal(cardButton(view, 'A'), buttons[0]);
   assert.equal(cardButton(view, 'A').querySelector('.project-task-ring'), ring);
@@ -380,19 +387,17 @@ test('rolling 24-hour scope keeps every unfinished task and expires exactly at t
     sidebarCard('archivedInterrupted', 'interrupted', { lastActivityAt: old, archived: true }),
     sidebarCard('unknown', 'completed', { lastActivityAt: undefined, firstSubmittedAtSource: 'associated' })];
   sidebarPublish(view, cards, 2);
-  assert.deepEqual(sidebarIds(view), ['recent', 'queued', 'preparing', 'running', 'waiting', 'settling', 'stopping', 'interrupted']);
   const start = view.posted.length;
   view.advance(60000);
-  assert.equal(sidebarIds(view).includes('recent'), false);
-  assert.equal(sidebarIds(view).includes('waiting'), true);
   assert.equal(view.posted.slice(start).some(item => /Stop|Delete|Archive|Submit|TaskView/iu.test(item.type)), false);
-  openSidebar(view); view.element('projectTaskScope').value = 'all'; view.element('projectTaskScope').dispatchEvent({ type: 'change' });
+  openSidebar(view);
+  assert.deepEqual(sidebarIds(view, 'projectTaskList'), ['queued', 'preparing', 'running', 'waiting', 'settling', 'stopping', 'interrupted']);
+  view.element('projectTaskScope').value = 'all'; view.element('projectTaskScope').dispatchEvent({ type: 'change' });
   assert.equal(sidebarIds(view, 'projectTaskList').includes('boundary'), true);
   assert.equal(sidebarIds(view, 'projectTaskList').includes('unknown'), true);
   assert.equal(sidebarIds(view, 'projectTaskList').includes('archivedInterrupted'), false);
   view.element('projectShowArchived').checked = true; view.element('projectShowArchived').dispatchEvent({ type: 'change' });
   assert.equal(sidebarIds(view, 'projectTaskList').includes('archivedInterrupted'), true);
-  assert.equal(sidebarIds(view).includes('archivedInterrupted'), false, 'history scope does not flood rail');
 });
 
 test('current expired terminal remains in original rail position only while explicitly viewed', () => {
@@ -401,13 +406,14 @@ test('current expired terminal remains in original rail position only while expl
   sidebarPublish(view, cards, 2); openSidebar(view);
   view.element('projectTaskScope').value = 'all'; view.element('projectTaskScope').dispatchEvent({ type: 'change' });
   view.element('projectTaskList').querySelector('[data-task-card-id="old"]')!.querySelector('button')!.click();
-  assert.deepEqual(sidebarIds(view), ['old', 'live']);
   assert.match(cardButton(view, 'old').getAttribute('aria-label') || '', /Current|view/iu);
   cardButton(view, 'live').click();
-  assert.deepEqual(sidebarIds(view), ['live']);
+  // The explicit "all" scope keeps the expired terminal row; only the label moves.
+  assert.deepEqual(sidebarIds(view, 'projectTaskList'), ['old', 'live']);
+  assert.doesNotMatch(cardButton(view, 'old').getAttribute('aria-label') || '', /Currently viewing/u);
   sidebarPublish(view, cards.map(card => card.taskCardId === 'live' ? { ...card, state: 'completed', archived: true,
     lastActivityAt: '2026-11-01T00:00:00.000Z' } : card), 3);
-  assert.equal(sidebarIds(view).includes('live'), false, 'explicit archive is not overridden by current view');
+  assert.equal(sidebarIds(view, 'projectTaskList').includes('live'), false, 'explicit archive is not overridden by current view');
 });
 
 test('independent context rings distinguish unknown, real zero, over-limit and restored snapshots without faking completion', () => {
@@ -442,7 +448,7 @@ test('IME view changes wait for composition, preserve confirmed source draft and
   const view = projectView(); cardButton(view, 'A').click();
   view.element('promptInput').dispatchEvent({ type: 'compositionstart' }); type(view, '输入候选');
   const start = view.posted.filter(item => item.type === 'projectTaskView').length;
-  cardButton(view, 'B').click(); view.element('projectAssistantView').click();
+  cardButton(view, 'B').click(); rail(view).selectView(null, 'project');
   assert.match(view.element('projectInputTarget').textContent, /Task A/);
   assert.equal(view.posted.filter(item => item.type === 'projectTaskView').length, start);
   type(view, '输入完成'); view.element('promptInput').dispatchEvent({ type: 'compositionend' }); view.advance(0);
@@ -485,7 +491,7 @@ test('tooltip uses light safe metadata, preserves its node through progress and 
   assert.equal(tooltip.classList.contains('hidden'), false);
   assert.equal(view.posted.slice(start).some(item => ['projectTaskPrefetch', 'projectTaskView', 'loadOlderMessages',
     'regenerateSessionTitle', 'projectAssistantSubmit', 'projectTaskSubmit'].includes(item.type)), false);
-  view.element('projectTaskRailList').dispatchEvent({ type: 'scroll' });
+  view.document.querySelector('.project-sidebar-content')!.dispatchEvent({ type: 'scroll' });
   assert.equal(tooltip.classList.contains('hidden'), true);
 });
 
@@ -619,11 +625,10 @@ test('legacy background metadata preserves transcript, composer and IME while up
   assert.deepEqual(view.domMetrics(), metrics, 'legacy card-only updates do not recreate input menus or transcript elements');
   view.receive({ type: 'projectTasksState', projectId: 'P', enabled: false, revision: 13, viewGeneration: 0,
     readOnly: true, capabilities: { canSubmit: false, canCreateTarget: true }, cards });
-  assert.equal(view.element('projectNewTask').disabled, false);
   assert.equal(view.element('projectStopAll').disabled, true);
   assert.equal(view.element('promptInput').firstChild, draftNode, 'read-only capability refresh does not rewrite the composing draft');
   view.receive({ type: 'projectTasksState', capabilities: { canSubmit: true, canCreateTarget: true }, projectId: 'P', enabled: false, revision: 14, viewGeneration: 0, cards });
-  assert.equal(view.element('projectNewTask').disabled, false, 'partial metadata cannot clear read-only authority');
+  assert.equal(view.element('projectStopAll').disabled, true, 'partial metadata cannot clear read-only authority');
   view.element('promptInput').dispatchEvent({ type: 'compositionend' }); view.advance(0);
   assert.equal(view.element('transcript').firstChild, transcript, 'metadata was not deferred as a view replacement');
   assert.equal(view.element('promptInput').firstChild, draftNode);
@@ -638,7 +643,6 @@ test('legacy publications reject old revisions without rolling back task metadat
   view.receive({ type: 'projectTasksState', capabilities: { canSubmit: true, canCreateTarget: true }, projectId: 'P', enabled: false, revision: 9, viewGeneration: 0,
     readOnly: false, cards: [sidebarCard('A', 'failed', { title: 'Stale title' })] });
   assert.match(cardButton(view, 'A').getAttribute('aria-label') || '', /Newest task title/);
-  assert.equal(view.element('projectNewTask').disabled, false);
   assert.equal(view.element('transcript').firstChild, transcript);
 });
 
@@ -658,7 +662,6 @@ test('older ownership generations cannot restore execution capability through ne
   type(view, 'Kept local draft'); submit(view);
   assert.equal(view.posted.some(item => item.type === 'projectAssistantSubmit'), false);
   assert.equal(view.element('promptInput').textContent, 'Kept local draft');
-  assert.equal(view.element('projectNewTask').disabled, false);
 });
 
 test('a newer metadata revision cannot apply a stale legacy view generation over a local task selection', () => {
@@ -771,7 +774,7 @@ test('ordinary draft survives rail browsing and ordinary history never becomes t
     { id: 'ordinary-only-message', role: 'assistant', content: 'Only ordinary history' }
   ] } });
   assert.equal(view.element('promptInput').textContent, 'ordinary session draft', 'same session ID still has separate ordinary and task draft surfaces');
-  view.element('projectAssistantView').click();
+  rail(view).selectView(null, 'project');
   assert.equal(view.state.messages.some((message: { id: string }) => message.id === 'ordinary-only-message'), false);
   cardButton(view, 'A').click();
   assert.equal(view.element('promptInput').textContent, 'worker task draft');

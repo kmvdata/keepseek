@@ -3,7 +3,7 @@ import type { WebviewFragment } from '../../input/composition';
 /** Drawer frame, its header/ranges/content rows and the "more" popup. */
 export const drawerStylesFragment: WebviewFragment = {
   id: 'sidebar-drawer-styles',
-  source: `    .project-task-sidebar { position: absolute; inset: 0 auto 0 0; width: min(288px, 100%); min-width: 0; display: flex; flex-direction: column; z-index: 20; background: var(--vscode-sideBar-background, var(--vscode-editor-background)); border-right: 1px solid var(--vscode-panel-border); box-shadow: 4px 0 12px var(--vscode-widget-shadow, #0005); }
+  source: `    .project-task-sidebar { position: absolute; inset: 0 auto 0 0; width: min(180px, 100%); min-width: 0; display: flex; flex-direction: column; z-index: 20; background: var(--vscode-sideBar-background, var(--vscode-editor-background)); border-right: 1px solid var(--vscode-panel-border); box-shadow: 4px 0 12px var(--vscode-widget-shadow, #0005); }
     .project-sidebar-header { flex: 0 0 auto; display: flex; justify-content: space-between; align-items: center; padding: 5px 8px; gap: 4px; }
     .project-sidebar-header button { padding: 2px 7px; }
     .project-sidebar-ranges { flex: 0 0 auto; display: flex; gap: 5px; flex-wrap: wrap; align-items: center; padding: 3px 8px 6px; font-size: 11px; border-bottom: 1px solid var(--vscode-panel-border); }

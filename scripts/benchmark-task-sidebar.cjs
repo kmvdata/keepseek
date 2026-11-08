@@ -65,9 +65,8 @@ for (const count of [10, 100]) {
     const toggle = view.document.getElementById('projectSidebarToggle');
     if (toggle) toggle.click();
     const list = view.element('projectTaskList');
-    const rail = view.document.getElementById('projectTaskRailList');
+    // The rail is a blank drawer handle; task rows exist only in the drawer list.
     const initialRows = [...list.children];
-    const initialRail = rail ? [...rail.children] : [];
     const transcript = view.element('transcript');
     let allocations = 0, listClears = 0, transcriptClears = 0;
     const create = view.document.createElement, createSvg = view.document.createElementNS;
@@ -88,8 +87,7 @@ for (const count of [10, 100]) {
       elapsedMs: Number((performance.now() - started).toFixed(3)), createdElements: allocations,
       taskListReplaceChildren: listClears, transcriptReplaceChildren: transcriptClears,
       retainedTaskRows: initialRows.filter(node => list.children.includes(node)).length,
-      retainedRailRows: initialRail.filter(node => rail.children.includes(node)).length,
-      initialTaskRows: initialRows.length, initialRailRows: initialRail.length,
+      retainedRailRows: 0, initialTaskRows: initialRows.length, initialRailRows: 0,
       emittedMessages: view.posted.length - postedBefore });
   }
 }
