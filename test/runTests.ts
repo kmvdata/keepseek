@@ -110,6 +110,7 @@ import './sessionTitleRequest.test';
 import './sessionTitleWebview.test';
 import './sessionTitleIntegration.test';
 import './sessionTitleRegeneration.test';
+import './sidebarStructure.test';
 import './projectCoordination.test';
 import './projectChildAdmission.test';
 import './projectRouter.test';

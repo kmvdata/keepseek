@@ -1,105 +1,11 @@
 /** Project task view chrome. Runtime and session ownership remain entirely in the host. */
-export function getProjectTasksTemplate(): string {
-  return `
-    <nav id="projectTasks" class="project-tasks hidden" aria-label="Project tasks" data-i18n-aria-label="projectTasksTitle">
-      <button id="projectSidebarToggle" type="button" class="project-rail-control" aria-controls="projectTaskSidebar" aria-expanded="false" data-i18n-title="projectOpenTasks" data-i18n-aria-label="projectOpenTasks">☰</button>
-      <button id="projectAssistantView" type="button" class="project-rail-control" data-i18n-title="projectAssistant" data-i18n-aria-label="projectAssistant">✦</button>
-      <button id="projectNewTask" type="button" class="project-rail-control" data-i18n-title="projectNewTask" data-i18n-aria-label="projectNewTask">+</button>
-      <div id="projectTaskRailList" class="project-task-rail-list" role="list"></div>
-      <button id="projectTaskHistory" type="button" class="project-rail-control" data-i18n-title="projectAllTasks" data-i18n-aria-label="projectAllTasks">◷</button>
-      <span id="projectTaskAnnouncements" class="project-task-announcements" role="status" aria-live="polite" aria-atomic="true"></span>
-    </nav>`;
-}
-
-/** Anchored to the transcript stage; never participates in its flex geometry. */
-export function getProjectTasksOverlayTemplate(): string {
-  return `
-    <aside id="projectTaskSidebar" class="project-task-sidebar hidden" aria-label="Project tasks" data-i18n-aria-label="projectTasksTitle">
-      <div class="project-sidebar-header">
-        <strong data-i18n="projectTasksTitle">项目任务</strong>
-        <button id="projectSidebarClose" type="button" class="secondary" data-i18n-title="projectCloseTasks" data-i18n-aria-label="projectCloseTasks">×</button>
-      </div>
-      <div class="project-sidebar-ranges">
-        <select id="projectTaskScope" data-i18n-aria-label="projectTaskScope" aria-label="Task range">
-          <option value="recent" data-i18n="projectRecentTasks">最近24小时</option>
-          <option value="all" data-i18n="projectAllTasks">全部任务</option>
-        </select>
-        <label><input id="projectShowArchived" type="checkbox" /><span data-i18n="projectShowArchived">显示归档</span></label>
-        <details id="projectTaskMore" class="project-task-more">
-          <summary data-i18n="projectMoreActions">更多</summary>
-          <div class="project-task-more-menu">
-            <button id="projectAssociateSession" type="button" class="secondary" data-i18n="projectAssociateSession">关联当前会话</button>
-            <button id="projectStopAll" type="button" class="secondary" data-i18n="projectStopAll">停止全部</button>
-          </div>
-        </details>
-      </div>
-      <div class="project-sidebar-content">
-        <div id="projectTiming" class="project-task-metrics hidden"></div>
-        <div id="projectRouterUsage" class="project-task-metrics hidden"></div>
-        <div id="projectTaskList" class="project-task-list" role="list"></div>
-        <div id="projectTaskDetail" class="project-task-detail"></div>
-      </div>
-    </aside>
-    <div id="projectTaskTooltip" class="project-task-tooltip hidden" role="tooltip"></div>`;
-}
-
-export function getProjectTasksStyles(): string {
-  return `
-    .project-workspace { flex: 1; min-height: 0; min-width: 0; display: flex; overflow: hidden; }
-    .project-main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
-    .project-transcript-stage { position: relative; flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; isolation: isolate; }
-    .project-tasks { flex: 0 0 44px; width: 44px; min-height: 0; display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 4px 2px; border-right: 1px solid var(--vscode-panel-border); }
-    .project-rail-control { flex: 0 0 36px; width: 36px; height: 36px; padding: 0; color: var(--vscode-foreground); background: transparent; font-size: 18px; }
-    .project-task-rail-list { flex: 1; min-height: 0; width: 40px; overflow-y: auto; overflow-x: hidden; scrollbar-width: thin; }
-    .project-task-rail-item { height: 42px; width: 38px; display: flex; align-items: center; justify-content: center; }
-    .project-task-announcements { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-    .project-task-lamp { width: 36px; height: 36px; min-height: 36px; padding: 3px; background: transparent; border-radius: 6px; }
-    .project-task-lamp:hover { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); }
-    .project-task-lamp.is-selected { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
-    .project-task-sidebar { position: absolute; inset: 0 auto 0 0; width: min(288px, 100%); min-width: 0; display: flex; flex-direction: column; z-index: 20; background: var(--vscode-sideBar-background, var(--vscode-editor-background)); border-right: 1px solid var(--vscode-panel-border); box-shadow: 4px 0 12px var(--vscode-widget-shadow, #0005); }
-    .project-sidebar-header { flex: 0 0 auto; display: flex; justify-content: space-between; align-items: center; padding: 5px 8px; gap: 4px; }
-    .project-sidebar-header button { padding: 2px 7px; }
-    .project-sidebar-ranges { flex: 0 0 auto; display: flex; gap: 5px; flex-wrap: wrap; align-items: center; padding: 3px 8px 6px; font-size: 11px; border-bottom: 1px solid var(--vscode-panel-border); }
-    .project-sidebar-ranges select { min-width: 0; max-width: 100%; background: var(--vscode-dropdown-background); color: var(--vscode-dropdown-foreground); border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border)); }
-    .project-sidebar-ranges label { display: inline-flex; align-items: center; gap: 2px; }
-    .project-sidebar-content { min-height: 0; overflow-y: auto; padding: 6px; }
-    .project-task-more { position: relative; margin-left: auto; }
-    .project-task-more summary { cursor: pointer; }
-    .project-task-more:not([open]) .project-task-more-menu { display: none; }
-    .project-task-more-menu { position: absolute; top: 100%; right: 0; z-index: 2; display: grid; gap: 3px; min-width: min(130px, calc(100vw - 56px)); max-width: min(230px, calc(100vw - 56px)); padding: 5px; background: var(--vscode-menu-background, var(--vscode-sideBar-background)); border: 1px solid var(--vscode-panel-border); box-shadow: 0 2px 7px var(--vscode-widget-shadow, #0005); }
-    .project-task-list { display: grid; gap: 4px; margin-top: 6px; }
-    .project-task-card { min-width: 0; border: 1px solid var(--vscode-panel-border); border-radius: 5px; padding: 6px; background: var(--vscode-sideBar-background); }
-    .project-task-card.is-selected { border-color: var(--vscode-focusBorder); }
-    .project-task-open { appearance: none; display: flex; gap: 7px; align-items: flex-start; border: 0; padding: 0; width: 100%; background: transparent; color: var(--vscode-foreground); text-align: left; font: inherit; cursor: pointer; }
-    .project-task-copy { flex: 1; min-width: 0; }
-    .project-task-title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-weight: 600; overflow-wrap: anywhere; }
-    .project-task-phase, .project-task-progress, .project-task-metrics, .project-task-first, .project-task-current { font-size: 11px; overflow-wrap: anywhere; color: var(--vscode-descriptionForeground); }
-    .project-task-progress { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-    .project-task-current { color: var(--vscode-focusBorder); }
-    .project-task-metrics { margin-top: 2px; }
-    .project-task-detail { margin-top: 7px; padding-top: 6px; border-top: 1px solid var(--vscode-panel-border); }
-    .project-task-detail h3 { margin: 3px 0; font-size: 12px; overflow-wrap: anywhere; }
-    .project-task-actions { display: flex; gap: 5px; align-items: center; flex-wrap: wrap; }
-    .project-task-actions button, .project-task-more-menu button { font: inherit; font-size: 11px; padding: 3px 7px; min-height: 25px; }
-    .project-task-ring { --task-status-color: var(--vscode-charts-orange, #c88b36); position: relative; display: inline-flex; flex: 0 0 28px; width: 28px; height: 28px; align-items: center; justify-content: center; vertical-align: middle; }
-    .project-task-ring svg { position: absolute; inset: 0; width: 28px; height: 28px; transform: rotate(-90deg); overflow: visible; }
-    .project-task-ring-track { fill: none; stroke: var(--vscode-widget-border, var(--vscode-descriptionForeground)); opacity: .4; stroke-width: 2.5; }
-    .project-task-ring-arc { fill: none; stroke: var(--vscode-progressBar-background, var(--vscode-focusBorder, #6796e6)); stroke-width: 2.5; }
-    .project-task-ring[data-usage-status="unknown"] .project-task-ring-track { stroke-dasharray: 2 3; }
-    .project-task-ring[data-state="completed"] { --task-status-color: var(--vscode-charts-green, #388a34); }
-    .project-task-ring[data-state="failed"], .project-task-ring[data-state="cancelled"], .project-task-ring[data-state="interrupted"] { --task-status-color: var(--vscode-charts-red, #c94f4f); }
-    .project-task-status-icon { width: 19px; height: 19px; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; color: var(--vscode-sideBar-background, #fff); background: var(--task-status-color); font-size: 12px; font-weight: bold; line-height: 1; }
-    .project-task-tooltip { position: fixed; z-index: 35; max-width: min(320px, calc(100vw - 12px)); max-height: min(300px, calc(100vh - 12px)); overflow: auto; pointer-events: auto; white-space: pre-line; overflow-wrap: anywhere; padding: 7px 9px; color: var(--vscode-editorHoverWidget-foreground, var(--vscode-foreground)); background: var(--vscode-editorHoverWidget-background, var(--vscode-editor-background)); border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-panel-border)); box-shadow: 0 2px 8px var(--vscode-widget-shadow, #0005); font-size: 11px; }
-    .project-view-status { flex: 0 0 auto; display: flex; align-items: center; gap: 5px; font-size: 11px; }
-    .project-view-status:has(> .hidden):not(:has(> :not(.hidden))) { display: none; }
-    .project-owner-notice { flex: 1; color: var(--vscode-inputValidation-warningForeground, var(--vscode-descriptionForeground)); padding: 3px 6px; }
-    .project-view-status button { font-size: 11px; padding: 2px 6px; }
-    .project-input-target { flex: 0 0 auto; font-size: 11px; padding: 3px 6px; overflow-wrap: anywhere; color: var(--vscode-descriptionForeground); }
-    .project-tasks button:focus-visible, .project-task-sidebar button:focus-visible, .project-task-sidebar select:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: -2px; }
-    @media (forced-colors: active) { .project-task-status-icon { forced-color-adjust: none; color: Canvas; background: CanvasText; } .project-task-ring-arc { stroke: Highlight; } .project-task-lamp.is-selected { outline: 2px solid Highlight; } }
-    @media (prefers-reduced-motion: reduce) { .project-task-ring, .project-task-sidebar { animation: none; transition: none; } }
-  `;
-}
+// Templates and styles now live in ./sidebar; the script fragment below still
+// shares one IIFE with the host, so it keeps its original position.
+export {
+  getProjectTasksOverlayTemplate,
+  getProjectTasksStyles,
+  getProjectTasksTemplate
+} from './sidebar';
 
 export function getProjectTasksScript(): string {
   return `
