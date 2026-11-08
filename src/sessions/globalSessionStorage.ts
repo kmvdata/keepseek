@@ -129,6 +129,16 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     this.evidenceStore = new ToolEvidenceStore(globalStorageUri);
   }
 
+  public async readWorkspaceApprovalMode(workspaceScope: WorkspaceSessionScope): Promise<ApprovalMode | undefined> {
+    const hash = getWorkspaceHash(workspaceScope.key);
+    const index = await this.readWorkspaceIndex(hash, workspaceScope);
+    if (index?.workspaceKey === workspaceScope.key) return index.approvalMode;
+    // V1 is one intact file; this fallback does not migrate or recover its active
+    // conversation. The following durable shard commit performs safe migration.
+    const legacy = await this.readLegacyWorkspaceSessionFile(hash, workspaceScope);
+    return legacy?.workspaceKey === workspaceScope.key ? legacy.approvalMode : undefined;
+  }
+
   public async loadWorkspace(workspaceScope: WorkspaceSessionScope): Promise<StoredWorkspaceSessionState> {
     const hash = getWorkspaceHash(workspaceScope.key);
     let index = await this.readWorkspaceIndex(hash, workspaceScope);
@@ -223,7 +233,13 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
 
   private async saveWorkspaceCoordinated(workspaceScope: WorkspaceSessionScope, state: StoredWorkspaceSessionState, preserveSelection = false): Promise<void> {
     const workspaceHash = getWorkspaceHash(workspaceScope.key);
-    const existing = await this.readWorkspaceIndex(workspaceHash, workspaceScope);
+    let existing = await this.readWorkspaceIndex(workspaceHash, workspaceScope);
+    if (!existing) {
+      // New Chat can commit before the initial legacy-history read finishes.
+      // Preserve that intact history before publishing the first V2 index.
+      const legacy = await this.readLegacyWorkspaceSessionFile(workspaceHash, workspaceScope);
+      if (legacy?.workspaceKey === workspaceScope.key) existing = await this.migrateLegacyWorkspaceFile(legacy, true);
+    }
     const entries = new Map((existing?.sessions ?? []).map((entry) => [entry.id, entry]));
     for (const summary of state.sessionSummaries ?? []) {
       if (summary.workspaceKey !== workspaceScope.key) continue;
@@ -336,7 +352,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     const normalizedWorkspaceKey = workspaceKey.trim();
     const ids = new Set(sessionIds.map((id) => id.trim()).filter(Boolean));
     if (!normalizedWorkspaceKey || !ids.size) return;
-    const index = await this.loadIndexByWorkspaceKey(normalizedWorkspaceKey);
+    const index = await this.loadIndexByWorkspaceKey(normalizedWorkspaceKey, true);
     if (!index) return;
     const removed = index.sessions.filter((entry) => ids.has(entry.id));
     if (!removed.length) return;
@@ -366,7 +382,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     if (!normalizedWorkspaceKey) return;
     const hash = getWorkspaceHash(normalizedWorkspaceKey);
     this.forgetScheduledManifestWorkspace(hash);
-    const index = await this.loadIndexByWorkspaceKey(normalizedWorkspaceKey);
+    const index = await this.loadIndexByWorkspaceKey(normalizedWorkspaceKey, true);
     if (index) await Promise.all(index.sessions.map((entry) => this.evidenceStore.deleteSessionEvidence(entry.id)));
     await this.deleteFile(this.getWorkspaceDirectoryUri(hash), true);
     await this.deleteFile(vscode.Uri.joinPath(this.legacyWorkspacesUri, `${hash}.json`));
@@ -419,7 +435,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
       if (!index) {
         const legacy = await this.readLegacyWorkspaceSessionFile(hash, manifestEntryToMetadata(manifest.workspaces[hash]));
         if (!legacy) continue;
-        index = await this.migrateLegacyWorkspaceFile(legacy);
+        index = await this.migrateLegacyWorkspaceFile(legacy, true);
       }
       const removed = index.sessions.filter((entry) => {
         if (entry.isFavorite || protectedIds.has(entry.id)) return false;
@@ -487,20 +503,23 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     }
   }
 
-  private async loadIndexByWorkspaceKey(workspaceKey: string): Promise<WorkspaceSessionIndex | undefined> {
+  private async loadIndexByWorkspaceKey(workspaceKey: string, coordinated = false): Promise<WorkspaceSessionIndex | undefined> {
     if (!workspaceKey) return undefined;
     const hash = getWorkspaceHash(workspaceKey);
     let index = await this.readWorkspaceIndex(hash);
     if (!index) {
       const manifest = await this.readManifest();
       const legacy = await this.readLegacyWorkspaceSessionFile(hash, manifestEntryToMetadata(manifest.workspaces[hash]));
-      if (legacy?.workspaceKey === workspaceKey && !this.readOnly) index = await this.migrateLegacyWorkspaceFile(legacy);
+      if (legacy?.workspaceKey === workspaceKey && !this.readOnly) index = await this.migrateLegacyWorkspaceFile(legacy, coordinated);
     }
-    return index?.workspaceKey === workspaceKey ? await this.reconcileWorkspaceIndex(index) : undefined;
+    return index?.workspaceKey === workspaceKey ? await this.reconcileWorkspaceIndex(index, coordinated) : undefined;
   }
 
-  private async migrateLegacyWorkspaceFile(file: LegacyWorkspaceSessionFile): Promise<WorkspaceSessionIndex> {
+  private async migrateLegacyWorkspaceFile(file: LegacyWorkspaceSessionFile, coordinated = false): Promise<WorkspaceSessionIndex> {
+    if (!coordinated) return await withStorageCoordinator(this.rootUri, async () => this.migrateLegacyWorkspaceFile(file, true));
     const workspaceHash = getWorkspaceHash(file.workspaceKey);
+    const existing = await this.readWorkspaceIndex(workspaceHash);
+    if (existing) return existing;
     const entries: SessionIndexEntry[] = [];
     for (const session of file.sessions) {
       const value = { version: 2, workspaceKey: file.workspaceKey, session };
@@ -529,9 +548,13 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     return index;
   }
 
-  private async reconcileWorkspaceIndex(index: WorkspaceSessionIndex): Promise<WorkspaceSessionIndex> {
+  private async reconcileWorkspaceIndex(index: WorkspaceSessionIndex, coordinated = false): Promise<WorkspaceSessionIndex> {
     if (this.readOnly) return index;
+    if (!coordinated) return await withStorageCoordinator(this.rootUri, async () => this.reconcileWorkspaceIndex(index, true));
     const hash = getWorkspaceHash(index.workspaceKey);
+    // A concurrently-created fresh session may have committed since this read.
+    // Reconciliation must not write an obsolete index over that selection/shard.
+    index = await this.readWorkspaceIndex(hash) ?? index;
     const known = new Set(index.sessions.map((entry) => entry.storageFile.replace(/^sessions\//u, '')));
     const orphanFiles = (await this.listSessionShardFiles(hash)).filter((file) => !known.has(file));
     if (!orphanFiles.length) return index;

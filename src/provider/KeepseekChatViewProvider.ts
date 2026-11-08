@@ -348,7 +348,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   private interactionSnapshot(revision: number) {
     const sessionId = this.sessionReady ? this.sessionStore.activeSessionId : '';
+    const freshSession = !!this.freshSessionId && this.freshSessionId === sessionId;
     return this.interactions.snapshot({ sessionId, revision, sessionReady: this.sessionReady,
+      freshSession, readOnly: this.projectOptions?.owner.isOwner === false,
       requestContextReady: this.requestContextReady, approvalDataReady: this.approvalDataReady,
       modelReady: this.commandSettingsReadiness?.mainModel === 'ready',
       contextReady: this.runContextReadiness === 'ready',
@@ -360,9 +362,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         || this.changeActionAbortController && !this.changeActionAbortController.signal.aborted || this.activeDraftRunId),
       cancelOperationId: this.interactionCoordinator?.current?.operationId,
       failure: this.interactionFailure && this.interactionFailure.sessionId === sessionId ? this.interactionFailure.message
-        : this.commandSettingsReadiness?.executionMode === 'error' ? (this.language === 'en' ? 'Session loading failed. Reload the window to retry.' : '会话加载失败，请重新加载窗口重试。')
+        : !freshSession && this.commandSettingsReadiness?.executionMode === 'error' ? (this.language === 'en' ? 'Session loading failed. Reload the window to retry.' : '会话加载失败，请重新加载窗口重试。')
         : this.runContextRefreshError ? this.t('runContextRefreshFailed', { message: getErrorMessage(this.runContextRefreshError) })
-        : this.getStartupState().phase === 'startup-error' ? (this.language === 'en' ? 'Reload the window to retry initialization.' : '请重新加载窗口以重试初始化。') : undefined });
+        : !freshSession && this.getStartupState().phase === 'startup-error' ? (this.language === 'en' ? 'Reload the window to retry initialization.' : '请重新加载窗口以重试初始化。') : undefined });
   }
 
   private setInteractionPhase(phase: InteractionPhase, operation?: InteractionOperation): void {
@@ -501,6 +503,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private readonly sessionCleanupTimer: ReturnType<typeof setInterval>;
   private readonly visibleMessageLimits = new Map<string, number>();
   private sessionReady = false;
+  /** A newly created local target has no historical operations to recover.
+   * First-send admission is independent from old history initialization. */
+  private freshSessionId?: string;
+  private locallyCreatedSessionId?: string;
+  private initialProjectViewMode?: 'legacy';
+  private approvalStoresInitialization?: Promise<void>;
   private approvalDataReady = false;
   private sessionRecoveryReady = false;
   private requestContextReady = false;
@@ -2886,26 +2894,32 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async createNewSession(): Promise<void> {
-    if (this.sessionReady && !this.interactionSnapshot(this.stateRevision).canNavigate) return;
-    if (this.isBusy || this.isStartingRun || this.runContextRefreshInFlight || this.activeDraftRunId || this.activeChangeActions.size || this.hasActiveBackgroundRun()) {
+    if (!this.interactionSnapshot(this.stateRevision).canCreateSession) return;
+    if (this.isBusy || this.isStartingRun || this.activeDraftRunId || this.activeChangeActions.size || this.hasActiveBackgroundRun()) {
       return;
     }
-    const operation = this.interactions.begin('navigation', this.sessionStore.activeSessionId, 'loading_session');
+    const operation = this.interactions.begin('navigation', this.sessionStore.activeSessionId, 'saving');
     if (!operation) return;
-    this.postState({ immediate: true });
+    this.initialProjectViewMode = 'legacy';
     try {
-      await this.ensureSessionNavigationReady();
-      if (this.isBusy || this.hasActiveBackgroundRun()) return;
       this.clearSessionTransientState();
-      const session = await this.sessionStore.createNewSession(this.language, sessionId => {
+      // Old context refreshes may finish, but cannot own or gate this new target.
+      this.runContextRefreshPromise = undefined; this.runContextRefreshInFlight = false; this.runContextRefreshError = undefined;
+      await this.sessionStore.createFreshSession(this.language, sessionId => {
+        this.freshSessionId = sessionId;
+        this.locallyCreatedSessionId = sessionId;
+        this.sessionReady = true;
+        this.sessionRecoveryReady = true;
+        this.commandSettingsReadiness.executionMode = 'ready';
+        this.interactionFailure = undefined;
         this.interactions.update(operation, 'saving', sessionId);
-        this.postState({ immediate: true });
+        this.postState({ immediate: true, forceFull: true });
       });
       this.sessionRecoveryReady = true;
       this.interactionFailure = undefined;
-      this.interactions.update(operation, 'preparing_context', session.id);
+      this.interactions.finish(operation);
       this.publishSessionChanged();
-      await this.prepareNavigatedSessionContext(operation, session, true);
+      this.postState({ immediate: true, forceFull: true });
     } catch (error) {
       if (this.interactions.owns(operation)) this.reportSessionPreparationFailure(this.sessionStore.activeSessionId, error);
     } finally {
@@ -2954,6 +2968,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       if (!session) return;
 
       if (!wasActiveSession) {
+        this.freshSessionId = undefined;
         this.interactionFailure = undefined;
         this.clearSessionTransientState();
         this.interactions.update(operation, 'preparing_context', session.id);
@@ -5992,6 +6007,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     let work: ReturnType<UserTaskClock['enter']> | undefined;
     this.postState({ immediate: true, omitMessages: true });
     try {
+      if (this.freshSessionId === taskSessionForSave.id) {
+        await this.prepareFreshSessionForSend(taskSessionForSave, preparationController.signal);
+        if (preparationController.signal.aborted || this.sessionStore.activeSessionId !== taskSessionForSave.id) return;
+      }
       if (!await this.awaitRunContextRefresh() || preparationController.signal.aborted) return;
       const taskSession = this.sessionStore.getActiveSession();
       if (taskSession.id !== operation.sessionId || !this.interactions.owns(operation)) return;
@@ -7225,6 +7244,37 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     return true;
   }
 
+  /** Store initialization is shared, but old-session hydration is not a
+   * dependency of a brand-new session's first real request. */
+  private ensureApprovalStoresInitialized(): Promise<void> {
+    return this.approvalStoresInitialization ??= (async () => {
+      const results = await Promise.allSettled([
+        this.measureStartup('approval-review-store-loaded', () => this.approvalReviews.initialize()),
+        this.measureStartup('change-set-store-loaded', () => this.changeSets.initialize()),
+        this.measureStartup('draft-run-store-loaded', () => this.draftRuns.initialize())
+      ]);
+      const failure = results.find(result => result.status === 'rejected');
+      if (failure?.status === 'rejected') throw failure.reason;
+    })();
+  }
+
+  private async prepareFreshSessionForSend(session: ChatSession, signal: AbortSignal): Promise<void> {
+    const generation = this.sessionContextGeneration ?? 0;
+    await Promise.all([this.ensureApprovalStoresInitialized(), this.refreshModelSourceState()]);
+    if (signal.aborted) return;
+    this.assertSessionContextOwner(session, generation);
+    this.approvalDataReady = true;
+    this.sessionRecoveryReady = true; // UUID was locally created, with no old operations.
+    this.commandSettingsReadiness.approvalMode = 'ready';
+    this.commandSettingsReadiness.mainModel = 'ready';
+    await this.refreshSessionSkills(session);
+    if (signal.aborted) return;
+    this.assertSessionContextOwner(session, generation);
+    this.freshSessionId = undefined;
+    this.updateRequestContextReadiness();
+    this.postState({ immediate: true, omitMessages: true });
+  }
+
   private initializeAfterWebviewReady(): Promise<void> {
     if (this.startupInitializationPromise) return this.startupInitializationPromise;
     let navigationReady!: () => void;
@@ -7237,11 +7287,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     void this.startupNavigationReadyPromise.catch(() => undefined);
     this.startupInitializationPromise = (async () => {
       const sessionResult = await Promise.allSettled([this.measureStartup('session-store-loaded', () => this.sessionInitialization)]);
-      if (sessionResult[0]?.status === 'rejected') {
+      if (sessionResult[0]?.status === 'rejected' && !this.locallyCreatedSessionId) {
         this.commandSettingsReadiness.executionMode = 'error';
         throw sessionResult[0].reason;
       }
-      if (sessionResult[0]?.status === 'fulfilled' && this.usageLedgerStore && this.usageLedgerFlushes && this.projectOptions?.owner.isOwner !== false) {
+      if (sessionResult[0]?.status === 'fulfilled' && !this.locallyCreatedSessionId && this.usageLedgerStore && this.usageLedgerFlushes && this.projectOptions?.owner.isOwner !== false) {
         const session = this.sessionStore.getActiveSession();
         this.loadUsageDisplay(session);
       }
@@ -7259,35 +7309,38 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         await this.sessionStore.persist();
         vscode.window.showInformationMessage(this.t('approvalModeMigrationNotice'));
       }
-      this.sessionReady = sessionResult[0]?.status === 'fulfilled';
-      this.commandSettingsReadiness.executionMode = sessionResult[0]?.status === 'fulfilled' ? 'ready' : 'error';
-      this.syncConfiguredState();
+      this.sessionReady = sessionResult[0]?.status === 'fulfilled' || !!this.locallyCreatedSessionId;
+      this.commandSettingsReadiness.executionMode = this.sessionReady ? 'ready' : 'error';
+      if (!this.locallyCreatedSessionId) this.syncConfiguredState();
       this.postLightweightState();
       this.markStartupStageOnce('approval-mode-visible', { entries: 1 });
 
-      const approvalTask = this.measureStartup('approval-review-store-loaded', () => this.approvalReviews.initialize());
-      const changeSetTask = this.measureStartup('change-set-store-loaded', () => this.changeSets.initialize());
-      const draftRunTask = this.measureStartup('draft-run-store-loaded', () => this.draftRuns.initialize());
+      const safetySession = this.sessionStore.getActiveSession();
+      const safetyGeneration = this.sessionContextGeneration ?? 0;
+      const ownsSafety = () => this.sessionStore.activeSessionId === safetySession.id
+        && (this.sessionContextGeneration ?? 0) === safetyGeneration;
       const safetyTask = (async () => {
-        const results = await Promise.allSettled([approvalTask, changeSetTask, draftRunTask]);
+        const results = await Promise.allSettled([this.ensureApprovalStoresInitialized()]);
         let ready = results.every((result) => result.status === 'fulfilled');
-        if (ready) {
+        if (ready && ownsSafety() && safetySession.id !== this.locallyCreatedSessionId) {
           const sessionResults = await Promise.allSettled([
-            this.changeSets.loadSession?.(this.sessionStore.activeSessionId),
-            this.draftRuns.loadSession?.(this.sessionStore.activeSessionId)
+            this.changeSets.loadSession?.(safetySession.id),
+            this.draftRuns.loadSession?.(safetySession.id)
           ]);
           ready = sessionResults.every((result) => result.status === 'fulfilled');
           if (ready) {
-            try { await this.recoverHistoryTruncation(this.sessionStore.getActiveSession()); }
+            try { if (ownsSafety()) await this.recoverHistoryTruncation(safetySession); }
             catch (error) {
               ready = false;
               vscode.window.showErrorMessage(this.t('runStorageFailed') + ': ' + getErrorMessage(error));
             }
           }
         }
-        this.approvalDataReady = ready;
-        this.sessionRecoveryReady = ready;
-        this.commandSettingsReadiness.approvalMode = ready ? 'ready' : 'error';
+        if (ownsSafety()) {
+          this.approvalDataReady = ready;
+          this.sessionRecoveryReady = ready;
+          this.commandSettingsReadiness.approvalMode = ready ? 'ready' : 'error';
+        }
         this.postStartupSettingsPatch();
         if (ready) navigationReady();
         else navigationFailed(new Error(this.language === 'en' ? 'Safety recovery failed. Reload the window to retry.' : '操作记录恢复失败，请重新加载窗口重试。'));
@@ -7331,6 +7384,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       const ownsStartupContext = () => this.sessionStore.activeSessionId === startupSession.id
         && (this.sessionContextGeneration ?? 0) === startupContextGeneration;
       const runContextTask = (async () => {
+        if (startupSession.id === this.locallyCreatedSessionId) return;
         try {
           await this.measureStartup(
             'skills-and-project-instructions-loaded',
@@ -7414,6 +7468,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const assistant = new ProjectAssistantHost({ ...this.projectOptions, extensionUri: this.extensionUri,
       storageUri: this.globalStorageUri, sessionStore: this.sessionStore, skillState: this.skillState, extensionInfo: this.extensionInfo,
       sources: this.sharedProjectSources,
+      initialViewMode: () => this.initialProjectViewMode,
       skills: this.skillStore,
       legacyBusy: sessionId => this.sessionStore.activeSessionId === sessionId && Boolean(this.isBusy || this.isStartingRun || this.activeDraftRunId || this.activeChangeActions.size),
       stopLegacy: async () => { this.abortPrompt(); if (this.hasActiveBackgroundRun()) await this.stopBackgroundRun(); await this.activeRunSettled; },
@@ -7440,13 +7495,14 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     interactiveReady: boolean;
     sideEffectsReady: boolean;
   } {
-    const interactiveReady = this.sessionReady && this.approvalDataReady && this.requestContextReady;
+    const fresh = this.sessionReady && this.freshSessionId === this.sessionStore.activeSessionId;
+    const interactiveReady = fresh || this.sessionReady && this.approvalDataReady && this.requestContextReady;
     const hasError = this.projectInitializationFailed || this.projectScopeInvalidated || this.commandSettingsReadiness.mainModel === 'error'
       || this.commandSettingsReadiness.executionMode === 'error'
       || this.commandSettingsReadiness.approvalMode === 'error'
       || this.runContextReadiness === 'error';
     return {
-      phase: hasError
+      phase: fresh ? 'ready' : hasError
         ? 'startup-error'
         : !this.sessionReady
           ? 'loading-sessions'
@@ -7512,6 +7568,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private postLightweightState(): void {
+    // A late old-history startup publication must not replace live operation
+    // cards with the bootstrap's empty arrays after the new target is usable.
+    if (this.locallyCreatedSessionId && this.sessionReady && this.fullStateSent) {
+      this.postState({ immediate: true, omitMessages: true });
+      return;
+    }
     const revision = ++this.stateRevision;
     const hasSession = this.sessionReady;
     const activeSession = hasSession ? this.sessionStore.getActiveSession() : undefined;

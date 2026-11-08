@@ -147,6 +147,52 @@ test('display-only background work has no ownership; runtime background exclusiv
   assert.equal(startup.canCancel, false);
 });
 
+test('a committed fresh session is immediately ready for input without granting historic recovery readiness', () => {
+  const facts = ready({ sessionId: 'fresh', freshSession: true, sessionReady: false,
+    requestContextReady: false, approvalDataReady: false, modelReady: false,
+    contextReady: false, sessionRecoveryReady: false, contextRefreshing: true });
+  const fresh = deriveInteractionState(facts);
+  assert.equal(fresh.phase, 'idle');
+  assert.equal(fresh.canEdit, true);
+  assert.equal(fresh.canSubmit, true);
+  assert.equal(fresh.canChangeContext, true);
+  assert.equal(fresh.canNavigate, false, 'historical selection still requires its own loaded index');
+  assert.equal(fresh.canCreateSession, true);
+  assert.equal(fresh.canCancel, false);
+  assert.equal(fresh.waitingReason, undefined);
+  assert.equal(fresh.blockingReason, undefined);
+  assert.equal(facts.approvalDataReady, false, 'input readiness never modifies side-effect/recovery facts');
+  assert.equal(facts.sessionRecoveryReady, false);
+  assert.equal(deriveInteractionState({ ...facts, freshSession: false }).canSubmit, false);
+  assert.equal(deriveInteractionState({ ...facts, sessionId: '' }).canSubmit, false,
+    'a fresh marker without a committed identity cannot admit input');
+});
+
+test('new-session creation can escape historical loading but never an execution owner or observer boundary', () => {
+  const loading = ready({ sessionId: '', sessionReady: false, requestContextReady: false,
+    approvalDataReady: false, contextRefreshing: true });
+  const state = deriveInteractionState(loading);
+  assert.equal(state.phase, 'loading_session');
+  assert.equal(state.canCreateSession, true);
+  assert.equal(state.canNavigate, false);
+  assert.equal(state.canSubmit, false);
+  assert.equal(deriveInteractionState({ ...loading, failure: 'Historic read failed' }).canCreateSession, true);
+  for (const busy of [{ mainRunning: true }, { starting: true }, { actionRunning: true }, { backgroundRunning: true }]) {
+    const busyState = deriveInteractionState({ ...loading, ...busy, freshSession: true, sessionId: 'fresh' });
+    assert.equal(busyState.canCreateSession, false);
+    assert.equal(busyState.canSubmit, false);
+  }
+  const coordinator = new InteractionCoordinator();
+  coordinator.begin('navigation', 'A', 'loading_session');
+  assert.equal(coordinator.snapshot(loading).canCreateSession, false, 'another session owner cannot be stolen');
+  const observer = deriveInteractionState(ready({ freshSession: true, readOnly: true }));
+  assert.equal(observer.canCreateSession, false);
+  assert.equal(observer.canSubmit, false);
+  assert.equal(observer.canChangeContext, false);
+  assert.equal(observer.canNavigate, true);
+  assert.equal(deriveInteractionState(ready()).canCreateSession, true);
+});
+
 test('diagnostics record phases, safe session identity and elapsed time without affecting owners', () => {
   let now = 10;
   const events: InteractionDiagnostic[] = [];

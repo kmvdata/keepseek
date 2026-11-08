@@ -183,6 +183,211 @@ test('coalesced persistence waits for the requested snapshot revision and commit
   assert.deepEqual(storage.saved?.sessions[0]?.messages.map((message) => message.id), ['m0', 'm1', 'm2']);
 });
 
+test('fresh sessions commit without waiting for an old body and survive its delayed initialization', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-fresh-session-'));
+  const storage = new GlobalSessionStorage(vscode.Uri.file(root) as never);
+  t.after(async () => { await storage.flush(); await rm(root, { recursive: true, force: true }); });
+  const scope = { key: 'fresh-session', name: 'Fresh', folderUris: [] };
+  const old = createSession('old-session', [createMessage(0), createMessage(1)], scope);
+  await storage.saveWorkspace(scope, { activeSessionId: old.id, sessions: [old] });
+  const oldShard = path.join(root, 'chat-sessions', 'v2', 'workspaces', getWorkspaceHash(scope.key), 'sessions',
+    `${createHash('sha256').update(old.id).digest('hex').slice(0, 32)}.json`);
+  const oldBytes = await readFile(oldShard, 'utf8');
+  const loaded = deferred<void>(), release = deferred<void>();
+  const load = storage.loadWorkspace.bind(storage);
+  let reads = 0;
+  storage.loadWorkspace = async workspace => {
+    reads += 1;
+    const result = await load(workspace);
+    loaded.resolve(); await release.promise;
+    return result;
+  };
+  const writes: string[][] = [];
+  const save = storage.saveSessionChanges.bind(storage);
+  storage.saveSessionChanges = async (workspace, state, preserve) => {
+    writes.push(state.sessions.map(session => session.id));
+    await save(workspace, state, preserve);
+  };
+  const store = new ChatSessionStore(storage, 'en', scope);
+  const placeholder = store.getActiveSession();
+  const initializing = store.initialize();
+  await loaded.promise;
+  let selectedAtSaving = '';
+  const fresh = await store.createFreshSession('en', id => { selectedAtSaving = store.activeSessionId; assert.equal(id, selectedAtSaving); });
+  assert.equal(store.getActiveSession(), fresh);
+  assert.equal(reads, 1, 'New Chat must not issue another historical body load');
+  assert.deepEqual(writes, [[fresh.id]], 'the pre-load placeholder is not authority');
+  const disk = await new GlobalSessionStorage(vscode.Uri.file(root) as never).loadWorkspace(scope);
+  assert.equal(disk.activeSessionId, fresh.id);
+  assert.deepEqual(new Set(disk.sessionSummaries?.map(session => session.id)), new Set([old.id, fresh.id]));
+  assert.ok(!disk.sessionSummaries?.some(session => session.id === placeholder.id));
+  fresh.messages.push(createMessage(2));
+  store.markSessionDirty(fresh.id);
+  release.resolve(); await initializing;
+  assert.equal(store.getActiveSession(), fresh, 'a late load cannot replace the live fresh object or selection');
+  assert.deepEqual(fresh.messages.map(message => message.id), ['m2']);
+  assert.ok(store.getSessionSummaries().some(session => session.id === old.id));
+  await store.flush();
+  assert.deepEqual(writes, [[fresh.id], [fresh.id]], 'late initialization preserves unsaved fresh revisions');
+  assert.equal((await storage.loadSession(scope.key, fresh.id))?.messages[0]?.content, 'message 2');
+  assert.equal(await readFile(oldShard, 'utf8'), oldBytes, 'old user/replay shards are untouched');
+});
+
+test('failed historical initialization does not discard a durable fresh session', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-fresh-failed-load-'));
+  const storage = new GlobalSessionStorage(vscode.Uri.file(root) as never);
+  t.after(async () => { await storage.flush(); await rm(root, { recursive: true, force: true }); });
+  const scope = { key: 'fresh-failed-load', name: 'Fresh', folderUris: [] };
+  const old = createSession('old-session', [createMessage(0)], scope);
+  await storage.saveWorkspace(scope, { activeSessionId: old.id, sessions: [old] });
+  const release = deferred<void>();
+  storage.loadWorkspace = async () => { await release.promise; throw new Error('old history unavailable'); };
+  const store = new ChatSessionStore(storage, 'en', scope);
+  const initializing = store.initialize();
+  const rejected = assert.rejects(initializing, /old history unavailable/);
+  const fresh = await store.createFreshSession();
+  release.resolve(); await rejected;
+  assert.equal(store.getActiveSession(), fresh);
+  fresh.messages.push(createMessage(2)); await store.persist();
+  const disk = await new GlobalSessionStorage(vscode.Uri.file(root) as never).loadWorkspace(scope);
+  assert.equal(disk.activeSessionId, fresh.id);
+  assert.equal(disk.sessions[0].messages[0].id, 'm2');
+  assert.ok(disk.sessionSummaries?.some(session => session.id === old.id));
+});
+
+test('fresh sessions inherit the saved project mode while its old body is still unread', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-fresh-preferences-'));
+  const storage = new GlobalSessionStorage(vscode.Uri.file(root) as never);
+  const originalRead = vscode.workspace.fs.readFile;
+  const release = deferred<void>();
+  t.after(async () => {
+    release.resolve(); vscode.workspace.fs.readFile = originalRead;
+    await storage.flush(); await rm(root, { recursive: true, force: true });
+  });
+  const scope = { key: 'fresh-preferences', name: 'Fresh', folderUris: [] };
+  const old = createSession('old-session', [createMessage(0)], scope);
+  await storage.saveWorkspace(scope, { activeSessionId: old.id, approvalMode: 'delegate', sessions: [old] });
+  const oldShard = path.join(root, 'chat-sessions', 'v2', 'workspaces', getWorkspaceHash(scope.key), 'sessions',
+    `${createHash('sha256').update(old.id).digest('hex').slice(0, 32)}.json`);
+  const oldBytes = await readFile(oldShard, 'utf8');
+  const blocked = deferred<void>();
+  let bodyReads = 0;
+  vscode.workspace.fs.readFile = async uri => {
+    if (uri.fsPath === oldShard) { bodyReads += 1; blocked.resolve(); await release.promise; }
+    return await originalRead(uri);
+  };
+  const store = new ChatSessionStore(storage, 'en', scope);
+  const initializing = store.initialize();
+  await blocked.promise;
+  let selectedAtSaving = '';
+  const creating = store.createFreshSession('en', id => { selectedAtSaving = id; });
+  assert.equal(store.activeSessionId, selectedAtSaving, 'selection happens before preference I/O');
+  assert.equal(store.approvalMode, 'ask', 'unread preferences cannot grant authority before their read');
+  const fresh = await creating;
+  assert.equal(store.approvalMode, 'delegate');
+  assert.equal(fresh.approvalMode, 'delegate');
+  assert.equal(bodyReads, 1, 'preference reads and fresh commits never open the old active body');
+  const disk = await new GlobalSessionStorage(vscode.Uri.file(root) as never).loadWorkspace(scope);
+  assert.equal(disk.activeSessionId, fresh.id);
+  assert.equal(disk.approvalMode, 'delegate');
+  assert.ok(disk.sessionSummaries?.some(session => session.id === old.id));
+  assert.equal(await readFile(oldShard, 'utf8'), oldBytes);
+  release.resolve(); await initializing;
+  assert.equal(store.getActiveSession(), fresh);
+  assert.equal(store.approvalMode, 'delegate');
+});
+
+test('an explicit newer ask selection wins a delayed saved delegate preference', async () => {
+  const scope = { key: 'fresh-preference-selection', name: 'Fresh', folderUris: [] };
+  const old = createSession('old-session', [createMessage(0)], scope);
+  const storage = new MemorySessionStorage({ activeSessionId: old.id, approvalMode: 'delegate', sessions: [old] });
+  const adapter: ChatSessionStorageAdapter = storage;
+  const release = deferred<void>();
+  adapter.readWorkspaceApprovalMode = async () => { await release.promise; return 'delegate'; };
+  const store = new ChatSessionStore(adapter, 'en', scope);
+  const creating = store.createFreshSession();
+  assert.equal(await store.setApprovalMode('ask'), false);
+  release.resolve(); const fresh = await creating;
+  assert.equal(fresh.approvalMode, 'ask');
+  assert.equal(store.approvalMode, 'ask');
+  assert.equal(storage.saved?.approvalMode, 'ask');
+});
+
+test('fresh sessions also retain their live selection across an already-initialized reload', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-fresh-reload-'));
+  const storage = new GlobalSessionStorage(vscode.Uri.file(root) as never);
+  t.after(async () => { await storage.flush(); await rm(root, { recursive: true, force: true }); });
+  const scope = { key: 'fresh-reload', name: 'Fresh', folderUris: [] };
+  const old = createSession('old-session', [createMessage(0)], scope);
+  await storage.saveWorkspace(scope, { activeSessionId: old.id, sessions: [old] });
+  const store = new ChatSessionStore(storage, 'en', scope);
+  await store.initialize();
+  const loaded = deferred<void>(), release = deferred<void>();
+  const load = storage.loadWorkspace.bind(storage);
+  storage.loadWorkspace = async workspace => {
+    const snapshot = await load(workspace);
+    loaded.resolve(); await release.promise; return snapshot;
+  };
+  const reloading = store.initialize();
+  await loaded.promise;
+  const fresh = await store.createFreshSession();
+  fresh.messages.push(createMessage(2)); store.markSessionDirty(fresh.id);
+  release.resolve(); await reloading;
+  assert.equal(store.getActiveSession(), fresh);
+  await store.flush();
+  assert.equal((await storage.loadSession(scope.key, fresh.id))?.messages[0]?.id, 'm2');
+});
+
+test('fresh sessions safely merge replacement-only adapters before initialization', async () => {
+  const scope = { key: 'fresh-replacement', name: 'Fresh', folderUris: [] };
+  const old = createSession('old-session', [createMessage(0)], scope);
+  const storage = new MemorySessionStorage({ activeSessionId: old.id, sessions: [old] });
+  const store = new ChatSessionStore(storage, 'en', scope);
+  const placeholder = store.getActiveSession();
+  const fresh = await store.createFreshSession();
+  assert.equal(storage.saved?.activeSessionId, fresh.id);
+  assert.deepEqual(new Set(storage.saved?.sessions.map(session => session.id)), new Set([old.id, fresh.id]));
+  assert.ok(!storage.saved?.sessions.some(session => session.id === placeholder.id));
+  await store.initialize();
+  assert.equal(store.getActiveSession(), fresh);
+});
+
+test('fresh sessions preserve V1 history when a delayed legacy migration resumes', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-fresh-legacy-'));
+  const storage = new GlobalSessionStorage(vscode.Uri.file(root) as never);
+  const originalRead = vscode.workspace.fs.readFile;
+  const release = deferred<void>();
+  t.after(async () => {
+    release.resolve(); vscode.workspace.fs.readFile = originalRead;
+    await storage.flush(); await rm(root, { recursive: true, force: true });
+  });
+  const scope = { key: 'fresh-legacy', name: 'Fresh', folderUris: [] };
+  const old = createSession('old-session', [createMessage(0), createMessage(1)], scope);
+  const legacyPath = path.join(root, 'chat-sessions', 'v1', 'workspaces', `${getWorkspaceHash(scope.key)}.json`);
+  await vscode.workspace.fs.createDirectory(vscode.Uri.file(path.dirname(legacyPath)));
+  await writeFile(legacyPath, JSON.stringify({ version: 1, workspaceKey: scope.key, workspaceName: scope.name,
+    workspaceFolders: [], activeSessionId: old.id, approvalMode: 'delegate', sessions: [old], updatedAt: old.updatedAt }));
+  const loaded = deferred<void>();
+  let held = false;
+  vscode.workspace.fs.readFile = async uri => {
+    const bytes = await originalRead(uri);
+    if (!held && uri.fsPath === legacyPath) { held = true; loaded.resolve(); await release.promise; }
+    return bytes;
+  };
+  const store = new ChatSessionStore(storage, 'en', scope);
+  const initializing = store.initialize();
+  await loaded.promise;
+  const fresh = await store.createFreshSession();
+  release.resolve(); await initializing;
+  assert.equal(store.getActiveSession(), fresh);
+  const disk = await new GlobalSessionStorage(vscode.Uri.file(root) as never).loadWorkspace(scope);
+  assert.equal(disk.activeSessionId, fresh.id);
+  assert.equal(disk.approvalMode, 'delegate');
+  assert.equal(fresh.approvalMode, 'delegate');
+  assert.deepEqual(new Set(disk.sessionSummaries?.map(session => session.id)), new Set([old.id, fresh.id]));
+  assert.deepEqual((await storage.loadSession(scope.key, old.id))?.messages.map(message => message.content), ['message 0', 'message 1']);
+});
+
 test('approval mode persists for the project and is inherited by every new or selected session', async () => {
   const workspaceScope: WorkspaceSessionScope = {
     key: 'workspace:approval-mode',
@@ -366,6 +571,12 @@ test('loading a corrupt history truncation journal fails closed instead of dropp
     pendingHistoryTruncation: { version: 1, sessionId: 'another-session' } }] }, scope), /journal scope/);
 });
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(yes => { resolve = yes; });
+  return { promise, resolve };
+}
+
 class MemorySessionStorage implements ChatSessionStorageAdapter {
   public saved: StoredWorkspaceSessionState | undefined;
 
@@ -508,6 +719,7 @@ test('pure task views preserve execution selection and byte history and scoped c
   assert.equal(workerScope.getActiveSession(), worker);
   await workerScope.initialize(); assert.equal(workerScope.getActiveSession(), worker);
   await assert.rejects(workerScope.selectSession(legacy.id), /cannot select/);
+  await assert.rejects(workerScope.createFreshSession(), /cannot create/);
   const writes: string[][] = [];
   const save = storage.saveSessionChanges.bind(storage);
   storage.saveSessionChanges = async (workspace, state, preserve) => {
@@ -571,6 +783,7 @@ test('pinned empty task sessions survive compaction and idle eviction while read
   storage.setReadOnly(true); store.setReadOnly(true);
   assert.ok(await store.viewSessionPage(task.id));
   await assert.rejects(store.createDetachedSession(), /read-only/);
+  await assert.rejects(store.createFreshSession(), /read-only/);
   await assert.rejects(storage.saveWorkspace(scope, { activeSessionId: task.id, sessions: [task] }), /read-only/);
   assert.equal(await storage.cleanupExpiredSessions({ currentWorkspaceKey: scope.key, currentActiveSessionId: task.id, force: true }), false);
   release(); store.evictIdleSessions(0); assert.equal(store.getSessionById(task.id), undefined);

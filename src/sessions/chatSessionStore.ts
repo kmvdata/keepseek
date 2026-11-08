@@ -72,6 +72,8 @@ export interface StoredWorkspaceSessionState {
 export interface ChatSessionStorageAdapter {
   loadMessageCheckpoint?(workspaceKey: string, sessionId: string, messageId: string): Promise<unknown>;
   loadWorkspace(workspaceScope: WorkspaceSessionScope): Promise<StoredWorkspaceSessionState>;
+  /** Project preferences only; sharded adapters must not open the active body. */
+  readWorkspaceApprovalMode?(workspaceScope: WorkspaceSessionScope): Promise<ApprovalMode | undefined>;
   saveWorkspace(workspaceScope: WorkspaceSessionScope, state: StoredWorkspaceSessionState): Promise<void>;
   /** Incremental shard commit. An absent selection leaves the global viewing selection untouched. */
   saveSessionChanges?(workspaceScope: WorkspaceSessionScope, state: StoredWorkspaceSessionState, preserveSelection?: boolean): Promise<void>;
@@ -142,6 +144,7 @@ export class ChatSessionStore {
   private sessionSummaries = new Map<string, ChatSessionSummary>();
   private activeSessionIdValue = '';
   private approvalModeValue: ApprovalMode = 'ask';
+  private approvalModeRevision = 0;
   private readonly stagedTitles = new Map<string, {
     token: string; revision: number; title: string; metadata: SessionTitleMetadata; clearCustomTitle?: boolean;
   }>();
@@ -158,6 +161,11 @@ export class ChatSessionStore {
   private sessionCommitted?: (session: ChatSession) => void;
   private readonly residentBytes = new Map<string, number>();
   private readonly lastViewed = new Map<string, number>();
+  private workspaceLoaded = false;
+  private workspaceLoadRevision = 0;
+  private workspaceLoadPending = false;
+  /** Explicit new sessions can become usable while the previous body is loading. */
+  private readonly sessionsCreatedBeforeLoad = new Set<string>();
 
   public setReadOnly(readOnly: boolean): void { this.readOnly = readOnly; }
   private assertWritable(): void { if (this.readOnly) throw new Error('This project is open read-only in this window.'); }
@@ -495,6 +503,8 @@ export class ChatSessionStore {
     }
 
     this.workspaceScope = workspaceScope;
+    this.workspaceLoaded = false;
+    this.sessionsCreatedBeforeLoad.clear();
     await this.load();
     return true;
   }
@@ -516,9 +526,40 @@ export class ChatSessionStore {
     return session;
   }
 
+  /** Starts from known empty authority, without waiting for historical bodies.
+   * The sharded adapter commits only this session and the new selection. */
+  public async createFreshSession(language: KeepseekLanguage = this.language, onSaving?: (sessionId: string) => void): Promise<ChatSession> {
+    this.assertWritable();
+    if (this.fixedSessionId) throw new Error('Task execution scope cannot create a different session.');
+    // Before initial loading, getActiveSession() may only be a display placeholder.
+    // It must never become a dirty authority shard as a side effect of New Chat.
+    this.language = language;
+    const scope = this.workspaceScope;
+    const readPreferences = !this.workspaceLoaded;
+    const modeRevision = this.approvalModeRevision;
+    const session = createEmptySession(language, this.workspaceScope, this.approvalModeValue, 'normal');
+    this.sessions.unshift(session);
+    if (!this.workspaceLoaded || this.workspaceLoadPending) this.sessionsCreatedBeforeLoad.add(session.id);
+    this.setActiveSessionId(session.id);
+    onSaving?.(session.id);
+    if (readPreferences && this.sessionStorage.readWorkspaceApprovalMode) {
+      const mode = await this.sessionStorage.readWorkspaceApprovalMode(scope);
+      // This is an existing project preference, not a recovered approval. An
+      // explicit newer UI mode selection always wins the asynchronous read.
+      if (this.workspaceScope.key === scope.key && this.activeSessionIdValue === session.id
+        && this.approvalModeRevision === modeRevision && (mode === 'ask' || mode === 'delegate')) {
+        this.approvalModeValue = mode;
+        session.approvalMode = mode;
+      }
+    }
+    await this.persistSession(session.id, 'fresh_session_create');
+    return session;
+  }
+
   public async setApprovalMode(approvalMode: ApprovalMode): Promise<boolean> {
     this.assertWritable();
     if (approvalMode !== 'ask' && approvalMode !== 'delegate') return false;
+    this.approvalModeRevision += 1;
     const session = this.getActiveSession();
     if (this.approvalModeValue === approvalMode && session.approvalMode === approvalMode) {
       return false;
@@ -726,6 +767,7 @@ export class ChatSessionStore {
     queuedAt: number;
     reason: string;
     sessionVersions: Map<string, number>;
+    mergeWorkspace: boolean;
   };
   private persistenceDrain?: Promise<void>;
   private readonly persistenceWaiters: Array<{
@@ -748,7 +790,8 @@ export class ChatSessionStore {
     this.assertWritable();
     const started = performance.now();
     const incremental = !!this.sessionStorage.saveSessionChanges;
-    const dirty = incremental ? this.sessions.filter(session => this.dirtySessions.has(session.id)) : this.sessions;
+    const dirty = incremental || !this.workspaceLoaded
+      ? this.sessions.filter(session => this.dirtySessions.has(session.id)) : this.sessions;
     for (const session of dirty) {
       session.executionTime = reconcileExecutionTime(session.executionTime, session.messages);
       this.sessionSummaries.set(session.id, toSessionSummary(session, this.language));
@@ -761,7 +804,7 @@ export class ChatSessionStore {
     };
     const checkpointSources = new Map(dirty.flatMap(session => session.messages.map(message => [message.id, message.runCheckpoint] as const)));
     this.pendingPersistence = { revision, scope: { ...this.workspaceScope, folderUris: [...this.workspaceScope.folderUris] }, snapshot, checkpointSources,
-      sessionVersions: new Map(this.dirtySessions), queuedAt: performance.now(), reason };
+      sessionVersions: new Map(this.dirtySessions), queuedAt: performance.now(), reason, mergeWorkspace: !this.workspaceLoaded };
     for (const session of dirty) recordLocalPerformance({ type: 'checkpoint_snapshot', sessionId: session.id,
       snapshotMs: performance.now() - started, reason, queueDepth: Number(Boolean(this.persistenceDrain)) + 1 });
     const completed = new Promise<void>((resolve, reject) => { this.persistenceWaiters.push({ revision, resolve, reject }); });
@@ -830,13 +873,17 @@ export class ChatSessionStore {
           if (summary) { summary.title = saved.title; summary.customTitle = saved.customTitle; }
         }
         if (this.sessionStorage.saveSessionChanges) await this.sessionStorage.saveSessionChanges(next.scope, next.snapshot, !!this.fixedSessionId || next.reason === 'task_session_create');
-        else if (this.fixedSessionId) {
+        else if (this.fixedSessionId || next.mergeWorkspace) {
           // Small legacy/test adapters have replacement semantics. Preserve all
           // unrelated sessions and the viewing selection in that fallback too.
           const prior = await this.sessionStorage.loadWorkspace(next.scope);
           const merged = new Map(prior.sessions.map(session => [session.id, session]));
           next.snapshot.sessions.forEach(session => merged.set(session.id, session));
-          await this.sessionStorage.saveWorkspace(next.scope, { ...prior, sessions: [...merged.values()] });
+          const summaries = new Map((prior.sessionSummaries ?? []).map(summary => [summary.id, summary]));
+          next.snapshot.sessionSummaries?.forEach(summary => summaries.set(summary.id, summary));
+          await this.sessionStorage.saveWorkspace(next.scope, { ...prior,
+            ...(this.fixedSessionId ? {} : { activeSessionId: next.snapshot.activeSessionId, approvalMode: next.snapshot.approvalMode }),
+            sessions: [...merged.values()], sessionSummaries: [...summaries.values()] });
         } else await this.sessionStorage.saveWorkspace(next.scope, next.snapshot);
         for (const saved of next.snapshot.sessions) {
           const staged = this.stagedTitles.get(saved.id);
@@ -992,21 +1039,36 @@ export class ChatSessionStore {
   }
 
   private async load(): Promise<void> {
-    const stored = await this.sessionStorage.loadWorkspace(this.workspaceScope);
+    const scope = this.workspaceScope;
+    const revision = ++this.workspaceLoadRevision;
+    this.workspaceLoadPending = true;
+    let stored: StoredWorkspaceSessionState;
+    try { stored = await this.sessionStorage.loadWorkspace(scope); }
+    finally { if (revision === this.workspaceLoadRevision) this.workspaceLoadPending = false; }
+    if (scope.key !== this.workspaceScope.key || revision !== this.workspaceLoadRevision) return;
     const sessions = normalizeStoredSessions({ sessions: stored.sessions }, this.workspaceScope);
-
-    this.dirtySessions.clear(); this.viewPages.clear(); this.residentBytes.clear();
-    this.sessions = sessions.filter((session) => this.isInCurrentWorkspace(session));
+    const live = this.sessions.filter(session => this.sessionsCreatedBeforeLoad.has(session.id) && this.isInCurrentWorkspace(session));
+    const liveIds = new Set(live.map(session => session.id));
+    const liveSelection = liveIds.has(this.activeSessionIdValue) ? this.activeSessionIdValue : undefined;
+    for (const id of this.dirtySessions.keys()) if (!liveIds.has(id)) this.dirtySessions.delete(id);
+    for (const id of this.viewPages.keys()) if (!liveIds.has(id)) this.viewPages.delete(id);
+    this.residentBytes.clear();
+    // Preserve the exact live object: a user can already have sent a durable new
+    // turn while an obsolete historical read was still in flight.
+    this.sessions = [...live, ...sessions.filter(session => this.isInCurrentWorkspace(session) && !liveIds.has(session.id))];
     for (const session of this.sessions) this.residentBytes.set(session.id, Buffer.byteLength(JSON.stringify(session)));
     this.sessionSummaries = new Map((stored.sessionSummaries ?? this.sessions.map((session) => toSessionSummary(session, this.language)))
       .filter((summary) => summary.workspaceKey === this.workspaceScope.key)
       .map((summary) => [summary.id, summary]));
-    this.activeSessionIdValue = typeof stored.activeSessionId === 'string' ? stored.activeSessionId : '';
+    for (const session of live) this.sessionSummaries.set(session.id, toSessionSummary(session, this.language));
+    this.activeSessionIdValue = liveSelection ?? (typeof stored.activeSessionId === 'string' ? stored.activeSessionId : '');
     const storedActiveSession = this.sessions.find((session) => session.id === this.activeSessionIdValue)
       ?? this.getCurrentWorkspaceSessions()[0];
-    this.approvalModeValue = normalizeStoredApprovalMode(stored.approvalMode ?? storedActiveSession?.approvalMode);
+    if (!liveSelection) this.approvalModeValue = normalizeStoredApprovalMode(stored.approvalMode ?? storedActiveSession?.approvalMode);
     this.ensureActiveSession();
-    if ((stored.approvalMode as unknown) === 'model_review') this.getActiveSession().approvalModeMigrated = true;
+    if (!liveSelection && (stored.approvalMode as unknown) === 'model_review') this.getActiveSession().approvalModeMigrated = true;
+    this.workspaceLoaded = true;
+    this.sessionsCreatedBeforeLoad.clear();
     this.compact();
   }
 

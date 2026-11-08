@@ -62,6 +62,10 @@ export interface InteractionFacts {
   sessionReady: boolean;
   requestContextReady: boolean;
   approvalDataReady: boolean;
+  /** A committed, empty local session can accept a draft before historic recovery finishes. */
+  freshSession?: boolean;
+  /** Observer windows can view sessions but cannot create or execute them. */
+  readOnly?: boolean;
   /** Optional detailed readiness; old callers retain the aggregate readiness contract. */
   modelReady?: boolean;
   contextReady?: boolean;
@@ -89,6 +93,8 @@ export interface InteractionSnapshot {
   /** Source, Skill and context changes use the same readiness boundary. */
   canChangeContext: boolean;
   canNavigate: boolean;
+  /** Creation has no historic-session loading dependency; absent on older Host snapshots. */
+  canCreateSession?: boolean;
   canCancel: boolean;
   cancelOperationId?: string;
   blockingReason?: string;
@@ -208,18 +214,23 @@ export function deriveInteractionState(facts: InteractionFacts, operation?: {
   phase: InteractionPhase;
 }): InteractionSnapshot {
   const owned = operation?.sessionId === facts.sessionId ? operation : undefined;
-  const pending = Boolean(operation || facts.mainRunning || facts.starting || facts.contextRefreshing
+  const fresh = facts.freshSession === true && Boolean(facts.sessionId);
+  const executing = Boolean(operation || facts.mainRunning || facts.starting
     || facts.actionRunning || facts.backgroundRunning);
-  const ready = facts.sessionReady && facts.requestContextReady && facts.approvalDataReady
-    && facts.modelReady !== false && facts.contextReady !== false && facts.sessionRecoveryReady !== false;
+  const contextPending = !fresh && Boolean(facts.contextRefreshing);
+  const pending = executing || contextPending;
+  // This only admits local input. The task owner still checks model, context,
+  // recovery and durability before issuing a request or executing an action.
+  const ready = fresh || (facts.sessionReady && facts.requestContextReady && facts.approvalDataReady
+    && facts.modelReady !== false && facts.contextReady !== false && facts.sessionRecoveryReady !== false);
   let phase: InteractionPhase = owned?.phase ?? 'idle';
   if (!owned) {
     if (facts.mainRunning) phase = 'running';
     else if (facts.actionRunning || facts.backgroundRunning) phase = 'action';
     else if (facts.starting) phase = 'preparing_task';
     else if (facts.failure) phase = 'failed';
-    else if (!facts.sessionReady || operation) phase = 'loading_session';
-    else if (facts.contextRefreshing || !ready) phase = 'preparing_context';
+    else if ((!facts.sessionReady && !fresh) || operation) phase = 'loading_session';
+    else if (contextPending || !ready) phase = 'preparing_context';
   } else if (facts.mainRunning && phase === 'preparing_task') phase = 'running';
   const cancelOperationId = owned?.operationId ?? facts.cancelOperationId;
   const canCancel = Boolean(facts.cancellable && cancelOperationId
@@ -240,9 +251,10 @@ export function deriveInteractionState(facts: InteractionFacts, operation?: {
     phase,
     // Editing a draft never executes it and remains available during preparation.
     canEdit: true,
-    canSubmit: ready && !pending && !facts.failure,
-    canChangeContext: ready && !pending && !facts.failure,
+    canSubmit: ready && !pending && !facts.failure && !facts.readOnly,
+    canChangeContext: ready && !pending && !facts.failure && !facts.readOnly,
     canNavigate: facts.sessionReady && !pending,
+    canCreateSession: !executing && !facts.readOnly,
     canCancel,
     ...(canCancel ? { cancelOperationId } : {}),
     ...(waitingReason ? { waitingReason } : {}),

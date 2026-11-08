@@ -13,6 +13,7 @@ import { getInputScript } from '../src/webview/input/script';
 import { getInputStyles } from '../src/webview/input/styles';
 import { getInputTemplate } from '../src/webview/input/template';
 import { getScript } from '../src/webview/script';
+import { deriveInteractionState } from '../src/provider/interactionState';
 import { createWebviewDomHarness } from './webviewDomHarness';
 
 test('operation status disappears in the same idle update, without a notification timeout', () => {
@@ -38,6 +39,54 @@ function readyView(language = 'en') {
     startup: { interactiveReady: true, sideEffectsReady: true }, interaction: interaction('A', 1) } });
   return view;
 }
+
+test('new session remains reachable while history loads and immediately accepts input when committed', () => {
+  const view = createWebviewDomHarness();
+  const loadingFacts = { sessionId: '', revision: 1, sessionReady: false,
+    requestContextReady: false, approvalDataReady: false, modelReady: false,
+    contextReady: false, sessionRecoveryReady: false };
+  view.receive({ type: 'state', revision: 1, state: { activeSessionId: '',
+    startup: { interactiveReady: false, sideEffectsReady: false },
+    interaction: deriveInteractionState(loadingFacts) } });
+  assert.equal(view.element('newChatTab').disabled, false);
+  assert.equal(view.element('historyTab').disabled, true);
+  assert.equal(view.element('sendButton').disabled, true);
+  view.element('newChatTab').click();
+  assert.equal(view.posted.filter(message => message.type === 'newSession').length, 1);
+  assert.equal(view.posted.some(message => message.type === 'selectSession' || message.type === 'sendPrompt'), false);
+
+  view.receive({ type: 'state', revision: 2, state: { activeSessionId: 'fresh',
+    interaction: deriveInteractionState({ ...loadingFacts, sessionId: 'fresh', revision: 2, freshSession: true }) } });
+  assert.equal(view.element('statusText').textContent, '');
+  assert.equal(view.element('referenceMenuButton').disabled, false);
+  assert.equal(view.element('historyTab').disabled, true);
+  assert.equal(view.state.startup?.sideEffectsReady, false);
+  view.element('promptInput').textContent = 'first fresh request';
+  view.element('promptInput').dispatchEvent({ type: 'input' });
+  assert.equal(view.element('sendButton').disabled, false);
+  view.element('composer').dispatchEvent({ type: 'submit' });
+  const submitted = view.posted.filter(message => message.type === 'sendPrompt');
+  assert.equal(submitted.length, 1);
+  assert.equal(submitted[0].sessionId, 'fresh');
+  assert.equal(view.element('newChatTab').disabled, true, 'pending durable acceptance still owns the input target');
+  view.element('newChatTab').click();
+  assert.equal(view.posted.filter(message => message.type === 'newSession').length, 1);
+});
+
+test('new session stays disabled for the current execution owner and observer windows', () => {
+  const view = readyView();
+  view.receive({ type: 'state', revision: 2, state: { isBusy: true,
+    interaction: deriveInteractionState({ sessionId: 'A', revision: 2, sessionReady: true,
+      requestContextReady: true, approvalDataReady: true, mainRunning: true }) } });
+  assert.equal(view.element('newChatTab').disabled, true);
+  view.element('newChatTab').click();
+  assert.equal(view.posted.some(message => message.type === 'newSession'), false);
+  view.receive({ type: 'state', revision: 3, state: { isBusy: false,
+    interaction: deriveInteractionState({ sessionId: 'A', revision: 3, sessionReady: true,
+      requestContextReady: true, approvalDataReady: true, readOnly: true }) } });
+  assert.equal(view.element('newChatTab').disabled, true);
+  assert.equal(view.element('historyTab').disabled, false);
+});
 
 test('a draft typed during startup survives the first authoritative session identity', () => {
   const view = createWebviewDomHarness();

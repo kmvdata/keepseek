@@ -173,6 +173,14 @@ export function getScript(): string {
       return !pendingSubmission && (interaction ? interaction.canNavigate === true : !state.isBusy && !isBackgroundActive());
     }
 
+    function canCreateSession() {
+      if (pendingSubmission || (typeof projectTasks !== 'undefined' && projectTasks?.readOnly)) return false;
+      if (projectTaskUiActive()) return true;
+      var interaction = currentInteraction();
+      return interaction ? (interaction.canCreateSession ?? interaction.canNavigate) === true
+        : !state.isBusy && !isBackgroundActive();
+    }
+
     function canChangeContext() {
       if (projectTaskUiActive()) return !projectTasks.readOnly;
       var interaction = currentInteraction();
@@ -191,6 +199,7 @@ export function getScript(): string {
       var requestId = 'submission-' + Date.now().toString(36) + '-' + (++submissionSequence);
       pendingSubmission = { requestId: requestId, sessionId: state.activeSessionId,
         kind: kind, prompt: prompt, messageId: messageId || '' };
+      renderSessionControls();
       return requestId;
     }
 
@@ -1003,7 +1012,7 @@ export function getScript(): string {
 
     if (newChatTab) {
       newChatTab.addEventListener('click', function() {
-        if (!canNavigateSessions()) return;
+        if (!canCreateSession()) return;
         closeSettingsMenu();
         closeSessionMenu();
         resetLocalContextUsageEstimate();
@@ -2041,7 +2050,7 @@ export function getScript(): string {
 
     function renderSessionControls() {
       if (newChatTab) {
-        newChatTab.disabled = !canNavigateSessions();
+        newChatTab.disabled = !canCreateSession();
       }
       if (historyTab) {
         historyTab.disabled = !canNavigateSessions();

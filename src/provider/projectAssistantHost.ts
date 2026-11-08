@@ -51,6 +51,7 @@ interface DraftRecord {
 }
 
 interface HostOptions extends ProjectAssistantOptions {
+  initialViewMode?(): 'legacy' | undefined;
   extensionUri: vscode.Uri;
   storageUri: vscode.Uri;
   sessionStore: ChatSessionStore;
@@ -155,6 +156,7 @@ export class ProjectAssistantHost {
       if (raw.viewMode === 'task' && raw.viewTaskId && this.tasks.get(raw.viewTaskId)) { this.viewTaskId = raw.viewTaskId; this.viewMode = 'task'; }
       else if (raw.viewMode === 'new' || raw.viewMode === 'legacy') this.viewMode = raw.viewMode;
     } catch (error) { if (!isMissing(error)) this.options.publish({ type: 'projectTaskError', reason: errorText(error) }); }
+    if (this.options.initialViewMode?.() === 'legacy') { this.viewMode = 'legacy'; this.viewTaskId = null; }
     this.initialized = true;
     this.syncPins(); this.publish();
     void this.showView().catch(error => this.options.publish({ type: 'projectTaskError', reason: errorText(error) }));

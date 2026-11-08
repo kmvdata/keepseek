@@ -11,6 +11,7 @@ import { GlobalSessionStorage } from '../src/sessions/globalSessionStorage';
 import type { SessionTitleCoordinator } from '../src/sessions/sessionTitleCoordinator';
 import type { SharedProjectSources } from '../src/context/sharedProjectSources';
 import type { SkillStore } from '../src/skills/skillStore';
+import type { ChangeSetStore } from '../src/edits/changeSetStore';
 import type { InteractionSnapshot } from '../src/provider/interactionState';
 import type { WebviewMessage } from '../src/provider/webviewMessages';
 import type { AgentResponse, ChatMessage, ChatSession } from '../src/shared/types';
@@ -28,6 +29,7 @@ interface NavigationHost {
   refreshWorkspaceScope(): Promise<void>;
   refreshSkills(options?: { post?: boolean }): Promise<void>;
   postState(options: { immediate?: boolean; forceFull?: boolean }): void;
+  postLightweightState(): void;
   isStartingRun: boolean;
   isBusy: boolean;
   sessionReady: boolean;
@@ -50,7 +52,7 @@ interface NavigationHost {
   recoverSubagentUsage(session: ChatSession): Promise<void>;
   usageLedgerFlushes: Map<string, Promise<void>>;
   usageDisplayReadiness: Map<string, 'loading' | 'ready' | 'incomplete'>;
-  changeSets: { loadSession?(sessionId: string): Promise<void> };
+  changeSets: Pick<ChangeSetStore, 'initialize' | 'loadSession' | 'addDraftEdits'>;
   views: Set<unknown>;
 }
 
@@ -59,6 +61,7 @@ interface PostedState {
   isBusy?: boolean;
   interaction?: InteractionSnapshot;
   messages?: ChatMessage[];
+  changeSets?: Array<{ id: string }>;
   usageMetrics?: { displayReadiness?: 'loading' | 'ready' | 'incomplete' };
 }
 
@@ -174,44 +177,87 @@ test('A to B to A context preparation ignores the previous A generation failure 
   assert.equal(errors.length, 0);
 });
 
-for (const action of ['newSession', 'copyOtherWorkspaceSession'] as const) {
-  test(`${action} releases navigation after safe selection while its context continues loading`, async t => {
-    const { host, store, storage, first, publish, posts, errors } = await fixture(t);
-    const foreignScope = { key: 'workspace:copy-context', name: 'Copy Context', folderUris: [] };
-    const sourceId = 'copy-source';
-    if (action === 'copyOtherWorkspaceSession') await storage.saveWorkspace(foreignScope, {
-      activeSessionId: sourceId,
-      sessions: [{ ...first, id: sourceId, workspaceKey: foreignScope.key, workspaceName: foreignScope.name, workspaceFolders: [] }]
-    });
-    const entered = deferred(); const release = deferred();
-    t.after(() => release.resolve());
-    const resolveSkills = host.skillStore.resolveAndLoadSkills.bind(host.skillStore);
-    let pauseTarget = true;
-    host.skillStore.resolveAndLoadSkills = async input => {
-      const result = await resolveSkills(input);
-      if (input.session.id !== first.id && pauseTarget) {
-        pauseTarget = false; entered.resolve(); await release.promise;
-      }
-      return result;
-    };
-    const preparing = host.handleMessage(action === 'newSession' ? { type: action }
-      : { type: action, workspaceKey: foreignScope.key, sessionId: sourceId });
-    await entered.promise;
-    publish();
-    assert.notEqual(store.activeSessionId, first.id);
-    assert.equal(lastState(posts).interaction?.canNavigate, true);
-    assert.equal(lastState(posts).interaction?.canEdit, true);
-    assert.equal(lastState(posts).interaction?.canSubmit, false);
-    await host.handleMessage({ type: 'selectSession', sessionId: first.id });
-    const entryFloor = host.activeSessionEntryRevision;
-    release.resolve(); await preparing;
-    publish();
-    assert.equal(store.activeSessionId, first.id);
-    assert.equal(lastState(posts).interaction?.canSubmit, true);
-    assert.equal(host.activeSessionEntryRevision, entryFloor);
-    assert.equal(errors.length, 0);
+test('copyOtherWorkspaceSession releases navigation after safe selection while its context continues loading', async t => {
+  const { host, store, storage, first, publish, posts, errors } = await fixture(t);
+  const foreignScope = { key: 'workspace:copy-context', name: 'Copy Context', folderUris: [] };
+  const sourceId = 'copy-source';
+  await storage.saveWorkspace(foreignScope, {
+    activeSessionId: sourceId,
+    sessions: [{ ...first, id: sourceId, workspaceKey: foreignScope.key, workspaceName: foreignScope.name, workspaceFolders: [] }]
   });
-}
+  const entered = deferred(); const release = deferred();
+  t.after(() => release.resolve());
+  const resolveSkills = host.skillStore.resolveAndLoadSkills.bind(host.skillStore);
+  let pauseTarget = true;
+  host.skillStore.resolveAndLoadSkills = async input => {
+    const result = await resolveSkills(input);
+    if (input.session.id !== first.id && pauseTarget) {
+      pauseTarget = false; entered.resolve(); await release.promise;
+    }
+    return result;
+  };
+  const preparing = host.handleMessage({ type: 'copyOtherWorkspaceSession', workspaceKey: foreignScope.key, sessionId: sourceId });
+  await entered.promise;
+  publish();
+  assert.notEqual(store.activeSessionId, first.id);
+  assert.equal(lastState(posts).interaction?.canNavigate, true);
+  assert.equal(lastState(posts).interaction?.canEdit, true);
+  assert.equal(lastState(posts).interaction?.canSubmit, false);
+  await host.handleMessage({ type: 'selectSession', sessionId: first.id });
+  const entryFloor = host.activeSessionEntryRevision;
+  release.resolve(); await preparing;
+  publish();
+  assert.equal(store.activeSessionId, first.id);
+  assert.equal(lastState(posts).interaction?.canSubmit, true);
+  assert.equal(host.activeSessionEntryRevision, entryFloor);
+  assert.equal(errors.length, 0);
+});
+
+test('a new ordinary session is ready without loading project context or Skills; its first send prepares them', async t => {
+  const { host, store, first, posts, publish } = await fixture(t);
+  const refresh = host.sharedProjectSources.refresh.bind(host.sharedProjectSources);
+  const resolveSkills = host.skillStore.resolveAndLoadSkills.bind(host.skillStore);
+  let sourceReads = 0, skillReads = 0;
+  host.sharedProjectSources.refresh = async (...args) => { sourceReads++; return refresh(...args); };
+  host.skillStore.resolveAndLoadSkills = async input => { skillReads++; return resolveSkills(input); };
+  const calls = acceptedRun(host, store);
+  await host.handleMessage({ type: 'newSession' });
+  const fresh = store.getActiveSession();
+  publish();
+  assert.notEqual(fresh.id, first.id);
+  assert.deepEqual(fresh.messages, []);
+  assert.equal(sourceReads, 0, 'New must not scan project sources before there is user input');
+  assert.equal(skillReads, 0, 'New must not load Skills before there is user input');
+  assert.equal(host.currentRunContextsBySession.has(fresh.id), false);
+  assert.equal(lastState(posts).interaction?.phase, 'idle');
+  assert.equal(lastState(posts).interaction?.canEdit, true);
+  assert.equal(lastState(posts).interaction?.canSubmit, true);
+  await host.handleMessage(submission(fresh.id, 'fresh-first-input'));
+  assert.ok(sourceReads > 0, 'the real first submission still loads its own project context');
+  assert.ok(skillReads > 0, 'the real first submission still resolves its own Skills');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].sessionId, fresh.id);
+  assert.equal(posts.find(post => post.requestId === 'fresh-first-input')?.status, 'accepted');
+});
+
+test('unreadable project context does not block New; first send preserves its unaccepted draft', async t => {
+  const { host, store, posts, errors, publish } = await fixture(t);
+  host.sharedProjectSources.refresh = async () => { throw new Error('fresh context cannot be read'); };
+  const calls = acceptedRun(host, store);
+  await host.handleMessage({ type: 'newSession' });
+  const fresh = store.getActiveSession();
+  publish();
+  assert.equal(errors.length, 0, 'opening an empty session does not read failing project sources');
+  assert.equal(lastState(posts).interaction?.phase, 'idle');
+  assert.equal(lastState(posts).interaction?.canSubmit, true);
+  await host.handleMessage(submission(fresh.id, 'fresh-context-error'));
+  assert.equal(calls.length, 0, 'context failure cannot silently dispatch an underprepared request');
+  const feedback = posts.find(post => post.requestId === 'fresh-context-error');
+  assert.ok(feedback);
+  assert.ok(feedback.status === 'rejected' || feedback.status === 'failed');
+  assert.match(feedback.reason ?? '', /fresh context cannot be read/u);
+  assert.deepEqual(fresh.messages, [], 'no durable user acceptance means no ACK may clear the draft');
+});
 
 test('cold startup context for the previous session cannot hold or overwrite a ready history target', async t => {
   const { host, store, first, second, publish, posts } = await fixture(t, { skipStartup: true });
@@ -242,6 +288,81 @@ test('cold startup context for the previous session cannot hold or overwrite a r
   assert.ok(host.currentRunContextsBySession.has(second.id));
   t.diagnostic(JSON.stringify({ boundary: 'cold-start-history', oldContextPaused: true, targetCanSubmitBeforeRelease: true,
     oldCompletionIgnored: true, sourceReads: host.sharedProjectSources.diagnostics }));
+});
+
+test('new session is ready while startup safety recovery is pending; sending still waits for safety', { timeout: 10_000 }, async t => {
+  const { host, store, first, posts, publish } = await fixture(t, { skipStartup: true });
+  const entered = deferred(); const release = deferred();
+  t.after(() => release.resolve());
+  const initialize = host.changeSets.initialize.bind(host.changeSets);
+  host.changeSets.initialize = async () => { entered.resolve(); await release.promise; await initialize(); };
+  const startup = host.initializeAfterWebviewReady();
+  await entered.promise;
+  const calls = acceptedRun(host, store);
+  let request: Promise<void> | undefined;
+  let freshId = '';
+  try {
+    await host.handleMessage({ type: 'newSession' });
+    freshId = store.activeSessionId;
+    publish();
+    assert.notEqual(freshId, first.id);
+    assert.equal(host.approvalDataReady, false, 'display readiness must not pretend global safety recovery finished');
+    assert.equal(lastState(posts).interaction?.phase, 'idle');
+    assert.equal(lastState(posts).interaction?.canEdit, true);
+    assert.equal(lastState(posts).interaction?.canSubmit, true);
+    request = host.handleMessage(submission(freshId, 'fresh-pending-safety'));
+    publish();
+    assert.equal(lastState(posts).interaction?.phase, 'preparing_task', 'an explicit send owns a task preparation rather than a session-loading spinner');
+    assert.equal(lastState(posts).interaction?.canSubmit, false, 'duplicate sends remain closed while necessary preparation is pending');
+    assert.equal(calls.length, 0, 'no model dispatch may cross unfinished safety recovery');
+  } finally {
+    release.resolve();
+    await Promise.all([startup, request]);
+  }
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].sessionId, freshId);
+  assert.equal(posts.find(post => post.requestId === 'fresh-pending-safety')?.status, 'accepted');
+  assert.equal(store.activeSessionId, freshId);
+});
+
+test('new session first send does not wait for the previous startup session context', { timeout: 10_000 }, async t => {
+  const { host, store, first, posts, publish } = await fixture(t, { skipStartup: true });
+  const entered = deferred(); const release = deferred();
+  t.after(() => release.resolve());
+  const resolveSkills = host.skillStore.resolveAndLoadSkills.bind(host.skillStore);
+  let freshSkillReads = 0;
+  host.skillStore.resolveAndLoadSkills = async input => {
+    if (input.session.id === first.id) { entered.resolve(); await release.promise; }
+    else freshSkillReads++;
+    return resolveSkills(input);
+  };
+  const startup = host.initializeAfterWebviewReady();
+  await entered.promise;
+  const calls = acceptedRun(host, store);
+  let request: Promise<void> | undefined;
+  let freshId = '';
+  try {
+    await host.handleMessage({ type: 'newSession' });
+    freshId = store.activeSessionId;
+    publish();
+    assert.equal(freshSkillReads, 0, 'opening empty input does not load a new session context');
+    assert.equal(lastState(posts).interaction?.phase, 'idle');
+    assert.equal(lastState(posts).interaction?.canSubmit, true);
+    request = host.handleMessage(submission(freshId, 'fresh-with-old-context-paused'));
+    await request;
+    assert.equal(calls.length, 1, 'the first send uses its own context without waiting for an obsolete old target');
+    assert.equal(calls[0].sessionId, freshId);
+    assert.ok(freshSkillReads > 0);
+    assert.equal(posts.find(post => post.requestId === 'fresh-with-old-context-paused')?.status, 'accepted');
+  } finally {
+    release.resolve();
+    await Promise.all([startup, request]);
+  }
+  publish();
+  assert.equal(store.activeSessionId, freshId);
+  assert.equal(lastState(posts).interaction?.phase, 'idle');
+  assert.equal(lastState(posts).interaction?.canSubmit, true);
+  assert.ok(host.currentRunContextsBySession.has(freshId));
 });
 
 for (const action of ['refresh', 'retry'] as const) {
@@ -693,38 +814,75 @@ test('failed startup safety recovery cannot be bypassed through navigation into 
   assert.match(lastState(posts).interaction?.blockingReason ?? '', /Safety recovery failed|操作记录恢复失败/u);
 });
 
-for (const type of ['newSession', 'selectSession'] as const) {
-  test(`session navigation ${type} waits for the initial persisted session load`, async t => {
-    const { host, store, storage, first, second, releaseLoad, initialization, publish, posts } = await fixture(t, { delayLoad: true });
-    let writes = 0;
-    const originalSave = storage.saveSessionChanges.bind(storage);
-    storage.saveSessionChanges = async (...args) => { writes++; await originalSave(...args); };
-    const navigation = host.handleMessage(type === 'newSession' ? { type } : { type, sessionId: second.id });
-    const writesBeforeLoad = writes;
-    releaseLoad.resolve();
-    await Promise.all([initialization, navigation]);
-    assert.equal(writesBeforeLoad, 0, 'navigation must not save an empty pre-load session over persisted history');
-    if (type === 'newSession') assert.notEqual(store.activeSessionId, first.id, 'late initialization must not restore the old active session');
-    else assert.equal(store.activeSessionId, second.id, 'history selection must use the initialized summaries');
-    publish();
-    assert.equal(posts.at(-1)?.state?.activeSessionId, store.activeSessionId);
-  });
-}
-
-test('failed initial session loading leaves navigation unlocked without saving a replacement', async t => {
-  const { host, storage, releaseLoad, initialization, errors } = await fixture(t, { delayLoad: true, loadFailure: true });
+test('history selection waits for the initial persisted session load', async t => {
+  const { host, store, storage, first, second, releaseLoad, initialization, publish, posts } = await fixture(t, { delayLoad: true });
   let writes = 0;
   const originalSave = storage.saveSessionChanges.bind(storage);
   storage.saveSessionChanges = async (...args) => { writes++; await originalSave(...args); };
-  const navigation = host.handleMessage({ type: 'newSession' });
+  const navigation = host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  const writesBeforeLoad = writes;
   releaseLoad.resolve();
-  await navigation;
-  await assert.rejects(initialization, /injected session load failure/);
-  assert.equal(writes, 0);
-  assert.equal(host.isStartingRun, false);
-  assert.equal(host.sessionReady, false);
-  assert.equal(errors.length, 1);
+  await Promise.all([initialization, navigation]);
+  assert.equal(writesBeforeLoad, 0, 'navigation must not save an empty pre-load session over persisted history');
+  assert.equal(store.activeSessionId, second.id, 'history selection must use the initialized summaries');
+  publish();
+  assert.equal(posts.at(-1)?.state?.activeSessionId, store.activeSessionId);
+  assert.notEqual(store.activeSessionId, first.id);
 });
+
+for (const loadFailure of [false, true]) {
+  test(`new session becomes ready before the old initial session load ${loadFailure ? 'fails' : 'finishes'}`, { timeout: 10_000 }, async t => {
+    const { host, store, storage, scope, first, second, releaseLoad, initialization, posts, publish } = await fixture(t, { delayLoad: true, loadFailure });
+    t.after(() => releaseLoad.resolve());
+    const persistedFirst = await storage.loadSession(scope.key, first.id);
+    const persistedSecond = await storage.loadSession(scope.key, second.id);
+    assert.ok(persistedFirst && persistedSecond);
+    await host.handleMessage({ type: 'newSession' });
+    const fresh = store.getActiveSession();
+    publish();
+    assert.notEqual(fresh.id, first.id);
+    assert.notEqual(fresh.id, second.id);
+    assert.deepEqual(fresh.messages, []);
+    assert.equal(lastState(posts).activeSessionId, fresh.id);
+    assert.equal(lastState(posts).interaction?.phase, 'idle');
+    assert.equal(lastState(posts).interaction?.canEdit, true);
+    assert.equal(lastState(posts).interaction?.canSubmit, true, 'an unrelated old session is not a send-readiness dependency');
+    assert.equal(host.isStartingRun, false);
+    const calls = acceptedRun(host, store);
+    await host.handleMessage(submission(fresh.id, 'fresh-during-old-load'));
+    assert.equal(calls.length, 1, 'the first submission prepares only its fresh target while old history loading stays paused');
+    assert.equal(calls[0].sessionId, fresh.id);
+    assert.equal(posts.find(post => post.requestId === 'fresh-during-old-load')?.status, 'accepted');
+    const acceptedMessage = store.messages.find(message => message.role === 'user');
+    assert.ok(acceptedMessage);
+    const pendingChange = host.changeSets.addDraftEdits({
+      sessionId: fresh.id, runId: calls[0].rootTaskId, messageId: acceptedMessage.id,
+      edits: [{ id: 'fresh-unapplied-edit', uri: vscode.Uri.file(join(scope.folderUris[0] ?? tmpdir(), 'fresh-never-applied.txt')).toString(),
+        label: 'fresh-never-applied.txt', action: 'create', newText: 'pending fixture only', reason: 'Test a visible pending operation' }]
+    });
+    assert.ok(pendingChange);
+    publish();
+    assert.ok(lastState(posts).changeSets?.some(change => change.id === pendingChange.id));
+    host.postLightweightState();
+    assert.ok(lastState(posts).changeSets?.some(change => change.id === pendingChange.id), 'late startup publication cannot clear live pending change cards');
+    const oldFirst = await storage.loadSession(scope.key, first.id);
+    const oldSecond = await storage.loadSession(scope.key, second.id);
+    assert.deepEqual(oldFirst?.messages, persistedFirst.messages, 'creating fresh must preserve old durable history');
+    assert.deepEqual(oldSecond?.messages, persistedSecond.messages);
+    releaseLoad.resolve();
+    if (loadFailure) await assert.rejects(initialization, /injected session load failure/);
+    else await initialization;
+    await host.initializeAfterWebviewReady();
+    publish();
+    assert.equal(store.activeSessionId, fresh.id, 'late old initialization cannot restore its selection');
+    assert.deepEqual(store.getActiveSession().messages, fresh.messages, 'late initialization must retain the accepted fresh history');
+    assert.equal(store.getActiveSession().messages.filter(message => message.role === 'user').length, 1, 'late initialization cannot erase the accepted fresh input');
+    assert.equal(lastState(posts).activeSessionId, fresh.id);
+    assert.equal(lastState(posts).interaction?.phase, 'idle');
+    assert.equal(lastState(posts).interaction?.canSubmit, true);
+    assert.ok(lastState(posts).changeSets?.some(change => change.id === pendingChange.id), 'old load completion retains the fresh target operation cards');
+  });
+}
 
 test('repeated new-session clicks create one persisted session while navigation is pending', async t => {
   const { host, store, storage, first, second, publish, posts } = await fixture(t);
@@ -750,27 +908,25 @@ test('repeated new-session clicks create one persisted session while navigation 
   assert.notEqual(store.activeSessionId, first.id);
   assert.notEqual(store.activeSessionId, second.id);
   assert.equal(host.isStartingRun, false);
-  assert.ok(host.currentRunContextsBySession.has(store.activeSessionId), 'new session Skills and project context are actually refreshed under the navigation lock');
+  assert.equal(host.currentRunContextsBySession.has(store.activeSessionId), false, 'creating an empty session does not prepare unused context');
   publish();
   assert.equal(posts.at(-1)?.state?.isBusy, false);
 });
 
-for (const type of ['newSession', 'selectSession'] as const) {
-  test(`persisted ${type} is published and unlocked when its context refresh fails`, async t => {
-    const { host, store, first, second, posts, errors, publish } = await fixture(t);
-    // Fault injection at the context-source dependency, without replacing Host
-    // navigation, state construction, persistence, or approval/runtime services.
-    host.sharedProjectSources.refresh = async () => { throw new Error('injected context read failure'); };
-    await host.handleMessage(type === 'newSession' ? { type } : { type, sessionId: second.id });
-    assert.notEqual(store.activeSessionId, first.id);
-    assert.equal(host.isStartingRun, false);
-    assert.equal(errors.length, 1);
-    assert.ok(posts.some(post => post.type === 'sessionChanged'));
-    publish();
-    assert.equal(posts.at(-1)?.state?.activeSessionId, store.activeSessionId);
-    assert.equal(posts.at(-1)?.state?.isBusy, false);
-  });
-}
+test('persisted selectSession is published and unlocked when its context refresh fails', async t => {
+  const { host, store, first, second, posts, errors, publish } = await fixture(t);
+  // Fault injection at the context-source dependency, without replacing Host
+  // navigation, state construction, persistence, or approval/runtime services.
+  host.sharedProjectSources.refresh = async () => { throw new Error('injected context read failure'); };
+  await host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  assert.notEqual(store.activeSessionId, first.id);
+  assert.equal(host.isStartingRun, false);
+  assert.equal(errors.length, 1);
+  assert.ok(posts.some(post => post.type === 'sessionChanged'));
+  publish();
+  assert.equal(posts.at(-1)?.state?.activeSessionId, store.activeSessionId);
+  assert.equal(posts.at(-1)?.state?.isBusy, false);
+});
 
 test('an in-flight automatic title does not block or get cancelled by session navigation', async t => {
   const { host, store, first, second, publish, posts } = await fixture(t);
