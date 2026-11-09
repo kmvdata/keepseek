@@ -10,7 +10,7 @@ export const editorStylesFragment: WebviewFragment = {
          不一致时 height='auto' 会被钳到 max-height、随后收缩回固定值，
          导致 scrollTop 被 clamp，滚动条出现后每次输入视口跳动（闪烁）。 */
       max-height: 200px;
-      padding: 10px 12px 6px;
+      padding: 10px 0 6px;
       line-height: 1.45;
       font-size: 13px;
       border: none;
@@ -44,8 +44,8 @@ export const editorStylesFragment: WebviewFragment = {
       content: attr(data-placeholder);
       position: absolute;
       top: 10px;
-      left: 12px;
-      right: 12px;
+      left: 0;
+      right: 0;
       color: var(--vscode-input-placeholderForeground);
       pointer-events: none;
       white-space: nowrap;

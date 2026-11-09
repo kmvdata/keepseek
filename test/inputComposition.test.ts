@@ -473,10 +473,10 @@ test('input feature fragments compose deterministically and exactly once', () =>
 });
 
 test('modular input assembly preserves reviewed task-aware input bytes', () => {
-  assert.equal(hash(getInputScript()), '4dfadf0d9d63bc01f8976f79dc2fecfdb10dc9bdadc26e636e12e6bc2d1670b5');
-  assert.equal(hash(getInputStyles()), '6868e318f8c2fb409ded9fb9becf3a4b97a2701b08851d6fa3114197908e8604');
+  assert.equal(hash(getInputScript()), 'd21fcfe260347b7b4ea466ab52ec5c476c4e10fae011044a14b524e651e902e2');
+  assert.equal(hash(getInputStyles()), '4c25e741f3940ad01a7a9190450169fcdd0b9ece2b33b637b82d39501c6e74e9');
   // Account cancellation remains usable independently of project execution.
-  assert.equal(hash(getInputTemplate()), 'f476aceb0b55397c08f27a30b188a232747155d8b3984fbb4010cbf31055cd6a');
+  assert.equal(hash(getInputTemplate()), '10fb2f0bb0209ac8bcdd4e4ec72a7c89f56d008a44a94eb3f2f56f132d3a9cfd');
 });
 
 test('assembled input keeps unique DOM ids, public controls, payload fields, and feature CSS', () => {

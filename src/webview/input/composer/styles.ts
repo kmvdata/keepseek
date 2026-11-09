@@ -16,8 +16,10 @@ export const composerBaseStylesFragment: WebviewFragment = {
       display: flex;
       flex-direction: column;
       min-height: 116px;
-      border-top: 1px solid var(--vscode-chat-requestBorder, var(--vscode-input-border, transparent));
-      border-bottom: 1px solid var(--vscode-chat-requestBorder, var(--vscode-input-border, transparent));
+      /* box-sizing: border-box 让这条 1px 描边落在面板宽度之内，
+         因此保留卡片外观也不会重新产生左右间隙。 */
+      border: 1px solid var(--vscode-chat-requestBorder, var(--vscode-input-border, transparent));
+      border-radius: 6px;
       overflow: visible;
       background: var(--vscode-chat-requestBackground, var(--vscode-input-background));
     }
