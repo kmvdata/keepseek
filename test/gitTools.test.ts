@@ -10,7 +10,7 @@ import * as vscode from './stubs/vscode';
 
 const gitVerificationSkip = process.platform === 'win32' ? 'Windows native Git executable verification is unavailable.' : false;
 
-test('Git helpers use the controlled read-only fallback without committing or pushing', { skip: gitVerificationSkip }, async (t) => {
+test('Git helpers use the controlled read-only CLI without committing or pushing', { skip: gitVerificationSkip }, async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'keepseek-git-'));
   t.after(async () => await fs.rm(root, { recursive: true, force: true }));
   t.after(() => { vscode.workspace.workspaceFolders = []; });
@@ -31,8 +31,9 @@ test('Git helpers use the controlled read-only fallback without committing or pu
   const suggestion = JSON.parse(await service.suggestCommitMessage({}, 'en'));
 
   assert.equal(status.ok, true);
-  assert.equal(status.providerAvailable, false);
-  assert.equal(status.fallback, true);
+  assert.equal(status.source, 'git_cli');
+  assert.equal('providerAvailable' in status, false);
+  assert.equal('fallback' in status, false);
   assert.equal(status.count, 1);
   assert.equal(branch.branch.name, 'main');
   assert.equal(diff.summary.fileCount, 1);

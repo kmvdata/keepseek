@@ -179,7 +179,7 @@ test('A to B to A context preparation ignores the previous A generation failure 
 });
 
 for (const action of ['newSession', 'copyOtherWorkspaceSession'] as const) {
-  test(`${action} releases navigation after safe selection while its context continues loading`, async t => {
+  test(`${action} releases navigation after safe selection with blank context deferred`, { timeout: 30_000 }, async t => {
     const { host, store, storage, first, publish, posts, errors } = await fixture(t);
     const foreignScope = { key: 'workspace:copy-context', name: 'Copy Context', folderUris: [] };
     const sourceId = 'copy-source';
@@ -200,12 +200,14 @@ for (const action of ['newSession', 'copyOtherWorkspaceSession'] as const) {
     };
     const preparing = host.handleMessage(action === 'newSession' ? { type: action }
       : { type: action, workspaceKey: foreignScope.key, sessionId: sourceId });
-    await entered.promise;
+    if (action === 'newSession') await preparing;
+    else await entered.promise;
     publish();
     assert.notEqual(store.activeSessionId, first.id);
     assert.equal(lastState(posts).interaction?.canNavigate, true);
     assert.equal(lastState(posts).interaction?.canEdit, true);
-    assert.equal(lastState(posts).interaction?.canSubmit, false);
+    assert.equal(lastState(posts).interaction?.canSubmit, action === 'newSession');
+    assert.equal(pauseTarget, action === 'newSession', 'blank navigation performs no Skill reads; copied history prepares its context');
     await host.handleMessage({ type: 'selectSession', sessionId: first.id });
     const entryFloor = host.activeSessionEntryRevision;
     release.resolve(); await preparing;
@@ -309,7 +311,37 @@ test('deleting the active history row restores the replacement session recovery 
   assert.equal(lastState(posts).interaction?.canSubmit, true);
 });
 
-test('workspace scope change restores target operations before opening task submission', async t => {
+
+test('fresh production startup accepts input without reading project context and prepares it under the first task owner', { timeout: 30_000 }, async t => {
+  const { host, store, publish, posts } = await fixture(t, { fresh: true, skipStartup: true });
+  const session = store.getActiveSession();
+  const refresh = host.sharedProjectSources.refresh.bind(host.sharedProjectSources);
+  const reading = deferred(), release = deferred();
+  let reads = 0;
+  t.after(() => release.resolve());
+  host.sharedProjectSources.refresh = async (...args) => {
+    reads++; reading.resolve(); await release.promise;
+    return refresh(...args);
+  };
+  await host.initializeAfterWebviewReady();
+  publish();
+  assert.equal(session.messages.length, 0);
+  assert.equal(reads, 0, 'no AGENTS or Skill scan during fresh startup');
+  assert.equal(host.currentRunContextsBySession.has(session.id), false);
+  assert.equal(lastState(posts).interaction?.canSubmit, true);
+  const calls = acceptedRun(host, store);
+  const submissionWork = host.handleMessage(submission(session.id, 'fresh-input'));
+  await reading.promise;
+  assert.equal(calls.length, 0, 'no model dispatch before required task context exists');
+  assert.equal(host.interactions.current?.kind, 'task', 'the first context await is owned by the submitted task');
+  release.resolve();
+  await submissionWork;
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].sessionId, session.id);
+  assert.ok(host.currentRunContextsBySession.has(session.id));
+});
+
+test('workspace scope change starts a fresh blank before opening task submission', async t => {
   const { host, store, publish, posts } = await fixture(t);
   const initial = store.activeSessionId;
   await host.refreshWorkspaceScope();
@@ -327,7 +359,7 @@ function messages(taskId: string): ChatMessage[] {
   ];
 }
 
-async function fixture(t: TestContext, options: { delayLoad?: boolean; loadFailure?: boolean; skipStartup?: boolean } = {}) {
+async function fixture(t: TestContext, options: { delayLoad?: boolean; loadFailure?: boolean; skipStartup?: boolean; fresh?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'keepseek-session-navigation-'));
   const uri = vscode.Uri.file(root);
   const scope = { key: 'workspace:navigation', name: 'Navigation', folderUris: [] };
@@ -353,7 +385,7 @@ async function fixture(t: TestContext, options: { delayLoad?: boolean; loadFailu
     return snapshot;
   };
   const store = new ChatSessionStore(storage, 'en', scope);
-  const initialization = store.initialize();
+  const initialization = store.initialize({ fresh: options.fresh });
   void initialization.catch(() => undefined);
   if (!options.delayLoad) await initialization;
   else await loadStarted.promise;
@@ -756,7 +788,8 @@ test('repeated new-session clicks create one persisted session while navigation 
   assert.notEqual(store.activeSessionId, first.id);
   assert.notEqual(store.activeSessionId, second.id);
   assert.equal(host.isStartingRun, false);
-  assert.ok(host.currentRunContextsBySession.has(store.activeSessionId), 'new session Skills and project context are actually refreshed under the navigation lock');
+  assert.equal(host.currentRunContextsBySession.has(store.activeSessionId), false, 'blank navigation defers project and Skill reads until a task is submitted');
+  assert.equal(host.sharedProjectSources.dirty, true);
   publish();
   assert.equal(posts.at(-1)?.state?.isBusy, false);
 });
@@ -770,7 +803,7 @@ for (const type of ['newSession', 'selectSession'] as const) {
     await host.handleMessage(type === 'newSession' ? { type } : { type, sessionId: second.id });
     assert.notEqual(store.activeSessionId, first.id);
     assert.equal(host.isStartingRun, false);
-    assert.equal(errors.length, 1);
+    assert.equal(errors.length, type === 'newSession' ? 0 : 1, 'a new blank does not scan context; explicit history still reports a failed preparation');
     assert.ok(posts.some(post => post.type === 'sessionChanged'));
     publish();
     assert.equal(posts.at(-1)?.state?.activeSessionId, store.activeSessionId);
@@ -976,7 +1009,7 @@ test('history timeout reuse retains the empty session recovery barrier', { timeo
   release.resolve(); await completed.promise;
 });
 
-test('history timeout replacement keeps a failed Skill refresh closed to submission', { timeout: 3_000 }, async t => {
+test('history timeout replacement defers Skill reads and rejects a task if that preparation later fails', { timeout: 3_000 }, async t => {
   const { host, store, storage, first, second, posts, errors, publish } = await fixture(t);
   host.historySessionLoadTimeoutMs = 20;
   const entered = deferred(); const release = deferred(); const completed = deferred();
@@ -996,10 +1029,14 @@ test('history timeout replacement keeps a failed Skill refresh closed to submiss
   assert.notEqual(store.activeSessionId, second.id);
   assert.equal(store.getActiveSession().messages.length, 0);
   assert.equal(lastState(posts).interaction?.canNavigate, true);
-  assert.equal(lastState(posts).interaction?.canSubmit, false);
-  assert.equal(lastState(posts).interaction?.phase, 'failed');
-  assert.equal(errors.length, 1);
-  assert.match(errors[0], /replacement Skill read failed/u);
+  assert.equal(lastState(posts).interaction?.canSubmit, true);
+  assert.equal(lastState(posts).interaction?.phase, 'idle');
+  assert.deepEqual(errors, []);
+  const calls = acceptedRun(host, store);
+  await host.handleMessage(submission(store.activeSessionId, 'deferred-skill-failure'));
+  assert.equal(calls.length, 0, 'failed task context cannot dispatch to the model');
+  assert.ok(posts.some(post => post.type === 'submissionResult' && post.status === 'failed'
+    && post.reason?.includes('replacement Skill read failed')));
   release.resolve(); await completed.promise;
 });
 

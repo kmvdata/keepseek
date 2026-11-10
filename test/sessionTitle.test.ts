@@ -5,7 +5,7 @@ import {
   buildSessionTitleMaterial, buildSessionTitleRegenerationMaterial, cloneSessionTitleMetadata, getSessionTitleRegenerationTaskId,
   lockSessionTitleMetadata, normalizeSessionTitle,
   parseSessionTitleResult, reconcileSessionTitleAfterTruncation, sessionTitleBasisMatches,
-  sessionTitleConversationFingerprint, sessionTitleDisplayWidth, sessionTitleMessageHash, sessionTitleTaskBasisMatches, isSessionTitleFinalAnswer, SESSION_TITLE_SYSTEM_PROMPT,
+  sessionTitleDisplayWidth, sessionTitleMessageHash, sessionTitleTaskBasisMatches, SESSION_TITLE_SYSTEM_PROMPT,
   SESSION_TITLE_REGENERATION_MAX_CHARS,
   recordSessionTitleAttempt, sessionTitleTaskWasAttempted, selectSessionTitleInputs,
   isSessionTitleOrigin, isSessionTitleUserInput, sessionTitleInputId, type SessionTitleMetadata
@@ -19,9 +19,8 @@ function fixture() {
   return [message('u1', 'user', '分析 KeepSeek 审批失败原因'), message('a1', 'assistant', '需要继续检查审批任务的关联。')];
 }
 function completed(messages = fixture()): SessionTitleMetadata {
-  return { version: 1, status: 'completed', revision: 3,
-    completed: { taskId: 'u1', basis: { scope: 'recent_turns_v2',
-      messages: messages.map(item => ({ id: item.id, hash: sessionTitleMessageHash(item) })), lastMessageId: messages.at(-1)!.id } }, lastOutcome: 'set' };
+  return { version: 2, status: 'completed', stopped: 'named', revision: 3,
+    completed: { taskId: 'u1', basis: buildSessionTitleMaterial(messages, 'u1')!.basis }, lastOutcome: 'set' };
 }
 
 test('title schema permits a meaningful unresolved topic, defer is explicit, malformed output is never repaired', () => {
@@ -70,7 +69,7 @@ test('Unicode display units preserve graphemes and precise identifiers may excee
 
 test('load keeps consumed rounds, clears interrupted claims and never trusts a manual or corrupt completed state', () => {
   const basis = buildSessionTitleMaterial(fixture(), 'u1')!.basis;
-  const running: SessionTitleMetadata = { version: 1, status: 'running', revision: 2,
+  const running: SessionTitleMetadata = { version: 2, status: 'running', revision: 2,
     lastAttemptTaskId: 'u1', attempt: { taskId: 'u1', token: 'attempt1', basis } };
   assert.deepEqual(normalizeSessionTitle(running), { version: 2, status: 'pending', revision: 2,
     lastAttemptTaskId: 'u1', lastOutcome: 'interrupted' });
@@ -79,40 +78,22 @@ test('load keeps consumed rounds, clears interrupted claims and never trusts a m
   assert.equal(normalizeSessionTitle(completed(), 'My title').status, 'pending');
   assert.equal(normalizeSessionTitle(completed(), 'My title').lastOutcome, 'manual');
   assert.equal(normalizeSessionTitle({ ...completed(), version: 9 }).status, 'pending');
-  assert.equal(normalizeSessionTitle({ ...completed(), version: 2 }).stopped, undefined,
+  assert.equal(normalizeSessionTitle({ ...completed(), stopped: undefined }).stopped, undefined,
     'a v2 completed diagnostic without durable stop cannot manufacture successful naming');
-  assert.equal(normalizeSessionTitle({ ...completed(), completed: { taskId: 'u1', basis: { messages: [] } } }).status, 'pending');
-  assert.equal(normalizeSessionTitle({ version: 1, status: 'made-up', revision: Infinity }).revision, 0);
+  assert.equal(normalizeSessionTitle({ ...completed(), stopped: undefined, completed: { taskId: 'u1', basis: { messages: [] } } }).status, 'pending');
+  assert.equal(normalizeSessionTitle({ version: 2, status: 'made-up', revision: Infinity }).revision, 0);
   assert.equal(normalizeSessionTitle(undefined).status, 'pending');
   assert.equal(lockSessionTitleMetadata(running).revision, 3);
   assert.equal(lockSessionTitleMetadata(lockSessionTitleMetadata(running)).revision, 4, 'same text manual rename advances a revision');
 });
 
-test('completed load provenance must match actual message content, chronology and logical user task', () => {
-  const messages = fixture();
-  const metadata = completed(messages);
-  assert.equal(normalizeSessionTitle(metadata, undefined, { messages }).status, 'completed');
-  for (const corrupted of [
-    [messages[0]],
-    [{ ...messages[0], content: 'replacement user topic' }, messages[1]],
-    [messages[1], messages[0]],
-    [messages[0], { ...messages[1], userTask: { ...messages[1].userTask!, id: 'wrong-task' } }],
-    [messages[0], { ...messages[1], userTask: { ...messages[1].userTask!, originMessageId: 'missing' } }],
-    [messages[0], { ...messages[1], userTask: undefined }]
-  ]) {
-    const normalized = normalizeSessionTitle(metadata, undefined, { messages: corrupted });
-    assert.equal(normalized.status, 'pending');
-    assert.equal(normalized.lastAttemptTaskId, 'u1', 'a corrupt completed state does not unconsume the attempted round');
-    assert.equal(normalized.lastOutcome, 'stale');
-    assert.equal(normalized.revision, 4);
-  }
-  const wrongTask = { ...metadata, completed: { ...metadata.completed!, taskId: 'different-task' } };
-  assert.equal(normalizeSessionTitle(wrongTask, undefined, { messages }).status, 'pending');
-  const brokenSchema = { ...metadata, completed: { taskId: 'u1', basis: { messages: [] } } };
-  assert.equal(normalizeSessionTitle(brokenSchema, undefined, { messages }).lastAttemptTaskId, 'u1');
-  assert.equal(normalizeSessionTitle(metadata, 'manual title', { messages: [] }).lastOutcome, 'manual');
+test('current durable naming survives archived provenance; unsupported title versions are rejected', () => {
+  const metadata = completed();
+  assert.equal(normalizeSessionTitle(metadata, undefined, { messages: [] }).stopped, 'named');
+  assert.equal(normalizeSessionTitle({ ...metadata, version: 1 }).stopped, undefined);
+  assert.equal(normalizeSessionTitle({ ...metadata, version: 99 }).stopped, undefined);
+  assert.equal(normalizeSessionTitle(metadata, 'manual title').stopped, 'manual');
 });
-
 
 test('automatic title material is the current accepted user instruction before any answer exists', () => {
   const messages = [message('u1', 'user', '你好'), message('a1', 'assistant', 'ASSISTANT_OLD_SECRET'),
@@ -205,7 +186,7 @@ test('new provenance ignores every assistant change but detects selected user mu
   assert.equal(sessionTitleBasisMatches(messages.slice(1), material.basis), false);
 });
 
-test('committed stop survives removed old naming content while old in-flight basis stays strict', () => {
+test('committed stop survives removed naming content while in-flight basis stays strict', () => {
   const messages = fixture();
   const old = completed(messages);
   const metadata = normalizeSessionTitle(old);
@@ -214,16 +195,15 @@ test('committed stop survives removed old naming content while old in-flight bas
   assert.equal(truncated.resetTitle, false);
   assert.equal(truncated.metadata.stopped, 'named');
   assert.equal(truncated.metadata.status, 'completed');
-  assert.equal(sessionTitleTaskBasisMatches(messages.slice(0, 1), 'u1', metadata.completed!.basis), false);
+  assert.equal(sessionTitleTaskBasisMatches([], 'u1', metadata.completed!.basis), false);
   assert.equal(normalizeSessionTitle(metadata, undefined, { messages: [] }).stopped, 'named');
-  assert.equal(normalizeSessionTitle(old, undefined, { messages: [], confirmedLegacyCompletion: true }).stopped, 'named');
-  assert.equal(normalizeSessionTitle(old, undefined, { messages: [] }).stopped, undefined);
+  assert.equal(normalizeSessionTitle(old, undefined, { messages: [] }).stopped, 'named');
   const manual = reconcileSessionTitleAfterTruncation(metadata, 'manual name', []);
   assert.equal(manual.resetTitle, false);
   assert.equal(manual.metadata.stopped, 'manual');
 });
 
-test('copies remap both old and user-only provenance while retaining the stop and no executable claims', () => {
+test('copies remap user-only provenance while retaining the stop and no executable claims', () => {
   const messages = fixture();
   const copies = messages.map(item => ({ ...item, id: `copy-${item.id}`,
     userTask: { ...item.userTask!, id: 'copy-u1', originMessageId: 'copy-u1' } }));
@@ -262,7 +242,7 @@ test('manual material binds only the latest two real user inputs and prioritizes
   assert.match(material.userPrompt, /TOPIC_17_UNIQUE/u);
   assert.match(material.userPrompt, /TOPIC_18_UNIQUE/u);
   assert.equal(material.basis.scope, 'user_inputs_v3');
-  assert.equal(material.basis.conversation, undefined);
+  assert.equal('conversation' in material.basis, false);
   assert.deepEqual(material.basis.messages.map(item => item.id), ['u17', 'u18']);
   assert.equal(material.basis.lastMessageId, 'u18');
   assert.ok(sessionTitleTaskBasisMatches(messages, 'u18', material.basis));
@@ -308,29 +288,10 @@ test('manual user-only excerpts stay bounded with escaping, graphemes and thousa
   }
 });
 
-test('legacy whole-history fingerprint and answer provenance keep their old semantics', () => {
-  const messages = fixture();
-  messages.unshift(message('old-user', 'user', 'EARLIER_HISTORY', 'old-user'),
-    message('old-answer', 'assistant', 'OLD_ANSWER', 'old-user'));
-  const wholeBasis = { messages: [messages[2], messages[3]].map(item => ({ id: item.id, hash: sessionTitleMessageHash(item) })),
-    lastMessageId: 'a1', conversation: sessionTitleConversationFingerprint(messages, 'a1')! };
-  assert.ok(sessionTitleTaskBasisMatches(messages, 'u1', wholeBasis));
-  const inputBasis = buildSessionTitleMaterial(messages, 'u1')!.basis;
-  messages[0].content += ' changed earlier';
-  assert.equal(sessionTitleTaskBasisMatches(messages, 'u1', wholeBasis), false);
-  assert.equal(sessionTitleTaskBasisMatches(messages, 'u1', inputBasis), true);
-  const noLinks = fixture().map(item => { const copied = { ...item }; delete copied.userTask; return copied; });
-  const oldNoLinks = { messages: noLinks.map(item => ({ id: item.id, hash: sessionTitleMessageHash(item) })),
-    lastMessageId: 'a1', conversation: sessionTitleConversationFingerprint(noLinks, 'a1')! };
-  assert.ok(sessionTitleTaskBasisMatches(noLinks, 'u1', oldNoLinks));
-  assert.equal(sessionTitleTaskBasisMatches(noLinks, 'u1', { ...oldNoLinks, conversation: undefined }), false,
-    'legacy whole-history basis is never reinterpreted as the new user-only scope');
-});
-
-test('legacy user-only manual refresh works before an answer without backfilling task links', () => {
+test('user-only manual refresh works before an answer without changing messages', () => {
   const messages = [message('old-user', 'user', '先分析审批问题'), message('old-answer', 'assistant', 'ASSISTANT_SECRET'),
     message('new-user', 'user', '现在检查会话切换')];
-  for (const item of messages) delete item.userTask;
+  for (const item of messages) item.userTask = { version: 1, id: item.id, originMessageId: item.id, reason: 'user' };
   const before = structuredClone(messages);
   const material = buildSessionTitleRegenerationMaterial(messages, 'new-user')!;
   assert.equal(getSessionTitleRegenerationTaskId(messages), 'new-user');
@@ -355,7 +316,6 @@ test('latest input selection ignores assistant streaming, terminal errors and ho
   messages.push(message('u2', 'user', '后续的新目的', 'u2'));
   assert.equal(getSessionTitleRegenerationTaskId(messages), 'u2');
   const answer = message('a2', 'assistant', 'error', 'u2');
-  answer.incompleteForTitle = true;
   answer.runDetails = { status: 'failed' } as ChatMessage['runDetails'];
   messages.push(answer);
   assert.equal(getSessionTitleRegenerationTaskId(messages), 'u2');
@@ -366,7 +326,7 @@ test('latest input selection ignores assistant streaming, terminal errors and ho
 test('new basis schema rejects non-user, oversized or whole-history mixtures', () => {
   const messages = fixture();
   const basis = buildSessionTitleMaterial(messages, 'u1')!.basis;
-  const running = (candidate: typeof basis) => ({ version: 2, status: 'running', revision: 1,
+  const running = (candidate: unknown) => ({ version: 2, status: 'running', revision: 1,
     attempt: { token: 'claim', taskId: 'u1', basis: candidate } });
   assert.equal(normalizeSessionTitle(running(basis), undefined, { preserveRunning: true }).attempt?.basis.scope, 'user_inputs_v3');
   const assistantBasis = { ...basis, messages: [{ id: 'a1', hash: sessionTitleMessageHash(messages[1]) }], lastMessageId: 'a1' };
@@ -453,17 +413,11 @@ test('recovery naming consumes each genuine input once instead of consuming its 
   assert.equal(sessionTitleTaskWasAttempted(reconciled.metadata, retained, 'supplement-1'), true);
 });
 
-test('internal recovery-style records remain excluded and legacy whole-history hashes stay unchanged', () => {
+test('internal recovery-style records remain excluded from naming input', () => {
   const messages = fixture();
-  const before = sessionTitleConversationFingerprint(messages, 'a1')!;
-  const oldBasis = { messages: messages.map(item => ({ id: item.id, hash: sessionTitleMessageHash(item) })),
-    lastMessageId: 'a1', conversation: before };
   const supplement = message('supplement-1', 'user', '新的用户目的');
   supplement.userTask = { ...messages[0].userTask!, reason: 'recovery' };
   messages.splice(1, 0, supplement);
-  assert.deepEqual(sessionTitleConversationFingerprint(messages, 'a1'), before,
-    'legacy fingerprints retain their original recovery-record interpretation');
-  assert.ok(sessionTitleTaskBasisMatches(messages, 'u1', oldBasis));
   const host = { ...supplement, id: 'host-continuation', contextMeta: { displayKind: 'draft_run_auto_continue' as const } };
   const protectedHost = { ...supplement, id: 'host-protected', contextMeta: { protectedReason: 'background_run_result' as const } };
   assert.equal(isSessionTitleUserInput(host), false);

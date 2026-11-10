@@ -162,7 +162,7 @@ export function createDisplayedSessionContextUsageEstimate(input: {
   baseUrl?: string;
 }): ContextUsageEstimate {
   // The authoritative provider projection already contains every reasoning byte
-  // that will be sent (tool-call reasoning and legacy-v1 final reasoning). UI-only
+  // that will be sent (tool-call reasoning). UI-only
   // v2 final reasoning must not be counted a second time.
   return toSessionContextUsageEstimate(createContextUsageEstimate(input));
 }

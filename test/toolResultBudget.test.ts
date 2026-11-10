@@ -10,8 +10,8 @@ import { createContextEpochState, createEpochHostCheckpoint, createEpochSeed, cr
 import { ContextWindowCalibrationStore } from '../src/agent/contextWindowCalibrationStore';
 import { prepareEvidenceEnvelope } from '../src/agent/evidence/shaping';
 import { ToolEvidencePersistenceError, ToolEvidenceStore } from '../src/agent/evidence/store';
-import { getAgentTools, READ_EVIDENCE_TOOL_NAME } from '../src/agent/protocol';
-import { AgentInterruptedError, checkpointCopy, createRunCheckpoint, grantCheckpointToolBudgetSegment, migrateLegacyCapacityCheckpoint, recoverNoProgressWithUserTurn, recoveryBlocker, type RunCheckpoint } from '../src/agent/runCheckpoint';
+import { CURRENT_AGENT_PROTOCOL_VERSION, getAgentTools, READ_EVIDENCE_TOOL_NAME } from '../src/agent/protocol';
+import { AgentInterruptedError, checkpointCopy, createRunCheckpoint, grantCheckpointToolBudgetSegment, recoverNoProgressWithUserTurn, recoveryBlocker, type RunCheckpoint } from '../src/agent/runCheckpoint';
 import { isContextTooLongError, ToolResultAdmissionController } from '../src/agent/toolResultAdmission';
 import { WorkspaceToolService } from '../src/agent/tools/workspaceTools';
 import { getScript } from '../src/webview/script';
@@ -282,62 +282,54 @@ test('learned effective windows persist by exact source, provider, endpoint and 
   assert.equal(await store.load({ ...key, endpointHash: 'endpoint-b' }), undefined);
 });
 
-test('v1 calibration migration is canonical, atomic and retryable after a failed v2 write', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'keepseek-calibration-v1-'));
+test('current calibration storage uses canonical identity and preserves the committed state on failed update', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'keepseek-calibration-current-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
   const storage = vscode.Uri.file(root) as unknown as import('vscode').Uri;
   const store = new ContextWindowCalibrationStore(storage);
   const key = {
-    sourceId: 'official',
-    provider: 'deepseek' as const,
-    modelId: 'deepseek-flash',
-    canonicalModelId: 'deepseek-v4-flash',
-    endpointHash: 'official-endpoint'
+    sourceId: 'official', provider: 'deepseek' as const, modelId: 'deepseek-flash',
+    canonicalModelId: 'deepseek-v4-flash', endpointHash: 'official-endpoint'
   };
-  const v1Hash = createHash('sha256').update(JSON.stringify([
-    key.provider, key.sourceId, key.modelId, key.endpointHash
-  ]), 'utf8').digest('hex');
-  const v1Directory = vscode.Uri.joinPath(storage, 'model-calibration', 'v1');
-  const v1Uri = vscode.Uri.joinPath(v1Directory, `${v1Hash}.json`);
-  await vscode.workspace.fs.createDirectory(v1Directory);
-  await vscode.workspace.fs.writeFile(v1Uri, new TextEncoder().encode(JSON.stringify({
-    version: 1,
-    keyHash: v1Hash,
-    state: {
-      declaredWindowTokens: 32_768,
-      learnedEffectiveWindowTokens: 32_768,
-      estimatorScale: 1.31,
-      observations: 4,
-      contextTooLongCount: 0
-    },
-    updatedAt: '2026-01-01T00:00:00.000Z'
-  })));
-
+  const controller = new ToolResultAdmissionController(32_768, undefined,
+    { identity: 'deepseek-v4-flash', version: 'original' });
+  controller.state.estimatorScale = 1.31;
+  await store.save(key, controller.state);
   const originalRename = vscode.workspace.fs.rename;
   vscode.workspace.fs.rename = async (source, target, options) => {
-    if (target.fsPath.includes('/model-calibration/v2/')) throw new Error('simulated atomic migration failure');
+    if (target.fsPath.includes('/model-calibration/v2/')) throw new Error('simulated atomic write failure');
     await originalRename(source, target, options);
   };
   t.after(() => { vscode.workspace.fs.rename = originalRename; });
-  const declaration = {
-    identity: 'deepseek-v4-flash',
-    version: 'deepseek-model-identity-v1:1048576',
-    declaredWindowTokens: 1_048_576
-  };
+  const declaration = { identity: 'deepseek-v4-flash', version: 'larger', declaredWindowTokens: 1_048_576 };
   const inMemory = await store.load(key, declaration);
   assert.equal(inMemory?.learnedEffectiveWindowTokens, 1_048_576);
   assert.equal(inMemory?.estimatorScale, 1.31);
-  assert.ok((await vscode.workspace.fs.readFile(v1Uri)).byteLength > 0, 'failed migration preserves v1 source');
-
+  assert.equal((await store.load(key))?.learnedEffectiveWindowTokens, 32_768,
+    'an unsuccessful atomic update leaves the committed current record intact');
   vscode.workspace.fs.rename = originalRename;
-  const retried = await store.load({ ...key, modelId: 'deepseek-v4.1-flash' }, declaration);
-  assert.equal(retried, undefined, 'v1 lookup remains tied to the original wire alias until migration succeeds');
-  const migrated = await store.load(key, declaration);
-  assert.equal(migrated?.learnedEffectiveWindowTokens, 1_048_576);
-  assert.deepEqual(
-    await store.load({ ...key, modelId: 'deepseek-v4.1-flash' }, declaration),
-    migrated,
-    'v2 calibration is shared by canonical model identity'
-  );
+  const saved = await store.load(key, declaration);
+  assert.deepEqual(await store.load({ ...key, modelId: 'deepseek-v4.1-flash' }), saved,
+    'wire aliases share the canonical current record');
+});
+
+test('calibration storage rejects unsupported formats without loading their observations', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'keepseek-calibration-unsupported-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const storage = vscode.Uri.file(root) as unknown as import('vscode').Uri;
+  const store = new ContextWindowCalibrationStore(storage);
+  const key = { sourceId: 'source', provider: 'openai-compatible' as const, modelId: 'model', endpointHash: 'endpoint' };
+  const keyHash = createHash('sha256').update(JSON.stringify([
+    key.provider, key.sourceId, key.modelId, key.endpointHash
+  ]), 'utf8').digest('hex');
+  const directory = vscode.Uri.joinPath(storage, 'model-calibration', 'v2');
+  await vscode.workspace.fs.createDirectory(directory);
+  const invalid = { ...new ToolResultAdmissionController(32_768).state, version: 1 };
+  await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(directory, `${keyHash}.json`), new TextEncoder().encode(JSON.stringify({
+    version: 2, keyHash, state: invalid, updatedAt: new Date().toISOString()
+  })));
+  assert.equal(await store.load(key), undefined);
+  await assert.rejects(store.save(key, invalid as never), /Invalid current/u);
 });
 
 test('epoch seed is canonical and no-progress detection survives rollovers', () => {
@@ -352,7 +344,7 @@ test('epoch seed is canonical and no-progress detection survives rollovers', () 
   const seed = createEpochSeed(options);
   assert.equal(createEpochSeed(structuredClone(options)), seed);
   const parsed = JSON.parse(seed) as { originalTask: string; protocolVersion: number; hostState: { evidence: unknown[] } };
-  assert.equal(parsed.protocolVersion, 8);
+  assert.equal(parsed.protocolVersion, CURRENT_AGENT_PROTOCOL_VERSION);
   assert.equal(parsed.originalTask, options.originalTask);
   assert.equal(parsed.hostState.evidence.length, 1);
   assert.match(createHostFallbackSummary({ plan, evidenceRefs: options.evidenceRefs, failures: ['summary timeout'] }), /summary timeout/u);
@@ -384,19 +376,6 @@ test('epoch seed is canonical and no-progress detection survives rollovers', () 
   assert.equal(stopped.action, 'stop');
 });
 
-test('protocol v8 freezes the evidence tool while v7 stays unchanged', () => {
-  const v7a = JSON.stringify(getAgentTools({ requestProtocolVersion: 7 }));
-  const v7b = JSON.stringify(getAgentTools({ requestProtocolVersion: 7 }));
-  const v8a = getAgentTools({ requestProtocolVersion: 8 });
-  const v8b = getAgentTools({ requestProtocolVersion: 8 });
-  assert.equal(v7a, v7b);
-  assert.equal(JSON.stringify(v8a), JSON.stringify(v8b));
-  assert.equal(JSON.parse(v7a).some((tool: { function: { name: string } }) => tool.function.name === READ_EVIDENCE_TOOL_NAME), false);
-  assert.equal(v8a.some((tool) => tool.function.name === READ_EVIDENCE_TOOL_NAME), true);
-  assert.equal(v8a.find((tool) => tool.function.name === 'keepseek_read_subagent_result')?.function.description.includes('Legacy migration bridge'), true);
-  assert.deepEqual(v8a.map((tool) => tool.function.name), [...v8a.map((tool) => tool.function.name)].sort());
-});
-
 test('large results complete in one logical task for all three provider protocols', async () => {
   for (const provider of ['openai-compatible', 'openai-responses', 'anthropic-compatible'] as const) {
     const result = await runLargeResult(provider);
@@ -413,7 +392,7 @@ test('large results complete in one logical task for all three provider protocol
     assert.ok(result.bodies[1].includes(JSON.stringify(toolResult)), `${provider} sends persisted envelope bytes`);
     const first = JSON.parse(result.bodies[0]);
     const second = JSON.parse(result.bodies[1]);
-    assert.deepEqual(second.tools, first.tools, `${provider} freezes the v8 schema`);
+    assert.deepEqual(second.tools, first.tools, `${provider} freezes the current schema`);
     if (provider === 'openai-responses') assert.deepEqual(second.input.slice(0, first.input.length), first.input);
     else if (provider === 'anthropic-compatible') {
       assert.deepEqual(second.system, first.system);
@@ -678,44 +657,6 @@ test('Responses and Anthropic resume a finalized segment in the same native repl
       assert.equal(bodies.length, 3);
       assert.match(bodies[2], /Host continuation: the user explicitly selected Continue/u);
     }
-  } finally { globalThis.fetch = originalFetch; }
-});
-
-test('a hot v7 lane migrates only after its first externalized result and then exposes evidence paging', async () => {
-  const workspace = new WorkspaceToolService();
-  let reads = 0;
-  workspace.readWorkspaceFile = async () => { reads += 1; return JSON.stringify({ ok: true, path: 'legacy.ts', content: LARGE_ASCII }); };
-  const bodies: Array<Record<string, unknown>> = [];
-  const migrations: Array<{ version: number; toolSchemaVersion: number; toolNames: string[] }> = [];
-  const visibleDeltas: string[] = [];
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async (_url, init) => {
-    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-    bodies.push(body);
-    if (JSON.stringify(body).includes('Create a concise semantic checkpoint')) {
-      return modelResponse('openai-compatible', undefined, 'internal summary');
-    }
-    return bodies.length === 1
-      ? modelResponse('openai-compatible', { id: 'legacy-read', name: 'keepseek_read_workspace_file', args: '{"path":"legacy.ts"}' })
-      : modelResponse('openai-compatible');
-  }) as typeof fetch;
-  try {
-    const input = request('openai-compatible');
-    input.requestProtocolVersion = 7;
-    const response = await new AgentRunner(workspace).run(input, {
-      onProtocolMigration: async (protocol) => { migrations.push(protocol); },
-      onDelta: (event) => { if (event.type === 'content') visibleDeltas.push(event.delta); }
-    });
-    assert.equal(response.message, 'Done.');
-    assert.equal(reads, 1);
-    assert.equal(bodies.length, 3);
-    assert.equal(hasEvidenceTool(bodies[0]), false);
-    assert.equal(hasEvidenceTool(bodies[1]), false);
-    assert.equal(hasEvidenceTool(bodies[2]), true);
-    assert.equal(JSON.stringify(bodies[2]).includes('keepseek_context_epoch_checkpoint'), true);
-    assert.equal(visibleDeltas.join(''), 'Done.', 'hidden epoch summaries never enter the transcript');
-    assert.equal(migrations.length, 1);
-    assert.equal(migrations[0].version, 8);
   } finally { globalThis.fetch = originalFetch; }
 });
 
@@ -1109,35 +1050,6 @@ test('reasoning-only output exhaustion is a Provider error, not a tool no-progre
   } finally { globalThis.fetch = originalFetch; }
 });
 
-test('legacy capacity checkpoints migrate in place and UI has no new-turn action', () => {
-  const legacy = {
-    version: 1, id: 'checkpoint', taskId: 'task', approvalRootTaskId: 'task', createdAt: '', updatedAt: '', attempt: 1,
-    status: 'blocked', stopReason: 'budget_exhausted', usedMs: 1, maxExecutionMs: 0, modelStepRetries: 0, workspaceUris: [],
-    source: { sourceId: 'source', provider: 'openai-compatible', modelId: 'model', endpointHash: 'hash' },
-    request: { prompt: 'original', history: [], contextFiles: [], language: 'en', model: { id: 'model', label: 'Model', sourceId: 'source', provider: 'openai-compatible' }, settings: { thinkingEnabled: false, reasoningEffort: 'high', compressionThreshold: 'balanced' }, executionLimits: {} },
-    state: { messages: [], toolRounds: [], draftEdits: [], draftRuns: [], reasoningParts: [], turn: 1, toolCallCount: 1,
-      validationRunCount: 0, toolResultTokens: 99, validationState: {}, repairLoop: { status: 'idle', iteration: 0, maxIterations: 2, pendingDraftEditIds: [] },
-      budgetStopReason: 'tool_result_budget_exhausted' },
-    finalResponse: { message: 'Old budget text', draftEdits: [], draftRuns: [], toolRounds: [], repairLoop: { status: 'idle', iteration: 0, maxIterations: 2, pendingDraftEditIds: [] },
-      runDetails: { id: 'details', startedAt: '', endedAt: '', status: 'blocked', protocol: 'Chat Completions', requestCount: 1, toolCalls: [], timeline: [], budgetStopReason: 'tool_result_budget_exhausted' } }
-  } as unknown as RunCheckpoint;
-  const migrated = migrateLegacyCapacityCheckpoint(legacy);
-  assert.equal(migrated.version, 2);
-  assert.equal(migrated.status, 'interrupted');
-  assert.equal(migrated.stopReason, 'extension_restart');
-  assert.equal(migrated.state?.budgetStopReason, undefined);
-  assert.equal(migrated.runBudget?.toolRounds, 1);
-  assert.equal(migrated.runBudget?.toolCalls, 1);
-  assert.equal(migrated.request.executionLimits?.maxToolIterations, 0);
-  assert.equal(migrated.request.executionLimits?.maxToolCalls, 0);
-  assert.equal(recoveryBlocker(migrated), undefined);
-  assert.equal(JSON.stringify(legacy).includes('tool_result_budget_exhausted'), true);
-  const source = getScript();
-  for (const removed of ['continueAgentTaskInNewTurn', 'continueTaskInNewTurn', 'runContinueInNewTurn', 'runNewTurnNotice']) {
-    assert.equal(source.includes(removed), false, removed);
-  }
-});
-
 test('crash recovery distinguishes pending, replayable, completed and uncertain tool executions', async () => {
   const root = await mkdtemp(join(tmpdir(), 'keepseek-evidence-recovery-'));
   const uri = vscode.Uri.file(root) as unknown as import('vscode').Uri;
@@ -1211,7 +1123,7 @@ test('an explicit task cost ceiling reserves a billable upper bound before the f
   };
   const input: AgentRequest = {
     prompt: 'Inspect the workspace and finish.', history: [], contextFiles: [], language: 'en',
-    sessionId: 'session-cost-limit', requestProtocolVersion: 8,
+    sessionId: 'session-cost-limit', requestProtocolVersion: CURRENT_AGENT_PROTOCOL_VERSION,
     model: { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash', sourceId: 'deepseek-source',
       provider: 'deepseek', contextWindowTokens: 1_000_000, maxOutputTokens: 4_000 },
     settings: { thinkingEnabled: false, reasoningEffort: 'high', compressionThreshold: 'balanced' },
@@ -1272,7 +1184,9 @@ async function runLargeResult(provider: Provider) {
       : modelResponse(provider);
   }) as typeof fetch;
   try {
-    const response = await new AgentRunner(workspace).run(request(provider), { onCheckpoint: async (cp) => { checkpoint = checkpointCopy(cp); } });
+    const input = request(provider);
+    input.slimToolNames = ['keepseek_read_workspace_file', READ_EVIDENCE_TOOL_NAME];
+    const response = await new AgentRunner(workspace).run(input, { onCheckpoint: async (cp) => { checkpoint = checkpointCopy(cp); } });
     return { response, checkpoint, bodies, readCount };
   } finally { globalThis.fetch = originalFetch; }
 }
@@ -1285,7 +1199,7 @@ test('capacity-pressure replay crosses two necessary epochs with mixed audit and
     t.after(() => rm(root, { recursive: true, force: true }));
     const input = request(provider);
     input.executionLimits = undefined;
-    input.requestProtocolVersion = 10;
+    input.requestProtocolVersion = CURRENT_AGENT_PROTOCOL_VERSION;
     input.model = { ...input.model, contextWindowTokens: 1024000, maxOutputTokens: 393192 };
     input.history = Array.from({ length: 154 }, (_, i) => ({ id: `audit-${i}`, role: i % 2 ? 'assistant' as const : 'user' as const,
       content: `receipt ${i} ` + 'historic settled evidence '.repeat(150), createdAt: '',
@@ -1406,7 +1320,7 @@ test('offline 120-round replay across three protocols delivers pages and resumes
 });
 
 function request(provider: Provider): AgentRequest {
-  return { prompt: 'Read the large file and finish.', history: [], contextFiles: [], language: 'en', sessionId: 'session-runner', requestProtocolVersion: 8,
+  return { prompt: 'Read the large file and finish.', history: [], contextFiles: [], language: 'en', sessionId: 'session-runner', requestProtocolVersion: CURRENT_AGENT_PROTOCOL_VERSION,
     model: { id: 'custom-model', label: 'Custom', sourceId: 'source', provider, contextWindowTokens: 32_000, maxOutputTokens: 4_000 },
     settings: { thinkingEnabled: false, reasoningEffort: 'high', compressionThreshold: 'balanced' },
     sourceConfig: { sourceId: 'source', provider, apiKey: '', baseUrl: 'https://gateway.invalid/v1', supportsBilling: false },

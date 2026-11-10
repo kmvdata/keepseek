@@ -1,3 +1,4 @@
+import { KEEPSEEK_CONFIGURATION_NAMESPACE } from '../shared/identity';
 import { realpath, stat } from 'node:fs/promises';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
@@ -38,7 +39,7 @@ function isGrant(value: unknown): value is GitReleaseGrant {
 }
 
 function configuredGrants(): GitReleaseGrant[] {
-  const setting = vscode.workspace.getConfiguration('keepseek').inspect?.<unknown>('gitReleaseGrants')?.globalValue;
+  const setting = vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE).inspect?.<unknown>('gitReleaseGrants')?.globalValue;
   return Array.isArray(setting) ? setting.filter(isGrant) : [];
 }
 

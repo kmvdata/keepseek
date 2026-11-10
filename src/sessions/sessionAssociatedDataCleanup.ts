@@ -18,7 +18,7 @@ export interface SessionAssociatedCleanupStores {
 export interface SessionAssociatedCleanupResult {
   pendingReasons: string[];
   completedStores: string[];
-  inaccessibleLegacySources: number;
+  unverifiedSources: number;
 }
 
 /** Session-owned physical cleanup. Call after the durable tombstone, outside
@@ -45,7 +45,7 @@ export class SessionAssociatedDataCleanup {
   public async cleanup(sessionId: string, workspaceKey: string): Promise<SessionAssociatedCleanupResult> {
     const record = await new SessionDeletionAuthority(this.root).readRecord(sessionId);
     if (!record || record.workspaceKey !== workspaceKey) throw new Error('A matching durable deletion intent is required.');
-    const result: SessionAssociatedCleanupResult = { pendingReasons: [], completedStores: [], inaccessibleLegacySources: 0 };
+    const result: SessionAssociatedCleanupResult = { pendingReasons: [], completedStores: [], unverifiedSources: 0 };
     const evidence = new ToolEvidenceStore(this.root), subagents = new SubagentStore(this.root, workspaceKey);
     const runs = this.live.draftRuns ?? new DraftRunStore(this.root);
     const reviews = this.live.approvalReviews ?? new ApprovalReviewStore(this.root);
@@ -60,9 +60,9 @@ export class SessionAssociatedDataCleanup {
       ['approval-reviews', ['approval-reviews.json'], () => reviews.deleteSession(sessionId)],
       ['interaction-traces', ['interaction-logs'], async () => {
         const traces = await this.traces.cleanup(sessionId);
-        if (traces.unverifiedLegacySources) {
-          result.inaccessibleLegacySources += traces.unverifiedLegacySources;
-          result.pendingReasons.push('interaction-traces:legacy_ownership_unverified');
+        if (traces.unverifiedSources) {
+          result.unverifiedSources += traces.unverifiedSources;
+          result.pendingReasons.push('interaction-traces:ownership_unverified');
         }
       }]
     ];

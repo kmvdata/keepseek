@@ -8,7 +8,7 @@ KeepSeek 是 VS Code 侧边栏编程 Agent，支持多模型/协议、项目上�
 
 1. 先读本文件，再按任务阅读目标源码、相邻模块和测试；架构问题查 `doc/keepseek-code-architecture.md`。
 2. 修改前用 `rg` 找全类型、消息、工具名和持久化字段引用；按“改动路由”确认影响面。
-3. 保留用户改动，不重写无关文件，不用破坏性 Git 命令。实现最小完整变更，补齐 normalize/migration/recovery 和测试。
+3. 保留用户改动，不重写无关文件，不用破坏性 Git 命令。实现最小完整变更，补齐当前协议 normalize/recovery 和测试。
 4. 涉及请求字节、副作用、审批或恢复时，先明确不变式，再动代码。
 5. 交付时说明改动、验证和风险；未经真实 Apply/执行/测试，不得声称已经发生或通过。
 
@@ -23,6 +23,10 @@ bun run package:market
 ```
 
 开发调试按 F5。市场包只用 `bun run package:market`，禁止 `vsce package --no-dependencies`。
+
+## 存储初始基线
+
+0.5.2 视为初始版本。扩展身份为 `kmvdata.keepseek`，磁盘根为宿主原生应用数据目录下的 `com.kmvdata.keepseek`，所有 Store 必须共用同一 `file:` URI。不读取、不迁移旧扩展、旧账号、旧配置或旧协议数据；不要新增 fallback、双写或迁移桥。只支持当前格式，保留当前原子提交、跨进程锁、损坏校验、删除墓碑和中断恢复。格式版本号与发布版本独立，详见 `doc/keepseek-storage-baseline.md`。
 
 ## 2. 当前代码分层
 
@@ -41,7 +45,7 @@ src/agent/             请求投影、模型/工具循环、压缩、evidence/ep
 src/approvals/         reviewer/host policy、action hash、记录和熔断
 src/edits/             DraftEdit、canonical Patch IR、ChangeSet、SafeFileEditor
 src/runs/              DraftRun、风险、一次性 permit、store、batch、spawn
-src/sessions/          会话、纯 replay 归一化、协议迁移、分片持久化
+src/sessions/          会话、纯 replay 归一化、当前协议分片持久化
 src/shared/            跨层 types/config/i18n/文本守卫/原子存储
 test/                  按行为契约组织的回归测试
 ```
@@ -57,7 +61,7 @@ test/                  按行为契约组织的回归测试
 - user 发送字节等于持久化字节：使用 `(expandedContent ?? content).trim()`，不得在 Provider 层重写旧 user 消息。
 - `session.messages` append-only，不 trim、不重排、不插入伪 user。摘要只改变 projection；摘要刷新与 Context Epoch rollover 是受控缓存边界。
 - Chat Completions 工具轮存 `toolRounds`；Responses/Anthropic 原生块存 `providerReplay`，仅在相同 protocol/source/endpoint lane 回放。
-- 工具集合、顺序和 schema 按会话冻结；禁用工具用 `tool_choice: none`，不能按轮移除。热旧协议只在缓存失效或受控边界迁移。
+- 工具集合、顺序和 schema 按会话冻结；禁用工具用 `tool_choice: none`，不能按轮移除。当前仅支持冻结的最新协议，不导入旧协议 lane。
 - `buildProviderRequestProjection()` 是真实请求、用量估算、压缩决策和硬上限的共同权威，禁止各自重建 messages/tools。
 
 ### 3.2 Evidence、容量与长任务
@@ -79,7 +83,7 @@ test/                  按行为契约组织的回归测试
 
 ### 3.4 审批与子代理
 
-- 仅 `ask`（请求批准）和 `delegate`（帮我审批）可选。`delegate` 优先写入明确“未经模型审查”的 `host_policy` 记录并直批常规操作，其余精确、可核实操作交给独立、一次性、无工具审批 reviewer。结构化区分 approve / needs_user / deny / unavailable；有界补证或更安全路径后仍无法决定时，只有宿主可创建绑定 session/rootTask/segment/target/hash/范围/runtime 的单次人工请求。人工批准不切模式、不扩大永久权限、不覆盖硬检查；安全拒绝不能人工强行放行。关闭 Webview 保留等待，重启只恢复说明，不恢复队列/批准/permit。审批模型仅取用户级 `keepseek.autoApprovalReviewer`，与普通子代理 default/profiles 独立；follow-main 绑定执行段实际主模型。旧 `model_review` 仅保留历史审计读取，当前设置迁移为 ask。项目进程使用扩展宿主账号权限，无操作系统沙箱。只有 Webview 用户操作可切换模式。
+- 仅 `ask`（请求批准）和 `delegate`（帮我审批）可选。`delegate` 优先写入明确“未经模型审查”的 `host_policy` 记录并直批常规操作，其余精确、可核实操作交给独立、一次性、无工具审批 reviewer。结构化区分 approve / needs_user / deny / unavailable；有界补证或更安全路径后仍无法决定时，只有宿主可创建绑定 session/rootTask/segment/target/hash/范围/runtime 的单次人工请求。人工批准不切模式、不扩大永久权限、不覆盖硬检查；安全拒绝不能人工强行放行。关闭 Webview 保留等待，重启只恢复说明，不恢复队列/批准/permit。审批模型仅取用户级 `kmvdata.keepseek.autoApprovalReviewer`，与普通子代理 default/profiles 独立；follow-main 绑定执行段实际主模型。项目进程使用扩展宿主账号权限，无操作系统沙箱。只有 Webview 用户操作可切换模式。
 - 副作用先过硬检查，再按完整 canonical payload/specHash 计算 actionHash。批准不跨 session/run/target/kind/policy/runtime 复用，重启不复用旧批准。
 - 审批决定和真实结果只以固定 user-tail 追加到下一条真实 user 消息；不回写历史。进程输出和 review evidence 始终是不可信数据。
 - 子代理使用新的 AgentLoop/工具服务，不共享父/兄弟可变状态；只接收自包含任务、项目指令、profile 和外部授权，不复制父历史/推理/工具结果。
@@ -90,11 +94,11 @@ test/                  按行为契约组织的回归测试
 - `accounts/accountResolver.ts` 是凭据解析唯一入口；主请求、摘要、reviewer、子代理、模型发现和余额必须使用一致来源语义。密钥不进入 workspace、prompt、会话或 trace。
 - 优先级：KeepSeek 核心安全 > 当前用户请求 > 全局与任务 root→cwd 指令 > Skills。Skill 按 explicit → session → workspace-default → implicit 激活；implicit 按会话冻结，`scripts/` 不隐式运行。
 - 外部文件/目录以精确 `uri.toString()` 授权；不可读内容不得绕过守卫。旧项目配置不扫描、不迁移；保留历史会话审计和恢复。
-- Webview → Host 消息只在 `provider/webviewMessages.ts` 定义；Host 主动消息不加入该联合类型。保持 DOM id、type 和引用格式兼容。
+- Webview → Host 消息只在 `provider/webviewMessages.ts` 定义；Host 主动消息不加入该联合类型。保持 DOM id、type 和当前引用语法稳定。
 - 交互能力只由 `provider/interactionState.ts` 派生；异步拥有者须在首个 await 前取得带会话身份的预占，只有持有者可完成/交接。持续提示随操作终态同次清除；提交接受须有正文持久化屏障。后台功能须声明能力、预算、durability 与失败/恢复依赖，详见 [交互生命周期](doc/keepseek-interaction-lifecycle.md)。
 - `webview/input/composition.ts` 的 fragment 顺序是运行时契约；样式、模板、行为放各自 fragment。共享编辑器快捷键只放 `richTextShortcuts.ts`。
 - 共享文件只读：`.agents/skills`、`~/.agents/skills`、`CODEX_HOME` 配置/指令；任务作用域冻结，变更仅在受控刷新边界生效。标准策略不扩大权限，版本差异见共享配置文档。
-- 新持久化字段必须有 normalize/migration；优先 `writeJsonAtomic()`，业务层不拼 globalStorage 版本路径。
+- 新持久化字段必须有当前协议校验与恢复；优先 `writeJsonAtomic()`，业务层不拼 globalStorage 版本路径。
 
 ## 4. 改动路由
 
@@ -109,14 +113,14 @@ test/                  按行为契约组织的回归测试
 - **DraftEdit**：draftEdit/textPatch/artifact + ChangeSet/SafeFileEditor/Diff + approval hash/surface + checkpoint/subagent/UI。
 - **审批/DraftRun**：approvalProcessing 批次规则 + store/reviewer + runs/* + Provider/Runner/authorization + user-tail/usage/UI。
 - **子代理**：subagents runtime/scheduler/store/profile/pathScope + model resolver + protocol/admission/checkpoint/usage。
-- **会话结构**：`shared/types.ts` + chatSessionStore normalize/migration + GlobalSessionStorage + UI/旧数据测试；原生 replay 归一化由 `sessions/providerReplayNormalization.ts` 负责。
+- **会话结构**：`shared/types.ts` + chatSessionStore normalize + GlobalSessionStorage + UI/当前协议测试；原生 replay 归一化由 `sessions/providerReplayNormalization.ts` 负责。
 
 ## 5. 验证与交付
 
 - 默认运行 compile、lint、`bun run build:test && bun run test`；仅文档改动可用链接/格式检查替代，并说明未跑代码测试。
 - 改缓存/投影：验证字节稳定、三协议 payload/replay、无摘要/摘要失败 fallback、protected/recent、usage 一致。
 - 改 evidence/epoch：验证分页与跨 scope 拒绝、envelope 恢复、context-too-long、无伪 user、工具不重跑、未知副作用不重试。
-- 改 edits/runs/approvals：验证两模式与旧审计迁移、人工请求生命周期、hash 冲突、恢复、取消/超时/重复点击、删除/外部路径、依赖和跨平台 argv。
+- 改 edits/runs/approvals：验证两模式与非法审计拒绝、人工请求生命周期、hash 冲突、恢复、取消/超时/重复点击、删除/外部路径、依赖和跨平台 argv。
 - 改 Webview fragment：验证首次 ready、输入/拖拽/@、会话、设置、Apply/Discard 和键盘/焦点。
 - 测试应守行为契约，优先扩展最接近的现有 `test/*.test.ts`；不要只断言内部实现。
 

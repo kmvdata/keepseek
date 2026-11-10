@@ -4,8 +4,6 @@ import * as vscode from './stubs/vscode';
 import { saveModelRequestTimeout } from '../src/provider/requestTimeoutSettings';
 import {
   getConfiguredAgentSettings,
-  getConfiguredAgentContinuationMaxOutputTokens,
-  getConfiguredAgentFinalMaxOutputTokens,
   getConfiguredAgentMaxContextEpochRollovers,
   getConfiguredAgentMaxContinuations,
   getConfiguredAgentMaxExecutionMs,
@@ -13,8 +11,6 @@ import {
   getConfiguredAgentMaxToolCalls,
   getConfiguredAgentMaxToolIterations,
   getConfiguredAgentMaxTreeUpstreamTokens,
-  getConfiguredAgentRepairMaxOutputTokens,
-  getConfiguredAgentToolMaxOutputTokens,
   getConfiguredBalanceEndpointUrl,
   getConfiguredDraftRunMaxTranscriptBytes,
   getConfiguredDraftRunTimeoutMs,
@@ -30,7 +26,7 @@ import {
   normalizeCompressionThreshold
 } from '../src/shared/config';
 
-test('model timeout accepts only the six shared presets and normalizes legacy values to one hour', () => {
+test('model timeout accepts only the six shared presets and defaults invalid values to one hour', () => {
   assert.equal(getConfiguredModelRequestTimeoutMs(), 3_600_000);
   assert.deepEqual(MODEL_REQUEST_TIMEOUT_PRESETS.map((preset) => preset.seconds), [300, 900, 3600, 7200, 28800, 86400]);
   const original = vscode.workspace.getConfiguration;
@@ -212,10 +208,6 @@ test('root execution budgets default to unlimited while child safety budgets sta
   assert.equal(getConfiguredAgentMaxContextEpochRollovers(), 0);
   assert.equal(getConfiguredAgentMaxTreeUpstreamTokens(), 0);
   assert.equal(getConfiguredSubagentMaxUpstreamTokens(), 500_000);
-  assert.equal(getConfiguredAgentToolMaxOutputTokens(), 8_192);
-  assert.equal(getConfiguredAgentFinalMaxOutputTokens(), 16_384);
-  assert.equal(getConfiguredAgentContinuationMaxOutputTokens(), 8_192);
-  assert.equal(getConfiguredAgentRepairMaxOutputTokens(), 4_096);
 
   const original = vscode.workspace.getConfiguration;
   vscode.workspace.getConfiguration = () => ({
@@ -228,7 +220,6 @@ test('root execution budgets default to unlimited while child safety budgets sta
       'agent.maxContinuations': 99,
       'agent.maxContextEpochRollovers': -3,
       'agent.maxTreeUpstreamTokens': 1_000,
-      'agent.toolMaxOutputTokens': 256,
       'subagent.handoffPreviewBytes': 99_999,
       'subagent.parallelHandoffBytes': 1
     }[key] as T | undefined) ?? fallback
@@ -241,7 +232,6 @@ test('root execution budgets default to unlimited while child safety budgets sta
     assert.equal(getConfiguredAgentMaxContinuations(), 8);
     assert.equal(getConfiguredAgentMaxContextEpochRollovers(), 0);
     assert.equal(getConfiguredAgentMaxTreeUpstreamTokens(), 1_000);
-    assert.equal(getConfiguredAgentToolMaxOutputTokens(), 256);
     assert.equal(getConfiguredSubagentHandoffPreviewBytes(), 24_576);
     assert.equal(getConfiguredSubagentParallelHandoffBytes(), 16_384);
   } finally {

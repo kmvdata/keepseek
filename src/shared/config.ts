@@ -1,3 +1,4 @@
+import { KEEPSEEK_CONFIGURATION_NAMESPACE } from './identity';
 import * as vscode from 'vscode';
 import { mergeDurations, normalizeCostLimit, normalizeDuration } from '../agent/executionPolicy';
 import {
@@ -49,10 +50,6 @@ export const DEFAULT_AGENT_MAX_CONTEXT_EPOCH_ROLLOVERS = 0;
 export const DEFAULT_SUBAGENT_MAX_CONTEXT_EPOCH_ROLLOVERS = 3;
 export const DEFAULT_AGENT_MAX_TREE_UPSTREAM_TOKENS = 0;
 export const DEFAULT_SUBAGENT_MAX_UPSTREAM_TOKENS = 500_000;
-export const DEFAULT_AGENT_TOOL_MAX_OUTPUT_TOKENS = 8_192;
-export const DEFAULT_AGENT_FINAL_MAX_OUTPUT_TOKENS = 16_384;
-export const DEFAULT_AGENT_CONTINUATION_MAX_OUTPUT_TOKENS = 8_192;
-export const DEFAULT_AGENT_REPAIR_MAX_OUTPUT_TOKENS = 4_096;
 export const DEFAULT_DRAFT_RUN_TIMEOUT_MS = 120_000;
 export const DEFAULT_DRAFT_RUN_MAX_TRANSCRIPT_BYTES = 131_072;
 export const DEFAULT_MAX_REQUEST_RETRIES = 5;
@@ -181,7 +178,7 @@ export function getConfiguredModels(): KeepseekModel[] {
 }
 
 export function getSavedModelSelection(): ModelSelection {
-  const config = vscode.workspace.getConfiguration('keepseek');
+  const config = vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE);
   const sourceId = getWorkspaceConfigurationString(config, 'selectedSourceId');
   const modelId = getWorkspaceConfigurationString(config, 'selectedModelId');
   return { sourceId, modelId };
@@ -191,17 +188,9 @@ function getWorkspaceConfigurationString(
   config: vscode.WorkspaceConfiguration,
   key: string
 ): string {
-  // The main-model choice is project-scoped. `get()` is a merged view and may
-  // contain a user-level value left by an older KeepSeek version; treating that
-  // as a project choice makes every new workspace override the global default.
-  // Read only the value explicitly stored for this workspace. The fallback is
-  // retained for lightweight hosts/tests that do not implement `inspect()`.
-  const inspected = typeof config.inspect === 'function'
-    ? config.inspect<string>(key)
-    : undefined;
-  const value = inspected
-    ? inspected.workspaceValue
-    : config.get<string>(key, '');
+  // The main-model choice is project-scoped; user settings cannot override a
+  // new project's global default model selection.
+  const value = config.inspect<string>(key)?.workspaceValue;
   return typeof value === 'string' ? value.trim() : '';
 }
 
@@ -217,7 +206,7 @@ export function getConfiguredModelSelection(
 }
 
 export function getConfiguredAgentSettings(): AgentSettings {
-  const config = vscode.workspace.getConfiguration('keepseek');
+  const config = vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE);
   return normalizeAgentSettings({
     thinkingEnabled: config.get<boolean>('thinkingEnabled', true),
     reasoningEffort: config.get<AgentSettings['reasoningEffort']>('reasoningEffort', 'high'),
@@ -227,24 +216,23 @@ export function getConfiguredAgentSettings(): AgentSettings {
 
 export function getConfiguredCompressionThreshold(): CompressionThreshold {
   const configured = vscode.workspace
-    .getConfiguration('keepseek')
+    .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
     .get<unknown>('compressionThreshold', DEFAULT_COMPRESSION_THRESHOLD);
   return normalizeCompressionThreshold(configured);
 }
 
 export function getConfiguredMaxFileBytes(): number {
-  return vscode.workspace.getConfiguration('keepseek').get('maxFileBytes', DEFAULT_MAX_FILE_BYTES);
+  return vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE).get('maxFileBytes', DEFAULT_MAX_FILE_BYTES);
 }
 
 export function getConfiguredContextWindowTokens(model?: KeepseekModel): number {
-  // Backward-compatible entry point. Capability fallback is owned by the
-  // centralized runtime profile resolver, never by configuration callers.
+  // Capability fallback belongs to the centralized runtime profile resolver.
   return getEffectiveContextWindowTokens(model);
 }
 
 export function getConfiguredUsagePricingMap(): Record<string, UsageCostRates> {
   const configured = vscode.workspace
-    .getConfiguration('keepseek')
+    .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
     .get<Record<string, Partial<UsageCostRates>>>('usagePricing', {});
   const merged: Record<string, UsageCostRates> = { ...DEFAULT_USAGE_PRICING };
 
@@ -280,15 +268,14 @@ export function getConfiguredUsagePricingMap(): Record<string, UsageCostRates> {
 export function getConfiguredModelUsagePricing(modelId: string): UsageCostRates | undefined {
   const exactId = modelId.trim();
   const canonicalPricingKey = getCanonicalPricingKey(exactId);
-  // Known official models always use the published reference table. Legacy
-  // user overrides must not silently replace the current official prices.
+  // Known official models always use the published reference table.
   if (canonicalPricingKey) return { ...DEFAULT_USAGE_PRICING[canonicalPricingKey] };
   return getConfiguredUsagePricingMap()[exactId];
 }
 
 export function getConfiguredBalanceEndpointUrl(baseUrl: string): string {
   const configured = vscode.workspace
-    .getConfiguration('keepseek')
+    .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
     .get<string>('balanceEndpointUrl', DEFAULT_BALANCE_ENDPOINT_URL)
     .trim();
   if (configured) {
@@ -315,7 +302,7 @@ export function getConfiguredBalanceEndpointUrl(baseUrl: string): string {
 
 export function getConfiguredBalanceRefreshIntervalMs(): number {
   const configured = vscode.workspace
-    .getConfiguration('keepseek')
+    .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
     .get<number>('balanceRefreshIntervalMs', DEFAULT_BALANCE_REFRESH_INTERVAL_MS);
   return normalizeIntegerInRange(
     configured,
@@ -327,27 +314,27 @@ export function getConfiguredBalanceRefreshIntervalMs(): number {
 
 export function getConfiguredSlimToolModeEnabled(): boolean {
   return vscode.workspace
-    .getConfiguration('keepseek')
+    .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
     .get<boolean>('slimToolModeEnabled', DEFAULT_SLIM_TOOL_MODE_ENABLED);
 }
 
 export function getConfiguredPromptCacheTtlMs(): number {
   const minutes = vscode.workspace
-    .getConfiguration('keepseek')
+    .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
     .get<number>('promptCacheTtlMinutes', DEFAULT_PROMPT_CACHE_TTL_MINUTES);
   return normalizeIntegerInRange(minutes, 5, 10_080, DEFAULT_PROMPT_CACHE_TTL_MINUTES) * 60_000;
 }
 
 export function getConfiguredTotalContextBudgetTokens(): number {
   const value = vscode.workspace
-    .getConfiguration('keepseek')
+    .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
     .get<number>('context.totalBudgetTokens', DEFAULT_TOTAL_CONTEXT_BUDGET_TOKENS);
   return normalizeIntegerInRange(value, 1_000, 96_000, DEFAULT_TOTAL_CONTEXT_BUDGET_TOKENS);
 }
 
 export function getConfiguredValidationAuthorizationPolicy(): ValidationAuthorizationPolicy {
   const configured = vscode.workspace
-    .getConfiguration('keepseek')
+    .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
     .get<string>('validation.authorizationPolicy', DEFAULT_VALIDATION_AUTHORIZATION_POLICY);
   return configured === 'never' || configured === 'always'
     ? configured
@@ -356,35 +343,35 @@ export function getConfiguredValidationAuthorizationPolicy(): ValidationAuthoriz
 
 export function getConfiguredMaxValidationRuns(): number {
   const configured = vscode.workspace
-    .getConfiguration('keepseek')
+    .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
     .get<number>('validation.maxRunsPerAgentRun', DEFAULT_MAX_VALIDATION_RUNS);
   return normalizeIntegerInRange(configured, 0, 8, DEFAULT_MAX_VALIDATION_RUNS);
 }
 
 export function getConfiguredMaxRepairIterations(): number {
   const configured = vscode.workspace
-    .getConfiguration('keepseek')
+    .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
     .get<number>('validation.maxRepairIterations', DEFAULT_MAX_REPAIR_ITERATIONS);
   return normalizeIntegerInRange(configured, 0, 5, DEFAULT_MAX_REPAIR_ITERATIONS);
 }
 
 export function getConfiguredValidationTimeoutMs(): number {
   const configured = vscode.workspace
-    .getConfiguration('keepseek')
+    .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
     .get<number>('validation.timeoutMs', DEFAULT_VALIDATION_TIMEOUT_MS);
   return normalizeIntegerInRange(configured, 1_000, 600_000, DEFAULT_VALIDATION_TIMEOUT_MS);
 }
 
 export function getConfiguredDraftRunTimeoutMs(): number {
   const configured = vscode.workspace
-    .getConfiguration('keepseek')
+    .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
     .get<number>('draftRun.timeoutMs', DEFAULT_DRAFT_RUN_TIMEOUT_MS);
   return normalizeIntegerInRange(configured, 1_000, 1_800_000, DEFAULT_DRAFT_RUN_TIMEOUT_MS);
 }
 
 export function getConfiguredDraftRunMaxTranscriptBytes(): number {
   const configured = vscode.workspace
-    .getConfiguration('keepseek')
+    .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
     .get<number>('draftRun.maxTranscriptBytes', DEFAULT_DRAFT_RUN_MAX_TRANSCRIPT_BYTES);
   return normalizeIntegerInRange(configured, 4_096, 1_048_576, DEFAULT_DRAFT_RUN_MAX_TRANSCRIPT_BYTES);
 }
@@ -392,53 +379,53 @@ export function getConfiguredDraftRunMaxTranscriptBytes(): number {
 
 export function getConfiguredSkillContextBudgetChars(): number {
   const configured = vscode.workspace
-    .getConfiguration('keepseek')
+    .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
     .get<number>('skills.contextBudgetChars', DEFAULT_SKILL_CONTEXT_BUDGET_CHARS);
   return normalizeIntegerInRange(configured, 0, 200_000, DEFAULT_SKILL_CONTEXT_BUDGET_CHARS);
 }
 
 export function getConfiguredMaxImplicitSkills(): number {
   const configured = vscode.workspace
-    .getConfiguration('keepseek')
+    .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
     .get<number>('skills.maxImplicitActivations', DEFAULT_MAX_IMPLICIT_SKILLS);
   return normalizeIntegerInRange(configured, 0, 8, DEFAULT_MAX_IMPLICIT_SKILLS);
 }
 
 export function getConfiguredBackgroundMaxRounds(): number {
   const configured = vscode.workspace
-    .getConfiguration('keepseek')
+    .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
     .get<number>('background.maxRounds', DEFAULT_BACKGROUND_MAX_ROUNDS);
   return normalizeIntegerInRange(configured, 1, 10, DEFAULT_BACKGROUND_MAX_ROUNDS);
 }
 
 export function getConfiguredAgentMaxExecutionMs(): number {
-  return normalizeDuration(vscode.workspace.getConfiguration('keepseek').get(
+  return normalizeDuration(vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE).get(
     'agent.maxExecutionMs', DEFAULT_AGENT_MAX_EXECUTION_MS));
 }
 
 export function getConfiguredAgentMaxToolIterations(): number {
-  return normalizeUnlimitedInteger(vscode.workspace.getConfiguration('keepseek').get(
+  return normalizeUnlimitedInteger(vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE).get(
     'agent.maxToolIterations', DEFAULT_AGENT_MAX_TOOL_ITERATIONS), 512, DEFAULT_AGENT_MAX_TOOL_ITERATIONS);
 }
 
 export function getConfiguredAgentMaxToolCalls(): number {
-  return normalizeUnlimitedInteger(vscode.workspace.getConfiguration('keepseek').get(
+  return normalizeUnlimitedInteger(vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE).get(
     'agent.maxToolCalls', DEFAULT_AGENT_MAX_TOOL_CALLS), 2_048, DEFAULT_AGENT_MAX_TOOL_CALLS);
 }
 
 export function getConfiguredSubagentMaxExecutionMs(): number {
-  return normalizeDuration(vscode.workspace.getConfiguration('keepseek').get(
+  return normalizeDuration(vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE).get(
     'agent.subagentMaxExecutionMs', DEFAULT_SUBAGENT_MAX_EXECUTION_MS));
 }
 
 export function getConfiguredSubagentHandoffPreviewBytes(): number {
-  return normalizeIntegerInRange(vscode.workspace.getConfiguration('keepseek').get(
+  return normalizeIntegerInRange(vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE).get(
     'subagent.handoffPreviewBytes', DEFAULT_SUBAGENT_HANDOFF_PREVIEW_BYTES),
   1_024, 24_576, DEFAULT_SUBAGENT_HANDOFF_PREVIEW_BYTES);
 }
 
 export function getConfiguredSubagentParallelHandoffBytes(): number {
-  return normalizeIntegerInRange(vscode.workspace.getConfiguration('keepseek').get(
+  return normalizeIntegerInRange(vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE).get(
     'subagent.parallelHandoffBytes', DEFAULT_SUBAGENT_PARALLEL_HANDOFF_BYTES),
   16_384, 65_536, DEFAULT_SUBAGENT_PARALLEL_HANDOFF_BYTES);
 }
@@ -446,65 +433,41 @@ export function getConfiguredSubagentParallelHandoffBytes(): number {
 export function getConfiguredAgentMaxModelRequests(subagent = false): number {
   const fallback = subagent ? DEFAULT_SUBAGENT_MAX_MODEL_REQUESTS : DEFAULT_AGENT_MAX_MODEL_REQUESTS;
   const key = subagent ? 'agent.subagentMaxModelRequests' : 'agent.maxModelRequests';
-  const configured = vscode.workspace.getConfiguration('keepseek').get(key, fallback);
+  const configured = vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE).get(key, fallback);
   return subagent
     ? normalizeIntegerInRange(configured, 1, 512, fallback)
     : normalizeUnlimitedInteger(configured, 512, fallback);
 }
 
 export function getConfiguredAgentMaxContinuations(): number {
-  return normalizeIntegerInRange(vscode.workspace.getConfiguration('keepseek').get(
+  return normalizeIntegerInRange(vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE).get(
     'agent.maxContinuations', DEFAULT_AGENT_MAX_CONTINUATIONS), 0, 8, DEFAULT_AGENT_MAX_CONTINUATIONS);
 }
 
 export function getConfiguredAgentMaxContextEpochRollovers(): number {
-  return normalizeUnlimitedInteger(vscode.workspace.getConfiguration('keepseek').get(
+  return normalizeUnlimitedInteger(vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE).get(
     'agent.maxContextEpochRollovers', DEFAULT_AGENT_MAX_CONTEXT_EPOCH_ROLLOVERS),
   32, DEFAULT_AGENT_MAX_CONTEXT_EPOCH_ROLLOVERS);
 }
 
 export function getConfiguredAgentMaxTreeUpstreamTokens(): number {
-  return normalizeUnlimitedInteger(vscode.workspace.getConfiguration('keepseek').get(
+  return normalizeUnlimitedInteger(vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE).get(
     'agent.maxTreeUpstreamTokens', DEFAULT_AGENT_MAX_TREE_UPSTREAM_TOKENS),
   100_000_000, DEFAULT_AGENT_MAX_TREE_UPSTREAM_TOKENS, 1_000);
 }
 
 export function getConfiguredSubagentMaxUpstreamTokens(): number {
-  return normalizeIntegerInRange(vscode.workspace.getConfiguration('keepseek').get(
+  return normalizeIntegerInRange(vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE).get(
     'agent.subagentMaxUpstreamTokens', DEFAULT_SUBAGENT_MAX_UPSTREAM_TOKENS),
   1_000, 100_000_000, DEFAULT_SUBAGENT_MAX_UPSTREAM_TOKENS);
 }
 
-/** @deprecated Settings compatibility only. Request budgets use the source/model capability. */
-export function getConfiguredAgentToolMaxOutputTokens(): number {
-  return getConfiguredOutputLimit('agent.toolMaxOutputTokens', DEFAULT_AGENT_TOOL_MAX_OUTPUT_TOKENS);
-}
-
-/** @deprecated Settings compatibility only. Request budgets use the source/model capability. */
-export function getConfiguredAgentFinalMaxOutputTokens(): number {
-  return getConfiguredOutputLimit('agent.finalMaxOutputTokens', DEFAULT_AGENT_FINAL_MAX_OUTPUT_TOKENS);
-}
-
-/** @deprecated Settings compatibility only. Request budgets use the source/model capability. */
-export function getConfiguredAgentContinuationMaxOutputTokens(): number {
-  return getConfiguredOutputLimit('agent.continuationMaxOutputTokens', DEFAULT_AGENT_CONTINUATION_MAX_OUTPUT_TOKENS);
-}
-
-/** @deprecated Settings compatibility only. Request budgets use the source/model capability. */
-export function getConfiguredAgentRepairMaxOutputTokens(): number {
-  return getConfiguredOutputLimit('agent.repairMaxOutputTokens', DEFAULT_AGENT_REPAIR_MAX_OUTPUT_TOKENS);
-}
-
-function getConfiguredOutputLimit(key: string, fallback: number): number {
-  return normalizeIntegerInRange(vscode.workspace.getConfiguration('keepseek').get(key, fallback), 256, 65_536, fallback);
-}
-
 export function getConfiguredAgentMaxCost(): number {
-  return normalizeCostLimit(vscode.workspace.getConfiguration('keepseek').get('agent.maxCost', DEFAULT_AGENT_MAX_COST));
+  return normalizeCostLimit(vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE).get('agent.maxCost', DEFAULT_AGENT_MAX_COST));
 }
 
 export function getConfiguredModelRequestTimeoutMs(): number {
-  const config = vscode.workspace.getConfiguration('keepseek');
+  const config = vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE);
   // One user-level policy for every source/model. Never recover a timeout from
   // a model profile, session checkpoint, or workspace-specific override.
   const inspected = typeof config.inspect === 'function'
@@ -513,8 +476,7 @@ export function getConfiguredModelRequestTimeoutMs(): number {
   const configured = inspected
     ? inspected.globalValue ?? inspected.defaultValue
     : config.get<number>('modelRequestTimeoutSeconds', DEFAULT_MODEL_REQUEST_TIMEOUT_SECONDS);
-  // Legacy arbitrary values fall back to the shared default without rewriting
-  // user settings during reads. Only the six presets can reach the runtime.
+  // Only the six presets can reach the runtime.
   return (isModelRequestTimeoutPreset(configured) ? configured : DEFAULT_MODEL_REQUEST_TIMEOUT_SECONDS) * 1_000;
 }
 
@@ -523,41 +485,39 @@ export function isModelRequestTimeoutPreset(value: unknown): value is number {
 }
 
 export function getConfiguredBackgroundMaxDurationMs(): number {
-  // The old 30-minute constant was never a user setting. Only stored overrides
-  // survive migration; absence uses the new zero default.
   return mergeDurations(getConfiguredAgentMaxExecutionMs(),
-    vscode.workspace.getConfiguration('keepseek').get('background.maxDurationMs', 0));
+    vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE).get('background.maxDurationMs', 0));
 }
 
 export function getConfiguredBackgroundMaxToolCalls(): number {
   const configured = vscode.workspace
-    .getConfiguration('keepseek')
+    .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
     .get<number>('background.maxToolCalls', DEFAULT_BACKGROUND_MAX_TOOL_CALLS);
   return normalizeIntegerInRange(configured, 1, 256, DEFAULT_BACKGROUND_MAX_TOOL_CALLS);
 }
 
 export function getConfiguredMaxRequestRetries(): number {
   const configuredLimit = vscode.workspace
-    .getConfiguration('keepseek')
+    .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
     .get<number>('maxRequestRetries', DEFAULT_MAX_REQUEST_RETRIES);
   return normalizeIntegerInRange(configuredLimit, 0, MAX_REQUEST_RETRIES, DEFAULT_MAX_REQUEST_RETRIES);
 }
 
 export function getConfiguredRequestRetryBaseMs(): number {
   const configuredDelay = vscode.workspace
-    .getConfiguration('keepseek')
+    .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
     .get<number>('requestRetryBaseMs', DEFAULT_REQUEST_RETRY_BASE_MS);
   return normalizeIntegerInRange(configuredDelay, 0, MAX_REQUEST_RETRY_BASE_MS, DEFAULT_REQUEST_RETRY_BASE_MS);
 }
 
 export function getConfiguredDebugMode(): boolean {
   return vscode.workspace
-    .getConfiguration('keepseek')
+    .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
     .get<boolean>('trace.enabled', DEFAULT_TRACE_ENABLED);
 }
 
 export function getConfiguredInteractionTraceSettings(): InteractionTraceSettings {
-  const config = vscode.workspace.getConfiguration('keepseek');
+  const config = vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE);
   return {
     enabled: getConfiguredDebugMode(),
     level: normalizeInteractionTraceLevel(config.get<string>('trace.level', DEFAULT_TRACE_LEVEL)),
@@ -579,20 +539,20 @@ export function getConfiguredInteractionTraceSettings(): InteractionTraceSetting
 
 export function getConfiguredWorkspaceToolFileLimit(): number {
   const configuredLimit = vscode.workspace
-    .getConfiguration('keepseek')
+    .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
     .get<number>('maxWorkspaceToolFiles', DEFAULT_WORKSPACE_TOOL_FILE_LIMIT);
   return normalizeIntegerInRange(configuredLimit, 1, 50_000, DEFAULT_WORKSPACE_TOOL_FILE_LIMIT);
 }
 
 export function getConfiguredWorkspaceReadMaxBytes(): number {
   const configuredLimit = vscode.workspace
-    .getConfiguration('keepseek')
+    .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
     .get<number>('maxFileBytes', DEFAULT_MAX_FILE_BYTES);
   return normalizeIntegerInRange(configuredLimit, 1, 20_000_000, DEFAULT_MAX_FILE_BYTES);
 }
 
 export function getConfiguredPatchSettings(): PatchSettings {
-  const config = vscode.workspace.getConfiguration('keepseek');
+  const config = vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE);
   return {
     maxPayloadBytes: normalizeIntegerInRange(config.get('patch.maxPayloadBytes', DEFAULT_PATCH_MAX_PAYLOAD_BYTES), 1_024, 16_777_216, DEFAULT_PATCH_MAX_PAYLOAD_BYTES),
     maxHunks: normalizeIntegerInRange(config.get('patch.maxHunks', DEFAULT_PATCH_MAX_HUNKS), 1, 4_096, DEFAULT_PATCH_MAX_HUNKS),
@@ -608,21 +568,21 @@ export function getConfiguredPatchSettings(): PatchSettings {
 
 export function getConfiguredProviderInlineResultMaxChars(): number {
   const configuredLimit = vscode.workspace
-    .getConfiguration('keepseek')
+    .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
     .get<number>('providerInlineResultMaxChars', DEFAULT_PROVIDER_INLINE_RESULT_MAX_CHARS);
   return normalizeIntegerInRange(configuredLimit, 1_024, 1_000_000, DEFAULT_PROVIDER_INLINE_RESULT_MAX_CHARS);
 }
 
 export function getConfiguredEvidenceMaxBytes(): number {
   const configuredLimit = vscode.workspace
-    .getConfiguration('keepseek')
+    .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
     .get<number>('evidenceMaxBytes', DEFAULT_EVIDENCE_MAX_BYTES);
   return normalizeIntegerInRange(configuredLimit, 1_000_000, 1_000_000_000, DEFAULT_EVIDENCE_MAX_BYTES);
 }
 
 export function getConfiguredHistoryRetentionDays(): number {
   const configuredLimit = vscode.workspace
-    .getConfiguration('keepseek')
+    .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
     .get<number>('historyRetentionDays', DEFAULT_HISTORY_RETENTION_DAYS);
   return normalizeIntegerInRange(
     configuredLimit,
@@ -726,7 +686,7 @@ function normalizeNonNegativeNumber(value: unknown, fallback: number): number {
 
 /** User settings only. Project settings must not select a review destination. */
 export function getAutoApprovalReviewerSetting(): Pick<import('../agent/subagents/types').SubagentModelSetting, 'mode' | 'sourceId' | 'modelId'> {
-  const setting = vscode.workspace.getConfiguration('keepseek')
+  const setting = vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
     .inspect?.<{ mode?: unknown; sourceId?: unknown; modelId?: unknown }>('autoApprovalReviewer')?.globalValue;
   if (setting !== undefined && (!setting || (setting.mode !== 'follow-main' && setting.mode !== 'fixed'))) {
     throw new Error('Invalid approval model settings. / 审批模型 配置无效。');

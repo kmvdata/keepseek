@@ -188,7 +188,6 @@ export const usageFormattersFragment: WebviewFragment = {
           modelId: typeof value.modelId === 'string' ? value.modelId : '',
           provider: typeof value.provider === 'string' ? value.provider : '',
           protocol: typeof value.protocol === 'string' ? value.protocol : '',
-          legacyUnattributed: value.legacyUnattributed === true,
           attemptStatsIncomplete: value.attemptStatsIncomplete === true
             || value.providerAttemptCount === undefined || value.usageResponseCount === undefined,
           cacheDiagnostics: normalizeCacheDiagnosticsForView(value.cacheDiagnostics),

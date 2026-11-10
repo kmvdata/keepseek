@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
+import { CURRENT_AGENT_PROTOCOL_VERSION } from './protocol';
 import type { DraftEdit, DraftRunProposal, RepairLoopState, TaskPlan, HistoryWorkFact } from '../shared/types';
 import type { ContextWindowCalibrationState } from './toolResultAdmission';
 import { stableStringify } from './evidence/shaping';
 import { getDraftEditBase, getDraftEditKind, getDraftEditResult } from '../edits/draftEdit';
 
 export type ContextEpochRolloverReason = 'soft_context_pressure' | 'minimum_envelope_unfit'
-  | 'provider_context_too_long' | 'length_continuation' | 'protocol_migration';
+  | 'provider_context_too_long' | 'length_continuation';
 
 export interface ContextEpochRolloverRecord {
   index: number;
@@ -151,7 +152,7 @@ export function createEpochSeed(input: ContextEpochSeedInput): string {
     : fullHostState;
   const checkpoint = {
     kind: 'keepseek_context_epoch_checkpoint',
-    protocolVersion: input.protocolVersion ?? 8,
+    protocolVersion: CURRENT_AGENT_PROTOCOL_VERSION,
     originalTask: input.originalTask,
     semanticSummary: input.semanticSummary,
     hostState,
@@ -176,7 +177,7 @@ export function createEpochHostCheckpoint(input: ContextEpochCheckpointInput): s
   };
   return stableStringify({
     kind: 'keepseek_context_epoch_host_state',
-    protocolVersion: input.protocolVersion ?? 8,
+    protocolVersion: CURRENT_AGENT_PROTOCOL_VERSION,
     originalTask: input.originalTask,
     ...createEpochHostState(input, taskPlan)
   });

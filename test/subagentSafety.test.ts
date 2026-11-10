@@ -43,6 +43,7 @@ import { SubagentStore } from '../src/agent/subagents/store';
 import type { StoredSubagentMetadata } from '../src/agent/subagents/types';
 import { toSubagentProgressViewModel } from '../src/agent/subagentUsageStats';
 import type { DraftEdit } from '../src/shared/types';
+import { createFullTextDraftEdit } from '../src/edits/draftEdit';
 import type { AgentRequest } from '../src/shared/types';
 
 const temporaryDirectories: string[] = [];
@@ -170,8 +171,7 @@ test('read-only and depth-limited child profiles cannot draft, validate, run, or
   assert.equal(proposal.includes(CREATE_DRAFT_EDIT_TOOL_NAME), true);
   assert.equal(proposal.includes(RUN_VALIDATION_TOOL_NAME), false);
   assert.equal(proposal.includes('keepseek_delegate_task'), false);
-  assert.equal(getChildToolNamesForRuntime(resolveSubagentProfile({ requestedId: 'proposal' })!, 1, 8).includes(APPLY_PATCH_TOOL_NAME), false);
-  assert.equal(getChildToolNamesForRuntime(resolveSubagentProfile({ requestedId: 'proposal' })!, 1, 9).includes(APPLY_PATCH_TOOL_NAME), true);
+  assert.equal(proposal.includes(APPLY_PATCH_TOOL_NAME), true);
   const nestedProposal = restrictSubagentRuntimeProfile(resolveSubagentProfile({ requestedId: 'proposal' })!, { nested: true, parallel: false });
   assert.equal(nestedProposal.lane, 'nested-read');
   assert.equal(nestedProposal.toolNames.includes(CREATE_DRAFT_EDIT_TOOL_NAME), false);
@@ -199,8 +199,8 @@ test('proposal path scopes normalize URI hierarchy without prefix or multi-root 
   assert.equal(scopeContains(directory, child, roots), true);
   assert.equal(scopeContains(child, directory, roots), false);
 
-  const inScopeEdit: DraftEdit = { id: 'in', uri: vscode.Uri.file('/workspace/first/src/a.ts').toString(), label: 'src/a.ts', action: 'modify', newText: '', reason: '' };
-  const outOfScopeEdit: DraftEdit = { id: 'out', uri: vscode.Uri.file('/workspace/first/test/a.ts').toString(), label: 'test/a.ts', action: 'modify', newText: '', reason: '' };
+  const inScopeEdit: DraftEdit = createFullTextDraftEdit({ id: 'in', uri: vscode.Uri.file('/workspace/first/src/a.ts').toString(), label: 'src/a.ts', action: 'modify', content: '', reason: '' });
+  const outOfScopeEdit: DraftEdit = createFullTextDraftEdit({ id: 'out', uri: vscode.Uri.file('/workspace/first/test/a.ts').toString(), label: 'test/a.ts', action: 'modify', content: '', reason: '' });
   const artifacts = validateSubagentArtifacts({ lane: 'proposal', proposalScope: directory, roots, draftEdits: [inScopeEdit, outOfScopeEdit], draftRuns: [] });
   assert.deepEqual(artifacts.draftEdits.map((edit) => edit.id), ['in']);
   assert.match(artifacts.diagnostics.join(','), /proposal_artifact_scope_rejected/u);
@@ -273,7 +273,7 @@ test('typed result envelopes distinguish research, review, proposal, partial, em
   assert.equal(review.envelope?.kind, 'review');
   assert.equal(acceptSubagentResult({ raw: research, lane: 'review-read' }).ok, false);
 
-  const edit: DraftEdit = { id: 'e', uri: 'file:///workspace/src/a.ts', label: 'src/a.ts', action: 'modify', newText: 'x', reason: 'test' };
+  const edit: DraftEdit = createFullTextDraftEdit({ id: 'e', uri: 'file:///workspace/src/a.ts', label: 'src/a.ts', action: 'modify', content: 'x', reason: 'test' });
   const proposal = acceptSubagentResult({ raw: research, lane: 'proposal', draftEdits: [edit], draftRuns: [] });
   assert.equal(proposal.ok, true);
   assert.deepEqual(proposal.envelope?.kind === 'proposal' ? proposal.envelope.artifacts : undefined, {
@@ -313,29 +313,6 @@ test('malformed child results receive exactly one format-only repair and then fa
   } finally {
     globalThis.fetch = originalFetch;
   }
-});
-
-test('v6 child context adds typed contracts while frozen v5 bytes stay exact and workspace changes hash', () => {
-  const profile = resolveSubagentProfile({ requestedId: 'research' })!;
-  const v5 = getSubagentSystemPromptForVersion('en', profile, 1, 5);
-  assert.equal(createHash('sha256').update(v5).digest('hex'), 'f6e0740ce6844692c352244e5a97366a127205bb29a3334aa90fa5f535471e8e');
-  const v6 = getSubagentSystemPromptForVersion('en', profile, 1, 6);
-  assert.match(v6, /Return exactly one JSON object/u);
-  assert.equal(v6.startsWith(v5), true);
-  const v5Context = formatChildContextForVersion('', 'PROJECT', profile, 5);
-  assert.equal(createHash('sha256').update(v5Context).digest('hex'), '25e26566f3bac7b5c3656c3806e0c96251e3f71b29a651330bf5a5ff5a13196f');
-  const v5Tools = JSON.stringify(getAgentTools({
-    toolNames: getChildToolNamesForRuntime(profile, 1),
-    requestProtocolVersion: 5
-  }));
-  assert.equal(createHash('sha256').update(v5Tools).digest('hex'), '69b10a5a1f00f5fc264b0a9e2ecef1785f15f19afba2dab826569a6ae4958b3e');
-  const roots = workspaceRoots();
-  const first = createStableWorkspaceContext(roots);
-  const second = createStableWorkspaceContext([...roots, {
-    id: 'root-c', name: 'third', uri: vscode.Uri.file('/workspace/third'), caseSensitive: true
-  }]);
-  assert.notEqual(first.hash, second.hash);
-  assert.doesNotMatch(first.text, /\/workspace\//u);
 });
 
 test('runtime stores oversized valid JSON as explicit partial and never repairs a task binding mismatch', async () => {
@@ -389,8 +366,8 @@ test('runtime stores oversized valid JSON as explicit partial and never repairs 
   } finally { globalThis.fetch = originalFetch; }
 });
 
-test('a frozen V10 parent treats partial child delivery as failed batch acceptance without hiding siblings', async () => {
-  const directory = await temporaryDirectory('keepseek-subagent-legacy-partial-');
+test('a current parent treats partial child delivery as failed batch acceptance without hiding siblings', async () => {
+  const directory = await temporaryDirectory('keepseek-subagent-partial-');
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (_url: unknown, init: RequestInit | undefined) => {
     const request = JSON.parse(String(init?.body));
@@ -406,18 +383,19 @@ test('a frozen V10 parent treats partial child delivery as failed batch acceptan
     const runtime = new SubagentRuntime({ globalStorageUri: vscode.Uri.file(directory), workspaceKey: 'workspace',
       sourceStore: new ModelSourceStore(vscode.Uri.file(directory)) });
     const result = await runtime.delegateParallel({ tasks: [{ task: 'Partial branch' }, { task: 'Complete branch' }] }, {
-      parentRequest: { ...childParentRequest(), requestProtocolVersion: 10 }, parentRunId: 'legacy-batch', language: 'en'
+      parentRequest: { ...childParentRequest(), requestProtocolVersion: 15 }, parentRunId: 'current-batch', language: 'en'
     });
     const batch = JSON.parse(result.content);
-    assert.equal(batch.version, 2);
+    assert.equal(batch.version, 3);
     assert.equal(batch.ok, false);
     assert.equal(batch.errorType, 'subagent_parallel_child_failed');
-    assert.equal(batch.results[0].ok, false);
-    assert.equal(batch.results[0].errorType, 'subagent_result_partial');
+    assert.equal(batch.results[0].ok, true, 'partial results can be structurally accepted');
+    assert.equal(batch.results[0].formatAccepted, true);
+    assert.equal(batch.results[0].resultStatus, 'partial');
     assert.equal(batch.results[1].ok, true);
     assert.equal(result.draftEdits?.length, 0);
     const successfulPage = JSON.parse((await runtime.readResult({ ref: batch.results[1].resultRef }, {
-      parentRequest: { ...childParentRequest(), requestProtocolVersion: 10 }, parentRunId: 'legacy-batch', language: 'en'
+      parentRequest: { ...childParentRequest(), requestProtocolVersion: 15 }, parentRunId: 'current-batch', language: 'en'
     })).content);
     assert.equal(successfulPage.ok, true);
     assert.match(successfulPage.content, /Observed a concrete source/u);
@@ -492,7 +470,7 @@ test('completed-result index requires exact compatibility, same session, and fre
   const store = new SubagentStore(vscode.Uri.file(directory), 'workspace');
   const metadata = reusableMetadata(vscode.Uri.file(filePath).toString(), hash('stable'));
   await store.save(metadata, {
-    version: 1, metadataId: metadata.id, contextInstructions: '', messages: [], result: JSON.stringify(metadata.resultEnvelope)
+    version: 2, metadataId: metadata.id, contextInstructions: '', messages: [], result: JSON.stringify(metadata.resultEnvelope)
   });
   const query = candidateQuery();
   assert.equal((await store.findCompletedCandidates(query)).length, 1);
@@ -590,7 +568,7 @@ test('progress and diagnostics expose only bounded whitelisted state and restart
   assert.doesNotMatch(JSON.stringify(diagnosticValue), /VERY_SECRET|OTHER_SECRET|\/Users\/person/u);
 
   const running = { ...reusableMetadata('file:///workspace/a.ts', hash('x')), id: 'sa_running', status: 'running' as const };
-  await store.save(running, { version: 1, metadataId: running.id, contextInstructions: '', messages: [], result: '' });
+  await store.save(running, { version: 2, metadataId: running.id, contextInstructions: '', messages: [], result: '' });
   const interrupted = (await store.read('session', running.id))?.metadata;
   assert.equal(interrupted?.status, 'stopped');
   assert.equal(interrupted?.failureKind, 'interrupted');
@@ -614,7 +592,7 @@ function reservation(ownerId: string, scope: ProposalPathScope, roots: Workspace
 
 function reusableMetadata(uri: string, contentHash: string): StoredSubagentMetadata {
   return {
-    version: 1,
+    version: 2,
     id: 'sa_reusable', treeId: 'tree', parentSessionId: 'session', parentRunId: 'run', rootRunId: 'run',
     depth: 1, profile: 'research', lane: 'research-read', task: 'Inspect A', status: 'completed',
     sourceId: 'source', modelId: 'model', provider: 'deepseek', sourceConfigHash: 'source-hash',

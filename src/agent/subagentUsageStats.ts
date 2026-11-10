@@ -412,7 +412,7 @@ export function createUsageDetailsViewModel(input: {
   }
   const actual = (records: ProviderUsageLedgerRecord[]) => {
     const stats = rebuildSessionUsageStatsFromLedger(records);
-    const counts = summarizeUsageLedger({ version: 1, records, legacyAggregate: false, incomplete: false });
+    const counts = summarizeUsageLedger({ version: 1, records, incomplete: false });
     return { ...toActualUsageSlice(stats), providerAttemptCount: counts.providerAttemptCount, usageResponseCount: counts.usageResponseCount };
   };
   const groupedActual = (key: unknown[], fallback: () => ProviderUsageLedgerRecord[]) => {
@@ -429,8 +429,8 @@ export function createUsageDetailsViewModel(input: {
     for (const group of byModel) group.usage = groupedActual(['model', group.sourceId, group.modelId, group.provider],
       () => ledgerRecords.filter(record => record.sourceId === group.sourceId && record.originalModelId === group.modelId && record.provider === group.provider));
   }
-  const legacyTaskDetailsMissing = (subagentStats?.totalCount ?? 0) > terminalIds.size;
-  const acceptedTaskCount = !legacyTaskDetailsMissing && (terminalIds.size || activities.length)
+  const taskDetailsMissing = (subagentStats?.totalCount ?? 0) > terminalIds.size;
+  const acceptedTaskCount = !taskDetailsMissing && (terminalIds.size || activities.length)
     ? new Set([...terminalIds, ...activities.map(activity => activity.id)]).size : undefined;
   return {
     session,
@@ -444,7 +444,7 @@ export function createUsageDetailsViewModel(input: {
       reusedCount: activities.filter(activity => activity.reused).length,
       usageUnreportedCount: Math.max(0, (session.subagent.providerAttemptCount ?? session.subagent.requestCount)
         - (session.subagent.usageResponseCount ?? session.subagent.requestCount)),
-      lifecycleIncomplete: Boolean(input.lifecycleIncomplete || legacyTaskDetailsMissing || activities.some(activity => activity.interrupted)),
+      lifecycleIncomplete: Boolean(input.lifecycleIncomplete || taskDetailsMissing || activities.some(activity => activity.interrupted)),
       observedInvocations: input.observedInvocations,
       totalCount: subagentStats?.totalCount ?? 0,
       completedCount: subagentStats?.completedCount ?? 0,
@@ -641,11 +641,9 @@ function toActualUsageSlice(value: (Usage & {
     return createEmptyActualUsageSlice();
   }
   const requestCount = safeInteger(value.requestCount);
-  const legacyCost = safeNumber(value.sessionCost ?? value.cost);
-  const costByCurrency = normalizeCurrencyCosts(value.costByCurrency, legacyCost, value.currency);
+  const costByCurrency = normalizeCurrencyCosts(value.costByCurrency);
   const pricedRequestCount = safeInteger(value.pricedRequestCount
-    ?? (value.pricingStatus === 'priced'
-      || (legacyCost > 0 && value.pricingStatus !== 'estimated_upper_bound') ? requestCount : 0));
+    ?? (value.pricingStatus === 'priced' ? requestCount : 0));
   const estimatedRequestCount = safeInteger(value.estimatedRequestCount
     ?? (value.pricingStatus === 'estimated_upper_bound' ? requestCount : 0));
   const unpricedRequestCount = safeInteger(value.unpricedRequestCount
@@ -937,11 +935,7 @@ function cacheRate(hit: number, miss: number, reported: number): number | undefi
   return reported > 0 && denominator > 0 ? safePercent(safeInteger(hit), denominator) : undefined;
 }
 
-function normalizeCurrencyCosts(
-  value: unknown,
-  legacyCost?: unknown,
-  legacyCurrency?: unknown
-): Record<string, number> {
+function normalizeCurrencyCosts(value: unknown): Record<string, number> {
   const result: Record<string, number> = {};
   if (isRecord(value)) {
     for (const [currency, cost] of Object.entries(value)) {
@@ -949,12 +943,6 @@ function normalizeCurrencyCosts(
       if (normalizedCurrency) {
         result[normalizedCurrency] = safeNumber(cost);
       }
-    }
-  } else {
-    const currency = normalizeString(legacyCurrency);
-    const cost = safeNumber(legacyCost);
-    if (currency && cost > 0) {
-      result[currency] = cost;
     }
   }
   return result;

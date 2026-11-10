@@ -354,7 +354,7 @@ export const usageRenderFragment: WebviewFragment = {
           })));
         }
         if (selected.total.attemptStatsIncomplete) {
-          notes.append(usageNode('p', '', t('usageLegacyAttemptStatsIncomplete')));
+          notes.append(usageNode('p', '', t('usageAttemptStatsIncomplete')));
         }
         if (!selected.total.providerAttemptCount && !selected.total.requestCount) {
           notes.append(usageNode('p', '', t('usageNoProviderData')));
@@ -458,7 +458,7 @@ export const usageRenderFragment: WebviewFragment = {
           { key: 'usageMainSession', usage: selected.mainSession, percent: selected.mainPercent },
           { key: 'usageReviewerLabel', usage: selected.reviewer, percent: selected.reviewerPercent },
           { key: 'usageSubagentLabel', usage: selected.subagent, percent: selected.subagentPercent },
-          { key: 'usageHistoricalUnattributed', usage: selected.unattributed, percent: selected.unattributedPercent }
+          { key: 'usageUnattributed', usage: selected.unattributed, percent: selected.unattributedPercent }
         ].filter(function(item) { return hasActualUsage(item.usage) || (item.key === 'usageSubagentLabel' && subagents); });
         // A sole main-session slice adds no information. Non-main activity can
         // matter even with zero tokens, unknown usage, or known zero cost.
@@ -538,7 +538,7 @@ export const usageRenderFragment: WebviewFragment = {
           list.append(entry);
         });
         section.append(list);
-        var sourceIncomplete = !groups.length || (sessionUsage && sessionUsage.legacyUnattributed)
+        var sourceIncomplete = !groups.length
           || groups.some(function(group) { return !group.sourceId || !group.modelId; })
           || denominator < total.totalTokens
           || groups.reduce(function(sum, group) { return sum + group.requestCount; }, 0) < total.requestCount;
@@ -561,7 +561,7 @@ export const usageRenderFragment: WebviewFragment = {
         var child = slices.subagent;
         // Identity and the responsibility map establish provenance; coverage
         // checks additionally reject partially attributed historical sources.
-        return child && !source.legacyUnattributed
+        return child
           && Object.keys(slices).filter(function(key) { return hasActualUsage(slices[key]); }).every(function(key) { return key === 'subagent'; })
           && hasSameUsageCoverage(source, child);
       }
@@ -729,7 +729,7 @@ export const usageRenderFragment: WebviewFragment = {
           });
           body.append(grid, usageNode('p', 'usage-note', formatSubagentCounts(subagents.totalCount, subagents)));
         } else {
-          body.append(usageNode('p', 'usage-note', t('usageHistoricalEstimateUnavailable')));
+          body.append(usageNode('p', 'usage-note', t('usageRunSummaryUnavailable')));
         }
         if (fallbackModels.length) {
           body.append(usageNode('h5', 'usage-subagent-group-title', t('usageSubagentModels')));

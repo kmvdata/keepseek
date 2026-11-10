@@ -43,7 +43,7 @@ test('suffix truncation retains proven summaries and invalidates removed sources
   assert.deepEqual(result.summaryInvalidations, [
     { id: 'removed', reason: 'source_removed_or_changed' },
     { id: 'dependent', reason: 'summary_dependency_invalid' },
-    { id: 'legacy', reason: 'legacy_source_unverified' }
+    { id: 'legacy', reason: 'source_unverified' }
   ]);
   assert.deepEqual(state.contextCompression?.protectedMessageIds, ['u0']);
   assert.deepEqual(state.contextCompression?.protectionState, { version: 1, pendingMessageIds: ['a0'],

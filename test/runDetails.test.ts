@@ -1,3 +1,4 @@
+import { createFullTextDraftEdit } from '../src/edits/draftEdit';
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import { applyChangeSetEventToRunDetails, RunDetailsBuilder } from '../src/agent/logging/runDetails';
@@ -354,8 +355,8 @@ function createTwoFileChangeSet(): ChangeSet {
     messageId: 'message-1',
     operationSummary: 'Update two files',
     edits: [
-      { id: 'edit-a', uri: 'file:///a.ts', label: 'a.ts', action: 'modify', newText: 'a', reason: 'A' },
-      { id: 'edit-b', uri: 'file:///b.ts', label: 'b.ts', action: 'modify', newText: 'b', reason: 'B' }
+      createFullTextDraftEdit({ id: 'edit-a', uri: 'file:///a.ts', label: 'a.ts', action: 'modify', content: 'a', reason: 'A' }),
+      createFullTextDraftEdit({ id: 'edit-b', uri: 'file:///b.ts', label: 'b.ts', action: 'modify', content: 'b', reason: 'B' })
     ]
   });
   assert.ok(changeSet);

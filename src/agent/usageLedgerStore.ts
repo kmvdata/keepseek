@@ -4,7 +4,7 @@ import { writeJsonAtomic } from '../shared/atomicStorage';
 import { SessionDeletionAuthority } from '../sessions/sessionDeletionAuthority';
 import { assertManagedStoragePath, hasAssociatedDirectoryEntries } from '../sessions/sessionAssociatedPersistence';
 import type { ChatSession, ProviderUsageLedger, ProviderUsageLedgerRecord } from '../shared/types';
-import { normalizeUsageLedgerRecord, normalizeUsageLedgerValue, summarizeUsageLedger, preferUsageLedgerRecord,
+import { normalizeUsageLedgerRecord, summarizeUsageLedger, preferUsageLedgerRecord,
   summarizeCacheDiagnostics } from './usageLedger';
 import { updateUsageLedgerStatsIndex, rebuildSessionUsageStatsFromLedger } from './usageStats';
 import { recordLocalPerformance } from './logging/performanceTrace';
@@ -141,28 +141,6 @@ export class UsageLedgerStore {
     };
   }
 
-  public async migrateInlineLedger(
-    session: Pick<ChatSession, 'id' | 'usageLedger' | 'usageLedgerRef' | 'usageStats'>
-  ): Promise<NonNullable<ChatSession['usageLedgerRef']> | undefined> {
-    const inline = normalizeUsageLedgerValue(session.usageLedger);
-    if (!inline?.records.length && !session.usageLedgerRef) return undefined;
-    if (inline?.records.length) await this.appendMany(session.id, inline.records);
-    const restored = await this.readAll(session.id);
-    const restoredIdentities = new Set(restored.records.map(recordIdentity));
-    if (inline && inline.records.some((record) => !restoredIdentities.has(recordIdentity(record)))) {
-      throw new Error('Usage ledger migration verification failed.');
-    }
-    return {
-      version: USAGE_LEDGER_STORE_SCHEMA_VERSION,
-      sessionId: session.id,
-      migratedInlineVersion: inline ? 1 : session.usageLedgerRef?.migratedInlineVersion,
-      legacyAggregate: inline?.legacyAggregate ?? session.usageLedgerRef?.legacyAggregate
-        ?? Boolean(session.usageStats?.legacyUnattributed),
-      incomplete: Boolean(inline?.incomplete || session.usageLedgerRef?.incomplete || restored.incomplete),
-      ...(restored.damagedBucketCount ? { damagedBucketCount: restored.damagedBucketCount } : {})
-    };
-  }
-
   public async rebuild(sessionId: string): Promise<{
     ledger: ProviderUsageLedger;
     summary: ReturnType<typeof summarizeUsageLedger>;
@@ -173,7 +151,6 @@ export class UsageLedgerStore {
     const ledger: ProviderUsageLedger = {
       version: 1,
       records: page.records,
-      legacyAggregate: false,
       incomplete: page.damagedBucketCount > 0
     };
     if (!this.deletedSessions.has(sessionId)) this.indexes.set(sessionId, { records: new Map(page.records.map(record => [recordIdentity(record), record])),
@@ -185,7 +162,7 @@ export class UsageLedgerStore {
   /** Startup scans once; normal appends update the index only after durable commit.
    * Explicit rebuild remains the disk integrity check and repair entrypoint. */
   public async current(sessionId: string) {
-    const empty = () => ({ ledger: { version: 1 as const, records: [] as ProviderUsageLedgerRecord[], legacyAggregate: false, incomplete: false },
+    const empty = () => ({ ledger: { version: 1 as const, records: [] as ProviderUsageLedgerRecord[], incomplete: false },
       stats: undefined as ChatSession['usageStats'], damagedBucketCount: 0 });
     if (this.deletedSessions.has(sessionId) || (this.globalStorageUri && await new SessionDeletionAuthority(this.globalStorageUri).isSessionIdDeleted(sessionId))) return empty();
     if (!this.indexes.has(sessionId)) await this.rebuild(sessionId);
@@ -195,7 +172,7 @@ export class UsageLedgerStore {
       const records = [...index.records.values()];
       const incomplete = index.damagedBucketCount > 0;
       if (index.stats) index.stats.cacheDiagnostics = summarizeCacheDiagnostics(records, incomplete);
-      return { ledger: { version: 1 as const, records, legacyAggregate: false, incomplete },
+      return { ledger: { version: 1 as const, records, incomplete },
         stats: index.stats, damagedBucketCount: index.damagedBucketCount };
     });
   }

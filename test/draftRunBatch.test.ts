@@ -405,8 +405,8 @@ type Host = {
 };
 function hostFixture(f: Awaited<ReturnType<typeof createFixture>>) {
   const session = { id: 's', approvalMode: 'ask', messages: [
-    { id: 'u', role: 'user', content: 'task', createdAt: '' },
-    { id: 'a', role: 'assistant', content: '', createdAt: '', runCheckpointArchive: { version: 1, objectHash: 'a'.repeat(64), summary: { taskId: 'r', status: 'completed', usedMs: 0, maxExecutionMs: 0, limitSource: '', attempt: 1, modelRequests: 1, retries: 0, steps: 0, canResume: false } } }
+    { id: 'u', role: 'user', content: 'task', createdAt: '', userTask: { version: 1, id: 'u', originMessageId: 'u', reason: 'user' } },
+    { id: 'a', role: 'assistant', content: '', createdAt: '', userTask: { version: 1, id: 'u', originMessageId: 'u', reason: 'user' }, runCheckpointArchive: { version: 1, objectHash: 'a'.repeat(64), summary: { taskId: 'r', status: 'completed', usedMs: 0, maxExecutionMs: 0, limitSource: '', attempt: 1, modelRequests: 1, retries: 0, steps: 0, canResume: false } } }
   ] as ChatMessage[] };
   const states = { pendingEdits: false, background: false, sends: 0 };
   const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
@@ -595,7 +595,7 @@ function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: '
 }
 function elements(cards: UiElement[]): UiElement[] { return cards.flatMap((card) => [card, ...elements(card.children)]); }
 
-test('legacy delegate cards explain processing, scope, hard failure and reviewer denial in both languages', async () => fixture(async f => {
+test('delegate cards explain processing, scope, hard failure and reviewer denial in both languages', async () => fixture(async f => {
   for (const language of ['en', 'zh-CN'] as const) for (const mode of ['delegate'] as const) {
     const ui = renderHarness(f, language); ui.state.approvalMode = mode;
     const labels = WEBVIEW_TRANSLATIONS[language];
@@ -610,7 +610,7 @@ test('legacy delegate cards explain processing, scope, hard failure and reviewer
     const waiting = renderState();
     assert.equal(waiting.note.textContent, labels.approvalAutoInactive);
     assert.equal(waiting.buttons.length, 0);
-    ui.state.approvalProcessing = { version: 1, runId: 'r', rootTaskId: 'task', mode,
+    ui.state.approvalProcessing = { version: 2, runId: 'r', rootTaskId: 'task', mode,
       status: 'processing', updatedAt: '', targets: [{ id: 'A', kind: 'command', status: 'pending' }] };
     const processing = renderState();
     assert.equal(processing.note.textContent, labels.approvalProcessingNow);
@@ -633,7 +633,7 @@ test('legacy delegate cards explain processing, scope, hard failure and reviewer
   }
 }));
 
-test('current delegate cards resume V2 processing without granting scope, while V1 audit stays inert', async () => fixture(async f => {
+test('current delegate cards resume processing without granting scope', async () => fixture(async f => {
   f.add(['A']);
   for (const language of ['en', 'zh-CN'] as const) {
     const ui = renderHarness(f, language);
@@ -664,24 +664,18 @@ test('current delegate cards resume V2 processing without granting scope, while 
     for (const target of processing.targets) target.status = 'denied';
     assert.equal(resumes().length, 0, 'denial cannot expose a bypass');
     for (const target of processing.targets) target.status = 'needs_authorization';
-    processing.version = 1;
-    for (const mode of ['delegate', 'model_review'] as const) {
-      processing.mode = mode;
-      ui.state.approvalMode = mode;
-      assert.equal(resumes().length, 0, 'legacy snapshots only explain past processing');
-      assert.equal(render().filter(n => n.className === 'approval-state-note').length, 2);
-    }
+
   }
 }));
 
-test('Git draft cards show preflight diagnostics and never offer delegate restart recovery', async () => fixture(async f => {
+test('Git draft cards bind diagnostics and expose only explicit current processing recovery', async () => fixture(async f => {
   f.add(['A', 'B']);
   for (const language of ['en', 'zh-CN'] as const) {
     const ui = renderHarness(f, language);
     const labels = WEBVIEW_TRANSLATIONS[language];
     const [status, commit] = ui.state.draftRuns;
     const processing: NonNullable<typeof ui.state.approvalProcessing> = {
-      version: 1, runId: status.agentRunId, rootTaskId: 'task', mode: 'delegate', status: 'replanning', updatedAt: '',
+      version: 2, runId: status.agentRunId, rootTaskId: 'task', mode: 'delegate', status: 'replanning', updatedAt: '',
       reason: 'Batch status must not appear as another command’s diagnostic',
       targets: [{ id: status.id, kind: 'command', status: 'needs_replan' }, { id: commit.id, kind: 'command', status: 'dependency_blocked' }]
     };
@@ -713,8 +707,10 @@ test('Git draft cards show preflight diagnostics and never offer delegate restar
     processing.canResume = true;
     assert.equal(render(second).filter(node => node.type === 'button').length, 0);
     const resume = render(first).filter(node => node.type === 'button');
-    assert.equal(resume.length, 0);
-    assert.equal(ui.messages.length, 0);
+    assert.equal(resume.length, 1);
+    assert.equal(ui.messages.length, 0, 'rendering cannot automatically resume a command');
+    resume[0].click();
+    assert.deepEqual(JSON.parse(JSON.stringify(ui.messages)), [{ type: 'resumeApprovalProcessing' }]);
     processing.canResume = false;
     processing.targets[0].reason = labels.approvalReplanRepeated;
     const stopped = render(first);
@@ -801,7 +797,7 @@ test('command and file cards keep complete automatic notes outside button groups
     const labels = WEBVIEW_TRANSLATIONS[language];
     const fileReason = 'file:///external/' + 'long-unbroken-path'.repeat(30) + '/<script>literal</script>.txt';
     const set = { id: 'set', files: [{ id: 'edit-A', status: 'pending', label: 'file.ts', uri: 'file:///external/file.ts' }] };
-    ui.state.approvalProcessing = { version: 1, runId: 'r', rootTaskId: 'task', mode, status: 'blocked', updatedAt: '', targets: [
+    ui.state.approvalProcessing = { version: 2, runId: 'r', rootTaskId: 'task', mode, status: 'blocked', updatedAt: '', targets: [
       { id: 'A', kind: 'command', status: 'needs_authorization', reason: longAuthorizationReason },
       { id: 'edit-A', kind: 'edit', status: 'needs_authorization', reason: fileReason }
     ] };
@@ -853,7 +849,7 @@ test('automatic notes and buttons rerender without stale scope or duplicate acti
     };
     for (const status of ['needs_authorization', 'failed', 'pending', 'denied'] as const) {
       const reason = status === 'needs_authorization' ? longAuthorizationReason : status + ' reason';
-      ui.state.approvalProcessing = { version: 1, runId: 'r', rootTaskId: 'task', mode,
+      ui.state.approvalProcessing = { version: 2, runId: 'r', rootTaskId: 'task', mode,
         status: status === 'pending' ? 'processing' : 'blocked', canResume: false, updatedAt: '', targets: [
           { id: 'A', kind: 'command', status, reason }, { id: 'edit-A', kind: 'edit', status, reason }
         ] };

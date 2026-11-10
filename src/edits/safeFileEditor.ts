@@ -21,7 +21,6 @@ interface FileSnapshot {
   bytes?: Uint8Array;
   text?: string;
   byteIdentity?: FileContentIdentity;
-  legacyTextHash?: string;
 }
 
 export interface ChangeCheckpointJournal {
@@ -78,14 +77,14 @@ export class SafeFileEditor {
     this.assertBaselineMatches(edit, snapshot);
     return {
       originalText: snapshot.text ?? '',
-      originalTextHash: getDraftEditBase(edit)?.sha256 ?? snapshot.legacyTextHash,
+      originalTextHash: getDraftEditBase(edit)?.sha256 ?? snapshot.byteIdentity?.sha256,
       originalSize: snapshot.byteIdentity?.sizeBytes
     };
   }
 
   public async applyDraftEdit(
     edit: DraftEdit,
-    changeSetId = 'legacy',
+    changeSetId = 'standalone',
     approval?: DelegatedEditApproval,
     journal?: ChangeCheckpointJournal
   ): Promise<ChangeCheckpoint> {
@@ -151,8 +150,12 @@ export class SafeFileEditor {
       } else if (checkpoint.originalExists) {
         const original = checkpoint.originalBlobHash && this.artifactStore
           ? await this.artifactStore.getBlob(checkpoint.originalBlobHash)
-          : this.encoder.encode(checkpoint.originalText ?? '');
-        const expectedResult = checkpoint.hashMode === 'utf8_bytes' && checkpoint.appliedExists
+          : typeof checkpoint.originalText === 'string' ? this.encoder.encode(checkpoint.originalText)
+            : (() => { throw new Error('The rollback content is unavailable.'); })();
+        if (original.byteLength !== checkpoint.originalSizeBytes || hashBytes(original) !== checkpoint.originalTextHash) {
+          throw new Error('The rollback content does not match its saved byte identity.');
+        }
+        const expectedResult = checkpoint.appliedExists
           && checkpoint.appliedTextHash && checkpoint.appliedSizeBytes !== undefined
           ? { sha256: checkpoint.appliedTextHash, sizeBytes: checkpoint.appliedSizeBytes }
           : undefined;
@@ -176,6 +179,11 @@ export class SafeFileEditor {
 
   /** Reconcile prepared/applying journals after restart without replaying a mutation. */
   public async classifyCheckpoint(checkpoint: ChangeCheckpoint): Promise<'base' | 'result' | 'unknown'> {
+    if (checkpoint.version !== 2 || checkpoint.hashMode !== 'utf8_bytes'
+      || !['full_text_v1', 'text_patch_v1', 'delete_v1', 'move_v1'].includes(checkpoint.draftKind)
+      || checkpoint.originalExists && !validCheckpointIdentity(checkpoint.originalTextHash, checkpoint.originalSizeBytes)
+      || (checkpoint.appliedExists || checkpoint.draftKind === 'move_v1')
+        && !validCheckpointIdentity(checkpoint.appliedTextHash, checkpoint.appliedSizeBytes)) return 'unknown';
     const source = vscode.Uri.parse(checkpoint.uri);
     if (checkpoint.draftKind === 'move_v1' && checkpoint.targetUri) {
       const target = vscode.Uri.parse(checkpoint.targetUri);
@@ -190,14 +198,12 @@ export class SafeFileEditor {
     if (!checkpoint.appliedExists && !current.exists) return 'result';
     if (!checkpoint.originalExists && !current.exists) return 'base';
     if (current.exists) {
-      const currentHash = checkpoint.hashMode === 'legacy_text'
-        ? await this.readLegacyTextHash(source)
-        : current.identity?.sha256;
+      const currentHash = current.identity?.sha256;
       const currentSize = current.identity?.sizeBytes;
       if (checkpoint.appliedExists && currentHash === checkpoint.appliedTextHash
-        && (checkpoint.appliedSizeBytes === undefined || checkpoint.appliedSizeBytes === currentSize)) return 'result';
+        && checkpoint.appliedSizeBytes === currentSize) return 'result';
       if (checkpoint.originalExists && currentHash === checkpoint.originalTextHash
-        && (checkpoint.originalSizeBytes === undefined || checkpoint.originalSizeBytes === currentSize)) return 'base';
+        && checkpoint.originalSizeBytes === currentSize) return 'base';
     }
     return 'unknown';
   }
@@ -249,9 +255,8 @@ export class SafeFileEditor {
     try {
       const stat = await vscode.workspace.fs.stat(uri);
       if (stat.type !== vscode.FileType.File) throw new Error(this.t('draftTargetNotFile', { label: edit.label }));
-      // Legacy `newText` records are compatibility full-text edits. They use
-      // the explicit rollback-backup quota too; maxFileBytes is reserved for
-      // model/context full reads and is not an edit-pipeline limit.
+      // Full replacements use the rollback-backup quota; maxFileBytes only
+      // limits model/context reads.
       const limit = getConfiguredPatchSettings().maxBackupBytes;
       if (stat.size > limit) {
         throw new Error(this.t(edit.action === 'delete' ? 'cannotDeleteOversizedFile' : 'cannotWriteOversizedFile', { label: edit.label, limit: formatBytes(limit) }));
@@ -265,8 +270,7 @@ export class SafeFileEditor {
         exists: true,
         bytes,
         text,
-        byteIdentity: { sha256: hashBytes(bytes), sizeBytes: bytes.byteLength },
-        legacyTextHash: hashText(text)
+        byteIdentity: { sha256: hashBytes(bytes), sizeBytes: bytes.byteLength }
       };
     } catch (error) {
       if (isFileNotFoundError(error)) return { exists: false };
@@ -282,7 +286,7 @@ export class SafeFileEditor {
   private assertBaselineMatches(edit: DraftEdit, snapshot: FileSnapshot): void {
     const base = getDraftEditBase(edit);
     if (!base) return;
-    const actualHash = edit.kind ? snapshot.byteIdentity?.sha256 : snapshot.legacyTextHash;
+    const actualHash = snapshot.byteIdentity?.sha256;
     const sizeChanged = base.sizeBytes >= 0 && base.sizeBytes !== snapshot.byteIdentity?.sizeBytes;
     const hashChanged = Boolean(base.sha256) && base.sha256 !== actualHash;
     if (sizeChanged || hashChanged) {
@@ -329,9 +333,9 @@ export class SafeFileEditor {
       targetUri: edit.kind === 'move_v1' ? edit.targetUri : undefined,
       label: edit.label, action: edit.action, draftKind: kind, state: 'prepared', operation: 'apply',
       originalExists: original.exists, originalText,
-      originalTextHash: edit.kind ? original.byteIdentity?.sha256 : original.legacyTextHash,
+      originalTextHash: original.byteIdentity?.sha256,
       originalSizeBytes: original.byteIdentity?.sizeBytes, originalBlobHash,
-      hashMode: edit.kind ? 'utf8_bytes' : 'legacy_text',
+      hashMode: 'utf8_bytes',
       appliedExists: edit.action !== 'delete' && edit.kind !== 'move_v1',
       appliedTextHash: edit.kind === 'move_v1' ? edit.base.sha256 : result?.sha256,
       appliedSizeBytes: edit.kind === 'move_v1' ? edit.base.sizeBytes : result?.sizeBytes,
@@ -533,9 +537,6 @@ export class SafeFileEditor {
     }
   }
 
-  private async readLegacyTextHash(uri: vscode.Uri): Promise<string | undefined> {
-    try { return hashText(this.decoder.decode(await vscode.workspace.fs.readFile(uri))); } catch { return undefined; }
-  }
 
   private assertNoDirtyOpenEditor(uri: vscode.Uri, label: string): void {
     const dirtyDocument = vscode.workspace.textDocuments.some((document) => this.isSameUri(document.uri, uri) && document.isDirty);
@@ -701,9 +702,6 @@ async function resolveMissingRealPath(filePath: string): Promise<string> {
   }
 }
 
-function hashText(value: string): string {
-  return createHash('sha256').update(value, 'utf8').digest('hex');
-}
 
 function isFileNotFoundError(error: unknown): boolean {
   if (error instanceof vscode.FileSystemError) return error.code === 'FileNotFound';
@@ -711,4 +709,8 @@ function isFileNotFoundError(error: unknown): boolean {
     ? String((error as { code?: unknown }).code ?? '')
     : '';
   return code === 'ENOENT' || code === 'FileNotFound';
+}
+
+function validCheckpointIdentity(hash: string | undefined, sizeBytes: number | undefined): boolean {
+  return typeof hash === 'string' && /^[a-f0-9]{64}$/u.test(hash) && Number.isSafeInteger(sizeBytes) && Number(sizeBytes) >= 0;
 }

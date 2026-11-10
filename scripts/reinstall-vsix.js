@@ -15,7 +15,7 @@ function main() {
   const expectedExtensionId = getExtensionId(beforePackage);
 
   step(`Packaging ${expectedExtensionId}...`);
-  run(npmCommand, ['run', 'package']);
+  run(npmCommand, ['run', 'package:market']);
 
   const packageJson = readPackageJson();
   const extensionId = getExtensionId(packageJson);
@@ -27,6 +27,16 @@ function main() {
   const vsixPath = path.join(root, `${packageJson.name}-${version}.vsix`);
   if (!fs.existsSync(vsixPath)) {
     fail(`Expected VSIX was not created: ${path.relative(root, vsixPath)}`);
+  }
+
+  // Publisher changes create a distinct VS Code extension. An explicit reinstall
+  // must remove the retired identity to avoid two providers registering one view.
+  const retiredExtensionId = 'keepseek.keepseek';
+  const retiredVersion = getInstalledExtensionVersion(retiredExtensionId);
+  if (retiredVersion && retiredExtensionId !== extensionId) {
+    step(`Uninstalling retired ${retiredExtensionId}@${retiredVersion} from VS Code...`);
+    run(codeCommand, ['--uninstall-extension', retiredExtensionId]);
+    if (getInstalledExtensionVersion(retiredExtensionId)) fail(`Retired ${retiredExtensionId} is still installed.`);
   }
 
   const installedVersion = getInstalledExtensionVersion(extensionId);

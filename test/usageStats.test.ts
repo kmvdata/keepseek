@@ -15,7 +15,7 @@ import {
   normalizeSessionUsageStatsValue
 } from '../src/agent/usageStats';
 
-test('normalizes Kimi balance details without breaking legacy total-only records', () => {
+test('normalizes Kimi balance details when optional provider breakdowns are absent', () => {
   assert.deepEqual(normalizeBalanceStateValue({
     totalBalance: 12.5,
     cashBalance: -1,
@@ -343,7 +343,7 @@ test('keeps accounted cost and request attribution when a completed turn has mix
   assert.equal(group?.bySource?.executor?.requestCount, 2);
 });
 
-test('normalizes old aggregate usage without inventing model attribution', () => {
+test('keeps explicitly incomplete current statistics without inventing model attribution', () => {
   const stats = normalizeSessionUsageStatsValue({
     promptTokens: 100,
     completionTokens: 10,
@@ -351,10 +351,14 @@ test('normalizes old aggregate usage without inventing model attribution', () =>
     cacheHitTokens: 50,
     cacheMissTokens: 50,
     requestCount: 1,
+    providerAttemptCount: 0,
+    usageResponseCount: 0,
+    attemptStatsIncomplete: true,
     sessionCost: 0,
+    costByCurrency: {},
     currency: '¥'
   });
-  assert.equal(stats?.legacyUnattributed, true);
+  assert.equal(stats?.attemptStatsIncomplete, true);
   assert.equal(stats?.byModelSource, undefined);
   assert.equal(stats?.pricingStatus, 'unavailable');
 });

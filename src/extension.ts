@@ -1,5 +1,5 @@
+import { KEEPSEEK_CONFIGURATION_NAMESPACE, KEEPSEEK_PUBLISHER } from './shared/identity';
 import * as vscode from 'vscode';
-import { ensureKeybindings } from './keybindings';
 import { KeepseekChatViewProvider } from './provider/KeepseekChatViewProvider';
 import { GlobalSessionStorage } from './sessions/globalSessionStorage';
 import { ChatSessionStore, getCurrentWorkspaceSessionScope } from './sessions/chatSessionStore';
@@ -7,6 +7,7 @@ import { getConfiguredKeepseekLanguage } from './shared/i18n';
 import type { KeepseekExtensionInfo } from './shared/types';
 import { StartupPerformanceTrace } from './shared/startupPerformance';
 import { getRuntimeIdentity, initializeRuntimeIdentity } from './shared/runtimeIdentity';
+import { getNativeStorageUri } from './shared/storageRoot';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const startupTrace = new StartupPerformanceTrace();
@@ -14,15 +15,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   initializeRuntimeIdentity({ extensionUri: context.extensionUri, extensionMode: context.extensionMode,
     version: readPackageString(context.extension.packageJSON.version, '0.0.0'), remoteName: vscode.env.remoteName });
 
-  const globalSessionStorage = new GlobalSessionStorage(context.globalStorageUri, startupTrace);
+  const storageUri = getNativeStorageUri();
+  const globalSessionStorage = new GlobalSessionStorage(storageUri, startupTrace);
   const workspaceScope = getCurrentWorkspaceSessionScope();
   const sessionStore = new ChatSessionStore(globalSessionStorage, getConfiguredKeepseekLanguage(), workspaceScope);
   let startSessionInitialization: (() => void) | undefined;
   const sessionInitialization = new Promise<void>((resolve, reject) => {
     startSessionInitialization = () => {
       void startupTrace.measure('current-workspace-sessions-loaded', async () => {
-        await globalSessionStorage.migrateLegacyWorkspaceState(context.workspaceState, workspaceScope);
-        await sessionStore.initialize();
+        await sessionStore.initialize({ fresh: true });
       }, () => ({ entries: sessionStore.getSessionSummaries().length })).then(resolve, reject);
     };
   });
@@ -30,12 +31,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const provider = new KeepseekChatViewProvider(
     context.extensionUri,
     sessionStore,
-    context.globalStorageUri,
+    storageUri,
     context.globalState,
     createExtensionInfo(context),
     sessionInitialization,
-    startupTrace,
-    context.workspaceState
+    startupTrace
   );
   const webviewProvider = vscode.window.registerWebviewViewProvider(KeepseekChatViewProvider.viewType, provider, {
     webviewOptions: {
@@ -44,9 +44,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   });
   startupTrace.mark('provider-registered');
   startSessionInitialization?.();
-  // The package contribution is authoritative; this only performs the legacy
-  // user-keybindings migration once and never blocks Provider registration.
-  void ensureKeybindings(context);
 
   context.subscriptions.push(
     provider,
@@ -73,7 +70,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       (uri?: vscode.Uri, selectedUris?: vscode.Uri[]) => provider.insertExplorerDirectoryToInput(uri, selectedUris)
     ),
     vscode.workspace.onDidChangeConfiguration((event) => {
-      if (event.affectsConfiguration('keepseek')) {
+      if (event.affectsConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)) {
         provider.refreshConfiguration();
       }
     }),
@@ -104,7 +101,7 @@ function createExtensionInfo(context: vscode.ExtensionContext): KeepseekExtensio
   return {
     displayName: readPackageString(packageJson.displayName, 'KeepSeek'),
     version: readPackageString(packageJson.version, '0.0.0'),
-    publisher: readPackageString(packageJson.publisher, 'keepseek'),
+    publisher: readPackageString(packageJson.publisher, KEEPSEEK_PUBLISHER),
     author: 'kmvdata',
     repositoryUrl: 'https://github.com/kmvdata/keepseek',
     license: 'MIT'

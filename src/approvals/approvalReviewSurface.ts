@@ -38,7 +38,7 @@ export function createDraftEditReviewRequest(input: {
     agentRunId: input.agentRunId,
     actionKind: kind,
     targetId: input.edit.id,
-    actionHash: hashDraftEditAction(input.edit, originalTextHash),
+    actionHash: hashDraftEditAction(input.edit),
     history: input.history,
     purpose: input.edit.reason,
     staticRiskAnalysis: [

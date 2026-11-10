@@ -1,3 +1,4 @@
+import { KEEPSEEK_CONFIGURATION_NAMESPACE } from '../shared/identity';
 import type { AgentRequest, AgentTaskBudgetAuthority } from '../shared/types';
 import { createHistoryCleanupController } from './historyCleanupController';
 import { SessionUseLifetime } from './sessionUseLifetime';
@@ -21,7 +22,7 @@ import { inspectDraftRunScope, ExactOperationGrants, draftRunIdentity, inspectAu
 import { createApprovalProcessing, invalidateApprovalStateForHistory, isCompletedApprovalBatch, type ApprovalDependency, type DraftRunReplanResult } from '../approvals/approvalProcessing';
 import { createHistoryTruncationPlan, executeHistoryTruncation, recoverPendingHistoryTruncation, type HistoryTruncationScope, type PendingHistoryTruncation } from '../sessions/historyTruncation';
 import { reconcileTruncatedContext } from '../sessions/historyTruncationContext';
-import { executionSegmentId, migrateUserTasks, taskForSegment, taskGoal, type UserTaskLink } from '../sessions/userTask';
+import { executionSegmentId, taskForSegment, taskGoal, type UserTaskLink } from '../sessions/userTask';
 import { executionTimeView, reconcileExecutionTime, UserTaskClock } from '../sessions/executionTimeStats';
 import { createRunCheckpoint, inheritTaskBudget, checkpointCopy, endpointHash, getCheckpointPluginSnapshot, grantCheckpointToolBudgetSegment, isResumableToolBudgetCheckpoint, recoverNoProgressWithUserTurn, recoveryBlocker, type RunCheckpoint } from '../agent/runCheckpoint';
 import { createHash, randomUUID } from 'node:crypto';
@@ -178,6 +179,7 @@ import {
   addTurnUsageToSessionStats,
   applyUsageLedgerSummaryToSessionStats,
   applyUsageLedgerDeltaToSessionStats,
+  updateUsageLedgerStatsIndex,
   calculateCacheHitRate,
   getCacheMissPossibleReasons,
 } from '../agent/usageStats';
@@ -185,6 +187,7 @@ import {
   appendUsageLedgerRecord,
   mergePendingUsageLedger,
   normalizeUsageLedgerValue,
+  preferUsageLedgerRecord,
   summarizeUsageLedger
 } from '../agent/usageLedger';
 import { UsageLedgerStore } from '../agent/usageLedgerStore';
@@ -217,9 +220,7 @@ import { getAvailableSafeValidationScripts } from '../agent/tools/validationTool
 import {
   buildProviderRequestProjection,
   CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION,
-  CURRENT_PROVIDER_TOOL_SCHEMA_VERSION,
-  LEGACY_PROVIDER_REQUEST_PROTOCOL_VERSION,
-  PROVIDER_PROJECTION_REQUEST_PROTOCOL_VERSION
+  CURRENT_PROVIDER_TOOL_SCHEMA_VERSION
 } from '../agent/providerRequestProjection';
 import {
   ModelSourceStore
@@ -356,7 +357,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private language = getConfiguredKeepseekLanguage();
   private isBusy = false;
   private interactionCoordinator?: InteractionCoordinator;
-  /** Compatibility for host mutual-exclusion guards only; never a UI busy flag. */
+  /** Host mutual-exclusion guard; UI capabilities come from interactionState. */
   private get isStartingRun(): boolean { return Boolean(this.interactionCoordinator?.current); }
   private get interactions(): InteractionCoordinator {
     return this.interactionCoordinator ??= new InteractionCoordinator({ onDiagnostic: event => console.info('[KeepSeek] interaction', event) });
@@ -373,7 +374,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     return this.interactions.snapshot({ sessionId, revision, sessionReady: this.sessionReady,
       requestContextReady: this.requestContextReady, approvalDataReady: this.approvalDataReady,
       modelReady: this.commandSettingsReadiness?.mainModel === 'ready',
-      contextReady: this.runContextReadiness === 'ready',
+      contextReady: this.runContextReadiness === 'ready' || this.runContextReadiness === 'deferred',
       sessionRecoveryReady: this.sessionRecoveryReady,
       mainRunning: this.isBusy, contextRefreshing: this.runContextRefreshInFlight,
       actionRunning: Boolean(this.activeDraftRunId || this.activeChangeActions?.size || this.delegatedApprovalInFlight || this.draftRunBatches?.locked || this.delegatedApprovals?.hasPending(sessionId)),
@@ -532,7 +533,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private sessionRecoveryReady = false;
   private requestContextReady = false;
   private sessionContextGeneration = 0;
-  private runContextReadiness: StartupLoadState = 'loading';
+  private runContextReadiness: StartupLoadState | 'deferred' = 'loading';
   private commandSettingsReadiness: CommandSettingsReadiness = {
     mainModel: 'loading',
     subagentModel: 'loading',
@@ -580,8 +581,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     skillState: vscode.Memento,
     private readonly extensionInfo: KeepseekExtensionInfo,
     private readonly sessionInitialization: Promise<void> = Promise.resolve(),
-    private readonly startupTrace?: StartupPerformanceTrace,
-    private readonly historyWorkspaceState?: vscode.Memento
+    private readonly startupTrace?: StartupPerformanceTrace
   ) {
     this.sessionTitles = new SessionTitleCoordinator(this.sessionStore, {
       canCommit: () => vscode.workspace.isTrusted && !this.titleLifecycleDisposed,
@@ -608,7 +608,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       circuitBreaker: this.approvalCircuitBreaker,
       onUsage: (event) => {
         const session = this.sessionStore.getActiveSession();
-        if (!event.ledgerRecorded || session.usageLedgerRef?.legacyAggregate || session.usageLedger?.legacyAggregate) {
+        if (!event.ledgerRecorded) {
           session.usageStats = addUsageEventToSessionStats(session.usageStats, event);
         }
         session.updatedAt = new Date().toISOString();
@@ -752,7 +752,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     try {
       await this.sessionInitialization;
       await this.historyTruncationRecovery;
-      if (!(await this.sessionStore.setWorkspaceScope(getCurrentWorkspaceSessionScope()))) return;
+      if (!(await this.sessionStore.setWorkspaceScope(getCurrentWorkspaceSessionScope(), { fresh: true }))) return;
       const session = this.sessionStore.getActiveSession();
       this.interactions.update(operation, 'preparing_context', session.id);
       this.interactionFailure = undefined;
@@ -763,9 +763,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.currentRunContextsBySession.clear();
       this.slimToolNamesBySession.clear();
       this.sharedProjectSources.dirty = true;
+      this.sessionRecoveryReady = true;
+      this.deferEmptySessionContext(session);
       this.publishSessionChanged();
-      await Promise.all([this.refreshModelSourceState(), this.prepareSessionRecovery(session)]);
-      await this.refreshSessionSkills(session);
+      await this.refreshModelSourceState();
       this.interactions.update(operation, 'saving');
       this.postState({ immediate: true });
       await this.sessionStore.persist();
@@ -1626,7 +1627,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
       case 'saveHistorySettings': {
         try {
-          const config = vscode.workspace.getConfiguration('keepseek');
+          const config = vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE);
           const historyRetentionDays = normalizeIntegerInRange(
             message.historyRetentionDays,
             MIN_HISTORY_RETENTION_DAYS,
@@ -1645,7 +1646,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
       case 'setLanguage': {
         const language = normalizeKeepseekLanguage(message.language);
-        const config = vscode.workspace.getConfiguration('keepseek');
+        const config = vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE);
         await config.update('language', language, vscode.ConfigurationTarget.Global);
         this.language = language;
         await this.sessionStore.relocalizeEmptySessionTitles(language);
@@ -2263,7 +2264,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   ): TurnUsageStats {
     const nextTurnUsage = addUsageEventToTurnStats(currentTurnUsage, event);
     session.lastTurnUsage = nextTurnUsage;
-    if (!event.ledgerRecorded || session.usageLedgerRef?.legacyAggregate || session.usageLedger?.legacyAggregate) {
+    if (!event.ledgerRecorded) {
       session.usageStats = addUsageEventToSessionStats(session.usageStats, event, nextTurnUsage.updatedAt);
     }
     session.updatedAt = nextTurnUsage.updatedAt ?? new Date().toISOString();
@@ -2277,15 +2278,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     // Physical-attempt records are independently durable before the transport
     // proceeds; session summaries and UI are derived and may be coalesced.
     await this.usageLedgerStore.append(session.id, record);
-    const legacyAggregate = Boolean(session.usageLedgerRef?.legacyAggregate || session.usageLedger?.legacyAggregate
-      || !session.usageLedgerRef && !session.usageLedger && (session.usageStats?.requestCount ?? 0) > 0);
     const previousSummary = summarizeUsageLedger(session.usageLedger);
-    session.usageLedger = appendUsageLedgerRecord(session.usageLedger, record, legacyAggregate);
+    session.usageLedger = appendUsageLedgerRecord(session.usageLedger, record);
     if (record.cacheObservation && record.kind === 'usage_response') {
       this.rememberCacheObservation(session.id, record.cacheObservation);
     }
     const durableStats = this.usageLedgerStore.peekStats?.(session.id);
-    session.usageStats = !legacyAggregate && durableStats ? durableStats : applyUsageLedgerDeltaToSessionStats(
+    session.usageStats = durableStats ?? applyUsageLedgerDeltaToSessionStats(
       session.usageStats,
       previousSummary,
       summarizeUsageLedger(session.usageLedger)
@@ -2314,22 +2313,20 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       session.usageLedgerRef = {
         version: 2,
         sessionId: session.id,
-        migratedInlineVersion: snapshot?.records.length ? 1 : session.usageLedgerRef?.migratedInlineVersion,
-        legacyAggregate: snapshot?.legacyAggregate ?? session.usageLedgerRef?.legacyAggregate
-          ?? Boolean(session.usageStats?.legacyUnattributed),
         incomplete: Boolean(snapshot?.incomplete || session.usageLedgerRef?.incomplete
           || rebuilt.ledger.incomplete),
         ...(rebuilt.damagedBucketCount ? { damagedBucketCount: rebuilt.damagedBucketCount } : {})
       };
       const current = normalizeUsageLedgerValue(session.usageLedger);
       const visibleLedger = mergePendingUsageLedger(rebuilt.ledger, current);
-      session.usageStats = session.usageLedgerRef.legacyAggregate
-        ? applyUsageLedgerSummaryToSessionStats(session.usageStats, {
-            ...summarizeUsageLedger(visibleLedger),
-            legacyAggregate: true,
-            incomplete: true
-          })
-        : rebuilt.stats;
+      // A usage callback may arrive while the durable index is being read.
+      // Merge only pending identities so that the view never loses a new bill.
+      const visibleIndex = {
+        records: new Map(rebuilt.ledger.records.map(record => [`${record.requestId}\u0000${record.attemptIndex}`, record])),
+        stats: rebuilt.stats
+      };
+      for (const record of current?.records ?? []) updateUsageLedgerStatsIndex(visibleIndex, record, visibleLedger.incomplete);
+      session.usageStats = applyUsageLedgerSummaryToSessionStats(visibleIndex.stats, summarizeUsageLedger(visibleLedger));
       if (session.usageLedgerRef.incomplete && session.usageStats) session.usageStats = applyUsageLedgerSummaryToSessionStats(
         session.usageStats, { ...summarizeUsageLedger(visibleLedger), incomplete: true });
       const costIndex = this.referenceCostIndexes?.get(session.id) ?? new ReferenceCostIndex();
@@ -2342,12 +2339,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         const flushed = new Map(snapshot.records.map((record) => [`${record.requestId}\u0000${record.attemptIndex}`, record]));
         const remaining = current?.records.filter((record) => {
           const saved = flushed.get(`${record.requestId}\u0000${record.attemptIndex}`);
-          return !saved || saved.kind !== record.kind;
+          return !saved || preferUsageLedgerRecord(saved, record) !== saved;
         }) ?? [];
         session.usageLedger = remaining.length ? {
           version: 1,
           records: remaining,
-          legacyAggregate: session.usageLedgerRef.legacyAggregate,
           incomplete: session.usageLedgerRef.incomplete
         } : undefined;
       }
@@ -2359,8 +2355,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       else if (this.sessionStore.activeSessionId === session.id) this.postState();
       succeeded = true;
     }).catch((error) => {
-      // Inline records remain the crash-safe migration source until the v2
-      // store confirms an atomic bucket write.
+      // Pending records remain available for crash recovery until the bucket
+      // store confirms their atomic commit.
       this.usageDisplayReadiness?.set(session.id, 'incomplete');
       console.warn('[KeepSeek] Usage ledger flush failed; inline records retained.', error);
     });
@@ -2615,11 +2611,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const cacheCold = session.messages.length > 0
       && Number.isFinite(lastProviderRequestAt)
       && Date.now() - lastProviderRequestAt >= getConfiguredPromptCacheTtlMs();
-    const canMigrateProtocol = modelChanged || sourceChanged || providerChanged || baseUrlChanged || cacheCold;
-    if (canMigrateProtocol && (!protocol || protocol.version < CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION
-      || modelChanged || sourceChanged || providerChanged || baseUrlChanged)) {
-      // The previous cache lane is unusable anyway, so this is a safe migration
-      // boundary for the current serialization and tool schema.
+    if (!protocol || modelChanged || sourceChanged || providerChanged || baseUrlChanged) {
+      // A new model/source starts a fresh current serialization lane.
       protocol = {
         version: CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION,
         serializationStrategy: 'provider-projection-v2',
@@ -2630,24 +2623,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         providerId: sourceConfig.provider,
         baseUrl,
         createdAt: new Date().toISOString()
-      };
-      session.requestProtocol = protocol;
-    }
-
-    if (!protocol) {
-      // A pre-upgrade session stays on v1 until a cold/compaction boundary.
-      // Persisting the explicit metadata freezes its tool set across restarts
-      // without changing any provider-visible bytes.
-      protocol = {
-        version: LEGACY_PROVIDER_REQUEST_PROTOCOL_VERSION,
-        serializationStrategy: 'legacy-v1',
-        toolSchemaVersion: 1,
-        toolNames: [],
-        modelId: model.id,
-        sourceId: sourceConfig.sourceId,
-        providerId: sourceConfig.provider,
-        baseUrl,
-        createdAt: session.createdAt
       };
       session.requestProtocol = protocol;
     }
@@ -2836,6 +2811,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const generation = this.sessionContextGeneration ?? 0;
     this.assertSessionContextOwner(session, generation);
     if (!this.sessionRecoveryReady || !this.interactions.owns(operation)) return;
+    if (this.deferEmptySessionContext(session)) {
+      this.interactions.finish(operation);
+      this.postState({ immediate: true, forceFull: true });
+      return;
+    }
     this.interactions.finish(operation);
     this.postState({ immediate: true, omitMessages: true });
     const current = () => this.sessionStore.activeSessionId === session.id && (this.sessionContextGeneration ?? 0) === generation;
@@ -3563,7 +3543,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       // needs to stay blank while those two workspace configuration writes finish.
       options.onResolved?.();
       // Adopting a default is a one-time project choice. Persist the complete
-      // identity, including legacy modelId-only selections. Interaction remains
+      // identity using its source and model. Interaction remains
       // disabled until this completes, so a failed adoption can safely roll back.
       if (selectedModel?.sourceId && (savedSelection.sourceId !== selectedModel.sourceId
         || savedSelection.modelId !== selectedModel.id) && vscode.workspace.workspaceFolders?.length) {
@@ -3687,7 +3667,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         }
         if (locked()) throw new Error(this.t('modelSettingsReadonlyWhileBusy'));
         const setting = mode === 'fixed' ? { mode: 'fixed', sourceId, modelId } : { mode: 'follow-main' };
-        await vscode.workspace.getConfiguration('keepseek').update('autoApprovalReviewer', setting, vscode.ConfigurationTarget.Global);
+        await vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE).update('autoApprovalReviewer', setting, vscode.ConfigurationTarget.Global);
         if (JSON.stringify(getAutoApprovalReviewerSetting()) !== JSON.stringify(setting)) {
           throw new Error(this.t('approvalModelSaveFailed'));
         }
@@ -4247,7 +4227,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   ): Promise<void> {
     const previousSourceId = rollbackSelection.sourceId;
     const previousModelId = rollbackSelection.modelId;
-    const config = vscode.workspace.getConfiguration('keepseek');
+    const config = vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE);
     this.modelSelectionPersistenceDepth += 1;
     try {
       await config.update('selectedSourceId', sourceId, vscode.ConfigurationTarget.Workspace);
@@ -4392,7 +4372,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   private async setAgentSettings(settings: Partial<AgentSettings>): Promise<void> {
     this.agentSettings = normalizeAgentSettings(settings, this.agentSettings);
-    const config = vscode.workspace.getConfiguration('keepseek');
+    const config = vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE);
     await Promise.all([
       config.update('thinkingEnabled', this.agentSettings.thinkingEnabled, vscode.ConfigurationTarget.Workspace),
       config.update('reasoningEffort', this.agentSettings.reasoningEffort, vscode.ConfigurationTarget.Workspace),
@@ -4407,7 +4387,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     const debugMode = enabled === true;
-    const config = vscode.workspace.getConfiguration('keepseek');
+    const config = vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE);
     await config.update('trace.enabled', debugMode, vscode.ConfigurationTarget.Global);
     this.postState();
     vscode.window.showInformationMessage(this.t(debugMode ? 'debugModeEnabled' : 'debugModeDisabled'));
@@ -5418,7 +5398,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const message = session.messages.find((item) => item.id === messageId);
     const cp = message?.runCheckpoint;
     if (!message || !cp) return;
-    migrateUserTasks(session.messages);
     if (['blocked', 'stopped'].includes(session.approvalProcessing?.status ?? '')
       && session.approvalProcessing?.rootTaskId === (message.userTask?.id ?? cp.taskId)) {
       vscode.window.showWarningMessage(session.approvalProcessing.reason ?? this.t('approvalAutoStopped'));
@@ -5492,7 +5471,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
       this.modelSelectionTransactions.beginRun({ sourceId: cp.source.sourceId, modelId: cp.source.modelId });
       message.isStreaming = true;
-      message.incompleteForTitle = true;
       // Interrupted display deltas and the old error notice cannot become the
       // committed prefix of a recovered model attempt.
       message.content = (cp.state?.toolRounds.map((round) => round.assistantContent ?? '').join('') ?? '')
@@ -5541,16 +5519,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         },
         onSubagentRunSummary: (summary) => { session.subagentUsageStats = upsertSubagentRunUsageSummary(session.subagentUsageStats, summary); },
         onSubagentHandoffEstimate: (estimate) => { session.subagentUsageStats = addSubagentHandoffEstimate(session.subagentUsageStats, estimate); },
-        onProtocolMigration: async (protocol) => {
-          if (this.currentRunAbortController !== controller || !this.isCurrentHistoryMessage(session, message)) return;
-          session.requestProtocol = {
-            ...session.requestProtocol,
-            ...protocol,
-            serializationStrategy: 'provider-projection-v2',
-            createdAt: session.requestProtocol?.createdAt ?? new Date().toISOString()
-          };
-          await this.sessionStore.persist();
-        }
       });
       if (this.currentRunAbortController !== controller || !this.isCurrentHistoryMessage(session, message)) return;
       const planPhaseViolation = executionMode === 'plan' && hasPlanImplementationArtifacts(response);
@@ -5564,7 +5532,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         response.approvalContinuationRequired = false;
         response.approvalToolResults = undefined;
       }
-      if (!controller.signal.aborted && !response.approvalContinuationRequired && !response.approvalContinuationStopReason) delete message.incompleteForTitle;
       message.content = response.message;
       message.reasoningContent = response.reasoningContent;
       message.toolRounds = response.toolRounds;
@@ -5739,7 +5706,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         catch (error) { vscode.window.showErrorMessage(this.t('runStorageFailed') + ': ' + getErrorMessage(error)); return; }
       }
       if (args[4]?.replaceMessageId && !taskSession.messages.some(message => message.id === args[4]!.replaceMessageId && message.role === 'user')) return;
-      migrateUserTasks(taskSession.messages);
       const sendOptions = args[4] ?? {};
       const prior = taskSession.messages.at(-1);
       const handoff = sendOptions.delegatedContinuation;
@@ -5749,7 +5715,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         || latestApprovalSegmentId(taskSession) !== handoff.agentRunId)) return;
       const continuingSharedTask = !sendOptions.replaceMessageId && Boolean(sendOptions.draftRunAutoContinue || sendOptions.delegatedContinuation || sendOptions.repairLoop || sendOptions.planExecutionContinuation
         || prior?.runCheckpoint?.stopReason === 'no_progress_loop' || prior?.runCheckpointArchive?.summary.stopReason === 'no_progress_loop');
-      if (!continuingSharedTask && this.sharedProjectSources?.dirty) await this.refreshSessionSkills(taskSession);
+      if (!continuingSharedTask && this.sharedProjectSources
+        && (this.sharedProjectSources.dirty || !this.currentRunContextsBySession.has(taskSession.id))) {
+        await this.refreshSessionSkills(taskSession);
+      }
       if ((vscode.workspace.workspaceFolders?.length ?? 0) > 1 && !taskSession.projectScopeUri) {
         vscode.window.showWarningMessage(this.t('sharedScopeRequired'));
         return;
@@ -6318,9 +6287,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       if (draftRunTail && !truncation) {
         this.draftRuns.bindResultsToMessage(draftRunTail.draftRunIds, userMessage.id);
       }
-      if ((activeSession.requestProtocol?.version ?? 1) >= PROVIDER_PROJECTION_REQUEST_PROTOCOL_VERSION) {
-        capOversizedFirstUserProviderContent(activeSession);
-      }
+      capOversizedFirstUserProviderContent(activeSession);
       activeSession.updatedAt = now;
       await this.sessionStore.persist();
       options?.onSubmissionAccepted?.();
@@ -6393,7 +6360,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         // If compatibility validation rejects the new turn, retain the stopped
         // task on this tail as well. A subsequent send cannot accidentally
         // escape its logical budget just because an error message was appended.
-        incompleteForTitle: true,
         runCheckpoint: noProgressRecovery ? snapshotCheckpoint(noProgressRecovery) : undefined,
         isStreaming: true
       };
@@ -6561,16 +6527,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           }
           scheduleLiveState();
         },
-        onProtocolMigration: async (protocol) => {
-          if (!assistantMessage || this.currentRunAbortController !== abortController || !this.isCurrentHistoryMessage(activeSession, assistantMessage)) return;
-          activeSession.requestProtocol = {
-            ...activeSession.requestProtocol,
-            ...protocol,
-            serializationStrategy: 'provider-projection-v2',
-            createdAt: activeSession.requestProtocol?.createdAt ?? new Date().toISOString()
-          };
-          await this.sessionStore.persist();
-        }
       });
       if (!assistantMessage || !this.isCurrentHistoryMessage(activeSession, assistantMessage)) return;
       const planPhaseViolation = executionMode === 'plan' && hasPlanImplementationArtifacts(response);
@@ -6644,7 +6600,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       };
 
       if (assistantMessage) {
-        if (!abortController.signal.aborted && !response.approvalContinuationRequired && !response.approvalContinuationStopReason) delete assistantMessage.incompleteForTitle;
         assistantMessage.content = response.message;
         assistantMessage.reasoningContent = response.reasoningContent;
         if (!planPhaseViolation && (response.draftEdits.length || response.draftRuns?.length)) {
@@ -6748,7 +6703,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         activeSession.createdAt = now;
       }
       if (assistantMessage) {
-        assistantMessage.incompleteForTitle = true;
         const reason = assistantMessage.runCheckpoint?.stopReason;
         const errorText = `${reason ? this.t('runStopped_' + reason) : this.t('errorPrefix')}: ${getErrorMessage(error)}`;
         const hasPartialOutput = Boolean(assistantMessage.content.trim() || assistantMessage.reasoningContent?.trim());
@@ -6760,7 +6714,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         this.messages.push({
           id: randomUUID(),
           role: 'assistant',
-          incompleteForTitle: true,
           content: `${this.t('errorPrefix')}: ${getErrorMessage(error)}`,
           createdAt: new Date().toISOString(),
           modelId: model.id
@@ -6902,8 +6855,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     if (!result?.changed) {
       return false;
     }
-    const legacyAggregate = Boolean(session.usageLedgerRef?.legacyAggregate || session.usageLedger?.legacyAggregate
-      || !session.usageLedgerRef && !session.usageLedger && (session.usageStats?.requestCount ?? 0) > 0);
 
     session.contextCompression = result.state;
     if ((result.reason === 'created' || result.reason === 'updated') && session.requestProtocol) {
@@ -6918,7 +6869,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     // Standalone compression has already contacted the Provider. Retain its
     // records inline until their independent commit succeeds, including a disk
     // failure handled by the best-effort compression caller.
-    for (const record of result.usageLedgerRecords ?? []) session.usageLedger = appendUsageLedgerRecord(session.usageLedger, record, legacyAggregate);
+    for (const record of result.usageLedgerRecords ?? []) session.usageLedger = appendUsageLedgerRecord(session.usageLedger, record);
     for (const record of result.usageLedgerRecords ?? []) {
       await this.applyUsageLedgerRecord(session, record);
     }
@@ -6946,12 +6897,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       if (sessionResult[0]?.status === 'fulfilled' && this.usageLedgerStore && this.usageLedgerFlushes) {
         const session = this.sessionStore.getActiveSession();
         this.loadUsageDisplay(session);
-      }
-      const migrated = this.sessionStore.getActiveSession();
-      if (migrated.approvalModeMigrated) {
-        migrated.approvalModeMigrated = undefined;
-        await this.sessionStore.persist();
-        vscode.window.showInformationMessage(this.t('approvalModeMigrationNotice'));
       }
       this.sessionReady = sessionResult[0]?.status === 'fulfilled';
       this.historyCleanupInitializationFailed = false;
@@ -7034,6 +6979,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       const ownsStartupContext = () => this.sessionStore.activeSessionId === startupSession.id
         && (this.sessionContextGeneration ?? 0) === startupContextGeneration;
       const runContextTask = (async () => {
+        if (ownsStartupContext() && this.deferEmptySessionContext(startupSession)) {
+          this.postStartupSettingsPatch();
+          return;
+        }
         try {
           await this.measureStartup(
             'skills-and-project-instructions-loaded',
@@ -7053,6 +7002,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         }
       })();
       const validationTask = (async () => {
+        if (!startupSession.messages.length) return;
         try {
           await this.measureStartup(
             'validation-scripts-loaded',
@@ -7098,7 +7048,18 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   private updateRequestContextReadiness(): void {
     this.requestContextReady = this.commandSettingsReadiness.mainModel === 'ready'
-      && this.runContextReadiness === 'ready';
+      && (this.runContextReadiness === 'ready' || this.runContextReadiness === 'deferred');
+  }
+
+  /** A blank session is ready to accept input without scanning project files.
+   * The first owned task resolves its actual instructions and Skills before dispatch. */
+  private deferEmptySessionContext(session: ChatSession): boolean {
+    if (session.messages.length) return false;
+    this.currentRunContextsBySession?.delete(session.id);
+    if (this.sharedProjectSources) this.sharedProjectSources.dirty = true;
+    this.runContextReadiness = 'deferred';
+    this.updateRequestContextReadiness();
+    return true;
   }
 
   private getStartupState(): {
@@ -7245,8 +7206,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           this.cancelSessionTitleWork(target.id);
           await this.sessionStore.settleHistoryCleanup([target.id]);
         },
-        removed: target => this.removeHistoryCleanupLocalState(target),
-        workspaceState: this.historyWorkspaceState
+        removed: target => this.removeHistoryCleanupLocalState(target)
       });
   }
 
@@ -7321,7 +7281,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.interactionFailure = undefined; this.runContextRefreshError = undefined;
       // New blank history has no recovery work. Context is prepared lazily by
       // the next accepted send, independently of physical history recycling.
-      this.sessionRecoveryReady = true; this.runContextReadiness = 'ready';
+      this.sessionRecoveryReady = true; this.runContextReadiness = 'deferred';
       this.updateRequestContextReadiness(); this.sharedProjectSources.dirty = true;
       this.postToWebview({ type: 'historyCleanupSessionReplacement', previousSessionId, sessionId: this.sessionStore.activeSessionId });
     };
@@ -8101,7 +8061,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         if (message) message.content = `${reason}\n\n${message.content}`;
         const attempted = runs.some(run => run.startedAt && gitBatchKind(run) === missing);
         if (attempted || prior?.localGitCompletionRetried || prior?.status === 'stopped') {
-          session.approvalProcessing = { version: 1, rootTaskId: taskId, runId, mode: 'delegate', status: 'stopped',
+          session.approvalProcessing = { version: 2, rootTaskId: taskId, runId, mode: 'delegate', status: 'stopped',
             reason, targets: [], localGitCompletionRetried: prior?.localGitCompletionRetried, updatedAt: new Date().toISOString() };
           return;
         }
@@ -8158,8 +8118,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       && message.role === 'user' && message.userTask?.id === rootTaskId)?.content ?? '';
     const releaseIntent = gitReleaseIntent(originalGoal);
     const needsCommit = isExplicitLocalCommitGoal(originalGoal);
-    const legacyStage = isStageThenCommitGoal(originalGoal);
-    const releaseBatch = !legacyStage && (needsCommit || releaseIntent.tag || releaseIntent.query);
+    const stageThenCommit = isStageThenCommitGoal(originalGoal);
+    const releaseBatch = !stageThenCommit && (needsCommit || releaseIntent.tag || releaseIntent.query);
     const work = this.enterTaskWork(session, taskForSegment(session, batch.runId));
     const priorProcessing = session.approvalProcessing;
     const sameCompletedBatch = isCompletedApprovalBatch(priorProcessing, batch);
@@ -8468,13 +8428,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           }
           break;
         }
-        const reviewedBaselineHash = reviewRequest.exactAction.kind === 'draft_edit_apply'
-          || reviewRequest.exactAction.kind === 'draft_delete_apply'
-          ? reviewRequest.exactAction.expectedOriginalTextHash
-          : undefined;
         const currentEdit = this.changeSets.getPendingEdit(id);
         if (!currentEdit || currentEdit.runId !== batch.runId || currentEdit.sessionId !== batch.sessionId
-          || hashDraftEditAction(currentEdit.edit, reviewedBaselineHash) !== review.record.actionHash) {
+          || hashDraftEditAction(currentEdit.edit) !== review.record.actionHash) {
           report(id, 'identity_mismatch', this.t('approvalIdentityMismatch'));
           editResults.push({ id, applied: false, errors: ['DraftEdit changed after approval review.'] });
           break;
@@ -8720,10 +8676,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
             if (releaseBatch && kind === 'stage' && !needsCommit) {
               throw new Error('This release task has no staging authorization. / 本次发布任务未授权暂存。');
             }
-            const legacyAdd = JSON.stringify(draftRun.spec.args) === JSON.stringify(stageArgs);
-            const isStage = Boolean(semantics.gitStage) && (needsCommit || legacyAdd && isSingleLocalCommitGoal(originalGoal));
-            if (legacyStage && semantics.program === 'git' && (semantics.effects.includes('git_mutation') || subcommand === 'config')
-              && ((!legacyAdd && !semantics.gitCommit) || authorization.scope.diagnostics.some(item => item.code === 'git_configuration'))) {
+            const exactStageArgs = JSON.stringify(draftRun.spec.args) === JSON.stringify(stageArgs);
+            const isStage = Boolean(semantics.gitStage) && (needsCommit || exactStageArgs && isSingleLocalCommitGoal(originalGoal));
+            if (stageThenCommit && semantics.program === 'git' && (semantics.effects.includes('git_mutation') || subcommand === 'config')
+              && ((!exactStageArgs && !semantics.gitCommit) || authorization.scope.diagnostics.some(item => item.code === 'git_configuration'))) {
               throw new Error(`Git ${subcommand ?? ''} is outside the requested stage-and-commit operation. / Git ${subcommand ?? ''} 超出本次暂存并提交的授权。`);
             }
             const repository = authorization.scope.paths.find(path => path.role === 'repository' && !path.external)?.uri;
@@ -8771,13 +8727,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
                 }
                 throw new Error('A commit already ran for this task and its result cannot be reused. / 本任务已运行过提交，当前无法复用其结果。');
               }
-              if (legacyStage && !staged) {
+              if (stageThenCommit && !staged) {
                 setReplan(draftRun, { draftRunId: id, specHash: draftRun.specHash, rootTaskId, executionSegmentId: batch.runId,
                   phase: 'preflight', executed: false, code: 'git_commit_staging_required',
                   reason: 'Obtain the requested git add --all . result before committing. / 提交前请先取得本任务 git add --all . 的执行结果。' });
                 continue;
               }
-              if (legacyStage && !semantics.gitCommit.all) {
+              if (stageThenCommit && !semantics.gitCommit.all) {
                 setReplan(draftRun, { draftRunId: id, specHash: draftRun.specHash, rootTaskId, executionSegmentId: batch.runId,
                   phase: 'preflight', executed: false, code: 'git_commit_all_required',
                   reason: 'The user requested commit -a. Prepare a fresh proposal with -a and explicit -m arguments. / 用户要求 commit -a，请使用 -a 和独立的 -m 参数重新提案。' });
@@ -8786,7 +8742,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
               if (priorTaskRuns.some(run => run.startedAt && analyzeCommand(run.spec).gitStage && !run.gitStageEvidence)) {
                 throw new Error('Staging ran but its result is unverified. / 暂存已运行，但结果尚未核验。');
               }
-              const selected = staged && !legacyStage ? new Set(localStages.flatMap(run => run.gitStageEvidence?.files ?? [])) : undefined;
+              const selected = staged && !stageThenCommit ? new Set(localStages.flatMap(run => run.gitStageEvidence?.files ?? [])) : undefined;
               commit = await prepareLocalGitCommit(draftRun, authorization.scope, rootTaskId, controller.signal, staged?.gitStageEvidence, selected);
               if (!commit) throw new Error('The commit scope could not be verified. / 无法核实提交范围。');
               if (!isAuthorized()) return;

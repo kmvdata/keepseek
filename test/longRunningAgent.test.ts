@@ -1,3 +1,4 @@
+import { createFullTextDraftEdit } from '../src/edits/draftEdit';
 import './registerVscodeStub';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
@@ -16,6 +17,7 @@ import { checkpointCopy, createRunCheckpoint, normalizeRunCheckpoint, recoveryBl
 import { AgentRunner } from '../src/agent/runner';
 import { BackgroundRunCoordinator } from '../src/agent/backgroundRunCoordinator';
 import { SubagentScheduler } from '../src/agent/subagents/scheduler';
+import { createWorkspaceScopeRoots, resolveProposalPathScope } from '../src/agent/subagents/pathScope';
 import { StreamParser } from '../src/agent/providers/streamParser';
 import { ResponsesStreamParser } from '../src/agent/providers/responsesStreamParser';
 import { AnthropicStreamParser } from '../src/agent/providers/anthropicStreamParser';
@@ -94,7 +96,11 @@ describe('long-running Agent execution and safe recovery', () => {
 
   it('retains active tree budgets and path claims despite wall-clock age and restore', () => {
     const scheduler = new SubagentScheduler();
-    const input = { treeId: 'tree', parentRunId: 'parent', ownerId: 'one', depth: 1, proposal: true, paths: ['src/a.ts'] };
+    const roots = createWorkspaceScopeRoots([{ uri: vscode.Uri.file('/workspace') as never, name: 'workspace', index: 0 }]);
+    const resolved = resolveProposalPathScope(['src/a.ts'], roots);
+    assert.equal(resolved.ok, true);
+    if (!resolved.ok) return;
+    const input = { treeId: 'tree', parentRunId: 'parent', ownerId: 'one', depth: 1, proposal: true, scope: resolved.scope, roots };
     assert.equal(scheduler.reserve(input).ok, true);
     const oldNow = Date.now;
     Date.now = () => oldNow() + 10 * 60 * 60 * 1000;
@@ -291,10 +297,10 @@ describe('long-running Agent execution and safe recovery', () => {
       vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file(directory), name: 'test' }];
       const target = join(directory, 'edited.txt');
       await writeFile(target, 'user changed it');
-      await assert.rejects(new SafeFileEditor().applyDraftEdit({
+      await assert.rejects(new SafeFileEditor().applyDraftEdit(createFullTextDraftEdit({
         id: 'edit', uri: vscode.Uri.file(target).toString(), label: 'edited.txt', action: 'modify',
-        newText: 'replacement', reason: 'proposal', expectedOriginalTextHash: 'old-baseline'
-      }), /cannotApplyChangedDraftTarget/u);
+        content: 'replacement', reason: 'proposal', base: { sha256: '0'.repeat(64), sizeBytes: 12 }
+      })), /cannotApplyChangedDraftTarget/u);
       assert.equal(await readFile(target, 'utf8'), 'user changed it');
     } finally {
       vscode.workspace.fs.writeFile = oldWriter;

@@ -286,10 +286,13 @@ export const workspace = {
       });
     }
   },
-  getConfiguration(): { get<T>(key: string, fallback: T): T; inspect?(key: string): { globalValue?: unknown } | undefined; update(): Promise<void> } {
+  getConfiguration(_section?: string): { get<T>(key: string, fallback: T): T; inspect?(key: string): { globalValue?: unknown } | undefined; update(): Promise<void> } {
     return {
       get<T>(_key: string, fallback: T): T {
         return fallback;
+      },
+      inspect() {
+        return undefined;
       },
       async update(): Promise<void> {
         return undefined;

@@ -2,7 +2,7 @@ import './registerVscodeStub';
 import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
 import { getAutoApprovalReviewerSetting } from '../src/shared/config';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { test } from 'node:test';
@@ -24,6 +24,7 @@ import { ApprovalReviewStore } from '../src/approvals/approvalReviewStore';
 import { APPROVAL_POLICY_VERSION, type ApprovalReviewRequest } from '../src/approvals/approvalReviewTypes';
 import { buildApprovalReviewerProviderBody } from '../src/approvals/oneShotTextRequest';
 import type { AgentRequest, ChatMessage } from '../src/shared/types';
+import { createFullTextDraftEdit } from '../src/edits/draftEdit';
 
 test('reviewer JSON parsing accepts only the complete strict schema', () => {
   const valid = JSON.stringify({
@@ -87,7 +88,7 @@ test('review surfaces are deterministic, bounded, and exclude hidden provider st
     const content = 'head\n' + 'x'.repeat(60_000) + '\ntail';
     const request = createDraftEditReviewRequest({
       sessionId: 'session', agentRunId: 'run', language: 'en', history,
-      edit: { id: 'edit', uri: 'file:///private/workspace/a.ts', label: 'a.ts', action: 'create', newText: content, reason: 'Create a.ts.' },
+      edit: createFullTextDraftEdit({ id: 'edit', uri: 'file:///private/workspace/a.ts', label: 'a.ts', action: 'create', content, reason: 'Create a.ts.' }),
       originalText: ''
     });
     const serialized = serializeApprovalReviewRequest(request);
@@ -126,7 +127,7 @@ test('approval records require an exact current-runtime match and are one-shot',
       { policyVersion: APPROVAL_POLICY_VERSION - 1 },
       { expectedSource: 'host_policy' as const },
       { rootTaskId: 'other-task' },
-      { approvalMode: 'model_review' as const },
+      { approvalMode: undefined },
       { workspaceTrusted: false }
     ]) {
       await assert.rejects(store.consumeMatchingApproval({ ...match, ...mismatch }), /matching approval|untrusted workspace/u);
@@ -471,12 +472,12 @@ test('review surface uses the current user task original request across host con
     { id: 'host', role: 'user', content: 'Approval processing outcome, not authorization', createdAt: '', userTask: { ...second, reason: 'approval' }, contextMeta: { displayKind: 'delegated_auto_continue' } }
   ];
   const request = createDraftEditReviewRequest({ sessionId: 's', rootTaskId: 'task-two', agentRunId: 'segment-two',
-    edit: { id: 'e', uri: 'file:///workspace/result.txt', label: 'result.txt', action: 'create', reason: 'create', newText: 'ok' }, originalText: '', history, language: 'en' });
+    edit: createFullTextDraftEdit({ id: 'e', uri: 'file:///workspace/result.txt', label: 'result.txt', action: 'create', reason: 'create', content: 'ok' }), originalText: '', history, language: 'en' });
   assert.equal(request.originalGoalSummary, 'New task: create result.txt');
   assert.doesNotMatch(request.originalGoalSummary, /Old task|Approval processing/u);
   const before = JSON.stringify(history);
   createDraftEditReviewRequest({ sessionId: 's', rootTaskId: 'task-two', agentRunId: 'segment-three',
-    edit: { id: 'e', uri: 'file:///workspace/result.txt', label: 'result.txt', action: 'create', reason: 'create', newText: 'ok' }, originalText: '', history, language: 'en' });
+    edit: createFullTextDraftEdit({ id: 'e', uri: 'file:///workspace/result.txt', label: 'result.txt', action: 'create', reason: 'create', content: 'ok' }), originalText: '', history, language: 'en' });
   assert.equal(JSON.stringify(history), before);
 });
 
@@ -624,17 +625,19 @@ test('follow-main approval binds the actual segment model and source snapshot, i
   assert.deepEqual(resolved, main); assert.notEqual(resolved.model, main.model);
 });
 
-test('legacy model_review audit remains readable after restart without restoring approval authority', async () => {
+test('obsolete approval modes are discarded and cannot be retained by subsequent writes', async () => {
   await withApprovalFixture(async ({ storageUri, store }) => {
-    const legacy = await store.add({ ...approvalRecordInput(), approvalMode: 'model_review', approvalSource: 'model_review', decision: 'deny' });
+    const current = await store.add(approvalRecordInput());
     await store.flush();
+    const file = path.join(storageUri.fsPath, 'approval-reviews.json');
+    const stored = JSON.parse(await readFile(file, 'utf8')) as { version: number; records: unknown[] };
+    stored.records.push({ ...current, reviewId: 'obsolete', approvalMode: 'model_review', approvalSource: 'model_review' });
+    await writeFile(file, JSON.stringify(stored));
     const restored = new ApprovalReviewStore(storageUri as never); await restored.initialize();
-    assert.equal(restored.getLatestForTarget(legacy.targetId)?.approvalSource, 'model_review');
-    assert.equal(restored.get(legacy.reviewId)?.approvalMode, 'model_review');
-    assert.equal(restored.get(legacy.reviewId)?.decision, 'deny');
-    await assert.rejects(restored.consumeMatchingApproval({ reviewId: legacy.reviewId, sessionId: legacy.sessionId,
-      rootTaskId: legacy.rootTaskId, agentRunId: legacy.agentRunId, targetId: legacy.targetId, actionKind: legacy.actionKind,
-      actionHash: legacy.actionHash, approvalMode: 'delegate', policyVersion: legacy.policyVersion,
-      expectedSource: 'user_click', workspaceTrusted: true }), /matching approval/u);
+    assert.equal(restored.get('obsolete'), undefined);
+    assert.equal(restored.get(current.reviewId)?.approvalMode, 'delegate');
+    await restored.add({ ...approvalRecordInput(), targetId: 'new-current' });
+    await restored.flush();
+    assert.doesNotMatch(await readFile(file, 'utf8'), /model_review|obsolete/u);
   });
 });

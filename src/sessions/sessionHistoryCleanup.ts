@@ -32,7 +32,6 @@ export type HistoryCleanupTargetStatus = 'fullyDeleted' | 'protected' | 'skipped
 export interface HistoryCleanupTargetResult {
   status: HistoryCleanupTargetStatus;
   reason?: string;
-  inaccessibleLegacySource?: boolean;
 }
 export interface HistoryCleanupCatalogDiagnostic {
   code: HistoryCleanupIssueCode;
@@ -69,7 +68,6 @@ export interface HistoryCleanupState {
   unknown: number;
   failedBeforeCommit: number;
   removedPendingCleanup: number;
-  inaccessibleLegacy: number;
   favoriteCount: number;
   includesCurrentSession: boolean;
   reasonCounts?: Record<string, number>;
@@ -93,7 +91,7 @@ export interface HistoryCleanupJournalRecord {
   ownerPid?: number;
   state: HistoryCleanupState;
   items: Array<{ target: HistoryCleanupTarget; result?: HistoryCleanupTargetResult }>;
-  excluded?: { protected: number; unknown: number };
+  excluded: { protected: number; unknown: number };
 }
 export interface HistoryCleanupJournal {
   load(): Promise<HistoryCleanupJournalRecord | undefined>;
@@ -133,7 +131,8 @@ export class FileHistoryCleanupJournal implements HistoryCleanupJournal {
   private async loadOperation(operationId: string): Promise<HistoryCleanupJournalRecord | undefined> {
     const raw = await this.readJson(this.file(operationId));
     if (raw === undefined) return undefined;
-    const initial = isRecord(raw) && raw.version === 2 ? raw.record : raw;
+    if (!isRecord(raw) || raw.version !== 2) throw new HistoryCleanupError('journal_corrupt');
+    const initial = raw.record;
     let record = normalizeHistoryCleanupJournal(initial);
     if (!record || record.state.operationId !== operationId) throw new HistoryCleanupError('journal_corrupt');
     const consolidated = await this.readJson(this.file(operationId, '.complete.json'));
@@ -168,22 +167,22 @@ export class FileHistoryCleanupJournal implements HistoryCleanupJournal {
   }
   public async load(): Promise<HistoryCleanupJournalRecord | undefined> {
     const pointer = await this.readJson(this.uri);
-    let legacy = normalizeHistoryCleanupJournal(pointer);
-    let selected = legacy?.state.operationId ?? (isRecord(pointer) && pointer.version === 2 && validIdentity(pointer.operationId) ? pointer.operationId : undefined);
+    let selected = isRecord(pointer) && pointer.version === 2 && validIdentity(pointer.operationId) ? pointer.operationId : undefined;
     if (pointer !== undefined && !selected) throw new HistoryCleanupError('journal_corrupt');
-    let selectedTime = legacy?.confirmedAt ?? legacy?.state.now ?? (isRecord(pointer) && typeof pointer.confirmedAt === 'number' ? pointer.confirmedAt : -Infinity);
+    let selectedTime = isRecord(pointer) && typeof pointer.confirmedAt === 'number' ? pointer.confirmedAt : -Infinity;
     for (const metadata of await this.metadata()) {
       const time = metadata.confirmedAt ?? metadata.state.now;
-      if (!selected || time > selectedTime) { selected = metadata.state.operationId; selectedTime = time; legacy = undefined; }
+      if (!selected || time > selectedTime) { selected = metadata.state.operationId; selectedTime = time; }
     }
-    return selected ? await this.loadOperation(selected) ?? legacy : undefined;
+    return selected ? await this.loadOperation(selected) : undefined;
   }
+
   public async loadPending(): Promise<HistoryCleanupJournalRecord[]> {
     const result: HistoryCleanupJournalRecord[] = [];
     for (const metadata of await this.metadata()) {
       if (metadata.state.status !== 'running' && !metadata.state.removedPendingCleanup) continue;
       const record = await this.loadOperation(metadata.state.operationId);
-      if (record && (record.state.status === 'running' || record.items.some(item => item.result?.status === 'removedPendingCleanup' && !item.result.inaccessibleLegacySource))) result.push(record);
+      if (record && (record.state.status === 'running' || record.items.some(item => item.result?.status === 'removedPendingCleanup'))) result.push(record);
     }
     return result;
   }
@@ -235,7 +234,8 @@ export class FileHistoryCleanupJournal implements HistoryCleanupJournal {
         result.push(checkpoint as unknown as { state: HistoryCleanupState; confirmedAt?: number; ownerPid?: number }); continue;
       }
       const raw = await this.readJson(vscode.Uri.joinPath(this.operationsUri, name));
-      const record = normalizeHistoryCleanupJournal(isRecord(raw) && raw.version === 2 ? raw.record : raw);
+      if (!isRecord(raw) || raw.version !== 2) throw new HistoryCleanupError('journal_corrupt');
+      const record = normalizeHistoryCleanupJournal(raw.record);
       if (!record || this.key(record.state.operationId) !== key) throw new HistoryCleanupError('journal_corrupt');
       result.push(record);
     }
@@ -436,7 +436,7 @@ export class SessionHistoryCleanupService {
         && record.ownerPid !== undefined && record.ownerPid !== process.pid && processMayBeAlive(record.ownerPid))) {
         activeRecords.add(record.state.operationId); continue;
       }
-      if (record.state.status !== 'running' && !record.items.some(item => item.result?.status === 'removedPendingCleanup' && !item.result.inaccessibleLegacySource)) continue;
+      if (record.state.status !== 'running' && !record.items.some(item => item.result?.status === 'removedPendingCleanup')) continue;
       record.state.status = 'running'; record.ownerPid = process.pid;
       activeCleanupOperations.add(record.state.operationId);
       try {
@@ -444,8 +444,6 @@ export class SessionHistoryCleanupService {
         await this.persist(record);
       for (const [index, item] of record.items.entries()) {
         if (item.result && item.result.status !== 'removedPendingCleanup') continue;
-        // Inaccessible old Mementos remain explicit pending sources, rather than a spurious retry success.
-        if (item.result?.inaccessibleLegacySource) continue;
         try {
           const recovered = await this.adapter.recoverCommittedTarget?.(item.target, record.state.operationId);
           item.result = sanitizeTargetResult(recovered ?? { status: 'failedBeforeCommit', reason: 'interrupted_before_commit' });
@@ -477,7 +475,7 @@ export class SessionHistoryCleanupService {
       requestId, operationId: randomUUID(), status: 'confirming', options: structuredClone(plan.preview.options),
       now: plan.preview.now, cutoff: plan.preview.cutoff, total: plan.targets.length, processed: 0,
       fullyDeleted: 0, protected: plan.preview.protectedCount, skippedChanged: 0, unknown: plan.preview.unknownCount,
-      failedBeforeCommit: 0, removedPendingCleanup: 0, inaccessibleLegacy: 0,
+      failedBeforeCommit: 0, removedPendingCleanup: 0,
       favoriteCount: plan.preview.favoriteCount, includesCurrentSession: plan.preview.includesCurrentSession
     };
     this.current = state;
@@ -582,7 +580,7 @@ export function normalizeHistoryCleanupJournal(value: unknown): HistoryCleanupJo
   try { validateHistoryCleanupOptions(state.options); } catch { return undefined; }
   if (!validIdentity(state.operationId) || !validIdentity(state.requestId)
     || !['running', 'completed', 'failed'].includes(String(state.status)) || typeof state.now !== 'number' || !Number.isFinite(state.now)) return undefined;
-  const counterKeys = ['total', 'processed', 'fullyDeleted', 'protected', 'skippedChanged', 'unknown', 'failedBeforeCommit', 'removedPendingCleanup', 'inaccessibleLegacy', 'favoriteCount'];
+  const counterKeys = ['total', 'processed', 'fullyDeleted', 'protected', 'skippedChanged', 'unknown', 'failedBeforeCommit', 'removedPendingCleanup', 'favoriteCount'];
   if (counterKeys.some(key => typeof state[key] !== 'number' || !Number.isInteger(state[key]) || (state[key] as number) < 0)) return undefined;
   for (const item of value.items) {
     if (!isRecord(item) || !isRecord(item.target) || !validIdentity(item.target.workspaceKey) || !validIdentity(item.target.id) || !validIdentity(item.target.version)) return undefined;
@@ -592,8 +590,8 @@ export function normalizeHistoryCleanupJournal(value: unknown): HistoryCleanupJo
     || Object.entries(state.reasonCounts).some(([key, count]) => !/^[a-z][a-z0-9_]{0,63}$/u.test(key)
       || typeof count !== 'number' || !Number.isSafeInteger(count) || count < 1))) return undefined;
   if (state.total !== value.items.length || (state.processed as number) > value.items.length) return undefined;
-  if (value.excluded !== undefined && (!isRecord(value.excluded) || !Number.isInteger(value.excluded.protected)
-    || !Number.isInteger(value.excluded.unknown) || (value.excluded.protected as number) < 0 || (value.excluded.unknown as number) < 0)) return undefined;
+  if (!isRecord(value.excluded) || !Number.isInteger(value.excluded.protected)
+    || !Number.isInteger(value.excluded.unknown) || (value.excluded.protected as number) < 0 || (value.excluded.unknown as number) < 0) return undefined;
   return structuredClone(value) as unknown as HistoryCleanupJournalRecord;
 }
 function trustworthyTimestamp(value: unknown): number | undefined {
@@ -619,10 +617,10 @@ function processMayBeAlive(pid: number): boolean {
 
 const SAFE_REASON_CODES = new Set([
   'reclaiming', 'associated_cleanup_failed', 'interrupted_before_commit', 'recovery_unavailable', 'storage_failed',
-  'storage_outcome_unavailable', 'storage_cleanup_failed', 'session_storage_pending', 'workspace_state_cleanup_failed',
-  'inaccessible_legacy_source', 'unverified_legacy_logs', 'session_in_use', 'storage_ownership_unavailable',
+  'storage_outcome_unavailable', 'storage_cleanup_failed', 'session_storage_pending',
+  'unverified_logs', 'session_in_use', 'storage_ownership_unavailable',
   'deletion_intent_scope_conflict', 'history_changed', 'unsafe_session_shard', 'unreadable_session_identity',
-  'session_identity_mismatch', 'session_shard_changed', 'unsafe_session_objects', 'legacy_writer_lock', 'associated_cleanup_required',
+  'session_identity_mismatch', 'session_shard_changed', 'unsafe_session_objects', 'session_writer_lock', 'associated_cleanup_required',
   'evidence_cleanup_failed', 'subagents_cleanup_failed', 'usage_ledger_cleanup_failed', 'change_sets_cleanup_failed',
   'draft_runs_cleanup_failed', 'approval_reviews_cleanup_failed', 'interaction_traces_cleanup_failed'
 ]);
@@ -631,24 +629,21 @@ function safeReasonCode(raw: string): string | undefined {
   if (SAFE_REASON_CODES.has(raw)) return raw;
   const [store, code, extra] = raw.split(':');
   if (extra !== undefined || !SAFE_REASON_STORES.has(store) || !/^[A-Za-z_]+$/u.test(code ?? '')) return undefined;
-  if (code === 'legacy_ownership_unverified') return 'unverified_legacy_logs';
+  if (code === 'ownership_unverified') return 'unverified_logs';
   return `${store.replace(/-/gu, '_')}_cleanup_failed`;
 }
 
 function sanitizeTargetResult(result: HistoryCleanupTargetResult): HistoryCleanupTargetResult {
   const codes = [...new Set((result.reason ?? '').split(/[;,]/u).map(safeReasonCode).filter((value): value is string => !!value))];
-  return { status: result.status, ...(result.reason ? { reason: codes.join(';') || 'storage_cleanup_failed' } : {}),
-    ...(result.inaccessibleLegacySource ? { inaccessibleLegacySource: true } : {}) };
+  return { status: result.status, ...(result.reason ? { reason: codes.join(';') || 'storage_cleanup_failed' } : {}) };
 }
 
 function recountHistoryCleanupRecord(record: HistoryCleanupJournalRecord): void {
   const state = record.state;
   state.processed = 0; state.fullyDeleted = 0; state.skippedChanged = 0; state.failedBeforeCommit = 0;
-  state.removedPendingCleanup = 0; state.inaccessibleLegacy = 0;
+  state.removedPendingCleanup = 0;
   const extraProtected = record.items.filter(item => item.result?.status === 'protected').length;
   const extraUnknown = record.items.filter(item => item.result?.status === 'unknown' || item.result?.status === 'unavailable').length;
-  // Older operation records may lack explicit baselines; derive them from their persisted counters once.
-  record.excluded ??= { protected: Math.max(0, state.protected - extraProtected), unknown: Math.max(0, state.unknown - extraUnknown) };
   state.protected = record.excluded.protected + extraProtected;
   state.unknown = record.excluded.unknown + extraUnknown;
   state.reasonCounts = {};
@@ -662,7 +657,6 @@ function recountHistoryCleanupRecord(record: HistoryCleanupJournalRecord): void 
     state.processed++;
     const status = item.result.status;
     if (status === 'fullyDeleted' || status === 'skippedChanged' || status === 'failedBeforeCommit' || status === 'removedPendingCleanup') state[status]++;
-    if (item.result.inaccessibleLegacySource) state.inaccessibleLegacy++;
   }
 }
 
@@ -677,6 +671,5 @@ function isMissingJournalFile(error: unknown): boolean {
 }
 function isValidTargetResult(value: unknown): value is HistoryCleanupTargetResult {
   return isRecord(value) && ['fullyDeleted', 'protected', 'skippedChanged', 'unknown', 'unavailable', 'failedBeforeCommit', 'removedPendingCleanup'].includes(String(value.status))
-    && (value.reason === undefined || typeof value.reason === 'string')
-    && (value.inaccessibleLegacySource === undefined || typeof value.inaccessibleLegacySource === 'boolean');
+    && (value.reason === undefined || typeof value.reason === 'string');
 }

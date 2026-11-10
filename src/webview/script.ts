@@ -130,7 +130,7 @@ export function getScript(): string {
       extensionInfo: {
         displayName: 'KeepSeek',
         version: '',
-        publisher: 'keepseek',
+        publisher: 'kmvdata',
         author: 'kmvdata',
         repositoryUrl: 'https://github.com/kmvdata/keepseek',
         license: 'MIT'
@@ -493,7 +493,7 @@ export function getScript(): string {
       return {
         displayName: readNonEmptyString(info.displayName, 'KeepSeek'),
         version: readNonEmptyString(info.version, ''),
-        publisher: readNonEmptyString(info.publisher, 'keepseek'),
+        publisher: readNonEmptyString(info.publisher, 'kmvdata'),
         author: readNonEmptyString(info.author, 'kmvdata'),
         repositoryUrl: readNonEmptyString(info.repositoryUrl, 'https://github.com/kmvdata/keepseek'),
         license: readNonEmptyString(info.license, 'MIT')
@@ -3624,9 +3624,7 @@ ${conversationsSessionListFragment.source}
       return review && review.approvalSource === 'host_policy'
         ? t('approvalSourceHost')
         : review && review.approvalSource === 'auto_approval_review' ? t('approvalSourceAutoReviewer')
-        : review && review.approvalSource === 'model_review'
-          ? t('approvalSourceLegacyModel')
-          : review && review.approvalSource === 'local_policy' ? t('approvalSourceSafety') : t('approvalSourceUser');
+        : review && review.approvalSource === 'local_policy' ? t('approvalSourceSafety') : t('approvalSourceUser');
     }
 
     function getAuthorizationSourceLabel(source) {
@@ -4186,15 +4184,11 @@ ${conversationsSessionListFragment.source}
       var contextSources = Array.isArray(details.contextSources) ? details.contextSources : [];
       var projectInstructions = contextSources.filter(function(source) { return source.kind === 'project-instructions'; });
       var activatedSkills = contextSources.filter(function(source) { return source.kind === 'skill'; });
-      var legacyMemory = contextSources.filter(function(source) { return source.kind === 'legacy-memory'; });
       if (projectInstructions.length) {
         body.append(createRunTextSection(t('runDetailsProjectInstructions'), projectInstructions.map(formatRunContextSource)));
       }
       if (activatedSkills.length) {
         body.append(createRunTextSection(t('runDetailsSkills'), activatedSkills.map(formatRunContextSource)));
-      }
-      if (legacyMemory.length) {
-        body.append(createRunTextSection(t('runDetailsLegacyMemory'), legacyMemory.map(formatRunContextSource)));
       }
       if (details.contextDeduplication) {
         var discardedContext = Array.isArray(details.contextDiscarded) ? details.contextDiscarded : [];
@@ -4520,7 +4514,7 @@ ${conversationsSessionListFragment.source}
       contextSources.forEach(function(source) {
         var label = source.kind === 'project-instructions'
           ? t('runDetailsProjectInstructions')
-          : source.kind === 'skill' ? t('runDetailsSkills') : t('runDetailsLegacyMemory');
+          : t('runDetailsSkills');
         lines.push(label + ': ' + formatRunContextSource(source));
       });
       if (details.contextDeduplication) {
@@ -6589,7 +6583,7 @@ ${conversationsSessionListFragment.source}
 
       var fileName = getMessageFileName(reference.path);
       var labels = reference.startLine > 0
-        ? getLegacyLineLabelVariants(reference.startLine, reference.endLine, reference.startColumn, reference.endColumn).map(function(label) {
+        ? getLineLabelVariants(reference.startLine, reference.endLine, reference.startColumn, reference.endColumn).map(function(label) {
             return fileName + ' (' + label + ')';
           })
         : [];
@@ -6692,26 +6686,7 @@ ${conversationsSessionListFragment.source}
     }
 
     function getLineLabelVariants(startLine, endLine, startColumn, endColumn) {
-      var labels = [
-        formatLineReferenceLabel(startLine, endLine, startColumn, endColumn, getLanguage()),
-        formatLegacyLineReferenceLabel(startLine, endLine, startColumn, endColumn, getLanguage()),
-        formatLegacyLineReferenceLabel(startLine, endLine, startColumn, endColumn, 'zh-CN'),
-        formatLegacyLineReferenceLabel(startLine, endLine, startColumn, endColumn, 'en')
-      ];
-      return labels.filter(function(label, index) {
-        return labels.indexOf(label) === index;
-      });
-    }
-
-    function getLegacyLineLabelVariants(startLine, endLine, startColumn, endColumn) {
-      var labels = [
-        formatLegacyLineReferenceLabel(startLine, endLine, startColumn, endColumn, getLanguage()),
-        formatLegacyLineReferenceLabel(startLine, endLine, startColumn, endColumn, 'zh-CN'),
-        formatLegacyLineReferenceLabel(startLine, endLine, startColumn, endColumn, 'en')
-      ];
-      return labels.filter(function(label, index) {
-        return labels.indexOf(label) === index;
-      });
+      return [formatLineReferenceLabel(startLine, endLine, startColumn, endColumn, getLanguage())];
     }
 
     function formatLineReferenceLabel(startLine, endLine, startColumn, endColumn, language) {
@@ -6735,43 +6710,6 @@ ${conversationsSessionListFragment.source}
       }
 
       return 'L' + startLine + '#C' + normalizedStartColumn + '-L' + normalizedEndLine + '#C' + normalizedEndColumn;
-    }
-
-    function formatLegacyLineReferenceLabel(startLine, endLine, startColumn, endColumn, language) {
-      if (language === 'en') {
-        if (startLine === endLine) {
-          if (startColumn > 0) {
-            var colEndEn = endColumn > startColumn ? endColumn : 0;
-            if (colEndEn > 0) {
-              return 'line ' + startLine + ' cols ' + startColumn + '-' + colEndEn;
-            }
-            return 'line ' + startLine + ' from col ' + startColumn;
-          }
-          return 'line ' + startLine;
-        }
-        if (startColumn > 0 || endColumn > 0) {
-          var startColEn = startColumn > 0 ? ' col ' + startColumn : '';
-          var endColEn = endColumn > 0 ? ' col ' + endColumn : '';
-          return 'line ' + startLine + startColEn + '-line ' + endLine + endColEn;
-        }
-        return 'lines ' + startLine + '-' + endLine;
-      }
-      if (startLine === endLine) {
-        if (startColumn > 0) {
-          var colEnd = endColumn > startColumn ? endColumn : 0;
-          if (colEnd > 0) {
-            return '\\u7b2c' + startLine + '\\u884c\\u7b2c' + startColumn + '-' + colEnd + '\\u5217';
-          }
-          return '\\u7b2c' + startLine + '\\u884c\\u7b2c' + startColumn + '\\u5217\\u8d77';
-        }
-        return '\\u7b2c' + startLine + '\\u884c';
-      }
-      if (startColumn > 0 || endColumn > 0) {
-        var startCol = startColumn > 0 ? '\\u7b2c' + startColumn + '\\u5217' : '';
-        var endCol = endColumn > 0 ? '\\u7b2c' + endColumn + '\\u5217' : '';
-        return '\\u7b2c' + startLine + '\\u884c' + startCol + '-\\u7b2c' + endLine + '\\u884c' + endCol;
-      }
-      return '\\u7b2c' + startLine + '-' + endLine + '\\u884c';
     }
 
     function formatFileReferenceLabel(reference) {

@@ -15,6 +15,7 @@ import {
 import {
   createUsageLedgerRecords,
   createUsagePriceSnapshot,
+  normalizeUsageLedgerValue,
   summarizeCacheDiagnostics
 } from '../src/agent/usageLedger';
 import { UsageLedgerStore } from '../src/agent/usageLedgerStore';
@@ -280,16 +281,28 @@ test('soft-pressure hysteresis suppresses immediate post-rollover loops without 
   }), true);
 });
 
-test('v1 inline ledger migration is idempotent, pageable and rebuilds after aggregate loss', async () => {
+test('ledger restores only current cache observations while preserving confirmed usage', () => {
+  const current = observation({ requestId: 'current-cache', body: chatBody([{ role: 'user', content: 'task' }]) });
+  const records = createUsageLedgerRecords({ requestId: 'current-cache', source: 'executor', usage: USAGE,
+    attempts: [createUsagePriceSnapshot({ originalModelId: 'deepseek-v4-flash', sourceId: 'official', provider: 'deepseek',
+      protocol: 'chat-completions', supportsBilling: true })], cacheObservations: [current] });
+  const restored = normalizeUsageLedgerValue({ version: 1, records });
+  assert.equal(restored?.records[0]?.cacheObservation?.version, 2);
+  const obsolete = normalizeUsageLedgerValue({ version: 1, records: [{ ...records[0], cacheObservation: { ...current, version: 1 } }] });
+  assert.equal(obsolete?.records[0]?.cacheObservation, undefined);
+  assert.equal(obsolete?.records[0]?.usage?.totalTokens, USAGE.totalTokens);
+});
+
+test('current bucket ledger append is idempotent, pageable and rebuilds after aggregate loss', async () => {
   const root = await mkdtemp(join(tmpdir(), 'keepseek-usage-ledger-'));
   const store = new UsageLedgerStore(vscode.Uri.file(root) as unknown as import('vscode').Uri);
   const records = makeRecords(12);
   const session = {
-    id: 'session-one', usageLedger: { version: 1 as const, records, legacyAggregate: false, incomplete: false }
+    id: 'session-one', usageLedger: { version: 1 as const, records, incomplete: false }
   };
-  const firstRef = await store.migrateInlineLedger(session);
-  const secondRef = await store.migrateInlineLedger({ ...session, usageLedgerRef: firstRef });
-  assert.deepEqual(secondRef, firstRef);
+  await store.appendMany(session.id, records);
+  const second = await store.appendMany(session.id, records);
+  assert.equal(second.appended, 0);
   const firstPage = await store.readPage(session.id, { limit: 5 });
   assert.equal(firstPage.records.length, 5);
   assert.ok(firstPage.nextCursor);

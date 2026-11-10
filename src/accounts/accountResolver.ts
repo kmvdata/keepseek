@@ -29,8 +29,7 @@ export class MissingModelSourceApiKeyError extends Error {
 
 /**
  * 凭据解析的唯一入口：只解析请求的账号（ModelSource）。账号缺失或未启用时
- * 绝不隐式选择其它账号；旧版 keepseek.apiKey / keepseek.baseUrl 与
- * DEEPSEEK_API_KEY 环境变量不再支持，一律忽略（旧配置直接舍弃）。
+ * 绝不隐式选择其它账号。凭据仅来自当前账号存储。
  */
 export async function resolveModelSourceConfig(
   sourceId: string | undefined,

@@ -16,6 +16,17 @@ import type { ModelSource } from '../src/accounts/types';
 const NOW = 1_710_000_000_000;
 
 describe('model source catalog', () => {
+  it('requires a complete source and model identity without guessing by model name', () => {
+    const catalog = createModelCatalog([
+      createSource({ id: 'first', models: [{ id: 'shared' }] }),
+      createSource({ id: 'second', models: [{ id: 'shared' }] })
+    ]);
+    assert.equal(findModelBySelection(catalog, undefined), undefined);
+    assert.equal(findModelBySelection(catalog, { modelId: 'shared' }), undefined);
+    assert.equal(findModelBySelection(catalog, { sourceId: 'second' }), undefined);
+    assert.equal(findModelBySelection(catalog, { sourceId: 'second', modelId: 'shared' })?.sourceId, 'second');
+  });
+
   it('recognizes only the exact official DeepSeek host, including /v1 paths', () => {
     assert.equal(isOfficialDeepSeekSource({ provider: 'deepseek', baseUrl: 'https://api.deepseek.com' }), true);
     assert.equal(isOfficialDeepSeekSource({ provider: 'deepseek', baseUrl: 'https://api.deepseek.com/v1' }), true);

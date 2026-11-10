@@ -20,7 +20,7 @@ export type ApprovalActionKind =
 
 export type ApprovalReviewDecision = 'approve' | 'needs_user' | 'deny';
 export type ApprovalReviewRisk = 'low' | 'medium' | 'high' | 'critical';
-export type ApprovalReviewSource = 'auto_approval_review' | 'model_review' | 'host_policy' | 'local_policy' | 'user_click';
+export type ApprovalReviewSource = 'auto_approval_review' | 'host_policy' | 'local_policy' | 'user_click';
 export type ApprovalRoute = 'host_policy' | 'auto_approval_review' | 'user_click';
 
 export interface BoundedReviewText {
@@ -119,7 +119,7 @@ export interface ApprovalReviewRecord {
   actionHash: string;
   policyVersion: number;
   scopeFingerprint?: string;
-  approvalMode?: 'model_review' | 'delegate';
+  approvalMode?: 'delegate';
   approvalSource: ApprovalReviewSource;
   osIsolation?: 'none';
   reviewerConfigFingerprint?: string;
@@ -166,7 +166,7 @@ export interface ApprovalRecordMatch {
   actionKind: ApprovalActionKind;
   actionHash: string;
   policyVersion: number;
-  approvalMode?: 'model_review' | 'delegate';
+  approvalMode?: 'delegate';
   expectedSource: ApprovalRoute;
   reviewerConfigFingerprint?: string;
   scopeFingerprint?: string;

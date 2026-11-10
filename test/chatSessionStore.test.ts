@@ -32,7 +32,7 @@ test('stored replay normalization clones protocol data without changing visible 
     messages: [{ role: 'assistant', content: [{ type: 'thinking', thinking: '  thought\n', signature: 'signed' }] }]
   };
   const requestProtocol = {
-    version: 2, serializationStrategy: 'provider-projection-v2', toolSchemaVersion: 2,
+    version: CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION, serializationStrategy: 'provider-projection-v2', toolSchemaVersion: CURRENT_PROVIDER_TOOL_SCHEMA_VERSION,
     toolNames: ['keepseek_read_workspace_file_range'], sourceId: 'source', createdAt: '2026-01-01T00:00:00.000Z'
   };
   const replays = [responses, anthropic, { ...responses, items: [{ type: 'future_item' }] }, { protocol: 'future' }];
@@ -67,7 +67,7 @@ test('stored replay normalization clones protocol data without changing visible 
   assert.ok(visible.every(message => !('providerReplay' in message) && !('expandedContent' in message)));
 });
 
-test('trimActiveHistory preserves persisted active session messages', async () => {
+test('current persistence preserves the complete active history and frozen request metadata', async () => {
   const workspaceScope: WorkspaceSessionScope = {
     key: 'workspace:test',
     name: 'Test Workspace',
@@ -95,7 +95,7 @@ test('trimActiveHistory preserves persisted active session messages', async () =
     content: 'complete archived result', contentHash: 'hash-1', createdAt: '2026-01-01T00:00:00.000Z'
   }];
   session.requestProtocol = {
-    version: 2, serializationStrategy: 'provider-projection-v2', toolSchemaVersion: 2,
+    version: CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION, serializationStrategy: 'provider-projection-v2', toolSchemaVersion: CURRENT_PROVIDER_TOOL_SCHEMA_VERSION,
     toolNames: ['keepseek_read_workspace_file_range'], sourceId: 'source-a', createdAt: '2026-01-01T00:00:00.000Z',
     lastProviderRequestAt: '2026-01-01T00:01:00.000Z'
   };
@@ -103,24 +103,23 @@ test('trimActiveHistory preserves persisted active session messages', async () =
     version: 1,
     protectedMessageIds: [],
     summaries: [{
-      id: 'legacy-summary',
-      content: 'legacy summary content',
+      id: 'summary',
+      content: 'summary content',
       coveredMessageIds: ['m1'],
       createdAt: '2026-01-01T00:00:00.000Z',
       updatedAt: '2026-01-01T00:00:00.000Z',
       tokenEstimate: 10,
-      modelId: 'legacy-model',
+      modelId: 'current-model',
       version: 1
     }]
   };
   const store = new ChatSessionStore(storage, 'en', workspaceScope);
 
   await store.initialize();
-  store.trimActiveHistory(10);
   await store.persist();
 
   assert.equal(store.messages.length, 100);
-  assert.equal(store.getActiveSession().contextCompression?.summaries[0]?.modelId, 'legacy-model');
+  assert.equal(store.getActiveSession().contextCompression?.summaries[0]?.modelId, 'current-model');
   assert.equal(store.getActiveSession().contextCompression?.summaries[0]?.sourceId, undefined);
   assert.equal(store.messages[0].id, 'm0');
   assert.equal(store.messages[99].id, 'm99');
@@ -130,7 +129,7 @@ test('trimActiveHistory preserves persisted active session messages', async () =
   assert.equal(storage.saved?.sessions[0]?.historyArchive?.[0]?.content, 'complete archived result');
   assert.deepEqual(storage.saved?.sessions[0]?.requestProtocol?.toolNames, ['keepseek_read_workspace_file_range']);
   assert.equal(storage.saved?.sessions[0]?.requestProtocol?.sourceId, 'source-a');
-  assert.equal(storage.saved?.sessions[0]?.requestProtocol?.version, 2);
+  assert.equal(storage.saved?.sessions[0]?.requestProtocol?.version, CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION);
   assert.equal(storage.saved?.sessions[0]?.requestProtocol?.serializationStrategy, 'provider-projection-v2');
 
   const next = await store.createNewSession('en');
@@ -281,7 +280,7 @@ test('stored project approval mode overrides stale per-session values on load', 
   assert.equal(store.getActiveSession().approvalMode, 'delegate');
 });
 
-test('legacy project model_review migrates to ask without broadening authorization and rejects new legacy selections', async () => {
+test('unsupported approval mode is rejected without broadening authorization', async () => {
   const scope = { key: 'legacy-mode', name: 'Legacy', folderUris: [] };
   const active = createSession('legacy-active', [createMessage(0)], scope);
   const originalMessages = active.messages.map(message => ({ content: message.content, expandedContent: message.expandedContent, providerContent: message.providerContent }));
@@ -289,7 +288,6 @@ test('legacy project model_review migrates to ask without broadening authorizati
   const store = new ChatSessionStore(storage, 'en', scope);
   await store.initialize();
   assert.equal(store.approvalMode, 'ask');
-  assert.equal(store.getActiveSession().approvalModeMigrated, true);
   assert.equal(await store.setApprovalMode('model_review' as never), false);
   assert.deepEqual(store.getActiveSession().messages.map(message => ({ content: message.content, expandedContent: message.expandedContent, providerContent: message.providerContent })), originalMessages);
 });

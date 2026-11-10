@@ -1,9 +1,10 @@
 import type * as vscode from 'vscode';
 import type { ModelSelection } from '../shared/types';
+import { KEEPSEEK_STORAGE_NAMESPACE } from '../shared/identity';
 import { createModelCatalog, findModelBySelection, resolveDefaultModel, toModelSelection } from './modelCatalog';
 import type { ModelSource } from './types';
 
-export const GLOBAL_DEFAULT_MODEL_KEY = 'keepseek.defaultModel';
+export const GLOBAL_DEFAULT_MODEL_KEY = `${KEEPSEEK_STORAGE_NAMESPACE}.defaultModel`;
 
 /** One global identity; inferred defaults are never persisted as user choices. */
 export class DefaultModelStore {

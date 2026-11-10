@@ -441,7 +441,7 @@ export class ToolEvidenceStore {
       const value: unknown = JSON.parse(this.decoder.decode(await vscode.workspace.fs.readFile(this.getRecordUri(sessionId, taskId, id))));
       if (!isToolEvidence(value) || value.sessionId !== sessionId || value.taskId !== taskId || value.id !== id) return undefined;
       // Recompute optional V1 delivery metadata from immutable envelope bytes;
-      // legacy absence or a malformed field must not invent progress.
+      // an absent or malformed field must not invent progress.
       if (value.providerEnvelope !== undefined) {
         const visibleContentHash = visibleProgressFingerprint(value.toolName, value.providerEnvelope);
         value.bodyDelivery = { version: 1, bodyDelivered: Boolean(visibleContentHash), visibleContentHash,

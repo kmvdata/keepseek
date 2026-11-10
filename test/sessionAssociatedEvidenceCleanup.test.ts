@@ -19,7 +19,7 @@ async function deleted(authority: SessionDeletionAuthority, sessionId: string) {
 }
 
 const metadata = (parentSessionId: string): StoredSubagentMetadata => ({
-  version: 1, id: 'sa_test', parentSessionId, treeId: 'tree', parentRunId: 'run', rootRunId: 'run',
+  version: 2, id: 'sa_test', parentSessionId, treeId: 'tree', parentRunId: 'run', rootRunId: 'run',
   depth: 1, profile: 'research', lane: 'research-read', task: 'Synthetic inspection', status: 'completed',
   sourceId: 'source', modelId: 'model', provider: 'deepseek', sourceConfigHash: 'source-hash',
   systemPromptHash: 'system-hash', toolSchemaHash: 'tools-hash', profileHash: 'profile-hash',
@@ -56,7 +56,7 @@ test('durable deletion removes child private storage and rejects result/activity
     const uri = vscode.Uri.file(directory) as unknown as import('vscode').Uri;
     const authority = new SessionDeletionAuthority(uri), store = new SubagentStore(uri, 'workspace');
     const own = metadata('session'), other = metadata('retained');
-    const transcript = { version: 1 as const, metadataId: own.id, contextInstructions: '', messages: [], result: 'Synthetic result' };
+    const transcript = { version: 2 as const, metadataId: own.id, contextInstructions: '', messages: [], result: 'Synthetic result' };
     await store.save(own, transcript);
     await store.save(other, transcript);
     assert.ok(await store.read('session', own.id));
@@ -112,7 +112,7 @@ test('owned trace and performance bytes are reclaimed without touching another s
     assert.match(await readFile(ownPath, 'utf8'), /run_start/);
     await deleted(new SessionDeletionAuthority(uri), 'session');
     const recycler = new InteractionTraceCleanup(uri);
-    assert.equal((await recycler.cleanup('session')).unverifiedLegacySources, 1);
+    assert.equal((await recycler.cleanup('session')).unverifiedSources, 1);
     await assert.rejects(readFile(ownPath), { code: 'ENOENT' });
     await assert.rejects(readFile(ownPath + '.perf-0.jsonl'), { code: 'ENOENT' });
     assert.match(await readFile(retainedPath, 'utf8'), /run_start/);

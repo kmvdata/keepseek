@@ -63,21 +63,17 @@ export interface DelegateParallelInput {
 }
 
 export interface ReadSubagentResultInput {
-  /** V10 result reference. Legacy callers may still provide subagentId. */
-  ref?: string;
-  subagentId?: string;
+  /** Canonical child-result reference. */
+  ref: string;
   offsetBytes?: number;
   limitBytes?: number;
-  /** V1-V9 compatibility fields. */
-  offset?: number;
-  maxChars?: number;
 }
 
 export type SubagentManifestStatus = 'completed' | 'failed' | 'cancelled' | 'budget_exhausted' | 'stopped';
 
-/** Provider-visible V10 handoff. Full result text never appears in this object. */
-export interface SubagentResultManifestV2 {
-  version: 2 | 3;
+/** Provider-visible handoff. Full result text never appears in this object. */
+export interface SubagentResultManifest {
+  version: 3;
   ok: boolean;
   kind: 'subagent_result_manifest';
   subagentId: string;
@@ -174,7 +170,7 @@ export interface SubagentProgressState {
 }
 
 export interface StoredSubagentMetadata {
-  version: 1 | 2;
+  version: 2;
   id: string;
   treeId: string;
   parentSessionId: string;
@@ -194,7 +190,7 @@ export interface StoredSubagentMetadata {
   toolSchemaHash: string;
   profileHash: string;
   projectInstructionsHash: string;
-  /** V11 controlled context proof; absent legacy records remain audit-only. */
+  /** Frozen project/profile context proof for controlled child continuation. */
   hostContextHash?: string;
   authorizationContextHash?: string;
   workspaceContextHash?: string;
@@ -226,7 +222,7 @@ export interface StoredSubagentMetadata {
 
 export interface StoredSubagentTranscript {
   checkpoint?: import('../runCheckpoint').RunCheckpoint;
-  version: 1 | 2;
+  version: 2;
   metadataId: string;
   contextInstructions: string;
   messages: import('../../shared/types').ChatMessage[];

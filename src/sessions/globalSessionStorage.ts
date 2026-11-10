@@ -1,14 +1,10 @@
 import { createHash } from 'node:crypto';
 import * as vscode from 'vscode';
 import {
-  getSessionUpdatedTimestamp,
   createSessionTitle,
-  normalizeStoredActiveSessionIds,
   normalizeStoredSessions,
-  SESSION_STORAGE_KEY,
   sortSessionsByUpdatedAt,
   type ChatSessionStorageAdapter,
-  type StoredSessionState,
   type StoredWorkspaceSessionState,
   type WorkspaceSessionScope
 } from './chatSessionStore';
@@ -25,12 +21,10 @@ import { assertManagedStoragePath } from './sessionAssociatedPersistence';
 import type { HistoryCleanupCatalogEntry, HistoryCleanupTargetResult } from './sessionHistoryCleanup';
 import { HistoryCleanupFailure, type HistoryCleanupIssueCode, type HistoryCleanupPhase } from './historyCleanupErrors';
 
-export const SESSION_MIGRATION_KEY = 'keepseek.chatSessionsMigratedToGlobalV1';
 export const SESSION_CLEANUP_MIN_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 const SESSION_STORAGE_ROOT_DIR = 'chat-sessions';
 const SESSION_STORAGE_VERSION_DIR = 'v2';
-const LEGACY_SESSION_STORAGE_VERSION_DIR = 'v1';
 const SESSION_STORAGE_MANIFEST_FILE = 'manifest.json';
 const SESSION_STORAGE_WORKSPACES_DIR = 'workspaces';
 const cleanupFlights = new Map<string, Promise<boolean>>();
@@ -63,7 +57,6 @@ export interface WorkspaceSessionIndex {
   workspaceFolders: string[];
   activeSessionId: string;
   approvalMode: ApprovalMode;
-  approvalModeMigrated?: boolean;
   sessions: SessionIndexEntry[];
   updatedAt: string;
 }
@@ -73,18 +66,6 @@ export interface SessionIndexEntry extends ChatSessionSummary {
   byteLength?: number;
   /** The atomic workspace index commits an automatic title, after its shard. */
   autoTitleCommit?: string;
-}
-
-interface LegacyWorkspaceSessionFile {
-  version: 1;
-  workspaceKey: string;
-  workspaceName: string;
-  workspaceFolders: string[];
-  activeSessionId: string;
-  approvalMode: ApprovalMode;
-  approvalModeMigrated?: boolean;
-  sessions: ChatSession[];
-  updatedAt: string;
 }
 
 interface WorkspaceMetadata {
@@ -126,7 +107,6 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
   private readonly rootUri: vscode.Uri;
   private readonly manifestUri: vscode.Uri;
   private readonly workspacesUri: vscode.Uri;
-  private readonly legacyWorkspacesUri: vscode.Uri;
   private readonly evidenceStore: ToolEvidenceStore;
   public readonly deletionAuthority: SessionDeletionAuthority;
   private readonly objectStores = new Map<string, SessionObjectStore>();
@@ -146,42 +126,20 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     this.rootUri = vscode.Uri.joinPath(globalStorageUri, SESSION_STORAGE_ROOT_DIR, SESSION_STORAGE_VERSION_DIR);
     this.manifestUri = vscode.Uri.joinPath(this.rootUri, SESSION_STORAGE_MANIFEST_FILE);
     this.workspacesUri = vscode.Uri.joinPath(this.rootUri, SESSION_STORAGE_WORKSPACES_DIR);
-    this.legacyWorkspacesUri = vscode.Uri.joinPath(
-      globalStorageUri,
-      SESSION_STORAGE_ROOT_DIR,
-      LEGACY_SESSION_STORAGE_VERSION_DIR,
-      SESSION_STORAGE_WORKSPACES_DIR
-    );
     this.evidenceStore = new ToolEvidenceStore(globalStorageUri);
   }
 
-  public async loadWorkspace(workspaceScope: WorkspaceSessionScope): Promise<StoredWorkspaceSessionState> {
+  public async loadWorkspace(workspaceScope: WorkspaceSessionScope, options: { fresh?: boolean } = {}): Promise<StoredWorkspaceSessionState> {
     const hash = getWorkspaceHash(workspaceScope.key);
     let index = await this.readWorkspaceIndex(hash, workspaceScope);
-    if (!index) {
-      const legacy = await this.readLegacyWorkspaceSessionFile(hash, workspaceScope);
-      if (!legacy || legacy.workspaceKey !== workspaceScope.key) {
-        return { activeSessionId: '', sessions: [], sessionSummaries: [] };
-      }
-      try {
-        index = await this.migrateLegacyWorkspaceFile(legacy);
-      } catch (error) {
-        console.warn('KeepSeek: sharded session migration failed; using the intact V1 file.', error);
-        return {
-          activeSessionId: legacy.activeSessionId,
-          approvalMode: legacy.approvalMode,
-          sessions: legacy.sessions.map(session => session.id === legacy.activeSessionId && legacy.approvalModeMigrated
-            ? { ...session, approvalModeMigrated: true } : session),
-          sessionSummaries: legacy.sessions.map(toSessionSummary)
-        };
-      }
-    }
+    if (!index) return { activeSessionId: '', sessions: [], sessionSummaries: [] };
+    if (options.fresh) return { activeSessionId: '', approvalMode: index.approvalMode,
+      sessions: [], sessionSummaries: index.sessions.map(toPublicSummary) };
 
     index = await this.reconcileWorkspaceIndex(index);
     const activeSession = index.activeSessionId
       ? await this.readSession(index.workspaceKey, index.activeSessionId, index)
       : undefined;
-    if (activeSession && index.approvalModeMigrated) activeSession.approvalModeMigrated = true;
     return {
       activeSessionId: activeSession?.id ?? '',
       approvalMode: index.approvalMode,
@@ -269,18 +227,14 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     const normalizedSessionId = sessionId.trim();
     if (!normalizedWorkspaceKey || !normalizedSessionId) return undefined;
     if (options.readOnly) {
-      // A bounded navigation may abandon this read. Index repair/migration can
+      // A bounded navigation may abandon this read. Index repair can
       // write an old active selection after a replacement session has committed,
       // so only initialization and ordinary readers may perform those repairs.
       const hash = getWorkspaceHash(normalizedWorkspaceKey);
       const index = await this.readWorkspaceIndex(hash);
       if (index) return index.workspaceKey === normalizedWorkspaceKey
         ? await this.readSession(normalizedWorkspaceKey, normalizedSessionId, index) : undefined;
-      // Failed startup migration retains the intact V1 file as its authority.
-      // Keep that fallback readable without attempting migration during a read.
-      const legacy = await this.readLegacyWorkspaceSessionFile(hash);
-      return legacy?.workspaceKey === normalizedWorkspaceKey
-        ? legacy.sessions.find(session => session.id === normalizedSessionId) : undefined;
+      return undefined;
     }
     const index = await this.loadIndexByWorkspaceKey(normalizedWorkspaceKey);
     return index ? await this.readSession(normalizedWorkspaceKey, normalizedSessionId, index) : undefined;
@@ -368,7 +322,6 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     const index = await this.loadIndexByWorkspaceKey(normalizedWorkspaceKey);
     if (index) await Promise.all(index.sessions.map((entry) => this.evidenceStore.deleteSessionEvidence(entry.id)));
     await this.deleteFile(this.getWorkspaceDirectoryUri(hash), true);
-    await this.deleteFile(vscode.Uri.joinPath(this.legacyWorkspacesUri, `${hash}.json`));
     const manifest = await this.readManifest();
     if (manifest.workspaces[hash]) {
       delete manifest.workspaces[hash];
@@ -413,12 +366,8 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     let changed = false;
     const hashes = new Set([...Object.keys(manifest.workspaces), ...(await this.listWorkspaceIndexHashes())]);
     for (const hash of hashes) {
-      let index = await this.readWorkspaceIndex(hash, manifestEntryToMetadata(manifest.workspaces[hash]));
-      if (!index) {
-        const legacy = await this.readLegacyWorkspaceSessionFile(hash, manifestEntryToMetadata(manifest.workspaces[hash]));
-        if (!legacy) continue;
-        index = await this.migrateLegacyWorkspaceFile(legacy);
-      }
+      const index = await this.readWorkspaceIndex(hash, manifestEntryToMetadata(manifest.workspaces[hash]));
+      if (!index) continue;
       const removed = index.sessions.filter((entry) => {
         if (entry.isFavorite || protectedIds.has(entry.id)) return false;
         if (entry.workspaceKey === options.currentWorkspaceKey && entry.id === options.currentActiveSessionId) return false;
@@ -453,114 +402,11 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     return changed;
   }
 
-  public async migrateLegacyWorkspaceState(
-    workspaceState: vscode.Memento,
-    currentWorkspaceScope: WorkspaceSessionScope
-  ): Promise<boolean> {
-    try {
-      // A previously migrated Memento may become accessible only when its old
-      // workspace reopens. Reclaim only IDs with a committed deletion authority
-      // before honoring the migration flag; never import or select new targets.
-      const accessible = workspaceState.get<StoredSessionState>(SESSION_STORAGE_KEY);
-      if (isRecord(accessible) && Array.isArray(accessible.sessions)) {
-        const sessions: unknown[] = [];
-        const reclaimed: string[] = [];
-        for (const item of accessible.sessions) {
-          const id = isRecord(item) && typeof item.id === 'string' ? item.id : undefined;
-          const record = id ? await this.deletionAuthority.readRecord(id) : undefined;
-          const owner = isRecord(item) && typeof item.workspaceKey === 'string' ? item.workspaceKey : currentWorkspaceScope.key;
-          if (record && record.workspaceKey === owner) reclaimed.push(record.sessionId);
-          else sessions.push(item);
-        }
-        if (reclaimed.length) {
-          const activeSessionIdsByWorkspace = isRecord(accessible.activeSessionIdsByWorkspace)
-            ? Object.fromEntries(Object.entries(accessible.activeSessionIdsByWorkspace).filter(([, id]) => !reclaimed.includes(String(id)))) : undefined;
-          await workspaceState.update(SESSION_STORAGE_KEY, { ...accessible, sessions,
-            ...(reclaimed.includes(String(accessible.activeSessionId)) ? { activeSessionId: '' } : {}),
-            ...(activeSessionIdsByWorkspace ? { activeSessionIdsByWorkspace } : {}) });
-          for (const id of reclaimed) {
-            const record = await this.deletionAuthority.readRecord(id);
-            if (!record) continue;
-            const reasons = record.pendingReasons?.filter(reason => reason !== 'inaccessible_legacy_source');
-            await this.deletionAuthority.updateDeletion(id, reasons?.length ? 'committed' : record.pendingReasons ? 'reclaimed' : record.phase, reasons);
-          }
-        }
-      }
-      if (workspaceState.get<boolean>(SESSION_MIGRATION_KEY, false)) return false;
-      const legacyState = workspaceState.get<StoredSessionState>(SESSION_STORAGE_KEY);
-      if (!isRecord(legacyState) || !Array.isArray(legacyState.sessions)) {
-        await workspaceState.update(SESSION_MIGRATION_KEY, true);
-        return false;
-      }
-      const legacySessions = [];
-      for (const session of normalizeStoredSessions(legacyState, currentWorkspaceScope, { confirmedLegacyTitleCompletion: true })) {
-        if (!await this.isSessionDeleted(session.workspaceKey, session.id)) legacySessions.push(session);
-      }
-      const activeSessionIdsByWorkspace = normalizeStoredActiveSessionIds(legacyState, legacySessions);
-      for (const [workspaceKey, sessions] of groupSessionsByWorkspace(legacySessions)) {
-        const scope = getWorkspaceScopeForSessions(workspaceKey, sessions, currentWorkspaceScope);
-        const existing = await this.loadWorkspaceSessions(workspaceKey);
-        const merged = mergeSessionsById(existing, sessions);
-        await this.saveWorkspace(scope, {
-          activeSessionId: chooseActiveSessionId(merged, activeSessionIdsByWorkspace[workspaceKey]),
-          sessions: merged,
-          sessionSummaries: merged.map(toSessionSummary)
-        });
-      }
-      await workspaceState.update(SESSION_MIGRATION_KEY, true);
-      return true;
-    } catch (error) {
-      console.warn('KeepSeek: failed to migrate legacy chat sessions to global storage.', error);
-      return false;
-    }
-  }
-
   private async loadIndexByWorkspaceKey(workspaceKey: string): Promise<WorkspaceSessionIndex | undefined> {
     if (!workspaceKey) return undefined;
     const hash = getWorkspaceHash(workspaceKey);
-    let index = await this.readWorkspaceIndex(hash);
-    if (!index) {
-      const manifest = await this.readManifest();
-      const legacy = await this.readLegacyWorkspaceSessionFile(hash, manifestEntryToMetadata(manifest.workspaces[hash]));
-      if (legacy?.workspaceKey === workspaceKey) index = await this.migrateLegacyWorkspaceFile(legacy);
-    }
+    const index = await this.readWorkspaceIndex(hash);
     return index?.workspaceKey === workspaceKey ? await this.reconcileWorkspaceIndex(index) : undefined;
-  }
-
-  private async migrateLegacyWorkspaceFile(file: LegacyWorkspaceSessionFile): Promise<WorkspaceSessionIndex> {
-    const workspaceHash = getWorkspaceHash(file.workspaceKey);
-    const entries: SessionIndexEntry[] = [];
-    for (const session of file.sessions) {
-      if (await this.isSessionDeleted(file.workspaceKey, session.id)) continue;
-      const value = { version: 2, workspaceKey: file.workspaceKey, session };
-      const byteLength = new TextEncoder().encode(JSON.stringify(value)).byteLength;
-      if (this.globalStorageUri.scheme === 'file') {
-        await this.deletionAuthority.withSessionGate(file.workspaceKey, session.id, async () => {
-          await this.assertSessionWritable(file.workspaceKey, session.id);
-          await writeJsonAtomic(this.getSessionUri(workspaceHash, session.id), value);
-        });
-      } else await writeJsonAtomic(this.getSessionUri(workspaceHash, session.id), value);
-      entries.push({ ...toSessionSummary(session), storageFile: getSessionStorageFile(session.id), byteLength,
-        autoTitleCommit: automaticTitleCommit(session) });
-    }
-    const index: WorkspaceSessionIndex = {
-      version: 2,
-      workspaceKey: file.workspaceKey,
-      workspaceName: file.workspaceName,
-      workspaceFolders: file.workspaceFolders,
-      activeSessionId: chooseActiveSessionIdFromEntries(entries, file.activeSessionId),
-      approvalMode: file.approvalMode,
-      approvalModeMigrated: file.approvalModeMigrated,
-      sessions: sortIndexEntries(entries),
-      updatedAt: file.updatedAt
-    };
-    // The index is the commit marker. A failed migration leaves V1 authoritative.
-    await this.writeWorkspaceIndex(index);
-    await this.updateManifestWorkspace(index);
-    // The atomic workspace index is the migration commit marker. The global
-    // manifest is derived and may be refreshed later without risking shards.
-    await this.deleteFile(vscode.Uri.joinPath(this.legacyWorkspacesUri, `${workspaceHash}.json`));
-    return index;
   }
 
   private async reconcileWorkspaceIndex(index: WorkspaceSessionIndex): Promise<WorkspaceSessionIndex> {
@@ -588,23 +434,18 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
 
   private async readSessionShard(uri: vscode.Uri, index: WorkspaceSessionIndex): Promise<ChatSession | undefined> {
     const value = await this.readJsonFile(uri, 'session shard');
-    const rawId = isRecord(value) ? (typeof value.sessionId === 'string' ? value.sessionId
-      : isRecord(value.session) && typeof value.session.id === 'string' ? value.session.id : undefined) : undefined;
-    if (rawId && await this.isSessionDeleted(index.workspaceKey, rawId)) return undefined;
-    if (!isRecord(value) || ![2, 3, 4].includes(Number(value.version))) return undefined;
-    const stored = Number(value.version) >= 3 ? await this.objects(uri).load(value) : value.session;
+    if (!isRecord(value) || value.version !== 4 || typeof value.sessionId !== 'string') return undefined;
+    if (await this.isSessionDeleted(index.workspaceKey, value.sessionId)) return undefined;
+    const stored = await this.objects(uri).load(value);
     if (!isRecord(stored)) return undefined;
     const scope = { key: index.workspaceKey, name: index.workspaceName, folderUris: index.workspaceFolders };
-    // Verify the exact on-disk generation before normalization. A legacy
-    // completed record may refer to archived bodies; testing its basis first
-    // would erase a genuinely committed stop before the index can attest it.
+    // The shard is written before the index; attest a completed title against
+    // its committed index before accepting it after an interrupted save.
     let candidate = stored;
     const entry = index.sessions.find(item => item.id === stored.id);
-    let confirmedLegacyTitleCompletion = false;
     const state = isRecord(stored.autoTitle) ? stored.autoTitle : undefined;
     if (state && (state.status === 'completed' || state.stopped === 'named')) {
       const confirmed = titleMatchesIndex(stored as unknown as ChatSession, entry);
-      confirmedLegacyTitleCompletion = confirmed && state.version === 1;
       if (!confirmed) {
         const previous = isRecord(state.regenerationPrevious) ? state.regenerationPrevious : undefined;
         const prior = previous && isRecord(previous.metadata) && typeof previous.title === 'string'
@@ -615,7 +456,6 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
           : priorHash ? titleMatchesIndex(prior as unknown as ChatSession, entry) : !entry.autoTitleCommit && entry.title === previous?.title);
         if (confirmedPrevious) {
           candidate = prior!;
-          confirmedLegacyTitleCompletion = isRecord(candidate.autoTitle) && candidate.autoTitle.version === 1;
         } else {
           const taskId = typeof state.lastAttemptTaskId === 'string' ? state.lastAttemptTaskId
             : isRecord(state.completed) && typeof state.completed.taskId === 'string' ? state.completed.taskId : undefined;
@@ -630,7 +470,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
         }
       }
     }
-    const session = normalizeStoredSessions({ sessions: [candidate] }, scope, { confirmedLegacyTitleCompletion })[0];
+    const session = normalizeStoredSessions({ sessions: [candidate] }, scope)[0];
     return session?.workspaceKey === index.workspaceKey && !await this.isSessionDeleted(index.workspaceKey, session.id) ? session : undefined;
   }
 
@@ -659,15 +499,6 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     };
     if (this.globalStorageUri.scheme === 'file') await this.deletionAuthority.withIndexGate(index.workspaceKey, write);
     else await write();
-  }
-
-  private async readLegacyWorkspaceSessionFile(hash: string, fallback?: WorkspaceMetadata | WorkspaceSessionScope): Promise<LegacyWorkspaceSessionFile | undefined> {
-    const value = await this.readJsonFile(vscode.Uri.joinPath(this.legacyWorkspacesUri, `${hash}.json`), 'legacy workspace session file');
-    const legacy = normalizeLegacyWorkspaceSessionFile(value, fallback);
-    if (!legacy) return undefined;
-    legacy.sessions = await this.filterDeleted(legacy.workspaceKey, legacy.sessions);
-    legacy.activeSessionId = chooseActiveSessionId(legacy.sessions, legacy.activeSessionId);
-    return legacy;
   }
 
   private async readManifest(): Promise<GlobalSessionManifest> {
@@ -791,7 +622,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
   }
 
   /** One immutable readonly summary snapshot supplies candidates and ownership.
-   * No migration, body/checkpoint hydration, manifest repair or persistence is
+   * No body/checkpoint hydration, manifest repair or persistence is
    * permitted here. Unknown foreign ownership cannot authorize global-ID stores. */
   public async readHistoryCleanupCatalog(workspaceKey?: string): Promise<HistoryCleanupCatalog> {
     const snapshot = await this.readCleanupIndexSnapshot(workspaceKey);
@@ -873,23 +704,6 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
       if (orphans) { workspace.unknown += orphans; result.ownershipComplete = false; }
       if (workspace.unknown) result.diagnostics.push({ code: 'ownership_unverified', phase: 'ownership', retryable: false, workspaceHash: hash });
     }
-    // A legacy-only source has no trusted bounded owner summary. Preserve it
-    // and surface the limitation instead of reading combined message bodies.
-    try {
-      await assertManagedStoragePath(this.globalStorageUri, this.legacyWorkspacesUri);
-      for (const [name, type] of await vscode.workspace.fs.readDirectory(this.legacyWorkspacesUri)) {
-        if (type !== vscode.FileType.File || !/^[a-f0-9]{32}\.json$/u.test(name)) continue;
-        const hash = name.slice(0, -5);
-        result.unknownByHash.set(hash, (result.unknownByHash.get(hash) ?? 0) + 1);
-        result.ownershipComplete = false;
-        result.diagnostics.push({ code: 'ownership_unverified', phase: 'ownership', retryable: false, workspaceHash: hash });
-      }
-    } catch (error) {
-      if (!isFileNotFoundError(error)) {
-        result.ownershipComplete = false;
-        result.diagnostics.push(this.cleanupDiagnostic(error, 'ownership'));
-      }
-    }
     return result;
   }
 
@@ -945,15 +759,13 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
           if ((shardType & vscode.FileType.SymbolicLink) !== 0 || shardType !== vscode.FileType.File) return { status: 'unknown', reason: 'unsafe_session_shard' };
           const manifest = await this.readCleanupJson(shard, 'cleanup target identity');
           if (!isRecord(manifest)) return { status: 'unknown', reason: 'unreadable_session_identity' };
-          const identity = Number(manifest.version) === 2 && isRecord(manifest.session) ? manifest.session : manifest;
-          const id = Number(manifest.version) === 2 ? identity.id : identity.sessionId;
-          if (id !== target.id || identity.workspaceKey !== target.workspaceKey) return { status: 'unknown', reason: 'session_identity_mismatch' };
-          if (Number(manifest.version) >= 3) {
-            // Read only header fields, never messages/checkpoints, for final
-            // admission against a shard committed before its index update.
-            const updatedAt = await this.objects(shard).loadField(manifest, ['updatedAt']);
-            if (updatedAt !== target.updatedAt) return { status: 'skippedChanged', reason: 'session_shard_changed' };
-          } else if (identity.updatedAt !== target.updatedAt) return { status: 'skippedChanged', reason: 'session_shard_changed' };
+          if (manifest.version !== 4 || manifest.sessionId !== target.id || manifest.workspaceKey !== target.workspaceKey) {
+            return { status: 'unknown', reason: 'session_identity_mismatch' };
+          }
+          // Read only header fields, never messages/checkpoints, for final
+          // admission against a shard committed before its index update.
+          const updatedAt = await this.objects(shard).loadField(manifest, ['updatedAt']);
+          if (updatedAt !== target.updatedAt) return { status: 'skippedChanged', reason: 'session_shard_changed' };
         }
         const objectsUri = vscode.Uri.joinPath(shard, '..', `${shard.path.split('/').at(-1)}.objects`);
         await assertManagedStoragePath(this.globalStorageUri, objectsUri);
@@ -961,10 +773,9 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
           const type = (await vscode.workspace.fs.stat(objectsUri)).type;
           if ((type & vscode.FileType.SymbolicLink) !== 0 || type !== vscode.FileType.Directory) return { status: committed ? 'removedPendingCleanup' : 'unknown', reason: 'unsafe_session_objects' };
         } catch (error) { if (!isFileNotFoundError(error)) throw error; }
-        // Legacy writer locks live inside the object directory. Unknown/old
-        // writers cannot be proved idle by absence of a new-version use record.
+        // An unfinished object writer must never be removed during cleanup.
         const lock = vscode.Uri.joinPath(shard, '..', `${shard.path.split('/').at(-1)}.objects`, 'writer.lock');
-        try { await vscode.workspace.fs.stat(lock); return { status: committed ? 'removedPendingCleanup' : 'unavailable', reason: 'legacy_writer_lock' }; }
+        try { await vscode.workspace.fs.stat(lock); return { status: committed ? 'removedPendingCleanup' : 'unavailable', reason: 'session_writer_lock' }; }
         catch (error) { if (!isFileNotFoundError(error)) throw error; }
         if (!committed) await this.deletionAuthority.commitDeletion({ version: 1, workspaceKey: target.workspaceKey, sessionId: target.id,
           operationId, confirmedAt: new Date().toISOString(), phase: 'committed' });
@@ -986,21 +797,10 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
           await writeJsonAtomic(uri, raw, { durable: true });
         }
       });
-      const legacyUri = vscode.Uri.joinPath(this.legacyWorkspacesUri, `${getWorkspaceHash(target.workspaceKey)}.json`);
-      // Accessible V1 records are removed in a scoped read-modify-write gate.
-      await this.deletionAuthority.withIndexGate(target.workspaceKey, async () => {
-        const raw = await this.readCleanupJson(legacyUri, 'cleanup legacy source');
-        if (raw !== undefined && (!isRecord(raw) || raw.workspaceKey !== target.workspaceKey || !Array.isArray(raw.sessions))) throw new Error('Cleanup source identity cannot be verified');
-        if (isRecord(raw) && raw.workspaceKey === target.workspaceKey && Array.isArray(raw.sessions)) {
-          raw.sessions = raw.sessions.filter(item => !isRecord(item) || item.id !== target.id);
-          if (raw.activeSessionId === target.id) raw.activeSessionId = '';
-          await writeJsonAtomic(legacyUri, raw, { durable: true });
-        }
-      });
       const refreshed = await this.readWorkspaceIndex(getWorkspaceHash(target.workspaceKey));
       if (refreshed) this.scheduleManifestWorkspace(refreshed);
       await this.flush();
-      return { status: 'removedPendingCleanup', reason: 'associated_cleanup_required', inaccessibleLegacySource: true };
+      return { status: 'removedPendingCleanup', reason: 'associated_cleanup_required' };
     } catch (error) {
       const code = isRecord(error) && typeof error.code === 'string' && /^[A-Za-z_]+$/u.test(error.code) ? error.code : 'unavailable';
       return { status: committed ? 'removedPendingCleanup' : 'failedBeforeCommit', reason: `session_storage:${code}` };
@@ -1157,7 +957,6 @@ function normalizeWorkspaceIndex(value: unknown, fallback?: WorkspaceMetadata | 
     workspaceFolders,
     activeSessionId: chooseActiveSessionIdFromEntries(sessions, nonEmptyString(value.activeSessionId), fallbackActiveId),
     approvalMode: normalizeApprovalMode(value.approvalMode),
-    approvalModeMigrated: value.approvalMode === 'model_review' || value.approvalModeMigrated === true || undefined,
     sessions: sortIndexEntries(sessions),
     updatedAt: isoString(value.updatedAt, sessions[0]?.updatedAt ?? new Date(0).toISOString())
   };
@@ -1185,61 +984,22 @@ function normalizeSessionIndexEntry(value: unknown, workspaceKey: string, worksp
   };
 }
 
-/** The first generic v2 write can reach the shard and then fail before the
- * old index is replaced. Accept its v1 proof only for the same committed
- * title, revision and exact legacy provenance. New requests always use scoped bases. */
+/** The workspace index attests the exact completed automatic title. */
 function titleMatchesIndex(session: ChatSession, entry?: SessionIndexEntry): boolean {
-  if (!entry?.autoTitleCommit || entry.title !== session.title || entry.customTitle) return false;
-  if (automaticTitleCommit(session) === entry.autoTitleCommit) return true;
-  const state = session.autoTitle;
-  return state?.version === 2 && state.stopped === 'named' && state.status === 'completed'
-    && !!state.completed && !state.completed.basis?.scope
-    && automaticTitleCommit({ ...session, autoTitle: { ...state, version: 1 } }) === entry.autoTitleCommit;
+  return !!entry?.autoTitleCommit && entry.title === session.title && !entry.customTitle
+    && automaticTitleCommit(session) === entry.autoTitleCommit;
 }
 
-/** The format is selected from the stored metadata version. Never hash a
- * migrated v2 object when verifying an old v1 index marker. */
 export function automaticTitleCommit(session: ChatSession): string | undefined {
   if (session.customTitle || !session.autoTitle || typeof session.id !== 'string' || typeof session.title !== 'string') return undefined;
   const raw = session.autoTitle;
   const state = normalizeSessionTitle(raw, undefined, { preserveRunning: true });
-  if (raw.version === 1) {
-    if (raw.status !== 'completed' || !state.completed) return undefined;
-    return createHash('sha256').update(JSON.stringify([
-      session.id, session.title, state.revision, state.completed.taskId,
-      state.completed.basis.messages.map(ref => [ref.id, ref.hash]), state.completed.basis.lastMessageId,
-      ...(state.completed.basis.conversation ? [state.completed.basis.conversation] : [])
-    ]), 'utf8').digest('hex');
-  }
   if (raw.version !== 2 || raw.stopped !== 'named' || raw.status !== 'completed'
     || state.stopped !== 'named' || state.status !== 'completed') return undefined;
   return createHash('sha256').update(JSON.stringify([
     'session_title_v2', session.id, session.title, state.revision, state.stopped,
     state.completed ? [state.completed.taskId, state.completed.basis] : null
   ]), 'utf8').digest('hex');
-}
-
-function normalizeLegacyWorkspaceSessionFile(value: unknown, fallback?: WorkspaceMetadata | WorkspaceSessionScope): LegacyWorkspaceSessionFile | undefined {
-  if (!isRecord(value)) return undefined;
-  const workspaceKey = nonEmptyString(value.workspaceKey) ?? fallback?.key;
-  if (!workspaceKey) return undefined;
-  const workspaceName = nonEmptyString(value.workspaceName) ?? fallback?.name ?? workspaceKey;
-  const workspaceFolders = Array.isArray(value.workspaceFolders) ? stringArray(value.workspaceFolders) : fallback?.folderUris ?? [];
-  const scope = { key: workspaceKey, name: workspaceName, folderUris: workspaceFolders };
-  const sessions = normalizeStoredSessions(value, scope, { confirmedLegacyTitleCompletion: true }).filter((session) => session.workspaceKey === workspaceKey);
-  const fallbackActiveId = fallback && 'activeSessionId' in fallback ? fallback.activeSessionId : undefined;
-  const activeSessionId = chooseActiveSessionId(sessions, nonEmptyString(value.activeSessionId), fallbackActiveId);
-  return {
-    version: 1,
-    workspaceKey,
-    workspaceName,
-    workspaceFolders,
-    activeSessionId,
-    approvalModeMigrated: value.approvalMode === 'model_review' || value.approvalModeMigrated === true || undefined,
-    approvalMode: normalizeApprovalMode(value.approvalMode ?? sessions.find((session) => session.id === activeSessionId)?.approvalMode),
-    sessions: sortSessionsByUpdatedAt(sessions),
-    updatedAt: isoString(value.updatedAt, sessions[0]?.updatedAt ?? new Date(0).toISOString())
-  };
 }
 
 function sortIndexEntries(entries: SessionIndexEntry[]): SessionIndexEntry[] {
@@ -1249,32 +1009,6 @@ function sortIndexEntries(entries: SessionIndexEntry[]): SessionIndexEntry[] {
 function chooseActiveSessionIdFromEntries(entries: readonly SessionIndexEntry[], ...candidates: Array<string | undefined>): string {
   for (const candidate of candidates) if (candidate && entries.some((entry) => entry.id === candidate)) return candidate;
   return entries[0]?.id ?? '';
-}
-
-function chooseActiveSessionId(sessions: readonly ChatSession[], ...candidates: Array<string | undefined>): string {
-  for (const candidate of candidates) if (candidate && sessions.some((session) => session.id === candidate)) return candidate;
-  return sessions[0]?.id ?? '';
-}
-
-function groupSessionsByWorkspace(sessions: readonly ChatSession[]): Map<string, ChatSession[]> {
-  const groups = new Map<string, ChatSession[]>();
-  for (const session of sessions) groups.set(session.workspaceKey, [...(groups.get(session.workspaceKey) ?? []), session]);
-  return groups;
-}
-
-function getWorkspaceScopeForSessions(workspaceKey: string, sessions: readonly ChatSession[], current: WorkspaceSessionScope): WorkspaceSessionScope {
-  if (workspaceKey === current.key) return current;
-  const newest = sortSessionsByUpdatedAt([...sessions])[0];
-  return { key: workspaceKey, name: newest?.workspaceName || workspaceKey, folderUris: newest?.workspaceFolders ?? [] };
-}
-
-function mergeSessionsById(existing: readonly ChatSession[], incoming: readonly ChatSession[]): ChatSession[] {
-  const byId = new Map(existing.map((session) => [session.id, session]));
-  for (const session of incoming) {
-    const previous = byId.get(session.id);
-    if (!previous || getSessionUpdatedTimestamp(session) >= getSessionUpdatedTimestamp(previous)) byId.set(session.id, session);
-  }
-  return sortSessionsByUpdatedAt(Array.from(byId.values()));
 }
 
 function manifestEntryToMetadata(entry: GlobalSessionWorkspaceManifestEntry | undefined): WorkspaceMetadata | undefined {

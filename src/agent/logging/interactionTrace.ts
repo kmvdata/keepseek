@@ -211,14 +211,14 @@ export class InteractionTraceLogService {
   }
 }
 
-/** Only explicit sidecar ownership permits removal; legacy log bodies are never
+/** Only explicit sidecar ownership permits removal; unowned log bodies are never
  * read to infer ownership. One recycler instance shares its bounded metadata scan
  * across a batch rather than rescanning all logs for every target. */
 export class InteractionTraceCleanup {
-  private catalog?: Promise<{ bySession: Map<string, vscode.Uri[]>; unverifiedLegacySources: number }>;
+  private catalog?: Promise<{ bySession: Map<string, vscode.Uri[]>; unverifiedSources: number }>;
   public constructor(private readonly root: vscode.Uri) {}
-  private async readCatalog(): Promise<{ bySession: Map<string, vscode.Uri[]>; unverifiedLegacySources: number }> {
-    const result = { bySession: new Map<string, vscode.Uri[]>(), unverifiedLegacySources: 0 };
+  private async readCatalog(): Promise<{ bySession: Map<string, vscode.Uri[]>; unverifiedSources: number }> {
+    const result = { bySession: new Map<string, vscode.Uri[]>(), unverifiedSources: 0 };
     const logs = vscode.Uri.joinPath(this.root, TRACE_ROOT_DIR);
     await assertManagedStoragePath(this.root, logs);
     let entries: [string, vscode.FileType][];
@@ -233,13 +233,13 @@ export class InteractionTraceCleanup {
       catch (error) { if (isMissingAssociatedFile(error)) continue; throw error; }
       const ownedBases = new Set(files.filter(([name, type]) => type === vscode.FileType.File && /^run-.*\.jsonl\.owner\.json$/u.test(name)).map(([name]) => name.slice(0, -'.owner.json'.length)));
       for (const [name, type] of files) if (type === vscode.FileType.File && /^run-.*\.jsonl$/u.test(name)
-        && !/\.perf-[0-3]\.jsonl$/u.test(name) && !ownedBases.has(name)) result.unverifiedLegacySources++;
+        && !/\.perf-[0-3]\.jsonl$/u.test(name) && !ownedBases.has(name)) result.unverifiedSources++;
       for (const baseName of ownedBases) {
         const base = vscode.Uri.joinPath(directory, baseName), ownerUri = vscode.Uri.parse(`${base.toString()}.owner.json`);
         await assertManagedStoragePath(this.root, ownerUri);
         const owner = await readAssociatedJson(ownerUri);
         if (owner?.version !== 1 || typeof owner.sessionId !== 'string' || typeof owner.runId !== 'string'
-          || !baseName.endsWith(`-${owner.runId}.jsonl`)) { result.unverifiedLegacySources++; continue; }
+          || !baseName.endsWith(`-${owner.runId}.jsonl`)) { result.unverifiedSources++; continue; }
         const list = result.bySession.get(owner.sessionId) ?? [];
         list.push(base); result.bySession.set(owner.sessionId, list);
       }
@@ -263,7 +263,7 @@ export class InteractionTraceCleanup {
   public async hasSessionHistory(sessionId: string): Promise<boolean> {
     return (await this.indexedBases(sessionId)).length > 0;
   }
-  public async cleanup(sessionId: string): Promise<{ unverifiedLegacySources: number }> {
+  public async cleanup(sessionId: string): Promise<{ unverifiedSources: number }> {
     const authority = new SessionDeletionAuthority(this.root);
     return authority.withSessionIdGate(sessionId, async () => {
       const catalog = await (this.catalog ??= this.readCatalog());
@@ -277,12 +277,12 @@ export class InteractionTraceCleanup {
         // Retain the content-free owner marker: external post-run callbacks have
         // only runId/URI and still need to discover the deleted parent session.
       }
-      return { unverifiedLegacySources: catalog.unverifiedLegacySources };
+      return { unverifiedSources: catalog.unverifiedSources };
     });
   }
 }
 
-export async function deleteSessionInteractionTraces(root: vscode.Uri, sessionId: string): Promise<{ unverifiedLegacySources: number }> {
+export async function deleteSessionInteractionTraces(root: vscode.Uri, sessionId: string): Promise<{ unverifiedSources: number }> {
   return new InteractionTraceCleanup(root).cleanup(sessionId);
 }
 
@@ -642,7 +642,5 @@ function formatTimestampForFile(date: Date): string {
 
 function traceDayEndMs(day: string): number {
   if (!/^\d{4}-\d{2}-\d{2}$/u.test(day)) return NaN;
-  // Older folders were UTC-based. Use the later boundary so moving to local
-  // dates cannot shorten their retention period.
-  return Math.max(Date.parse(`${day}T23:59:59.999`), Date.parse(`${day}T23:59:59.999Z`));
+  return Date.parse(`${day}T23:59:59.999`);
 }

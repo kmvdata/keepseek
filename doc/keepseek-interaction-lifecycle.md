@@ -53,19 +53,21 @@ Webview → Host 消息唯一入口仍是 `provider/webviewMessages.ts`；Host �
 
 | 工作 | 安全展示正文 | 接收/继续任务 | 分类依据 |
 | --- | --- | --- | --- |
-| 初始 session 初始化 / lazy session load | 必须完成 | 必须完成 | 加载可替换内存 store，未跨屏障不能保存占位会话覆盖旧历史 |
+| 初始 summary 索引 / 用户选择后的 lazy session load | 必须完成 | 必须完成 | 生产启动显式 fresh，只读摘要并在内存建立新空白；不读取旧 active shard、不保存占位覆盖历史 |
 | 全局审批/ChangeSet/DraftRun 初始化及初始必要恢复 | 导航须等待该屏障 | 必须完成 | 独立 `startupNavigationReadyPromise`，失败不把历史当空白或安全就绪 |
 | 模型目录、来源及必要选择保存 | 不阻止导航和正文 | 必须完成 | 模型解析与保存决定实际请求来源；余额磁盘展示不属于此屏障 |
 | 内存选择与持久化 activeSessionId | 选择已确定后可显示 | 必须完成 | 页面、内存及持久化选择一致，旧导航不可回写 |
 | ChangeSet/DraftRun session load | 可先显示正文，操作入口保持禁用 | 必须完成 | 旧提案、执行结果与历史归属需要复核 |
 | pending history truncation 恢复及操作失效 flush | 可显示安全正文/恢复状态 | 必须完成 | 无效操作不得执行，不能丢失截断意图或重复副作用 |
-| 当前会话项目指令、Skills、引用上下文 | 可先显示正文、编辑草稿 | 必须完成 | 请求投影、权限与来源需正确；来源失败不能静默就绪 |
+| 当前会话项目指令、Skills、引用上下文 | 可先显示正文、编辑草稿 | 模型请求前必须完成 | 空白会话标记 deferred，可提交后在 task owner 下真实加载；已选非空历史仍在准备完成后开放提交，来源失败不能发模型请求 |
 | `userTaskBudgets` / 完整 checkpoint 读取 | 不必挡正文 | 相应继续/恢复前必须完成 | 安全时间、费用、逻辑调用量、委派树与恢复键权威 |
 | Usage Ledger 展示重建、参考费用/缓存观测 | 不阻塞 | 不阻塞 | 请求级原始记录单独耐久；这些汇总不是安全预算 |
 | 子代理摘要、活动展示恢复 | 不阻塞 | 不阻塞 | `restoreUsage()` 只读 summaries/activities，不恢复 scheduler 预算或调度任务 |
 | 标题生成/手动刷新、余额 | 不阻塞 | 不因展示占主任务 | 独立 session/request 所有权；用户指令 durable 后并行 drain，自动与主任务共享根预算预占，手动使用独立小预算；真实用量归目标，首次成功永久停止 |
 
-导航不等待整个 `startupInitializationPromise`。会话及必要安全存储跨过初始化屏障后，即使旧活动会话项目上下文、模型目录或展示工作仍在加载，也可开始目标会话事务。create/select/copy 的目标正文、安全选择保存、操作记录恢复及截断失效 flush 完成后，同步释放导航 owner。项目上下文继续按目标 session/generation 准备，此时 canEdit=true、canNavigate=true、canSubmit=false；上下文和其它执行必要条件满足后在同次状态更新开放提交。导航方法返回的 Promise 仍可等待上下文完成供调用方收口，但 UI 导航能力不依赖这个 Promise 结算。会话/上下文 generation 变化使旧启动或导航上下文工作的 ready、error 和 finally 失效，A→B→A 也不能把第一次进入 A 的结果赋给第二次 A；旧 finally 不释放新 owner、不重复发布 sessionChanged 抬高新入口 revision 下界。不可取消的读取可继续完成缓存，但不能回写新会话状态。
+生产启动及工作区切换使用 `fresh: true`：仅摘要索引进入内存，新空白不恢复旧 active、对象图、计划或上下文。新建空白、历史超时替换及清理后的空白均将上下文标记为 `deferred`，在会话/安全/模型条件就绪时可提交。第一条任务在首个 await 前占有 task owner，然后真实加载缺失或已变更的项目指令与 Skills，加载失败不得进入模型派发。自动保留刷新只读摘要并保留当前 resident active，不能恢复磁盘旧选择。
+
+导航不等待整个 `startupInitializationPromise`。会话及必要安全存储跨过初始化屏障后，即使旧活动会话项目上下文、模型目录或展示工作仍在加载，也可开始目标会话事务。create/select/copy 的目标正文、安全选择保存、操作记录恢复及截断失效 flush 完成后，同步释放导航 owner。对于非空历史，项目上下文继续按目标 session/generation 准备，此时 canEdit=true、canNavigate=true、canSubmit=false；上下文和其它执行必要条件满足后在同次状态更新开放提交。导航方法返回的 Promise 仍可等待上下文完成供调用方收口，但 UI 导航能力不依赖这个 Promise 结算。会话/上下文 generation 变化使旧启动或导航上下文工作的 ready、error 和 finally 失效，A→B→A 也不能把第一次进入 A 的结果赋给第二次 A；旧 finally 不释放新 owner、不重复发布 sessionChanged 抬高新入口 revision 下界。不可取消的读取可继续完成缓存，但不能回写新会话状态。
 
 历史正文选择在 store 内有 15 秒读取上限（`HISTORY_SESSION_LOAD_TIMEOUT_MS`），覆盖 `isSessionDeleted` 检查和正文读取。该读取向存储适配器传递 `readOnly`，不触发迁移或索引修复，防止迟到的旧索引覆盖新选择。超时只放弃尚未提交的选择，不缓存迟到正文、不改 active、不调用保存回调或 persist；Host 只释放该次 owner，随后复用当前非目标的空会话或按新建流程打开空会话，以非阻塞信息提示告知用户。新建会话仍通过正常保存屏障；超时读取本身不写入。开始 active 切换和 persist 后不再计时反转，因为内存已切换时放弃提交会制造不确定态。操作记录、历史截断恢复与项目上下文/Skills 仍 fail-closed，超时不能把这些依赖降级为 ready；真实 I/O 错误保留失败和重试语义。
 
@@ -75,7 +77,7 @@ Webview → Host 消息唯一入口仍是 `provider/webviewMessages.ts`；Host �
 
 安全预算来自 `sessions/userTaskBudget.ts`、`getTaskCheckpoint()` 与 Runner checkpoint：`usedMs/maxExecutionMs/maxCost/usedCostByCurrency/runBudget/budgetLimits/delegationBudget/commandRecoveryKeys`。Runner 用 checkpoint 恢复任务时钟、费用及委派树；审批 reviewer/子代理继承同一上限。展示后台化不修改这些恢复/合并路径，不少计、重复计或归零；正费用上限遇不可计价来源仍 fail-closed。
 
-自动标题在真实用户指令正文提交保存成功后独立准备并行请求，不等待完整助手回答、工程成功或前台 owner 释放；初次主请求也不等待标题响应。自动只用本条 user.content，手动在确认目标时冻结最多最近两条真实 user.content，均不携带助手、工具、展开内容或旧标题；手动仍遵守现有 busy/saving 能力门禁。每 session 串行保留已观察的真实提交候选，自动续跑/审批不新增轮次，普通追加和切换查看不取消有效在途；首次有效标题与停止标记共同提交后永久停止。新 user_inputs_v3 basis 仅核验所选用户正文，助手 streaming/失败或变化不使其过期；旧 basis 按原语义兼容读取。手动改名（含同文本）与刷新优先，旧结果/保存/finally 不覆盖新意图。用户正文保存后、预运行压缩前准备实际 root 活预算，并原对象注入 Runner。费用/token 无有限上限且请求无限或至少剩两次时可先开放标题，保留一次主调用余量；有限额度或仅余一次则等主请求首次预占耐久的短预算门，不等助手回答。用户亲自发送的 recovery 补充用新输入身份命名，同时保留旧执行 root 的已花额度。不能各从旧快照花同一余额或以等待完整标题响应串行阻塞初次主请求；后续同 root 续跑仍可等旧标题结算恢复单一权威。并行标题不重复累计主任务时间、不占输入 owner。完整状态、迁移与验收见[会话标题](keepseek-session-title-verification.md)。
+自动标题在真实用户指令正文提交保存成功后独立准备并行请求，不等待完整助手回答、工程成功或前台 owner 释放；初次主请求也不等待标题响应。自动只用本条 user.content，手动在确认目标时冻结最多最近两条真实 user.content，均不携带助手、工具、展开内容或旧标题；手动仍遵守现有 busy/saving 能力门禁。每 session 串行保留已观察的真实提交候选，自动续跑/审批不新增轮次，普通追加和切换查看不取消有效在途；首次有效标题与停止标记共同提交后永久停止。新 user_inputs_v3 basis 仅核验所选用户正文，助手 streaming/失败或变化不使其过期；只支持当前 `user_inputs_v3` basis。手动改名（含同文本）与刷新优先，旧结果/保存/finally 不覆盖新意图。用户正文保存后、预运行压缩前准备实际 root 活预算，并原对象注入 Runner。费用/token 无有限上限且请求无限或至少剩两次时可先开放标题，保留一次主调用余量；有限额度或仅余一次则等主请求首次预占耐久的短预算门，不等助手回答。用户亲自发送的 recovery 补充用新输入身份命名，同时保留旧执行 root 的已花额度。不能各从旧快照花同一余额或以等待完整标题响应串行阻塞初次主请求；后续同 root 续跑仍可等旧标题结算恢复单一权威。并行标题不重复累计主任务时间、不占输入 owner。完整状态、恢复与验收见[会话标题](keepseek-session-title-verification.md)。
 
 `ChatSessionStore.persist()` 和 `CoalescedWriter` 的等待者仅在其 revision 或包含它的更新完整快照提交成功后完成。可合并普通快照，不可用 debounce、best-effort 或“界面已空闲”替代必要屏障。必要保存失败保留内存状态、明确阻塞及重试范围；展示错误不重新锁住整个输入框，未知副作用不得自动重跑。
 
@@ -171,7 +173,7 @@ Webview → Host 消息唯一入口仍是 `provider/webviewMessages.ts`；Host �
 本节是可执行步骤，未在本次受控测试中冒充现场通过。使用开发宿主 F5 和隔离测试 workspace/session 存储；不要读取、破坏或改写真实会话来制造证据。记录平台、扩展基线、场景、阶段、首次安全可见/可编辑/可提交时间与诊断。模型场景仅在另行允许真实模型调用的环境进行。
 
 1. **冷启动立即进入历史**：F5 打开 KeepSeek，立即展开历史并选择一条目标会话，输入多行草稿。记录会话初始化、目标正文、安全恢复、模型、上下文及后台各阶段时间，以及正文可见/可编辑/可提交时间。仅模型暂停时显示模型等待，操作恢复与保存也有对应文案；目标条件满足后不再等待旧活动会话上下文或通知 timer。
-2. **新建与长历史**：准备隔离的空白及长历史会话，多次点击新建、重复选同一项并 A→B→A。检查正文/内存/持久化选择一致；暂停目标上下文，在安全恢复/保存完成后无需等上下文即可再次导航，期间仍不能提交。分别放行旧成功/失败并 A→B→A，确认只有当前 generation 可改变就绪及错误，旧 finally 不重复触发切换或清新 owner。原有主任务运行时导航限制不变。
+2. **新建与长历史**：准备隔离的空白及长历史会话，多次点击新建、重复选同一项并 A→B→A。检查正文/内存/持久化选择一致；新空白不读项目上下文即可提交；显式选择非空历史并暂停其上下文，在安全恢复/保存完成后无需等上下文即可再次导航，期间仍不能提交。分别放行旧成功/失败并 A→B→A，确认只有当前 generation 可改变就绪及错误，旧 finally 不重复触发切换或清新 owner。原有主任务运行时导航限制不变。
 3. **慢展示与慢安全读取**：开发替身分别暂停 ledger/subagent 展示读取、ChangeSet/DraftRun、历史恢复和项目上下文。前两项显示统计加载中但不阻止就绪；后几项可编辑草稿、不可执行过期动作，解除后无需等待 8 秒通知。
 4. **提交竞态与草稿**：在受控来源准备屏障重复 Enter/点击发送，同时触发导航；最多接收一个冲突请求。注入拒绝/失败/迟到反馈，检查不丢草稿、不跨会话发送、不自动重试；编辑重发保留历史截断与缓存前缀合同。
 5. **任务结束、错误、取消**：在可控 Runner 替身中验证正常返回、错误和中止，检查持续提示立即结束；慢必要保存显示保存阶段且无虚假 Stop；普通错误/完成通知保留合理时长。

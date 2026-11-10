@@ -30,8 +30,6 @@ interface SubagentReservationInput {
   depth: number;
   proposal: boolean;
   scope?: ProposalPathScope;
-  /** Legacy test/adapter surface. Runtime callers must pass a URI-resolved scope. */
-  paths?: readonly string[];
   roots?: readonly WorkspaceScopeRoot[];
   conflictingScopes?: readonly ProposalPathScope[];
 }
@@ -73,8 +71,9 @@ export class SubagentScheduler {
         return { ok: false, reason: `This delegation tree has reached its ${DEFAULT_SUBAGENT_MAX_CHILDREN_PER_TREE}-child limit.` };
       }
       if (input.proposal) {
-        const roots = input.roots?.length ? input.roots : [legacyScopeRoot()];
-        const scope = input.scope ?? (input.paths?.length ? legacyPathScope(input.paths) : { kind: 'workspace' as const });
+        if (!input.scope || !input.roots?.length) return { ok: false, reason: 'Proposal reservations require a resolved workspace scope.' };
+        const roots = input.roots;
+        const scope = input.scope;
         for (const conflict of input.conflictingScopes ?? []) {
           if (scopesOverlap(scope, conflict, roots)) {
             return { ok: false, reason: 'Proposal scope conflicts with an existing parent DraftEdit.' };
@@ -151,20 +150,6 @@ export class SubagentScheduler {
     this.treeBudgets.delete(treeId);
   }
 
-}
-
-function legacyScopeRoot(): WorkspaceScopeRoot {
-  return { id: 'legacy', name: 'legacy', uri: {} as never, caseSensitive: true };
-}
-
-function legacyPathScope(paths: readonly string[]): ProposalPathScope {
-  return {
-    kind: 'paths',
-    claims: paths.map((value) => ({
-      rootId: 'legacy',
-      segments: value.trim().replace(/\\/gu, '/').split('/').filter((segment) => segment && segment !== '.')
-    }))
-  };
 }
 
 class Semaphore {

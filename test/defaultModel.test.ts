@@ -163,7 +163,7 @@ test('an existing store observes another window default and rolls back an optimi
   assert.deepEqual(identity((await store.refresh()).defaultModel), b);
 });
 
-test('configuration ignores an inherited legacy model ID in a new project and preserves explicit project choices', () => {
+test('configuration requires a complete project identity and otherwise adopts the global default', () => {
   const original = vscode.workspace.getConfiguration;
   let workspaceValues: Record<string, string> = {};
   const inheritedValues: Record<string, string> = {
@@ -182,7 +182,7 @@ test('configuration ignores an inherited legacy model ID in a new project and pr
     const models = createModelCatalog([source('a'), source('b')]);
     assert.deepEqual(getConfiguredModelSelection(models, b), b);
     workspaceValues = { selectedModelId: 'shared' };
-    assert.deepEqual(getConfiguredModelSelection(models, b), a);
+    assert.deepEqual(getConfiguredModelSelection(models, b), b);
     workspaceValues.selectedSourceId = 'deleted';
     assert.deepEqual(getConfiguredModelSelection(models, b), b);
     workspaceValues.selectedSourceId = 'a';

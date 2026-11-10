@@ -148,47 +148,9 @@ test('host measured task never sums Runner snapshots, including duplicate/old sn
   clock.dispose();
 });
 
-test('legacy explicit continuations join only their original user task and preserve reliable totals', () => {
-  const session = createEmptySession();
-  session.executionTime = { version: 1, byTask: { oldMissing: 5000 }, incomplete: true };
-  session.messages = [
-    { id: 'first', role: 'user', content: 'first task', createdAt: '' }, message('a', 33470),
-    { id: 'auto', role: 'user', content: 'host result', createdAt: '', contextMeta: { displayKind: 'delegated_auto_continue' } }, message('b', 8681),
-    { id: 'new', role: 'user', content: 'continue with an independent question', createdAt: '' }, message('c', 1000)
-  ];
-  const before = JSON.stringify(session.messages);
-  session.executionTime = reconcileExecutionTime(session.executionTime, session.messages);
-  assert.equal(JSON.stringify(session.messages), before);
-  assert.deepEqual(session.executionTime.tasks?.first.segments, ['a', 'b']);
-  assert.deepEqual(session.executionTime.tasks?.new.segments, ['c']);
-  assert.equal(executionTimeView(session).totalMs, 48151);
-  assert.equal(executionTimeView(session).currentMs, 1000);
-  const snapshot = JSON.stringify(session.executionTime);
-  session.executionTime = reconcileExecutionTime(JSON.parse(snapshot), session.messages);
-  assert.equal(JSON.stringify(session.executionTime), snapshot);
-});
 
-test('legacy supplementary user turn with the same archived execution ID cannot double the high-water mark', () => {
-  const session = createEmptySession();
-  session.executionTime = { version: 1, byTask: { segment: 3000 }, incomplete: true };
-  session.messages = [
-    { id: 'user', role: 'user', content: 'original', createdAt: '' }, message('segment', 2000),
-    { id: 'supplement', role: 'user', content: 'additional requirement', createdAt: '' }, { ...message('segment', 4000), id: 'recovery' }
-  ];
-  const contents = session.messages.map(m => m.content);
-  session.executionTime = reconcileExecutionTime(session.executionTime, session.messages);
-  assert.equal(executionTimeView(session).totalMs, 4000);
-  assert.equal(executionTimeView(session).currentMs, 4000);
-  assert.ok(session.messages.every(entry => !entry.userTask));
-  assert.deepEqual(session.executionTime.tasks?.user.segments, ['segment']);
-  // Resuming an actual execution remains an explicit compatibility boundary.
-  assert.equal(taskForSegment(session, 'segment')?.id, 'user');
-  assert.equal(session.messages[2].userTask?.id, 'user');
-  assert.equal(taskGoal(session.messages, 'user'), 'original\n\nadditional requirement');
-  assert.deepEqual(session.messages.map(m => m.content), contents);
-  session.executionTime = reconcileExecutionTime(session.executionTime, session.messages);
-  assert.equal(executionTimeView(session).totalMs, 4000);
-});
+
+
 
 test('complete webview handles timing ticks and keeps new/history session navigation working', () => {
   const view = createWebviewDomHarness();
@@ -263,26 +225,4 @@ test('complete webview handles timing ticks and keeps new/history session naviga
   delete view.window.keepseekInputControls;
   assert.doesNotThrow(() => tick(a.id, 67_000));
   assert.equal(view.state.usageMetrics.executionTime.currentMs, 67_000);
-});
-
-
-test('timing reconciliation derives legacy roots from frozen messages without writing task links', () => {
-  const messages: ChatMessage[] = [
-    { id: 'legacy-user', role: 'user', content: 'Explain timing', createdAt: '' },
-    { ...message('legacy-run', 1200), id: 'legacy-answer', content: 'Timing answer' },
-    { id: 'legacy-continuation', role: 'user', content: 'Host continuation', createdAt: '',
-      contextMeta: { displayKind: 'draft_run_auto_continue' } },
-    { ...message('legacy-next-run', 800), id: 'legacy-final-answer', content: 'Final answer' }
-  ];
-  const before = JSON.stringify(messages);
-  for (const entry of messages) Object.freeze(entry);
-  Object.freeze(messages);
-  const stats = reconcileExecutionTime(undefined, messages);
-  assert.equal(JSON.stringify(messages), before);
-  assert.ok(messages.every(entry => !entry.userTask));
-  assert.deepEqual(stats.tasks?.['legacy-user'].segments, ['legacy-run', 'legacy-next-run']);
-  assert.equal(stats.tasks?.['legacy-user'].usedMs, 2000);
-  assert.equal(stats.currentTaskId, 'legacy-user');
-  assert.equal(stats.incomplete, true);
-  assert.equal(JSON.stringify(reconcileExecutionTime(stats, messages)), JSON.stringify(stats));
 });

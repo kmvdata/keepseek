@@ -1,6 +1,7 @@
 import { OUTPUT_BUDGET_POLICY_VERSION } from '../shared/outputBudget';
 import { normalizeRequestBudget, type RequestBudgetSnapshot } from './requestBudget';
 import { createHash, randomUUID } from 'node:crypto';
+import { CURRENT_AGENT_PROTOCOL_VERSION } from './protocol';
 import type { ActivatedSkill, AgentRequest, AgentToolRound, DraftEdit, DraftRunProposal, RepairLoopState } from '../shared/types';
 import type { DeepSeekAssistantMessage, DeepSeekMessage, DeepSeekUsage } from './deepseek/types';
 import type { ProviderNativeRunState } from './runner';
@@ -25,12 +26,8 @@ export type StopReason = 'user_stop' | 'time_budget' | 'tool_timeout' | 'connect
   | 'provider_error' | 'extension_restart' | 'waiting_for_user' | 'budget_pause' | 'budget_exhausted' | 'completed' | 'storage_failure' | 'resource_limit'
   | 'output_truncated' | 'cost_limit' | 'no_progress_loop' | 'uncertain_tool_result';
 
-/** Deserialization-only values produced by v1 checkpoints. V2 never emits them. */
-export type LegacyCapacityFinishReason = 'tool_iterations_exhausted' | 'tool_call_limit_exhausted'
-  | 'tool_result_budget_exhausted' | 'context_window_exhausted' | 'run_time_limit_exhausted';
-
 export interface RunCheckpoint {
-  version: 1 | 2;
+  version: 2;
   taskId: string;
   attempt: number;
   attemptIds: string[];
@@ -101,9 +98,9 @@ export interface RunCheckpoint {
     toolResultTokens: number;
     validationState?: import('./repairLoop').RunValidationState;
     repairLoop: RepairLoopState;
-    /** V2 internal Provider context segmentation. Legacy checkpoints omit it. */
+    /** Internal Provider context segmentation. */
     epoch?: ContextEpochState;
-    budgetStopReason?: LegacyCapacityFinishReason;
+    budgetStopReason?: 'tool_budget_exhausted' | 'tool_round_budget_exhausted' | 'tool_call_budget_exhausted';
     budgetStopInstructionQueued?: boolean;
     /** Complete response plus individual completed tool results. Never a delta. */
     pending?: {
@@ -128,7 +125,7 @@ export function createRunCheckpoint(
   maxCost = 0
 ): RunCheckpoint {
   const sourceConfig = request.sourceConfig;
-  const input = { ...request };
+  const input = { ...request, requestProtocolVersion: CURRENT_AGENT_PROTOCOL_VERSION };
   delete input.sourceConfig;
   delete input.signal;
   delete input.checkpoint;
@@ -160,7 +157,8 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
   if (!value || typeof value !== 'object') return undefined;
   const cp = value as RunCheckpoint;
   try {
-    if ((cp.version !== 1 && cp.version !== 2) || !cp.taskId || !cp.request?.model?.id || !Array.isArray(cp.request.history)
+    if (cp.version !== 2 || !cp.taskId || !cp.request?.model?.id
+      || cp.request.requestProtocolVersion !== CURRENT_AGENT_PROTOCOL_VERSION || !Array.isArray(cp.request.history)
       || !cp.source?.endpointHash || !Array.isArray(cp.workspaceFolders)
       || !Array.isArray(cp.attemptIds) || !Number.isFinite(cp.usedMs) || cp.usedMs < 0
       || !Number.isFinite(cp.maxExecutionMs) || cp.maxExecutionMs < 0) return undefined;
@@ -201,7 +199,7 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
       || cp.commandRecoveryBatch.keys.some(key => typeof key !== 'string' || !/^[a-f0-9]{64}$/u.test(key)))) return undefined;
     if (cp.commandRecoveryExhausted !== undefined && typeof cp.commandRecoveryExhausted !== 'boolean') return undefined;
     if (cp.exactRecoveryBlocked !== undefined && typeof cp.exactRecoveryBlocked !== 'boolean') return undefined;
-    if (cp.outputBudgetPolicyVersion !== undefined && ![1, OUTPUT_BUDGET_POLICY_VERSION].includes(cp.outputBudgetPolicyVersion)) return undefined;
+    if (cp.outputBudgetPolicyVersion !== undefined && cp.outputBudgetPolicyVersion !== OUTPUT_BUDGET_POLICY_VERSION) return undefined;
     if (cp.lastRequestBudget && !normalizeRequestBudget(cp.lastRequestBudget)) return undefined;
     if (cp.modelStepGenerationStrategy !== undefined && cp.modelStepGenerationStrategy !== 'small_tools') return undefined;
     if (cp.outputFailure) {
@@ -216,7 +214,7 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
     }
     if (cp.outputBudgetMigrations && (!Array.isArray(cp.outputBudgetMigrations) || cp.outputBudgetMigrations.length > 32
       || cp.outputBudgetMigrations.some((m) => !['larger_budget', 'smaller_tool_calls'].includes(m.reason)
-        || ![1, 2].includes(m.oldPolicy) || m.newPolicy !== OUTPUT_BUDGET_POLICY_VERSION
+        || m.oldPolicy !== OUTPUT_BUDGET_POLICY_VERSION || m.newPolicy !== OUTPUT_BUDGET_POLICY_VERSION
         || !/^[a-f0-9]{64}$/u.test(m.oldRequestHash) || !/^[a-f0-9]{64}$/u.test(m.newRequestHash)
         || ![m.oldOutputTokens, m.newOutputTokens].every((n) => Number.isSafeInteger(n) && n > 0)))) return undefined;
     if (cp.state?.epoch && !validEpochProgressState(cp.state.epoch)) return undefined;
@@ -233,12 +231,9 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
       if (!delegation) return undefined;
       copy.taskPlan.delegation = delegation;
     }
-    // Older retries counted scheduled waits. Conservatively retain the spent
-    // allowance rather than granting a fresh six requests after recovery.
-    copy.modelStepAttempts ??= copy.modelStepRetries ? copy.modelStepRetries + 1 : 0;
+    copy.modelStepAttempts ??= 0;
     copy.modelStepRetries = Math.max(0, copy.modelStepAttempts - 1);
-    copy.version = 2;
-    copy.outputBudgetPolicyVersion ??= 1;
+    copy.outputBudgetPolicyVersion ??= OUTPUT_BUDGET_POLICY_VERSION;
     if (copy.lastRequestBudget) copy.lastRequestBudget = normalizeRequestBudget(copy.lastRequestBudget);
     if (copy.outputFailure) copy.outputFailure = {
       kind: 'tool_output_truncated', finishReason: copy.outputFailure.finishReason, toolIntegrity: 'incomplete', toolsExecuted: 0,
@@ -255,41 +250,9 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
     const hasSerializedRunBudget = Object.prototype.hasOwnProperty.call(copy, 'runBudget');
     if (hasSerializedRunBudget && (!copy.runBudget || typeof copy.runBudget !== 'object'
       || Array.isArray(copy.runBudget))) return undefined;
-    const legacyCapacityStop = !hasSerializedRunBudget && (copy.stopReason === 'budget_exhausted'
-      || copy.state?.budgetStopReason || copy.finalResponse?.runDetails.budgetStopReason);
-    const legacyToolBudgetStop = legacyCapacityStop && isToolBudgetReason(readBudgetStopReason(copy));
     if (hasSerializedRunBudget) {
       copy.runBudget = createLogicalRunBudgetState(copy.runBudget);
       copy.modelRequests = copy.runBudget.modelRequests;
-      if (isToolBudgetReason(readBudgetStopReason(copy))
-        && copy.finalResponse?.runDetails.budgetPause?.resumable !== true
-        && !copy.request.subagentContext) {
-        // Pre-segment checkpoints could only have received these root limits
-        // from the old model profile. Do not perpetuate that implicit ceiling.
-        copy.request.executionLimits = {
-          ...copy.request.executionLimits,
-          maxToolIterations: 0,
-          maxToolCalls: 0
-        };
-      }
-    } else if (!legacyCapacityStop || legacyToolBudgetStop) {
-      copy.runBudget = createLogicalRunBudgetState({
-        modelRequests: copy.modelRequests,
-        toolRounds: copy.state?.turn ?? 0,
-        toolCalls: copy.state?.toolCallCount ?? 0,
-        continuations: copy.state?.continuation?.requests ?? 0,
-        contextEpochRollovers: copy.state?.epoch?.totalRollovers ?? 0,
-        usedMs: copy.usedMs,
-        treeUpstreamTokens: 0
-      });
-      copy.modelRequests = copy.runBudget.modelRequests;
-      if (legacyToolBudgetStop && !copy.request.subagentContext) {
-        copy.request.executionLimits = {
-          ...copy.request.executionLimits,
-          maxToolIterations: 0,
-          maxToolCalls: 0
-        };
-      }
     }
     if (copy.state?.epoch?.calibration) {
       const declaredWindowTokens = getEffectiveContextWindowTokens(copy.request.model);
@@ -387,17 +350,10 @@ export function recoveryBlocker(cp: RunCheckpoint, currentModel?: AgentRequest['
     }
   }
   if (cp.exactRecoveryBlocked) return 'The frozen request changed; preserve history and send a new user message / 冻结请求已变化，请保留会话并发送新用户消息开始新的请求边界。';
-  if ((cp.outputBudgetPolicyVersion ?? 1) < OUTPUT_BUDGET_POLICY_VERSION
-    && !cp.outputFailure && !cp.state?.pending && /Incomplete tool|工具响应未完成/iu.test(cp.error ?? '')) {
-    return 'Legacy interrupted request has no structured output-truncation evidence; preserve history and send a new user message / 旧中断请求缺少结构化长度截断证据，请保留会话并发送新用户消息开始新的请求边界。';
-  }
   if (isResumableToolBudgetCheckpoint(cp)) return undefined;
   if (cp.stopReason === 'budget_exhausted' && cp.runBudget) {
     return cp.error ?? 'Logical run budget exhausted / 逻辑任务预算已用尽';
   }
-  // Legacy capacity stops are migrated to a Context Epoch by the runner. They
-  // are not user-action blockers and must never require a synthetic new turn.
-  if (cp.stopReason === 'budget_exhausted' || cp.state?.budgetStopReason || cp.finalResponse?.runDetails.budgetStopReason) return undefined;
   return undefined;
 }
 
@@ -448,67 +404,8 @@ export function isCostLimitExhausted(cp: Pick<RunCheckpoint, 'maxCost' | 'usedCo
   return limit > 0 && Object.values(cp.usedCostByCurrency ?? {}).some((cost) => cost >= limit);
 }
 
-export function migrateLegacyCapacityCheckpoint(cp: RunCheckpoint): RunCheckpoint {
-  const copy = checkpointCopy(cp);
-  if (copy.runBudget) {
-    if (isResumableToolBudgetCheckpoint(copy)) {
-      copy.status = 'interrupted';
-      copy.stopReason = 'budget_pause';
-      if (copy.finalResponse?.runDetails.budgetPause?.resumable !== true
-        && !copy.request.subagentContext) {
-        copy.request.executionLimits = {
-          ...copy.request.executionLimits,
-          maxToolIterations: 0,
-          maxToolCalls: 0
-        };
-      }
-    }
-    return copy;
-  }
-  const legacyToolBudgetStop = isToolBudgetReason(readBudgetStopReason(copy));
-  if (legacyToolBudgetStop) {
-    copy.runBudget = createLogicalRunBudgetState({
-      modelRequests: copy.modelRequests,
-      toolRounds: copy.state?.turn ?? 0,
-      toolCalls: copy.state?.toolCallCount ?? 0,
-      continuations: copy.state?.continuation?.requests ?? 0,
-      contextEpochRollovers: copy.state?.epoch?.totalRollovers ?? 0,
-      usedMs: copy.usedMs
-    });
-    if (!copy.request.subagentContext) {
-      copy.request.executionLimits = {
-        ...copy.request.executionLimits,
-        maxToolIterations: 0,
-        maxToolCalls: 0
-      };
-    }
-  }
-  if (!copy.state?.budgetStopReason && !copy.finalResponse?.runDetails.budgetStopReason
-    && copy.stopReason !== 'budget_exhausted' && copy.stopReason !== 'budget_pause') return copy;
-  copy.version = 2;
-  copy.status = 'interrupted';
-  copy.stopReason = 'extension_restart';
-  copy.error = undefined;
-  copy.finalResponse = undefined;
-  if (copy.state) {
-    copy.state.budgetStopReason = undefined;
-    copy.state.budgetStopInstructionQueued = false;
-  }
-  return copy;
-}
-
 export function isResumableToolBudgetCheckpoint(cp: RunCheckpoint): boolean {
-  if (cp.stopReason === 'budget_pause' || cp.finalResponse?.runDetails.budgetPause?.resumable === true) return true;
-  return cp.stopReason === 'budget_exhausted' && isToolBudgetReason(readBudgetStopReason(cp));
-}
-
-function readBudgetStopReason(cp: RunCheckpoint): string | undefined {
-  return cp.state?.budgetStopReason ?? cp.finalResponse?.runDetails.budgetStopReason;
-}
-
-function isToolBudgetReason(reason: string | undefined): boolean {
-  return typeof reason === 'string'
-    && /^(?:tool_budget_exhausted|tool_round_budget_exhausted|tool_call_budget_exhausted|tool_iterations_exhausted|tool_call_limit_exhausted|tool_result_budget_exhausted)$/u.test(reason);
+  return cp.stopReason === 'budget_pause' || cp.finalResponse?.runDetails.budgetPause?.resumable === true;
 }
 
 /** Called only for the real Continue UI action. It grants another finite tool

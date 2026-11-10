@@ -1,6 +1,6 @@
 # 手动清理历史会话
 
-本页是本功能的行为、存储与验收入口；显示设置和自动保留规则仍由原有配置及 `sessionRetention.ts` 负责。本功能不调用模型，不操作项目目录、Git、账号、模型设置、Skills 或 AGENTS。
+本页是本功能的行为、存储与验收入口；显示设置和自动保留规则仍由原有配置及 `sessionRetention.ts` 负责。当前以 0.5.2 为初始版本，使用 `kmvdata.keepseek` 身份和宿主原生应用数据目录下的 `com.kmvdata.keepseek`，所有 Store 共用同一 `file:` 根。旧扩展、Memento、旧协议和旧目录均不读取、不导入、不迁移；格式版本与发布版本独立，见[存储初始基线](keepseek-storage-baseline.md)。本功能不调用模型，不操作项目目录、Git、账号、模型设置、Skills 或 AGENTS。
 
 ## 用户行为
 
@@ -19,19 +19,19 @@
 | 模块 | 职责 |
 | --- | --- |
 | `sessions/sessionHistoryCleanup.ts` | 严格参数校验、时间筛选、预览计划、一次性令牌、确认请求拥有者、顺序批次、操作日志与恢复 |
-| `provider/historyCleanupController.ts` | Store 接线、使用保护、当前 Memento 定向回收、已删除内存失效 |
+| `provider/historyCleanupController.ts` | Store 接线、使用保护、关联数据回收、已删除内存失效 |
 | `sessions/historyCleanupErrors.ts` | 清理阶段、错误码、可重试性、脱敏诊断与中英文反馈 |
 | `provider/KeepseekChatViewProvider.ts` | 本地能力、宿主确认、Webview 状态和空白替换接线 |
 | `provider/sessionUseLifetime.ts` | 跨排队/续跑/等待/收尾空隙保留原使用租约，真实空闲后释放；不建立项目 owner |
 | `sessions/sessionDeletionAuthority.ts` | 跨进程 gate、使用记录、耐久 tombstone、删除后的读写拒绝 |
-| `sessions/globalSessionStorage.ts` | 只读原始索引预览、归属校验、最终目标复核、shard/对象/index/V1 回收、迁移防复活 |
+| `sessions/globalSessionStorage.ts` | 只读原始索引预览、归属校验、当前 V4 shard/对象/index 回收、迟到写入防复活 |
 | `sessions/sessionObjectStore.ts` | canonical 主 shard 的最终保存与删除共用会话 gate；对象 writer 锁位于内层 |
 | `sessions/sessionAssociatedDataCleanup.ts` | 各所属 Store 的定向回收与真实错误聚合 |
 | `webview/input/dialogs/historySettings/` | 中英文表单、异步预览、进度/结果、键盘与草稿保留 |
 
 Webview 不传删除路径或权威会话集合，也不能用 confirmed 标记绕过确认。预览令牌绑定 Webview 身份、选项版本和固定候选，默认五分钟有效；重载、选择变化和新预览使旧计划失效。重复消息共享请求拥有者。确认前不持有磁盘锁。
 
-预览直接读取原始 summary，避免 normalize 为损坏日期制造 1970 年时间，不展开会话消息、对象图或 checkpoint，不调用会写 index/manifest 的恢复入口。完整索引身份检查会发现跨项目重复 ID；无法证明归属时不授权删除。缺失索引的孤儿 shard、legacy-only 文件在预览中报告未知，不为计算数量批量展开旧正文。执行逐目标有界读取 shard 身份和 header 更新时间；这是最终删除准入，不是预览 hydrate。
+预览直接读取原始 summary，避免 normalize 为损坏日期制造 1970 年时间，不展开会话消息、对象图或 checkpoint，不调用会写 index/manifest 的恢复入口。完整索引身份检查会发现跨项目重复 ID；无法证明归属时不授权删除。缺失索引的当前孤儿 shard 在预览中报告未知，不为计算数量批量展开正文。旧格式文件不是当前目录来源，不参与预览或恢复。执行逐目标有界读取 shard 身份和 header 更新时间；这是最终删除准入，不是预览 hydrate。
 
 ## 预览失败与重试
 
@@ -43,19 +43,15 @@ Host 使用 `{code, phase, retryable, systemCode?}` 表达错误。初始化未�
 
 命令 `KeepSeek: Runtime Diagnostics / 运行诊断`（`keepseek.showRuntimeDiagnostics`）新增 `historyCleanup`：包含存储 URI scheme、会话/安全恢复就绪布尔值、最后的结构化错误和当前目录诊断。它用于定位原生运行时差异，不读取或导出会话正文。
 
-只读现场核查：默认本地存储 9 个项目、112 条摘要，索引层归属完整、unknown/protected 均为 0。完整 controller 按“全部项目/不限时间”得到 73 个候选，另有 39 个无正文摘要因旧关联记录无法只读证明是否为空而保守列为 unknown，protected 为 0。核查使用当前编译 Store/controller 和文件系统适配，写入/重命名/删除/建目录入口均被设为拒绝，写入尝试为 0；未调用清理提交。这证明该本地文件路径可预览，不代表运行中 VS Code 的实际 URI/权限或原生界面已验收。
-
-原生复验尝试受环境阻塞：隔离扩展宿主启动退出 134，LaunchServices 返回 -10827；现有 Mac 桌面锁屏，不能读取当前 VS Code 窗口。因此截图发生时的唯一底层异常仍未从原生宿主采集，不能把已复现的“坏索引二次扫描”直接认定为现场根因。解锁并加载最新工作区构建后，应先验证预览数量及诊断，再用临时合成会话验证确认/取消；不得为验收清理真实历史。
-
 ## 存储、锁和恢复
 
-`globalStorage/session-deletions/v1/deleted/<sha256(sessionId)>.json` 保存版本 1 删除记录，含 workspaceKey、sessionId、operationId、确认时间、committed/reclaimed 阶段及无正文原因码。记录位于目标会话目录之外。只有宿主确认后、目标最终身份/版本/使用状态复核通过的目标才能写入记录，且 tombstone 使用耐久原子替换。
+`<nativeRoot>/session-deletions/v1/deleted/<sha256(sessionId)>.json` 保存版本 1 删除记录，含 workspaceKey、sessionId、operationId、确认时间、committed/reclaimed 阶段及无正文原因码。记录位于目标会话目录之外。只有宿主确认后、目标最终身份/版本/使用状态复核通过的目标才能写入记录，且 tombstone 使用耐久原子替换。
 
 同一 `sessionId` 的所有 canonical 主 shard、使用准入和删除提交共享短范围 gate。跨进程 gate 使用唯一参与者文件和 bakery 顺序：进入者先发布 choosing，再冻结序号，按序号和唯一 token 等待。存活由 PID 探测证明；只有 ESRCH 可视为死亡，EPERM/损坏/未知所有权保守保护。不使用 TTL 或过期心跳推定空闲，不删除并重建其他写入者持有的锁路径。
 
 锁顺序为会话 gate → 原有对象 writer 锁。workspace index、manifest、各共享关联 Store 的 gate 独立获取，不在会话 gate 中嵌套获取，宿主确认不占 gate。主保存的临时 use 记录覆盖 shard 到 index 提交；排队、运行、审批、Apply/命令等入口的运行 use 记录由宿主保留到终态。`SessionUseLifetime` 跨排队、续跑、审批等待与收尾之间的局部执行空隙继续持有原租约，由宿主的真实 in-use 判断在空闲后释放；状态检查失败保留保护，关闭 Webview 不把在途命令误判为空闲。物理回收同各 Store 的迟到写入共用对应 gate。
 
-逻辑提交后，读取、resident/summary 合并、孤儿修复、旧来源迁移、延迟 manifest、主 shard 和关联 Store 写入均检查同一删除权威。即使回收失败，已删除 ID 也不重新可见或可执行。删除记录不因物理完成或 20 条结果日志保留上限而删掉，避免旧来源重新导入。操作日志位于 `history-cleanup/v1/operations/`。目录版本保持 v1，当前文件 schema 为 v2，兼容读取旧 v1 全量操作记录。每次确认只持久化一次不可变计划，逐目标写小型结果 delta 与紧凑进度；终态只合并一次，避免每删一个会话重写整个候选计划。只对完全回收的终态记录保留最近 20 条；待回收记录和删除权威不随此上限丢弃。
+逻辑提交后，读取、resident/summary 合并、孤儿修复、延迟 manifest、主 shard 和关联 Store 写入均检查同一删除权威。即使回收失败，已删除 ID 也不重新可见或可执行。删除记录不因物理完成或 20 条结果日志保留上限而删掉，阻止仍存活进程的旧快照重新写入。操作日志位于 `history-cleanup/v1/operations/`。目录格式为 v1，当前计划、状态和最新指针的文件 schema 为 v2；仅接受当前分层文件格式，不读取旧版全量操作记录。每次确认只持久化一次不可变计划，逐目标写小型结果 delta 与紧凑进度；终态只合并一次，避免每删一个会话重写整个候选计划。只对完全回收的终态记录保留最近 20 条；待回收记录和删除权威不随此上限丢弃。
 
 操作文件均位于该 workspace 的 `<workspaceHash>/` 目录，文件名由 operationId 的 hash 生成，Webview 不提供路径。
 
@@ -65,29 +61,41 @@ Host 使用 `{code, phase, retryable, systemCode?}` 表达错误。初始化未�
 | `<operationHash>.results/<index>.json` | v1 单目标结果 delta，绑定 operationId 和目标索引 |
 | `<operationHash>.state.json` | v2 紧凑状态，含 operationId、确认时刻、ownerPid 和计数/进度 |
 | `<operationHash>.complete.json` | v1 最小终态快照，一次性合并结果；在操作 gate 下回收已合并 delta |
-| 同级 `<workspaceHash>.json` | v2 最新操作指针，兼容读取旧版全量记录 |
+| 同级 `<workspaceHash>.json` | v2 最新操作指针，不接受全量记录替代 |
 
 读取时叠加已写入的 delta，覆盖“结果已写入、紧凑进度尚未更新”时中断的情况。此操作日志不代替每个会话的 tombstone；计划内尚未提交删除权威的项目仍没有重启删除权限。
 
-重启恢复仅重试已经具有相同 operationId 耐久 tombstone 的目标；已确认但尚未完成目标最终复核的计划项不会自动取得删除权限，不重新全局筛选一批候选。当前 workspaceState 旧记录可访问时定向过滤。未打开项目的旧 Memento 无法从当前 ExtensionContext 读取，列为不可访问旧来源；以后项目打开时，迁移入口先定向回收已删除 ID，再处理原有迁移标记。
+重启恢复仅重试已经具有相同 operationId 耐久 tombstone 的目标；已确认但尚未完成目标最终复核的计划项不会自动取得删除权限，不重新全局筛选一批候选。当前版本不读取或回收 workspaceState 旧会话，不存在等待旧项目打开的迁移入口，也不生成“不可访问旧来源”计数。
+
+原生根在同一宿主用户下由各 VS Code profile/窗口共用，因此“全部项目”覆盖这一根中的项目。会话使用、删除权威和跨进程锁共用同一作用域；不要把该本地数据根跨机器或不同 PID 命名空间共享，PID 存活判断仅适用于同一宿主。
 
 ## 所属数据与保留边界
 
 | 所属数据 | 本次处理 |
 | --- | --- |
-| 摘要、会话 shard、对象图、对象目录内 legacy 备份、可访问 V1 记录 | 删除目标 ID 的数据并阻止旧快照重新写入 |
+| 当前摘要、V4 会话 shard、对象图 | 删除目标 ID 的数据并阻止旧快照重新写入 |
 | Evidence、子代理结果/诊断/私有历史、用量账本 | 所属 Store 按 session 定向删除，错误不吞掉 |
 | DraftRun、审批记录、ChangeSet/回滚记录 | 磁盘与当前内存失效；旧提案不能继续执行、批准、Apply 或回滚 |
 | ChangeArtifact 共享 blob | 交给现有全引用 GC，不按单会话 hash 强删 |
-| 可证归属的 interaction trace | 定向回收；无法证明归属的旧混合日志报告待处理 |
+| 可证归属的 interaction trace | 定向回收；缺少或损坏归属元数据的日志保留并报告 `unverified_logs` |
 | 标题候选、任务卡/计划、列表选择、展示/用量缓存 | 取消或失效，迟到结果不能复活删除对象 |
 | 无 session owner 的 `dropped-file-references` 缓存 | 可能被多个会话引用，保留；不宣称这些共享/无法归属缓存已物理擦除 |
 | 其他会话及共享设置、外部附件原文件、已修改的工作区文件 | 保留 |
-| 其他项目不可访问 workspaceState、外部备份 | 不承诺已物理擦除，结果单列限制 |
+| 当前数据根之外的旧格式数据和外部备份 | 不属于日常历史清理范围；不读取、不迁移、不承诺已物理擦除 |
 
 非 ENOENT 的权限/I/O 错误及损坏 JSON 不作为“已不存在”。提交前失败仍保留会话；提交后失败返回已移除、数据待回收；missing 是幂等成功。共享全局 Store 的删除和写入互斥并保留其他项目及并发新增记录。
 
-## 实测与复现
+## 当前基线验证
+
+当前专项验证覆盖 `storageBaseline`、`sessionHistoryCleanup`、`historyCleanupController`、Host/Webview、跨进程删除权威、当前 V4 对象图和标题 shard/index 提交恢复。自动化使用临时目录、合成数据与 DOM/Host harness，不等于原生 VS Code 验收。标准日志回归使用 32 个目标进行真实耐久写入与中断验证；大规模性能测量单独使用基准脚本，避免在日常回归反复执行千次 fsync。
+
+## 历史性能与现场记录（旧存储基线）
+
+以下观察、计数和时序来自切换当前初始基线之前的实现，仅保留排障证据。涉及旧 Memento、V1 文件、迁移和旧来源分类的描述不属于当前合同；旧记录不证明当前构建已验证。
+
+只读现场核查：默认本地存储 9 个项目、112 条摘要，索引层归属完整、unknown/protected 均为 0。完整 controller 按“全部项目/不限时间”得到 73 个候选，另有 39 个无正文摘要因旧关联记录无法只读证明是否为空而保守列为 unknown，protected 为 0。核查使用当前编译 Store/controller 和文件系统适配，写入/重命名/删除/建目录入口均被设为拒绝，写入尝试为 0；未调用清理提交。这证明该本地文件路径可预览，不代表运行中 VS Code 的实际 URI/权限或原生界面已验收。
+
+原生复验尝试受环境阻塞：隔离扩展宿主启动退出 134，LaunchServices 返回 -10827；现有 Mac 桌面锁屏，不能读取当前 VS Code 窗口。因此截图发生时的唯一底层异常仍未从原生宿主采集，不能把已复现的“坏索引二次扫描”直接认定为现场根因。解锁并加载最新工作区构建后，应先验证预览数量及诊断，再用临时合成会话验证确认/取消；不得为验收清理真实历史。
 
 2026-11-10，macOS（darwin），Node v24.15.0，仅临时目录与合成数据。`test/sessionDeletionAuthority.test.ts` 使用真正 `fork()` 的独立进程验证 gate 互斥、存活使用保护、进程死亡、符号链接父目录拒绝、旧快照迟到保存、删除后的新使用准入和幂等恢复，另覆盖 epoch、损坏路径、跨项目重复 ID、提交前/后 EACCES 故障。相关测试接入默认 runner。
 
@@ -105,7 +113,7 @@ Host 使用 `{code, phase, retryable, systemCode?}` 表达错误。初始化未�
 
 Host 回归以 120 条非当前会话验证清理不逐项保存幸存会话或发布完整正文；列表失效按 250 ms 合并，当前会话草稿捕获仍立即发布。实际 Store/controller/Memento 集成回归验证当前本地会话能够完全回收，跨项目不可访问旧来源保持真实待处理分类，且旧快照无法重新写回删除 ID。
 
-## 历史清理初版验证记录
+## 历史清理初版验证记录（旧存储基线）
 
 2026-11-10，基线 HEAD `c98c651078b73e1290f8f3cbc753bb369d124900`。这是预览故障修复之前的阶段记录，未覆盖后续补充的异常路径；本次修复验证另列。该阶段统一验证如下：
 
@@ -121,7 +129,7 @@ Host 回归以 120 条非当前会话验证清理不逐项保存幸存会话或�
 
 全部测试只使用临时项目、临时存储和合成会话。未删除用户真实历史，未提交、打标签、推送、发布、打包或安装扩展。
 
-## 预览故障修复验证
+## 预览故障修复验证（旧存储基线）
 
 2026-11-10，重新核对基线 HEAD `8b2b5727728a998455ea72d4fed906367fe095de`。本轮保留工作区已有的 15 秒会话加载上限、相关未提交代码及测试。以下为包括两阶段就绪刷新在内的最终工作树统一验证：
 
@@ -141,7 +149,7 @@ Host 回归以 120 条非当前会话验证清理不逐项保存幸存会话或�
 
 ## 现场验收与能力限制
 
-原生 VS Code UI、Windows/Linux、远程 URI、多平台账号配置为待现场验证；stub/DOM 测试不代表原生通过。当前本地 file 存储的同版本独立进程已实测。非 file 存储继续保留原有发送/保存能力，但本功能不能证明跨进程互斥，清理返回不可用。旧版本并行写入者不遵守新 gate/use/tombstone 协议，不能承诺跨版本安全；已知 legacy writer 锁和未知所有权保守跳过。用户应关闭旧版本窗口后使用本功能，不创建长期项目 owner 或只读窗口模式。
+原生 VS Code UI、Windows/Linux 和远程宿主仍需现场验证；stub/DOM 测试不代表原生通过。生产入口只创建宿主原生 `file:` 根，虚拟 `globalStorageUri` 不再进入 Store；`unsupported_storage` 只用于拒绝人为传入非 file 根的底层调用，不能靠关闭跨进程检查绕过。当前本地 file 存储的同版本独立进程已实测。旧扩展及旧协议写入者不受支持，不能与当前版本共用数据根；对象 writer 锁及未知所有权仍保守跳过，不创建长期项目 owner 或只读窗口模式。
 
 现场使用临时测试项目/独立测试扩展存储，至少验证：
 

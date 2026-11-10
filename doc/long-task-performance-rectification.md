@@ -88,7 +88,7 @@ Windows fsync/远程文件系统、多窗口旧版本写入者竞争、断电、
 
 此快照的持久化统计是 **282 attempts / 264 usage responses**；旧 view 转换均为缺失（随后 UI 变成假零），新版转换为 **282 / 264**。与此前 274/256 样本各多 8，不能用此前时点数值替换本次实测。274/256 另作为回归 fixture 验证。
 
-结果：[long-task-field-snapshot.json](long-task-field-snapshot.json)；脚本：[analyze-long-task-snapshot.js](../scripts/analyze-long-task-snapshot.js)。未重新执行原任务、工具、副作用或模型请求。没有可比较的生产 Provider/本地阶段新时间线，也没有真实模型摘要 token/成本与首 Token 延迟测量；此前 28%/72% 时间占比仅为排查线索，不列作新验收结果。新增滚动日志用于下一次运行后采集这些指标。
+结果：[long-task-field-snapshot.json](long-task-field-snapshot.json)；当时使用的 V2 副本迁移分析脚本已在 0.5.2 初始基线退役，当前不再提供旧格式迁移入口。未重新执行原任务、工具、副作用或模型请求。没有可比较的生产 Provider/本地阶段新时间线，也没有真实模型摘要 token/成本与首 Token 延迟测量；此前 28%/72% 时间占比仅为排查线索，不列作新验收结果。新增滚动日志用于下一次运行后采集这些指标。
 
 ## 同机前后性能对比
 
@@ -158,5 +158,5 @@ git diff --check
 
 最终执行全部退出 0。最终测试 757 项、756 通过、1 跳过、0 失败，耗时 88.23 秒。开发中新增恢复测试曾因 fixture 缺少 RepairLoopState 字段导致 build:test 失败，补齐后重新执行上述全部命令。跳过的是 `local fault server exercises delayed headers, disconnection, delayed EOF and healthy connection reuse`：当前沙箱禁止绑定本地监听端口，基线也同样跳过。其余 stream/retry/error 路径有离线 fixture 覆盖，但不替代该真实 socket 测试。没有运行市场打包、安装、发布或推送。
 
-性能复现：`bun run build:test` 后运行 `node --expose-gc scripts/benchmark-long-task.js after`。基线使用 `git archive 3c8ebb3` 的独立临时源码与同一 benchmark 脚本、相同依赖构建后运行 `before-repeat`，不回滚工作区。现场副本分析用 `node --expose-gc scripts/analyze-long-task-snapshot.js SNAPSHOT OLD_EXTENSION_OUT`；只写独立临时复制，不访问模型网络、不输出会话正文。对应 JSON 是可复核测量结果，不是生产监控数据。
+性能复现：`bun run build:test` 后运行 `node --expose-gc scripts/benchmark-long-task.js after`。基线使用 `git archive 3c8ebb3` 的独立临时源码与同一 benchmark 脚本、相同依赖构建后运行 `before-repeat`，不回滚工作区。历史现场副本分析当时只写独立临时复制，不访问模型网络、不输出会话正文；其 V2 迁移分析工具现已退役，不能用于当前基线。对应 JSON 是可复核测量结果，不是生产监控数据。
 

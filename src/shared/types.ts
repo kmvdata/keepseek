@@ -111,7 +111,7 @@ export type UsagePricingStatus = 'priced' | 'estimated_upper_bound' | 'unavailab
 export type AggregateUsagePricingStatus = UsagePricingStatus | 'partial';
 
 export interface UsageCostRates {
-  // 空闲时段(或单一档)价格,兼容旧配置;旧配置缺省峰谷时段时按此档计费
+  // 空闲时段或单一档价格；没有高峰定价的模型始终使用此档。
   cacheHitPrice: number; // 输入·缓存命中 (¥/M tokens)
   inputPrice: number; // 输入·缓存未命中 (¥/M tokens)
   outputPrice: number; // 输出 (¥/M tokens)
@@ -123,7 +123,7 @@ export interface UsageCostRates {
 }
 
 export interface UsageEvent {
-  /** Isolated auxiliary request attribution; absent on legacy records. */
+  /** Isolated auxiliary request attribution when applicable. */
   purpose?: 'session_title';
   usage: Usage;
   cost: number;
@@ -202,7 +202,7 @@ export interface CacheProjectionFingerprint {
  * bytes, credentials and endpoint URLs are deliberately excluded.
  */
 export interface ProviderCacheObservation {
-  version: 1 | 2;
+  version: 2;
   requestId: string;
   attemptIndex: number;
   source: UsageSource;
@@ -352,8 +352,6 @@ export interface ProviderUsageLedgerRecord {
 export interface ProviderUsageLedger {
   version: 1;
   records: ProviderUsageLedgerRecord[];
-  /** Older aggregate counters cannot be split into attempts and usage responses. */
-  legacyAggregate: boolean;
   incomplete: boolean;
 }
 
@@ -436,8 +434,6 @@ export interface SessionUsageStats extends Usage {
   cacheDataMissingRequestCount?: number;
   costByCurrency?: Record<string, number>;
   byModelSource?: UsageModelGroupStats[];
-  /** Persisted aggregate from an older version that cannot be attributed safely. */
-  legacyUnattributed?: boolean;
   attemptStatsIncomplete?: boolean;
   updatedAt?: string;
   bySource?: Partial<Record<UsageSource, UsageSourceStats>>;
@@ -537,9 +533,6 @@ export interface ModelSourceBalanceState {
   updatedAt?: string;
   error?: string;
 }
-
-/** Backward-compatible name retained for persisted sessions and existing callers. */
-export type DeepSeekBalanceState = ModelSourceBalanceState;
 
 export interface PromptCacheDiagnostics {
   systemPromptHash?: string;
@@ -676,7 +669,7 @@ export type DraftRunBatchDisplay = Pick<DraftRunBatchState,
 };
 
 export interface DraftRun extends DraftRunProposal {
-  /** Host execution facts. Missing legacy values mean unknown. */
+  /** Host execution facts. Missing execution facts mean unknown. */
   executionStarted?: boolean;
   executionPhase?: 'not_dispatched' | 'spawn_failed' | 'exited' | 'result_unknown';
   gitQueryResult?: import('../runs/gitQueryResult').GitQueryResult;
@@ -747,8 +740,6 @@ export interface ChatMessage {
   /** Host-only proof of a dynamic context tail appended to this message; never provider-visible itself. */
   dynamicContextHash?: string;
   isStreaming?: boolean;
-  /** Host-only marker for partial, failed or internal replies after reload. */
-  incompleteForTitle?: true;
   contextMeta?: ChatMessageContextMeta;
   usedSkills?: ChatMessageSkill[];
   runDetails?: RunDetailsSummary;
@@ -871,7 +862,7 @@ export interface ContextCompressionState {
   protectedMessageIds: string[];
   lastCompressedAt?: string;
   lastFailureReason?: string;
-  /** Host-derived lifecycle; absence in legacy sessions retains conservative protection. */
+  /** Host-derived lifecycle; missing lifecycle facts retain conservative protection. */
   protectionState?: { version: 1; pendingMessageIds: string[]; settledMessageIds: string[]; settledFacts?: HistoryWorkFact[] };
   lastCompression?: { version: 1; fingerprint: string; beforeTokens: number; afterTokens: number;
     netReleasedTokens: number; durationMs: number; protectedCount: number; compressibleCount: number; costKnown: boolean };
@@ -904,7 +895,7 @@ export interface ProjectInstructionContext {
   truncated: boolean;
 }
 
-export type RunContextSourceKind = 'project-instructions' | 'skill' | 'legacy-memory';
+export type RunContextSourceKind = 'project-instructions' | 'skill';
 
 export interface RunContextSourceSummary {
   id: string;
@@ -980,7 +971,6 @@ export interface ChatSession {
   /** Durable edit/resend intent; actions stay blocked until it is reconciled. */
   pendingHistoryTruncation?: import('../sessions/historyTruncation').PendingHistoryTruncation;
   pendingApproval?: import('../approvals/manualApproval').ManualApprovalSnapshot;
-  approvalModeMigrated?: boolean;
   userTaskBudgets?: Record<string, import('../sessions/userTaskBudget').UserTaskBudget>;
   approvalProcessing?: import('../approvals/approvalProcessing').ApprovalProcessingState;
   executionTime?: import('../sessions/executionTimeStats').SessionExecutionTime;
@@ -1004,7 +994,7 @@ export interface ChatSession {
   historyArchive?: HistoryArchiveEntry[];
   contextCompression?: ContextCompressionState;
   /**
-   * 持久化的稳定上下文块（AGENTS.md / Skills / Legacy Memory / Context Files 的
+   * 持久化的稳定上下文块（AGENTS.md / Skills / Context Files 的
    * 格式化结果）。字节不变时跨轮复用，保证 system 段前缀稳定；变化时整体重写
    * （一次可接受的缓存代价）。
    */
@@ -1015,8 +1005,6 @@ export interface ChatSession {
   usageLedgerRef?: {
     version: 2;
     sessionId: string;
-    migratedInlineVersion?: 1;
-    legacyAggregate: boolean;
     incomplete: boolean;
     damagedBucketCount?: number;
   };
@@ -1049,7 +1037,7 @@ export interface HistoryArchiveEntry {
 export interface SessionRequestProtocol {
   /** v1 replays ordinary final-answer reasoning; v2+ keeps it local-only. */
   version: number;
-  serializationStrategy: 'legacy-v1' | 'provider-projection-v2';
+  serializationStrategy: 'provider-projection-v2';
   toolSchemaVersion: number;
   toolNames: string[];
   modelId?: string;
@@ -1128,16 +1116,6 @@ interface DraftEditBase {
   reason: string;
 }
 
-/** Deserialization-only shape written by ChangeSet storage V1-V3. */
-export interface LegacyDraftEditV0 extends DraftEditBase {
-  kind?: undefined;
-  newText: string;
-  /** Internal apply precondition. Never expose this value to the Webview. */
-  expectedOriginalTextHash?: string;
-  /** Internal apply precondition. Never expose this value to the Webview. */
-  expectedOriginalSize?: number;
-}
-
 export interface FullTextDraftEditV1 extends DraftEditBase {
   kind: 'full_text_v1';
   action: 'create' | 'modify';
@@ -1169,7 +1147,7 @@ export interface MoveDraftEditV1 extends DraftEditBase {
   base: FileContentIdentity;
 }
 
-export type DraftEdit = LegacyDraftEditV0 | FullTextDraftEditV1 | TextPatchDraftEditV1
+export type DraftEdit = FullTextDraftEditV1 | TextPatchDraftEditV1
   | DeleteDraftEditV1 | MoveDraftEditV1;
 
 export type TaskPlanStatus = 'running' | 'blocked' | 'completed' | 'failed' | 'stopped';
@@ -1254,7 +1232,7 @@ export interface ChangeSetRevertResult {
 }
 
 export interface ChangeCheckpoint {
-  version?: 1 | 2;
+  version: 2;
   /** Exact external target explicitly authorized when this checkpoint was applied. */
   authorizedExternalUri?: string;
   id: string;
@@ -1264,15 +1242,15 @@ export interface ChangeCheckpoint {
   targetUri?: string;
   label: string;
   action: DraftEditAction;
-  draftKind?: 'legacy_full_text_v0' | 'full_text_v1' | 'text_patch_v1' | 'delete_v1' | 'move_v1';
-  state?: 'prepared' | 'applying' | 'applied' | 'uncertain' | 'interrupted' | 'reverted';
-  /** Direction of the last journaled mutation. Legacy checkpoints imply apply. */
-  operation?: 'apply' | 'revert';
+  draftKind: 'full_text_v1' | 'text_patch_v1' | 'delete_v1' | 'move_v1';
+  state: 'prepared' | 'applying' | 'applied' | 'uncertain' | 'interrupted' | 'reverted';
+  /** Direction of the last journaled mutation. */
+  operation: 'apply' | 'revert';
   originalExists: boolean;
-  /** V1 migration only. V2 patch checkpoints use inversePatch instead. */
+  /** Inline rollback content when no artifact store is configured; patches use inversePatch. */
   originalText?: string;
   originalTextHash?: string;
-  hashMode?: 'legacy_text' | 'utf8_bytes';
+  hashMode: 'utf8_bytes';
   originalSizeBytes?: number;
   originalBlobHash?: string;
   appliedExists: boolean;
@@ -1837,8 +1815,6 @@ export interface AgentRunCallbacks {
   onTraceLog?: (traceLog: AgentTraceLogInfo) => void;
   onTaskPlan?: (taskPlan: TaskPlan) => void;
   onRunDetails?: (runDetails: RunDetailsSummary) => void;
-  /** Persists a controlled in-task protocol rollover without a visible turn. */
-  onProtocolMigration?: (protocol: { version: number; toolSchemaVersion: number; toolNames: string[] }) => Promise<void>;
 }
 
 export type BackgroundRunStatus =

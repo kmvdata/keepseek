@@ -78,13 +78,12 @@ test('history cleanup hides days for all, sends only a token once, and keeps res
   const restoreId = view.open();
   view.receive({ type: 'historyCleanupState', requestId: restoreId, operation: {
     requestId: request.requestId, operationId: 'op', status: 'completed', options: { scope: 'all', mode: 'all' },
-    total: 12, processed: 12, fullyDeleted: 8, removedPendingCleanup: 2, inaccessibleLegacy: 1,
+    total: 12, processed: 12, fullyDeleted: 8, removedPendingCleanup: 2,
     protected: 1, failedBeforeCommit: 1 } });
   assert.equal(view.element('historyCleanupScope').value, 'all');
   assert.equal(view.element('historyCleanupScope').disabled, true);
   assert.match(view.element('historyCleanupSummary').textContent, /All projects.*any age/u);
   assert.match(view.element('historyCleanupSummary').textContent, /Fully cleared: 8; removed with data pending: 2/u);
-  assert.match(view.element('historyCleanupSummary').textContent, /inaccessible legacy/u);
   view.receive({ type: 'historyCleanupState', operation: { requestId: request.requestId, operationId: 'op',
     status: 'running', options: { scope: 'all', mode: 'all' }, total: 12, processed: 1 } });
   assert.match(view.element('historyCleanupSummary').textContent, /Fully cleared: 8/u);
@@ -192,11 +191,11 @@ test('history cleanup failures leave a durable result or retry instead of a stuc
   view.receive({ type: 'historyCleanupState', operation: { requestId: retry.requestId, operationId: 'partial',
     status: 'failed', options: { scope: 'current', mode: 'olderThan', days: 3 }, cutoff: '2026-11-07T07:00:00Z',
     total: 12, processed: 4, fullyDeleted: 3, removedPendingCleanup: 1, error: 'history_changed',
-    reasonCounts: { unverified_legacy_logs: 1, session_storage_pending: 1, usage_ledger_failed: 1 } } });
+    reasonCounts: { unverified_logs: 1, session_storage_pending: 1, usage_ledger_failed: 1 } } });
   assert.match(view.element('historyCleanupSummary').textContent, /History has changed/u);
   assert.match(view.element('historyCleanupSummary').textContent, /Fully cleared: 3/u);
-  assert.doesNotMatch(view.element('historyCleanupSummary').textContent, /history_changed|unverified_legacy_logs|usage_ledger_failed/u);
-  assert.match(view.element('historyCleanupSummary').textContent, /Legacy logs lack reliable ownership/u);
+  assert.doesNotMatch(view.element('historyCleanupSummary').textContent, /history_changed|unverified_logs|usage_ledger_failed/u);
+  assert.match(view.element('historyCleanupSummary').textContent, /Logs lack reliable ownership/u);
   assert.match(view.element('historyCleanupSummary').textContent, /storage reclamation is pending/u);
 });
 

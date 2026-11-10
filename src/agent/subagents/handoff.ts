@@ -4,7 +4,7 @@ import type { SubagentResultEnvelope } from './resultEnvelope';
 import type {
   StoredSubagentMetadata,
   SubagentManifestStatus,
-  SubagentResultManifestV2
+  SubagentResultManifest
 } from './types';
 
 export const DEFAULT_SUBAGENT_HANDOFF_PREVIEW_BYTES = 10_240;
@@ -33,14 +33,13 @@ export function createSubagentResultManifest(input: {
   error?: string;
   contractVersion?: 2;
   envelope?: SubagentResultEnvelope;
-}): SubagentResultManifestV2 {
+}): SubagentResultManifest {
   const resultBytes = utf8ByteLength(input.result);
   const preview = truncateUtf8(input.result, Math.max(0, input.previewBytes
     ?? DEFAULT_SUBAGENT_HANDOFF_PREVIEW_BYTES));
-  const legacyPartial = input.contractVersion !== 2 && input.metadata.resultStatus === 'partial';
-  const manifest: SubagentResultManifestV2 = {
-    version: input.contractVersion === 2 ? 3 : 2,
-    ok: legacyPartial ? false : input.ok,
+  const manifest: SubagentResultManifest = {
+    version: 3,
+    ok: input.ok,
     kind: 'subagent_result_manifest',
     subagentId: input.metadata.id,
     treeId: input.metadata.treeId,
@@ -48,7 +47,7 @@ export function createSubagentResultManifest(input: {
     lane: input.metadata.lane,
     depth: input.metadata.depth,
     status: input.status,
-    ...(input.contractVersion === 2 ? {
+    ...{
       resultStatus: input.metadata.resultStatus ?? 'failed',
       formatAccepted: input.metadata.resultFormatAccepted === true,
       parentAcceptance: 'pending' as const,
@@ -60,7 +59,7 @@ export function createSubagentResultManifest(input: {
         ...(item.startLine ? { startLine: item.startLine } : {}),
         verification: 'unverified' as const
       }))
-    } : {}),
+    },
     summary: truncateChars(normalizeInlineText(input.summary), SUBAGENT_HANDOFF_SUMMARY_MAX_CHARS),
     preview,
     resultRef: input.metadata.id,
@@ -76,17 +75,17 @@ export function createSubagentResultManifest(input: {
     usageSummary: compactUsage(input.usage),
     draftEditCount: Math.max(0, Math.floor(input.draftEditCount ?? 0)),
     draftRunCount: Math.max(0, Math.floor(input.draftRunCount ?? 0)),
-    ...(input.errorType || legacyPartial ? { errorType: truncateChars(input.errorType ?? 'subagent_result_partial', 128) } : {}),
+    ...(input.errorType ? { errorType: truncateChars(input.errorType, 128) } : {}),
     ...(input.error ? { error: truncateChars(normalizeInlineText(input.error), 512) } : {}),
     ...(input.metadata.diagnostic?.id ? { diagnosticRef: input.metadata.diagnostic.id } : {}),
     ...(input.metadata.reusedFromSubagentId
       ? { reusedFromSubagentId: input.metadata.reusedFromSubagentId } : {})
   };
-  return fitManifest(manifest, input.maxBytes ?? (input.contractVersion === 2 ? 12_288 : undefined));
+  return fitManifest(manifest, input.maxBytes ?? 12_288);
 }
 
 export function createParallelHandoff(input: {
-  manifests: readonly SubagentResultManifestV2[];
+  manifests: readonly SubagentResultManifest[];
   accepted: boolean;
   draftEditCount: number;
   draftRunCount: number;
@@ -96,76 +95,6 @@ export function createParallelHandoff(input: {
   conflicts?: readonly string[];
   error?: string;
 }): string {
-  if (input.manifests.some((manifest) => manifest.version === 3)) return createParallelHandoffV3(input);
-  const maxBytes = Math.max(16_384, Math.floor(input.maxBytes
-    ?? DEFAULT_SUBAGENT_PARALLEL_HANDOFF_BYTES));
-  const previewSources = input.manifests.map((manifest) => manifest.preview);
-  const results = input.manifests.map((manifest, taskIndex) => ({
-    taskIndex,
-    ok: manifest.ok,
-    status: manifest.status,
-    subagentId: manifest.subagentId,
-    treeId: manifest.treeId,
-    profile: manifest.profile,
-    lane: manifest.lane,
-    depth: manifest.depth,
-    resultRef: manifest.resultRef,
-    resultHash: manifest.resultHash,
-    resultChars: manifest.resultChars,
-    resultBytes: manifest.resultBytes,
-    hasMore: manifest.hasMore,
-    draftEditCount: manifest.draftEditCount,
-    draftRunCount: manifest.draftRunCount,
-    ...(manifest.errorType ? { errorType: manifest.errorType } : {}),
-    preview: ''
-  }));
-  const payload = () => ({
-    version: 2,
-    ok: input.accepted,
-    kind: 'subagent_parallel_manifest',
-    results,
-    draftEditCount: Math.max(0, Math.floor(input.draftEditCount)),
-    draftRunCount: Math.max(0, Math.floor(input.draftRunCount)),
-    ...(input.errorType ? { errorType: input.errorType } : {}),
-    ...(input.failedTasks?.length ? { failedTasks: [...input.failedTasks] } : {}),
-    ...(input.conflicts?.length ? { conflicts: input.conflicts.map((value) => truncateChars(value, 256)) } : {}),
-    ...(input.error ? { error: truncateChars(normalizeInlineText(input.error), 512) } : {})
-  });
-  let remaining = Math.max(0, maxBytes - utf8ByteLength(stableJson(payload())) - 64);
-  const active = new Set(previewSources.map((_value, index) => index).filter((index) => previewSources[index]));
-  const allocations = new Array(previewSources.length).fill(0) as number[];
-  while (remaining > 0 && active.size) {
-    const share = Math.max(1, Math.floor(remaining / active.size));
-    let consumed = 0;
-    for (const index of [...active]) {
-      const total = utf8ByteLength(previewSources[index]!);
-      const add = Math.min(share, total - allocations[index]!);
-      allocations[index]! += add;
-      consumed += add;
-      if (allocations[index] === total) active.delete(index);
-    }
-    if (!consumed) break;
-    remaining -= consumed;
-  }
-  results.forEach((result, index) => { result.preview = truncateUtf8(previewSources[index]!, allocations[index]!); });
-  let serialized = stableJson(payload());
-  // JSON escaping can be larger than the source UTF-8 slice. Shrink every
-  // preview proportionally, preserving metadata and deterministic fairness.
-  for (let attempt = 0; utf8ByteLength(serialized) > maxBytes && attempt < 12; attempt += 1) {
-    const current = results.reduce((sum, item) => sum + utf8ByteLength(item.preview), 0);
-    if (!current) break;
-    const excess = utf8ByteLength(serialized) - maxBytes;
-    const target = Math.max(0, current - excess - 32);
-    results.forEach((item, index) => {
-      const bytes = Math.floor(utf8ByteLength(item.preview) * target / current);
-      item.preview = truncateUtf8(previewSources[index]!, bytes);
-    });
-    serialized = stableJson(payload());
-  }
-  return serialized;
-}
-
-function createParallelHandoffV3(input: Parameters<typeof createParallelHandoff>[0]): string {
   const maxBytes = Math.max(16_384, Math.floor(input.maxBytes ?? DEFAULT_SUBAGENT_PARALLEL_HANDOFF_BYTES));
   const results = input.manifests.map((manifest, taskIndex) => ({
     taskIndex, ok: manifest.ok, status: manifest.status,
@@ -242,7 +171,7 @@ export function truncateUtf8(value: string, maxBytes: number): string {
   catch { return ''; }
 }
 
-function fitManifest(manifest: SubagentResultManifestV2, maxBytes: number | undefined): SubagentResultManifestV2 {
+function fitManifest(manifest: SubagentResultManifest, maxBytes: number | undefined): SubagentResultManifest {
   if (!maxBytes || utf8ByteLength(stableJson(manifest)) <= maxBytes) return manifest;
   const next = { ...manifest };
   let low = 0;
@@ -258,7 +187,7 @@ function fitManifest(manifest: SubagentResultManifestV2, maxBytes: number | unde
   if (utf8ByteLength(stableJson(next)) <= maxBytes) return next;
   next.summary = truncateChars(next.summary, 160);
   if (next.error) next.error = truncateChars(next.error, 160);
-  if (next.version === 3) {
+  {
     next.keyEvidence = []; next.uncertainties = []; next.missing = (next.missing ?? []).slice(0, 1);
     next.hasMore = next.resultBytes > utf8ByteLength(next.preview);
     if (utf8ByteLength(stableJson(next)) > maxBytes) throw new Error('subagent_manifest_metadata_too_large');

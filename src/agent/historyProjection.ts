@@ -8,6 +8,7 @@ import type {
   HistorySummary
 } from '../shared/types';
 import { estimateTokenCount } from './tokenEstimate';
+import { CURRENT_AGENT_PROTOCOL_VERSION } from './protocol';
 
 export const CONTEXT_COMPRESSION_VERSION = 1;
 
@@ -17,7 +18,7 @@ export interface HistoryProjectionInput {
   language: KeepseekLanguage;
   contextCompression?: ContextCompressionState;
   settings: ContextCompressionSettings;
-  /** Determines whether ordinary final assistant reasoning is provider-visible. */
+  /** Current request protocol identifier for projection diagnostics. */
   requestProtocolVersion?: number;
   /** Count provider-native replay only for a Responses request lane. */
   includeProviderReplay?: boolean;
@@ -94,7 +95,7 @@ export function buildHistoryProjection(input: HistoryProjectionInput): HistoryPr
     ? capProjectionToTokenBudget(
         projectedHistory,
         input.maxProjectionTokens,
-        input.requestProtocolVersion ?? 1,
+        CURRENT_AGENT_PROTOCOL_VERSION,
         input.includeProviderReplay === true,
         new Set([...protectedMessageIds, ...recentMessageIds])
       )
@@ -145,16 +146,13 @@ function capProjectionToTokenBudget(
 
 function estimateProjectedChatMessageTokens(
   message: ChatMessage,
-  requestProtocolVersion: number,
+  _requestProtocolVersion: number,
   includeProviderReplay = false
 ): number {
   const content = (message.providerContent ?? message.expandedContent ?? message.content).trim();
   let tokens = estimateTokenCount(`${message.role}\n${content}`) + 4;
   if (message.role !== 'assistant') {
     return tokens;
-  }
-  if (requestProtocolVersion <= 1 && message.reasoningContent) {
-    tokens += estimateTokenCount(message.reasoningContent);
   }
   for (const round of message.toolRounds ?? []) {
     tokens += estimateTokenCount([
@@ -265,7 +263,7 @@ export function createProtectedContextMeta(reason: string): ChatMessageContextMe
 
 export function estimateHistoryProjectionTokens(
   projection: HistoryProjectionResult,
-  requestProtocolVersion = 1
+  requestProtocolVersion = CURRENT_AGENT_PROTOCOL_VERSION
 ): number {
   const summaryTokens = projection.syntheticSystemMessages.reduce(
     (total, content) => total + estimateTokenCount(`system\n${content}`),

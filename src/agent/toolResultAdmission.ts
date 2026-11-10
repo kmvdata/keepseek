@@ -20,30 +20,16 @@ export interface ContextWindowCalibrationState {
   contextTooLongCount: number;
   successfulInputFloorTokens: number;
   providerContextTooLongCeilingTokens?: number;
-  legacyConservativeCeilingTokens?: number;
-  lastAdjustmentSource: 'declared' | 'successful_request' | 'provider_context_too_long' | 'legacy_rebaseline';
+  lastAdjustmentSource: 'declared' | 'successful_request' | 'provider_context_too_long';
   lastEstimatedInputTokens?: number;
   lastActualInputTokens?: number;
 }
-
-export interface LegacyContextWindowCalibrationStateV1 {
-  version?: 1;
-  declaredWindowTokens: number;
-  learnedEffectiveWindowTokens: number;
-  estimatorScale: number;
-  observations: number;
-  contextTooLongCount: number;
-  lastEstimatedInputTokens?: number;
-  lastActualInputTokens?: number;
-}
-
-export type RestoredContextWindowCalibrationState = ContextWindowCalibrationState | LegacyContextWindowCalibrationStateV1;
 
 export interface ContextWindowCalibrationMigration {
   reason: 'stale_capacity_calibration';
   beforeWindowTokens: number;
   afterWindowTokens: number;
-  evidence: 'legacy_fallback' | 'successful_input_floor' | 'declaration_changed';
+  evidence: 'successful_input_floor' | 'declaration_changed';
 }
 
 export interface ToolResultAdmissionDecision {
@@ -65,7 +51,7 @@ export class ToolResultAdmissionController {
 
   public constructor(
     declaredWindowTokens: number,
-    restored?: RestoredContextWindowCalibrationState,
+    restored?: ContextWindowCalibrationState,
     declaration: ContextWindowDeclaration = { identity: 'unknown-model', version: CONTEXT_WINDOW_DECLARATION_VERSION }
   ) {
     const result = migrateContextWindowCalibrationState(restored, declaredWindowTokens, declaration);
@@ -181,48 +167,33 @@ export class ToolResultAdmissionController {
 }
 
 export function migrateContextWindowCalibrationState(
-  value: RestoredContextWindowCalibrationState | undefined,
+  value: ContextWindowCalibrationState | undefined,
   declaredWindowTokens: number,
   declaration: ContextWindowDeclaration
 ): { state: ContextWindowCalibrationState; migration?: ContextWindowCalibrationMigration } {
   const declared = Number.isFinite(declaredWindowTokens) && declaredWindowTokens > 0
     ? Math.max(1_024, Math.floor(declaredWindowTokens))
     : 1_024;
-  if (!isCalibrationLike(value)) return { state: createDefaultState(declared, declaration) };
+  if (!isCurrentContextWindowCalibrationState(value)) return { state: createDefaultState(declared, declaration) };
 
   const estimatorScale = clampFinite(value.estimatorScale, 0.8, 3, 1.08);
   const observations = nonNegativeInteger(value.observations);
   const restoredContextTooLongCount = nonNegativeInteger(value.contextTooLongCount);
   const before = clampFinite(value.learnedEffectiveWindowTokens, 1_024, Number.MAX_SAFE_INTEGER, declared);
-  const isV2 = value.version === CONTEXT_WINDOW_CALIBRATION_VERSION
-    && typeof (value as ContextWindowCalibrationState).declaredIdentity === 'string';
-  // In v1 this counter was incremented only by an explicit Provider
-  // context-too-long response and reset after the next success. A positive
-  // value is therefore the one legacy signal strong enough to preserve the
-  // learned ceiling; a plain 32K record with count=0 is only old metadata.
-  const legacyHasProviderContextTooLongEvidence = !isV2 && restoredContextTooLongCount > 0;
-  const successfulFloor = isV2
-    ? Math.min(declared, nonNegativeInteger((value as ContextWindowCalibrationState).successfulInputFloorTokens))
-    : Math.min(declared, nonNegativeInteger(value.lastActualInputTokens));
-  const explicitProviderCeiling = isV2
-    ? normalizePositiveInteger((value as ContextWindowCalibrationState).providerContextTooLongCeilingTokens)
-    : legacyHasProviderContextTooLongEvidence ? before : undefined;
-  const legacyConservativeCeiling = isV2
-    ? normalizePositiveInteger((value as ContextWindowCalibrationState).legacyConservativeCeilingTokens)
-    : !legacyHasProviderContextTooLongEvidence && before < declared ? before : undefined;
-  const declarationChanged = !isV2
-    || (value as ContextWindowCalibrationState).declaredIdentity !== declaration.identity
-    || (value as ContextWindowCalibrationState).declaredVersion !== declaration.version
+  const successfulFloor = Math.min(declared, nonNegativeInteger(value.successfulInputFloorTokens));
+  const explicitProviderCeiling = normalizePositiveInteger(value.providerContextTooLongCeilingTokens);
+  const declarationChanged = value.declaredIdentity !== declaration.identity
+    || value.declaredVersion !== declaration.version
     || value.declaredWindowTokens !== declared;
 
   let learned = declared;
   let migration: ContextWindowCalibrationMigration | undefined;
   if (explicitProviderCeiling !== undefined) learned = Math.min(declared, explicitProviderCeiling);
-  else if (isV2 && !declarationChanged) learned = Math.min(declared, before);
+  else if (!declarationChanged) learned = Math.min(declared, before);
   else if (before !== declared) {
     migration = {
       reason: 'stale_capacity_calibration', beforeWindowTokens: before,
-      afterWindowTokens: declared, evidence: isV2 ? 'declaration_changed' : 'legacy_fallback'
+      afterWindowTokens: declared, evidence: 'declaration_changed'
     };
   }
   learned = explicitProviderCeiling === undefined && successfulFloor > before
@@ -250,20 +221,14 @@ export function migrateContextWindowCalibrationState(
       learnedEffectiveWindowTokens: clamp(learned, 1_024, declared),
       estimatorScale,
       observations,
-      contextTooLongCount: isV2 || legacyHasProviderContextTooLongEvidence
-        ? restoredContextTooLongCount
-        : 0,
+      contextTooLongCount: restoredContextTooLongCount,
       successfulInputFloorTokens: successfulFloor,
       ...(explicitProviderCeiling === undefined ? {} : {
         providerContextTooLongCeilingTokens: Math.min(declared, explicitProviderCeiling)
       }),
-      ...(legacyConservativeCeiling === undefined ? {} : {
-        legacyConservativeCeilingTokens: legacyConservativeCeiling
-      }),
-      lastAdjustmentSource: migration ? 'legacy_rebaseline'
-        : isV2
-          ? (value as ContextWindowCalibrationState).lastAdjustmentSource ?? 'declared'
-          : legacyHasProviderContextTooLongEvidence ? 'provider_context_too_long' : 'declared',
+      lastAdjustmentSource: migration
+        ? migration.evidence === 'successful_input_floor' ? 'successful_request' : 'declared'
+        : value.lastAdjustmentSource,
       ...(normalizePositiveInteger(value.lastEstimatedInputTokens) === undefined ? {} : {
         lastEstimatedInputTokens: normalizePositiveInteger(value.lastEstimatedInputTokens)
       }),
@@ -296,14 +261,22 @@ function createDefaultState(declared: number, declaration: ContextWindowDeclarat
   };
 }
 
-function isCalibrationLike(value: unknown): value is RestoredContextWindowCalibrationState {
+/** Only the current serialized state participates in capacity learning. */
+export function isCurrentContextWindowCalibrationState(value: unknown): value is ContextWindowCalibrationState {
   if (!value || typeof value !== 'object') return false;
-  const item = value as Partial<LegacyContextWindowCalibrationStateV1>;
-  return typeof item.declaredWindowTokens === 'number' && Number.isFinite(item.declaredWindowTokens)
-    && typeof item.learnedEffectiveWindowTokens === 'number' && Number.isFinite(item.learnedEffectiveWindowTokens)
-    && typeof item.estimatorScale === 'number' && Number.isFinite(item.estimatorScale)
-    && typeof item.observations === 'number' && Number.isFinite(item.observations)
-    && typeof item.contextTooLongCount === 'number' && Number.isFinite(item.contextTooLongCount);
+  const item = value as Partial<ContextWindowCalibrationState>;
+  const positive = (number: unknown): number is number => typeof number === 'number' && Number.isFinite(number) && number > 0;
+  const counter = (number: unknown): number is number => typeof number === 'number' && Number.isSafeInteger(number) && number >= 0;
+  return item.version === CONTEXT_WINDOW_CALIBRATION_VERSION
+    && typeof item.declaredIdentity === 'string' && item.declaredIdentity.length > 0
+    && typeof item.declaredVersion === 'string' && item.declaredVersion.length > 0
+    && positive(item.declaredWindowTokens) && positive(item.learnedEffectiveWindowTokens)
+    && positive(item.estimatorScale) && counter(item.observations) && counter(item.contextTooLongCount)
+    && counter(item.successfulInputFloorTokens)
+    && (item.providerContextTooLongCeilingTokens === undefined || positive(item.providerContextTooLongCeilingTokens))
+    && (item.lastEstimatedInputTokens === undefined || positive(item.lastEstimatedInputTokens))
+    && (item.lastActualInputTokens === undefined || positive(item.lastActualInputTokens))
+    && ['declared', 'successful_request', 'provider_context_too_long'].includes(item.lastAdjustmentSource ?? '');
 }
 
 function normalizePositiveInteger(value: unknown): number | undefined {

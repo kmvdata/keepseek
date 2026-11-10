@@ -60,7 +60,7 @@ test('display reference prices cover other sources while preserving official mod
     { sourceId: 'third-party', provider: 'qwencloud', model: 'another-model', supportsBilling: false, at: '2026-09-30T09:00:00+08:00' },
     { sourceId: 'kimi', provider: 'kimi', model: 'kimi-k3', supportsBilling: true, at: '2026-10-01T09:00:00+08:00' }
   ];
-  const ledger: ProviderUsageLedger = { version: 1, legacyAggregate: false, incomplete: false,
+  const ledger: ProviderUsageLedger = { version: 1, incomplete: false,
     records: cases.flatMap((item, index) => createUsageLedgerRecords({ requestId: String(index), source: 'executor', usage,
       attempts: [createUsagePriceSnapshot({ ...item, originalModelId: item.model, protocol: 'chat-completions', requestStartedAt: item.at })] })) };
   const before = JSON.stringify(ledger);
@@ -124,39 +124,31 @@ test('Pro stays separate and unknown near-match names are not canonicalized', ()
   assert.equal(getDeepSeekModelIdentity('prefix-deepseek-v4-flash'), undefined);
 });
 
-test('v1 fallback calibration rebaselines at the current declaration while preserving estimator scale', () => {
-  const migrated = migrateContextWindowCalibrationState({
-    version: 1,
-    declaredWindowTokens: 32_768,
-    learnedEffectiveWindowTokens: 32_768,
-    estimatorScale: 1.37,
-    observations: 7,
-    contextTooLongCount: 0
-  }, 1_048_576, { identity: DEEPSEEK_FLASH_CANONICAL_MODEL_ID, version: 'identity-v1:1048576' });
-  assert.equal(migrated.state.learnedEffectiveWindowTokens, 1_048_576);
-  assert.equal(migrated.state.estimatorScale, 1.37);
-  assert.equal(migrated.migration?.reason, 'stale_capacity_calibration');
-  assert.equal(migrated.state.legacyConservativeCeilingTokens, 32_768);
+test('current declaration changes rebase learned capacity while preserving estimator accuracy', () => {
+  const controller = new ToolResultAdmissionController(32_768, undefined,
+    { identity: DEEPSEEK_FLASH_CANONICAL_MODEL_ID, version: 'smaller' });
+  controller.state.estimatorScale = 1.37;
+  controller.state.observations = 7;
+  const reconciled = migrateContextWindowCalibrationState(controller.state, 1_048_576,
+    { identity: DEEPSEEK_FLASH_CANONICAL_MODEL_ID, version: 'larger' });
+  assert.equal(reconciled.state.learnedEffectiveWindowTokens, 1_048_576);
+  assert.equal(reconciled.state.estimatorScale, 1.37);
+  assert.equal(reconciled.state.observations, 7);
+  assert.equal(reconciled.migration?.evidence, 'declaration_changed');
+  assert.equal(reconciled.state.lastAdjustmentSource, 'declared');
 });
 
-test('v1 Provider context-too-long evidence survives declaration upgrades and clamps on downgrades', () => {
-  const upgraded = migrateContextWindowCalibrationState(
-    {
-      version: 1,
-      declaredWindowTokens: 32_768,
-      learnedEffectiveWindowTokens: 26_214,
-      estimatorScale: 1.2,
-      observations: 3,
-      contextTooLongCount: 1
-    },
-    1_048_576,
-    { identity: DEEPSEEK_FLASH_CANONICAL_MODEL_ID, version: 'new' }
-  ).state;
-  assert.equal(upgraded.learnedEffectiveWindowTokens, 26_214);
-  assert.equal(upgraded.providerContextTooLongCeilingTokens, 26_214);
+test('current Provider context-too-long evidence survives declaration upgrades and clamps on downgrades', () => {
+  const controller = new ToolResultAdmissionController(32_768, undefined,
+    { identity: DEEPSEEK_FLASH_CANONICAL_MODEL_ID, version: 'original' });
+  controller.recordContextTooLong(32_768);
+  const ceiling = controller.state.providerContextTooLongCeilingTokens;
+  const upgraded = migrateContextWindowCalibrationState(controller.state, 1_048_576,
+    { identity: DEEPSEEK_FLASH_CANONICAL_MODEL_ID, version: 'larger' }).state;
+  assert.equal(upgraded.learnedEffectiveWindowTokens, ceiling);
+  assert.equal(upgraded.providerContextTooLongCeilingTokens, ceiling);
   assert.equal(upgraded.contextTooLongCount, 1);
   assert.equal(upgraded.lastAdjustmentSource, 'provider_context_too_long');
-  assert.ok(upgraded.learnedEffectiveWindowTokens < 32_768);
   const downgraded = migrateContextWindowCalibrationState(
     { ...upgraded, providerContextTooLongCeilingTokens: 500_000, learnedEffectiveWindowTokens: 500_000 },
     128_000,
@@ -265,7 +257,7 @@ test('66 physical attempts and 26 usage responses do not become 40 unpriced bill
       source: request % 2 ? 'summary' : 'executor'
     }));
   }
-  const summary = summarizeUsageLedger({ version: 1, records, legacyAggregate: false, incomplete: false });
+  const summary = summarizeUsageLedger({ version: 1, records, incomplete: false });
   assert.equal(summary.providerAttemptCount, 66);
   assert.equal(summary.usageResponseCount, 26);
   assert.equal(summary.providerAttemptCount - summary.usageResponseCount, 40);
@@ -282,7 +274,7 @@ test('usage without an eligible price remains genuinely unpriced', () => {
   const records = createUsageLedgerRecords({
     requestId: 'proxy-1', attempts: [snapshot], usage: REPORTED_USAGE, source: 'executor'
   });
-  const summary = summarizeUsageLedger({ version: 1, records, legacyAggregate: false, incomplete: false });
+  const summary = summarizeUsageLedger({ version: 1, records, incomplete: false });
   assert.equal(summary.unpricedRequestCount, 1);
   assert.equal(summary.pricedRequestCount, 0);
   assert.equal(records[0]?.unpricedReason, 'unsupported_source');
@@ -323,7 +315,6 @@ test('usage ledger serializes, restores, re-summarizes and reprices by request t
       ...createUsageLedgerRecords({ requestId: 'cny', attempts: [cnySnapshot], usage: REPORTED_USAGE, source: 'reviewer' }),
       ...createUsageLedgerRecords({ requestId: 'usd', attempts: [usdSnapshot], usage: REPORTED_USAGE, source: 'subagent' })
     ],
-    legacyAggregate: false,
     incomplete: false
   };
   const restored = normalizeUsageLedgerValue(JSON.parse(JSON.stringify(ledger)));
@@ -332,10 +323,7 @@ test('usage ledger serializes, restores, re-summarizes and reprices by request t
     ...JSON.parse(JSON.stringify(ledger)),
     version: 0
   });
-  assert.equal(migrated?.version, 1);
-  assert.equal(migrated?.records.length, 2);
-  assert.equal(migrated?.legacyAggregate, true);
-  assert.equal(migrated?.incomplete, true);
+  assert.equal(migrated, undefined);
   const damagedPayload = JSON.parse(JSON.stringify(ledger));
   damagedPayload.records[0].requestStartedAt = 'not-a-time';
   const damaged = normalizeUsageLedgerValue(damagedPayload);
@@ -358,10 +346,10 @@ test('usage ledger serializes, restores, re-summarizes and reprices by request t
   assert.equal(repriced.records[1]?.priceSnapshot.pricingPeriod, 'offPeak');
 });
 
-test('legacy aggregate ledgers stay explicitly incomplete instead of inventing attempt counts', () => {
+test('obsolete ledgers are rejected and damaged current ledgers expose incomplete counts', () => {
   const normalized = normalizeUsageLedgerValue({ version: 0, records: [] });
   assert.equal(normalized, undefined);
-  const summary = summarizeUsageLedger({ version: 1, records: [], legacyAggregate: true, incomplete: true });
+  const summary = summarizeUsageLedger({ version: 1, records: [], incomplete: true });
   assert.equal(summary.providerAttemptCount, 0);
   assert.equal(summary.usageResponseCount, 0);
   assert.equal(summary.incomplete, true);

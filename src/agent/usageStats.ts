@@ -228,7 +228,6 @@ export function addUsageEventToSessionStats(
     ...cacheCounts,
     costByCurrency,
     byModelSource: addUsageModelGroup(base.byModelSource, event),
-    legacyUnattributed: base.legacyUnattributed,
     updatedAt: now,
     bySource: addUsageSourceStats(
       base.bySource,
@@ -255,14 +254,14 @@ export function applyUsageLedgerSummaryToSessionStats(
     const counts = summary.bySourceCounts?.[source];
     if (counts) bySource[source] = { promptTokens: 0, completionTokens: 0, totalTokens: 0, cacheHitTokens: 0,
       cacheMissTokens: 0, cost: 0, requestCount: 0, ...bySource[source], ...counts,
-      attemptStatsIncomplete: summary.incomplete || summary.legacyAggregate };
+      attemptStatsIncomplete: summary.incomplete };
   }
   return {
     ...stats,
     bySource,
     providerAttemptCount: summary.providerAttemptCount,
     usageResponseCount: summary.usageResponseCount,
-    attemptStatsIncomplete: summary.incomplete || summary.legacyAggregate,
+    attemptStatsIncomplete: summary.incomplete,
     cacheDiagnostics: summary.cacheDiagnostics
   };
 }
@@ -290,7 +289,7 @@ export function applyUsageLedgerDeltaToSessionStats(current: SessionUsageStats |
 /** Deterministic reconstruction for v2 ledger-backed sessions. */
 export function rebuildSessionUsageStatsFromLedger(
   records: readonly ProviderUsageLedgerRecord[],
-  metadata: { incomplete?: boolean; legacyAggregate?: boolean } = {}
+  metadata: { incomplete?: boolean } = {}
 ): SessionUsageStats | undefined {
   let stats: SessionUsageStats | undefined;
   for (const record of records) {
@@ -314,7 +313,6 @@ export function rebuildSessionUsageStatsFromLedger(
   const ledger = {
     version: 1 as const,
     records: [...records],
-    legacyAggregate: Boolean(metadata.legacyAggregate),
     incomplete: Boolean(metadata.incomplete)
   };
   return applyUsageLedgerSummaryToSessionStats(stats, summarizeUsageLedger(ledger));
@@ -336,7 +334,7 @@ export function updateUsageLedgerStatsIndex(index: UsageLedgerStatsIndex, record
       protocol: record.protocol, pricingStatus: record.pricingStatus, source: record.source, requestId: record.requestId,
       ledgerRecorded: true }), record.requestStartedAt);
   }
-  const single = (records: ProviderUsageLedgerRecord[]) => summarizeUsageLedger({ version: 1, records, legacyAggregate: false, incomplete });
+  const single = (records: ProviderUsageLedgerRecord[]) => summarizeUsageLedger({ version: 1, records, incomplete });
   index.stats = applyUsageLedgerDeltaToSessionStats(index.stats, single(previous ? [previous] : []), single([record]));
   index.records.set(key, record);
   return true;
@@ -362,10 +360,7 @@ export function addTurnUsageToSessionStats(
     + (turn.cacheDataMissingRequestCount ?? (turn.cacheDataStatus === 'reported' ? 0 : requestCount));
   const costByCurrency = mergeCostByCurrency(
     base.costByCurrency,
-    turn.costByCurrency,
-    turn.cost,
-    turn.currency,
-    (turn.pricedRequestCount ?? 0) + (turn.estimatedRequestCount ?? 0) > 0
+    turn.costByCurrency
   );
   return {
     ...sumUsage(base, turn),
@@ -385,7 +380,6 @@ export function addTurnUsageToSessionStats(
     cacheDataMissingRequestCount,
     costByCurrency,
     byModelSource: addTurnUsageModelGroup(base.byModelSource, turn),
-    legacyUnattributed: base.legacyUnattributed,
     updatedAt: now,
     bySource: mergeUsageSourceStats(base.bySource, turn.bySource)
   };
@@ -412,8 +406,7 @@ export function calculateUsageCost(usage: Usage, rates: UsageCostRates): number 
 
 /**
  * 按请求发生时刻的峰/谷时段选价并折算成本。
- * 高峰档字段(peakCacheHitPrice / peakInputPrice / peakOutputPrice)缺省时,
- * 回退到空闲档对应字段(兼容升级前的单档配置)。
+ * 提供商采用单一档定价时，全天使用该档；采用峰谷定价时按请求时段选价。
  */
 export function calculateUsageCostAt(
   usage: Usage,
@@ -454,7 +447,7 @@ export interface CacheMissReasonInput {
  * - system / tools schema 指纹变化是从该点起整段前缀失效的直接证据，无条件归因（不依赖命中率门槛）。
  * - history 段在 append-only 投影下每轮必然追加新消息，historyPrefixHash 逐轮变化是预期行为。
  * - 历史改写和 Provider 逐出只能由逐请求账本中基于真实原生投影的字节前缀证明得出；
- *   这个旧聚合兼容入口不根据整段 hash 或命中率变化猜测。
+ *   当前运行诊断不根据整段 hash 或命中率变化猜测。
  */
 export function getCacheMissPossibleReasons(input: CacheMissReasonInput): string[] {
   const reasons: string[] = [];
@@ -498,7 +491,7 @@ export function normalizeSessionUsageStatsValue(value: unknown): SessionUsageSta
   }
   const usage = normalizeUsage(value);
   const requestCount = readNonNegativeInteger(value.requestCount);
-  const sessionCost = normalizeCost(value.sessionCost);
+  const sessionCost = getSingleCurrencyCost(normalizeCostByCurrency(value.costByCurrency) ?? {});
   const pricingStatus = normalizeAggregatePricingStatus(value.pricingStatus)
     ?? (sessionCost > 0 ? 'priced' : 'unavailable');
   const estimatedRequestCount = readOptionalNonNegativeInteger(value.estimatedRequestCount)
@@ -520,16 +513,13 @@ export function normalizeSessionUsageStatsValue(value: unknown): SessionUsageSta
       ?? (usage.cacheDataStatus === 'reported' ? requestCount : 0),
     cacheDataMissingRequestCount: readOptionalNonNegativeInteger(value.cacheDataMissingRequestCount)
       ?? (usage.cacheDataStatus === 'reported' ? 0 : requestCount),
-    costByCurrency: normalizeCostByCurrency(value.costByCurrency, value.sessionCost, value.currency),
-    byModelSource: normalizeUsageModelGroups(value.byModelSource, getLegacySourceCurrency(value.costByCurrency, value.currency)),
-    legacyUnattributed: typeof value.legacyUnattributed === 'boolean'
-      ? value.legacyUnattributed
-      : !Array.isArray(value.byModelSource),
+    costByCurrency: normalizeCostByCurrency(value.costByCurrency),
+    byModelSource: normalizeUsageModelGroups(value.byModelSource),
     attemptStatsIncomplete: typeof value.attemptStatsIncomplete === 'boolean'
       ? value.attemptStatsIncomplete
       : value.providerAttemptCount === undefined || value.usageResponseCount === undefined,
     updatedAt: normalizeOptionalString(value.updatedAt),
-    bySource: normalizeUsageSourceStatsMap(value.bySource, getLegacySourceCurrency(value.costByCurrency, value.currency)),
+    bySource: normalizeUsageSourceStatsMap(value.bySource),
     cacheDiagnostics: normalizeCacheDiagnosticsMetrics(value.cacheDiagnostics)
   };
   return hasAnyUsage(stats) || stats.requestCount > 0 || (stats.providerAttemptCount ?? 0) > 0
@@ -542,7 +532,7 @@ export function normalizeTurnUsageStatsValue(value: unknown): TurnUsageStats | u
   }
   const usage = normalizeUsage(value);
   const requestCount = readNonNegativeInteger(value.requestCount);
-  const cost = normalizeCost(value.cost);
+  const cost = getSingleCurrencyCost(normalizeCostByCurrency(value.costByCurrency) ?? {});
   const pricingStatus = normalizeAggregatePricingStatus(value.pricingStatus)
     ?? (cost > 0 ? 'priced' : 'unavailable');
   const estimatedRequestCount = readOptionalNonNegativeInteger(value.estimatedRequestCount)
@@ -569,9 +559,9 @@ export function normalizeTurnUsageStatsValue(value: unknown): TurnUsageStats | u
       ?? (usage.cacheDataStatus === 'reported' ? requestCount : 0),
     cacheDataMissingRequestCount: readOptionalNonNegativeInteger(value.cacheDataMissingRequestCount)
       ?? (usage.cacheDataStatus === 'reported' ? 0 : requestCount),
-    costByCurrency: normalizeCostByCurrency(value.costByCurrency, value.cost, value.currency),
+    costByCurrency: normalizeCostByCurrency(value.costByCurrency),
     updatedAt: normalizeOptionalString(value.updatedAt),
-    bySource: normalizeUsageSourceStatsMap(value.bySource, getLegacySourceCurrency(value.costByCurrency, value.currency))
+    bySource: normalizeUsageSourceStatsMap(value.bySource)
   };
   return hasAnyUsage(stats) || stats.requestCount > 0 || (stats.providerAttemptCount ?? 0) > 0
     || stats.cost > 0 ? stats : undefined;
@@ -654,7 +644,7 @@ function normalizeCacheDiagnosticsMetrics(value: unknown): CacheDiagnosticsMetri
     estimatedReusableTokensNotHit: count(value.estimatedReusableTokensNotHit),
     estimatedLocalBoundaryLossTokens: count(value.estimatedLocalBoundaryLossTokens),
     estimatedLocalBoundaryExtraCostByCurrency: normalizeCostByCurrency(
-      value.estimatedLocalBoundaryExtraCostByCurrency, undefined, undefined
+      value.estimatedLocalBoundaryExtraCostByCurrency
     ) ?? {},
     ...(typeof value.lastAnomalyReason === 'string'
       ? { lastAnomalyReason: value.lastAnomalyReason as CacheDiagnosticsMetrics['lastAnomalyReason'] } : {}),
@@ -807,10 +797,7 @@ function mergeUsageSourceStats(
     };
     const costByCurrency = mergeCostByCurrency(
       previous.costByCurrency,
-      stats.costByCurrency,
-      stats.cost,
-      '',
-      (stats.pricedRequestCount ?? 0) + (stats.estimatedRequestCount ?? 0) > 0
+      stats.costByCurrency
     );
     merged = {
       ...(merged ?? {}),
@@ -837,10 +824,7 @@ function mergeUsageSourceStats(
   return merged;
 }
 
-function normalizeUsageSourceStatsMap(
-  value: unknown,
-  fallbackCurrency?: unknown
-): Partial<Record<UsageSource, UsageSourceStats>> | undefined {
+function normalizeUsageSourceStatsMap(value: unknown): Partial<Record<UsageSource, UsageSourceStats>> | undefined {
   if (!isRecord(value)) {
     return undefined;
   }
@@ -852,19 +836,17 @@ function normalizeUsageSourceStatsMap(
     }
     const usage = normalizeUsage(raw);
     const requestCount = readNonNegativeInteger(raw.requestCount);
-    const legacyCost = normalizeCost(raw.cost);
-    const pricedRequestCount = readOptionalNonNegativeInteger(raw.pricedRequestCount)
-      ?? (raw.pricingStatus === 'estimated_upper_bound' ? 0 : legacyCost > 0 ? requestCount : 0);
+    const pricedRequestCount = readNonNegativeInteger(raw.pricedRequestCount);
     const estimatedRequestCount = readOptionalNonNegativeInteger(raw.estimatedRequestCount)
       ?? (raw.pricingStatus === 'estimated_upper_bound' ? requestCount : 0);
-    const costByCurrency = normalizeCostByCurrency(raw.costByCurrency, raw.cost, fallbackCurrency);
+    const costByCurrency = normalizeCostByCurrency(raw.costByCurrency);
     result[source] = {
       ...usage,
       requestCount,
       providerAttemptCount: readOptionalNonNegativeInteger(raw.providerAttemptCount),
       attemptStatsIncomplete: raw.attemptStatsIncomplete === true || raw.providerAttemptCount === undefined || raw.usageResponseCount === undefined,
       usageResponseCount: readOptionalNonNegativeInteger(raw.usageResponseCount) ?? requestCount,
-      cost: costByCurrency ? getSingleCurrencyCost(costByCurrency) : legacyCost,
+      cost: getSingleCurrencyCost(costByCurrency ?? {}),
       pricedRequestCount,
       estimatedRequestCount,
       unpricedRequestCount: readOptionalNonNegativeInteger(raw.unpricedRequestCount)
@@ -999,10 +981,7 @@ function addTurnUsageModelGroup(
       + (turn.cacheDataMissingRequestCount ?? (turn.cacheDataStatus === 'reported' ? 0 : requestCount)),
     costByCurrency: mergeCostByCurrency(
       previous.costByCurrency,
-      turn.costByCurrency,
-      turn.cost,
-      turn.currency,
-      (turn.pricedRequestCount ?? 0) + (turn.estimatedRequestCount ?? 0) > 0
+      turn.costByCurrency
     ),
     bySource: mergeUsageSourceStats(previous.bySource, turn.bySource)
   };
@@ -1035,7 +1014,7 @@ function createEmptyUsageModelGroup(event: UsageEvent): UsageModelGroupStats {
   };
 }
 
-function normalizeUsageModelGroups(value: unknown, fallbackCurrency?: unknown): UsageModelGroupStats[] | undefined {
+function normalizeUsageModelGroups(value: unknown): UsageModelGroupStats[] | undefined {
   if (!Array.isArray(value)) {
     return undefined;
   }
@@ -1057,7 +1036,7 @@ function normalizeUsageModelGroups(value: unknown, fallbackCurrency?: unknown): 
       cacheDataRequestCount: readNonNegativeInteger(item.cacheDataRequestCount),
       cacheDataMissingRequestCount: readNonNegativeInteger(item.cacheDataMissingRequestCount),
       costByCurrency: normalizeCostByCurrency(item.costByCurrency),
-      bySource: normalizeUsageSourceStatsMap(item.bySource, getLegacySourceCurrency(item.costByCurrency, fallbackCurrency))
+      bySource: normalizeUsageSourceStatsMap(item.bySource)
     });
   }
   return groups.length ? groups : [];
@@ -1089,43 +1068,22 @@ function addCostByCurrency(
 
 function mergeCostByCurrency(
   current: Record<string, number> | undefined,
-  incoming: Record<string, number> | undefined,
-  fallbackCost: number,
-  fallbackCurrency: string,
-  hasPricedRequests: boolean
+  incoming: Record<string, number> | undefined
 ): Record<string, number> {
   const result = { ...(current ?? {}) };
-  const normalizedIncoming = normalizeCostByCurrency(incoming);
-  if (normalizedIncoming && Object.keys(normalizedIncoming).length) {
-    for (const [currency, cost] of Object.entries(normalizedIncoming)) {
-      result[currency] = normalizeCost((result[currency] ?? 0) + cost);
-    }
-    return result;
-  }
-  const currency = normalizeCurrency(fallbackCurrency);
-  if (hasPricedRequests && currency) {
-    result[currency] = normalizeCost((result[currency] ?? 0) + fallbackCost);
+  for (const [currency, cost] of Object.entries(normalizeCostByCurrency(incoming) ?? {})) {
+    result[currency] = normalizeCost((result[currency] ?? 0) + cost);
   }
   return result;
 }
 
-function normalizeCostByCurrency(
-  value: unknown,
-  legacyCost?: unknown,
-  legacyCurrency?: unknown
-): Record<string, number> | undefined {
+function normalizeCostByCurrency(value: unknown): Record<string, number> | undefined {
   const result: Record<string, number> = {};
   if (isRecord(value)) {
     for (const [currency, cost] of Object.entries(value)) {
       if (currency.trim()) {
         result[currency.trim()] = normalizeCost(cost);
       }
-    }
-  } else {
-    const cost = normalizeCost(legacyCost);
-    const currency = normalizeCurrency(legacyCurrency);
-    if (cost > 0 && currency) {
-      result[currency] = cost;
     }
   }
   return Object.keys(result).length ? result : {};
@@ -1134,14 +1092,6 @@ function normalizeCostByCurrency(
 function getSingleCurrency(costs: Record<string, number>): string | undefined {
   const currencies = Object.keys(costs);
   return currencies.length === 1 ? currencies[0] : undefined;
-}
-
-function getLegacySourceCurrency(value: unknown, fallback: unknown): string {
-  const costs = normalizeCostByCurrency(value);
-  const currencies = Object.keys(costs ?? {});
-  // Old per-source scalar costs cannot be assigned to a currency when the
-  // containing aggregate already includes multiple currencies.
-  return currencies.length > 1 ? '' : currencies[0] ?? normalizeCurrency(fallback);
 }
 
 function getSingleCurrencyCost(costs: Record<string, number>): number {

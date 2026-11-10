@@ -1,3 +1,4 @@
+import { KEEPSEEK_CONFIGURATION_NAMESPACE } from '../shared/identity';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
@@ -285,7 +286,7 @@ export class FileContextStore {
 }
 
 function getConfiguredContextLimits(): ContextLimits {
-  const config = vscode.workspace.getConfiguration('keepseek');
+  const config = vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE);
   return {
     maxFileBytes: config.get('maxFileBytes', DEFAULT_MAX_FILE_BYTES),
     maxContextFiles: config.get('maxContextFiles', 32)

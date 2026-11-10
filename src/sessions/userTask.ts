@@ -18,41 +18,7 @@ export function normalizeUserTask(value: unknown): UserTaskLink | undefined {
 export function executionSegmentId(message: ChatMessage | undefined): string | undefined {
   return message?.runCheckpoint?.taskId ?? message?.runCheckpointArchive?.summary.taskId;
 }
-/** Only explicit host continuation markers join legacy turns. Ordinary input
- * (including edited resends) starts a new task. No inference from prompt text. */
-export function migrateUserTasks(messages: ChatMessage[]): void {
-  let current: UserTaskLink | undefined;
-  const originallyLinked = new Set(messages.filter(message => normalizeUserTask(message.userTask)).map(message => message.id));
-  const segmentOwners = new Map<string, UserTaskLink>();
-  for (const [index, message] of messages.entries()) {
-    const saved = normalizeUserTask(message.userTask);
-    if (saved) current = saved;
-    else if (message.role === 'user') {
-      const kind = message.contextMeta?.displayKind;
-      const reason = kind === 'delegated_auto_continue' ? 'approval'
-        : kind === 'draft_run_auto_continue' ? 'command'
-          : kind === 'plan_execution_continuation' ? 'plan' : undefined;
-      if (reason && current) message.userTask = { ...current, reason };
-      else if (!reason) message.userTask = { version: 1, id: message.id, originMessageId: message.id, reason: 'user' };
-      current = message.userTask;
-    } else if (message.role === 'assistant') {
-      const segment = executionSegmentId(message);
-      const owner = segment && segmentOwners.get(segment);
-      if (owner) {
-        // A repeated authoritative execution ID is an explicit recovery link,
-        // including legacy no-progress supplementary user turns.
-        current = { ...owner, reason: 'recovery' };
-        const preceding = messages[index - 1];
-        if (preceding?.role === 'user' && !originallyLinked.has(preceding.id)) preceding.userTask = { ...current };
-      }
-      if (current) message.userTask = { ...current };
-    }
-    const segment = executionSegmentId(message);
-    if (segment && message.userTask && !segmentOwners.has(segment)) segmentOwners.set(segment, message.userTask);
-  }
-}
 export function taskForSegment(session: ChatSession, segmentId: string): UserTaskLink | undefined {
-  migrateUserTasks(session.messages);
   return session.messages.find(message => executionSegmentId(message) === segmentId)?.userTask;
 }
 export function taskGoal(history: readonly ChatMessage[], taskId: string): string {

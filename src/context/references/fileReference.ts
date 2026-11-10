@@ -1,3 +1,4 @@
+import { KEEPSEEK_CONFIGURATION_NAMESPACE } from '../../shared/identity';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
@@ -303,7 +304,7 @@ function exceedsReferenceExpansionLimit(content: string): boolean {
 }
 
 function getReferenceExpansionMaxBytes(): number {
-  return vscode.workspace.getConfiguration('keepseek').get('maxFileBytes', 200_000);
+  return vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE).get('maxFileBytes', 200_000);
 }
 
 export function getUriFileName(uri: vscode.Uri): string {
@@ -339,50 +340,6 @@ export function formatReferenceLineLabel(
   return `L${startLine}#C${normalizedStartColumn}-L${normalizedEndLine}#C${normalizedEndColumn}`;
 }
 
-function formatLegacyReferenceLineLabel(
-  startLine: number,
-  endLine: number,
-  startColumn: number,
-  endColumn: number,
-  language: KeepseekLanguage
-): string {
-  if (language === 'en') {
-    if (startLine === endLine) {
-      if (startColumn > 0) {
-        const colEnd = endColumn > startColumn ? endColumn : 0;
-        if (colEnd > 0) {
-          return `line ${startLine} cols ${startColumn}-${colEnd}`;
-        }
-        return `line ${startLine} from col ${startColumn}`;
-      }
-      return `line ${startLine}`;
-    }
-    if (startColumn > 0 || endColumn > 0) {
-      const startCol = startColumn > 0 ? ` col ${startColumn}` : '';
-      const endCol = endColumn > 0 ? ` col ${endColumn}` : '';
-      return `line ${startLine}${startCol}-line ${endLine}${endCol}`;
-    }
-    return `lines ${startLine}-${endLine}`;
-  }
-
-  if (startLine === endLine) {
-    if (startColumn > 0) {
-      const colEnd = endColumn > startColumn ? endColumn : 0;
-      if (colEnd > 0) {
-        return `第${startLine}行第${startColumn}-${colEnd}列`;
-      }
-      return `第${startLine}行第${startColumn}列起`;
-    }
-    return `第${startLine}行`;
-  }
-  if (startColumn > 0 || endColumn > 0) {
-    const startCol = startColumn > 0 ? `第${startColumn}列` : '';
-    const endCol = endColumn > 0 ? `第${endColumn}列` : '';
-    return `第${startLine}行${startCol}-第${endLine}行${endCol}`;
-  }
-  return `第${startLine}-${endLine}行`;
-}
-
 function getReferenceLineLabelVariants(
   startLine: number,
   endLine: number,
@@ -390,13 +347,7 @@ function getReferenceLineLabelVariants(
   endColumn: number,
   language: KeepseekLanguage
 ): string[] {
-  const labels = [
-    formatReferenceLineLabel(startLine, endLine, startColumn, endColumn, language),
-    formatLegacyReferenceLineLabel(startLine, endLine, startColumn, endColumn, language),
-    formatLegacyReferenceLineLabel(startLine, endLine, startColumn, endColumn, 'zh-CN'),
-    formatLegacyReferenceLineLabel(startLine, endLine, startColumn, endColumn, 'en')
-  ];
-  return labels.filter((label, index) => labels.indexOf(label) === index);
+  return [formatReferenceLineLabel(startLine, endLine, startColumn, endColumn, language)];
 }
 
 function getFullReferenceLabel(language: KeepseekLanguage): string {

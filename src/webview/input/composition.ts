@@ -47,7 +47,7 @@ export interface WebviewFragment {
 }
 
 // These fragments intentionally share one generated IIFE. The fixed order keeps
-// the legacy lexical scope, initialization order, and listener registration order.
+// the shared lexical scope, initialization order, and listener registration order.
 export const INPUT_SCRIPT_FRAGMENTS = [
   composerScript.composerOpenFragment,
   dragDrop.dragDropDeclarationFragment,

@@ -3,7 +3,6 @@ import { buildProviderRequestProjection } from '../src/agent/providerRequestProj
 import { getConfiguredAgentSettings } from '../src/shared/config';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,7 +10,7 @@ import { ChatSessionStore, createEmptySession, normalizeStoredSessions,
   type ChatSessionStorageAdapter, type StoredWorkspaceSessionState } from '../src/sessions/chatSessionStore';
 import { SessionTitleCoordinator } from '../src/sessions/sessionTitleCoordinator';
 import { OneShotTextRequestError } from '../src/agent/oneShotTextRequest';
-import { buildSessionTitleMaterial, buildSessionTitleRegenerationMaterial, sessionTitleMessageHash } from '../src/sessions/sessionTitle';
+import { buildSessionTitleMaterial, buildSessionTitleRegenerationMaterial } from '../src/sessions/sessionTitle';
 import { createHistoryTruncationPlan, executeHistoryTruncation } from '../src/sessions/historyTruncation';
 import type { ChatMessage, ChatSession } from '../src/shared/types';
 import { GlobalSessionStorage, getWorkspaceHash, automaticTitleCommit } from '../src/sessions/globalSessionStorage';
@@ -362,7 +361,7 @@ test('history truncation preserves a committed title and permanent stop even whe
   assert.equal(session.messages[0].id, 'replacement-1');
 });
 
-test('old sessions normalize to pending and manual title remains locked with damaged metadata', () => {
+test('sessions without title metadata normalize to pending and a manual title stays locked', () => {
   const initial = createEmptySession('en', scope);
   delete initial.autoTitle;
   initial.title = 'Old title';
@@ -696,7 +695,7 @@ for (const previousKind of ['automatic', 'custom'] as const) {
   });
 }
 
-test('manual regeneration names legacy conversations without rewriting their task links or request bytes', async () => {
+test('manual regeneration names messages without task links and preserves request bytes', async () => {
   const legacy = pair('legacy');
   for (const message of legacy) delete message.userTask;
   const { store, session, coordinator } = await fixture(legacy);
@@ -798,56 +797,34 @@ test('a cancelled manual claim keeps its committed automatic revision if the cor
 
 
 for (const committed of [true, false]) {
-  test(`old v1 ${committed ? 'canonical committed' : 'shard-only'} title is verified before archived basis migration`, async t => {
-    const root = await mkdtemp(join(tmpdir(), 'keepseek-title-legacy-hash-'));
+  test(`current title ${committed ? 'canonical commit survives' : 'shard-only result rolls back'} after restart`, async t => {
+    const root = await mkdtemp(join(tmpdir(), 'keepseek-title-current-commit-'));
     t.after(() => removeStorageRoot(root));
-    const storage = new GlobalSessionStorage(vscode.Uri.file(root) as never);
-    const store = new ChatSessionStore(storage, 'en', scope);
+    const uri = vscode.Uri.file(root) as never;
+    const store = new ChatSessionStore(new GlobalSessionStorage(uri), 'en', scope);
     await store.initialize();
     const session = store.getActiveSession();
-    session.messages = pair('legacy-hash');
+    session.messages = pair('current-title');
     await store.persist();
-    const basis = { messages: session.messages.map(message => ({ id: message.id, hash: sessionTitleMessageHash(message) })),
-      lastMessageId: session.messages.at(-1)!.id };
-    const legacy = { ...structuredClone(session), title: '旧标题保留', messages: [],
-      autoTitle: { version: 1 as const, status: 'completed' as const, revision: 4,
-        completed: { taskId: 'legacy-hash', basis }, lastOutcome: 'set' as const } };
-    // Calculate the original format independently, so a new hash used for an
-    // old marker cannot accidentally make both sides of this test agree.
-    const legacyHash = createHash('sha256').update(JSON.stringify([
-      legacy.id, legacy.title, 4, 'legacy-hash', basis.messages.map(ref => [ref.id, ref.hash]), basis.lastMessageId
-    ])).digest('hex');
-    assert.equal(automaticTitleCommit(legacy), legacyHash);
+    const initialTitle = session.title;
     const directory = join(root, 'chat-sessions', 'v2', 'workspaces', getWorkspaceHash(scope.key));
     const indexPath = join(directory, 'index.json');
-    const index = JSON.parse(await readFile(indexPath, 'utf8'));
-    const entry = index.sessions.find((item: { id: string }) => item.id === session.id);
-    if (committed) { entry.title = legacy.title; entry.autoTitleCommit = legacyHash; }
-    await writeFile(join(directory, entry.storageFile), JSON.stringify({ version: 2, workspaceKey: scope.key, session: legacy }));
-    await writeFile(indexPath, JSON.stringify(index));
-    const restart = new ChatSessionStore(new GlobalSessionStorage(vscode.Uri.file(root) as never), 'en', scope);
+    const previousIndex = await readFile(indexPath, 'utf8');
+    assert.equal(await new SessionTitleCoordinator(store).complete(session.id, 'current-title', async () => set), true);
+    const committedHash = automaticTitleCommit(session);
+    assert.ok(committedHash);
+    if (!committed) await writeFile(indexPath, previousIndex);
+    const restart = new ChatSessionStore(new GlobalSessionStorage(uri), 'en', scope);
     await restart.initialize();
     const recovered = restart.getActiveSession();
     assert.equal(recovered.autoTitle?.stopped, committed ? 'named' : undefined);
     assert.equal(recovered.autoTitle?.status, committed ? 'completed' : 'pending');
-    assert.equal(recovered.title, committed ? legacy.title : session.title);
+    assert.equal(recovered.title, committed ? '审批失败排查' : initialTitle);
     assert.equal(recovered.autoTitle?.version, 2);
+    assert.equal(automaticTitleCommit(recovered), committed ? committedHash : undefined);
     let requests = 0;
-    await new SessionTitleCoordinator(restart).complete(recovered.id, 'legacy-hash', async () => { requests++; return set; });
-    assert.equal(requests, 0);
-    await restart.persist();
-    if (committed) {
-      const currentHash = automaticTitleCommit(recovered);
-      assert.ok(currentHash); assert.notEqual(currentHash, legacyHash);
-      const currentIndex = JSON.parse(await readFile(indexPath, 'utf8'));
-      assert.equal(currentIndex.sessions.find((item: { id: string }) => item.id === session.id).autoTitleCommit, currentHash);
-      // Simulate losing the very first v2 index replacement after the
-      // migrated shard is durable. The surviving old proof still commits it.
-      await writeFile(indexPath, JSON.stringify(index));
-      const secondRestart = new ChatSessionStore(new GlobalSessionStorage(vscode.Uri.file(root) as never), 'en', scope);
-      await secondRestart.initialize();
-      assert.equal(secondRestart.getActiveSession().autoTitle?.stopped, 'named');
-    }
+    await new SessionTitleCoordinator(restart).complete(recovered.id, 'current-title', async () => { requests++; return set; });
+    assert.equal(requests, 0, 'restart never launches an unsolicited request');
   });
 }
 
@@ -973,7 +950,7 @@ test('v2 commit hash requires the explicit durable stop field and hashes it sepa
 });
 
 
-test('two truly legacy rounds refresh through normalization and title persistence without userTask backfill', async () => {
+test('two rounds without task links refresh through normalization without userTask backfill', async () => {
   const legacy = [...pair('legacy-first', '检查第一轮命令审批'), ...pair('legacy-latest', '解释最近一轮模型来源')];
   for (const entry of legacy) delete entry.userTask;
   const rawBefore = JSON.stringify(legacy);
@@ -1091,7 +1068,7 @@ test('out-of-order direct store completion keeps an earlier unattempted complete
   assert.equal(requests, 2);
 });
 
-test('ordered observed completions stay bounded after a lazily loaded unnamed legacy history', async () => {
+test('ordered observed completions stay bounded after a lazily loaded unnamed history', async () => {
   const history = Array.from({ length: 100 }, (_, index) => pair(`historical-${index}`)).flat();
   const { session, coordinator } = await fixture(history);
   let requests = 0;
@@ -1146,7 +1123,7 @@ test('an accepted user purpose commits a durable title while its first assistant
   });
   await started.promise;
   const assistant: ChatMessage = { id: 'still-streaming', role: 'assistant', content: 'ASSISTANT_SECRET_NOT_TITLE_MATERIAL',
-    reasoningContent: 'PRIVATE_REASONING', isStreaming: true, incompleteForTitle: true, createdAt: '', userTask: user.userTask,
+    reasoningContent: 'PRIVATE_REASONING', isStreaming: true, createdAt: '', userTask: user.userTask,
     runDetails: { status: 'running' } as ChatMessage['runDetails'] };
   session.messages.push(assistant);
   response.resolve(set);

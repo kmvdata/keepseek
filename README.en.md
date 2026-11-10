@@ -6,6 +6,8 @@
 
 # KeepSeek
 
+Version 0.5.2 starts a fresh baseline under `kmvdata.keepseek`. Configure accounts again; earlier data and settings are not imported. See the [storage baseline and reset instructions](doc/keepseek-storage-baseline.md).
+
 ## 1. Turn the Model You Choose into an Agent That Gets Real Work Done
 
 **KeepSeek is an open-source coding agent in the VS Code sidebar: you choose the models, control the context, and decide how edits and commands are approved.**
@@ -36,7 +38,7 @@ KeepSeek manages model connections as accounts. Personal accounts, team gateways
 
 KeepSeek currently supports official DeepSeek, Kimi, GLM, and QwenCloud accounts; OpenAI Chat Completions- and Responses-compatible services; Anthropic Messages-compatible services; and local Ollama. Each protocol handles streaming responses, tool calls, and reasoning content independently. You can also add models manually when a compatible endpoint does not provide a model list.
 
-API keys are stored only in VS Code extension global storage. They are never written to the workspace or Git.
+API keys are stored only in the extension host’s dedicated data directory. They are never written to the workspace or Git.
 
 Alongside the account system, KeepSeek adds several model-management conveniences:
 
@@ -91,7 +93,7 @@ There are two approval modes:
 - **Ask for approval** (default, `ask`): you approve file writes and commands individually or as a batch;
 - **Approve for me** (`delegate`): the host directly approves eligible routine actions, then sends other verifiable actions to an independent, tool-free approval model. When a decision remains unresolved, the host requests a precise one-time user decision. A safety denial cannot be overridden by a user click.
 
-The selected mode is saved per workspace and reused across its sessions. Configure the approval model under **`/` → Subagent models → Approval model**, following the actual main model for the task segment or choosing a fixed account and model. This uses the separate user-level `keepseek.autoApprovalReviewer` setting and does not inherit ordinary subagent defaults or role settings. Legacy Model review settings normalize to Ask for approval; historical audit records remain readable.
+The selected mode is saved per workspace and reused across its sessions. Configure the approval model under **`/` → Subagent models → Approval model**, following the actual main model for the task segment or choosing a fixed account and model. This uses the separate user-level `kmvdata.keepseek.autoApprovalReviewer` setting and does not inherit ordinary subagent defaults or role settings. Only Ask for approval and Approve for me are supported; earlier approval modes and settings are not imported.
 
 Approve for me retains workspace-trust, external-scope, file-conflict, dirty-editor, and one-time execution-permit checks. Processes run with extension-host privileges and have no OS sandbox. Stop the task at any time or switch back to Ask for approval to cancel subsequent automatic actions.
 

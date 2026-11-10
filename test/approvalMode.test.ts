@@ -11,6 +11,7 @@ import { Script } from 'node:vm';
 import { DelegatedApprovalQueue, draftRunPreparedMessage, getApprovalModeUserTail, normalizeApprovalMode } from '../src/agent/approvalMode';
 import { localize, WEBVIEW_TRANSLATIONS } from '../src/shared/i18n';
 import { createDraftRunProposal, hashDraftRunSpec } from '../src/runs/draftRunProposal';
+import { createFullTextDraftEdit, createDeleteDraftEdit } from '../src/edits/draftEdit';
 import { DraftRunStore } from '../src/runs/draftRunStore';
 import { ExactOperationGrants } from '../src/approvals/authorization';
 import { buildInitialAgentMessages, getAgentSystemPrompt, getAgentTools, RUN_VALIDATION_TOOL_NAME } from '../src/agent/protocol';
@@ -120,16 +121,16 @@ test('exact removed targets leave approval state for other targets in the same r
   assert.deepEqual(state.approvalProcessing?.targets.map(target => target.id), ['retained']);
 });
 
-test('an interrupted correction retains diagnostics and the attempt ledger without restoring execution authority', () => {
-  const state = normalizeApprovalProcessing({ version: 1, runId: 'segment', rootTaskId: 'task', mode: 'delegate',
+test('an interrupted correction retains diagnostics and requires an explicit resume without restoring the approval queue', () => {
+  const state = normalizeApprovalProcessing({ version: 2, runId: 'segment', rootTaskId: 'task', mode: 'delegate',
     status: 'replanning', replanKeys: ['a'.repeat(64)], targets: [{ id: 'run', kind: 'command', status: 'needs_replan',
       replan: { draftRunId: 'run', specHash: 'hash', rootTaskId: 'task', executionSegmentId: 'segment',
         phase: 'preflight', code: 'git_status_pager_override', reason: 'Use controlled status.', executed: false }
     }, { id: 'dependent', kind: 'command', status: 'dependency_blocked', reason: 'Malformed -m.',
       dependency: { targetId: 'run', label: 'git status', reason: 'Use controlled status.' }
     }] });
-  assert.equal(state?.status, 'stopped');
-  assert.equal(state?.canResume, undefined);
+  assert.equal(state?.status, 'blocked');
+  assert.equal(state?.canResume, true);
   assert.deepEqual(state?.replanKeys, ['a'.repeat(64)]);
   assert.equal(state?.targets[0].replan?.executed, false);
   assert.equal(state?.targets[1].reason, 'Malformed -m.');
@@ -137,77 +138,17 @@ test('an interrupted correction retains diagnostics and the attempt ledger witho
   assert.equal(new DelegatedApprovalQueue().take('session'), undefined);
 });
 
-test('stored approval modes preserve explicit legacy choices and fail closed on missing or unknown values', () => {
+test('stored approval modes accept only current choices and fail closed on missing or unknown values', () => {
   const scope = { key: 'workspace:test', name: 'Test', folderUris: ['file:///workspace'] };
   const sessions = normalizeStoredSessions({ sessions: [
     storedSession('ask-missing', undefined),
     storedSession('unknown', 'always'),
-    storedSession('delegate', 'delegate'),
-    storedSession('model', 'model_review')
+    storedSession('delegate', 'delegate')
   ] }, scope);
   const modes = Object.fromEntries(sessions.map((session) => [session.id, session.approvalMode]));
   assert.deepEqual(modes, {
-    'ask-missing': 'ask', unknown: 'ask', delegate: 'delegate', model: 'ask'
+    'ask-missing': 'ask', unknown: 'ask', delegate: 'delegate'
   });
-});
-
-test('approval changes only append new user bytes; V5/V6 stay frozen and V7 adds model review', () => {
-  const history: ChatMessage[] = [{ id: 'u', role: 'user', content: 'task', providerContent: 'task\n\n' + getApprovalModeUserTail('ask'), createdAt: '2026-01-01' }];
-  const input = { history, language: 'en' as const, contextFiles: [], prompt: 'task', requestProtocolVersion: 6 };
-  const before = buildInitialAgentMessages(input);
-  const frozen = JSON.stringify(history[0]);
-  history.push({ id: 'a', role: 'assistant', content: 'prepared', createdAt: '2026-01-01' });
-  history.push({ id: 'u2', role: 'user', content: 'continue', providerContent: 'continue\n\n' + getApprovalModeUserTail('delegate'), createdAt: '2026-01-01' });
-  const after = buildInitialAgentMessages({ ...input, prompt: 'continue' });
-  assert.equal(JSON.stringify(history[0]), frozen);
-  assert.deepEqual(after.slice(0, before.length), before);
-  assert.match(getAgentSystemPrompt({ language: 'en', requestProtocolVersion: 5 }), /Every arbitrary command requires a separate user click/u);
-  assert.doesNotMatch(getAgentSystemPrompt({ language: 'en', requestProtocolVersion: 6 }), /Every arbitrary command requires a separate user click/u);
-  assert.doesNotMatch(getAgentSystemPrompt({ language: 'en', requestProtocolVersion: 6 }), /model_review/u);
-  assert.match(getAgentSystemPrompt({ language: 'en', requestProtocolVersion: 7 }), /model_review/u);
-  assert.match(getApprovalModeUserTail('delegate'), /materially safer (?:new )?action/u);
-  new Script(getInputScript());
-  new Script(getScript());
-});
-
-test('V1-V6 system and tool bytes remain frozen while the V7 lane has a stable prefix', () => {
-  const systemHashes = {
-    en: [
-      '4a416b83f1739fe004774807758404a064472862dcf3ccfa6490fc62b717c3b7',
-      '4a416b83f1739fe004774807758404a064472862dcf3ccfa6490fc62b717c3b7',
-      '4a416b83f1739fe004774807758404a064472862dcf3ccfa6490fc62b717c3b7',
-      '82552e10d15a319863afc646e7030f60cf8d79c817834a5840f98ff6a54ae206',
-      '4b3eb4c23dcb16e80089a9cc53c4802b4dda69c820876debc2ba427836c32465',
-      '66a1905e145e0e42844bda3dda11403f3b727210b2c3d62fdd6b49ce5df24a4d',
-      'dbfbc84dfc4410a2bcff42009b9e7ffa27a6fb6176439b68d51e1a0099da07de'
-    ],
-    'zh-CN': [
-      '1d63f220eea788dadfca73fbc3c504010fa98be2b836dd6e94edc0238fc4c152',
-      '1d63f220eea788dadfca73fbc3c504010fa98be2b836dd6e94edc0238fc4c152',
-      '1d63f220eea788dadfca73fbc3c504010fa98be2b836dd6e94edc0238fc4c152',
-      '9e32ce6737fa037aa5769e3c18561bdccfbd12e17c03cd89f78996bb50b8fd79',
-      'd550e5df53f3381e735376df4e1086b53cfdaad701cbf6b290888b3171302c39',
-      'd55205b98254cb7e85404e5e0818adf2ca382cf81ebc2cd6e40106943caf3502',
-      '845e1648615c47e47ea1b88b41ab5e5b5205815f77cbeccbc73d235202208fb0'
-    ]
-  } as const;
-  const toolHashes = [
-    '68227c9aade1ba1eca24a6b9aaa9fe3ccadfdb1a744947d391f4e01fd9154ebd',
-    '68227c9aade1ba1eca24a6b9aaa9fe3ccadfdb1a744947d391f4e01fd9154ebd',
-    '97cd1468e229ba0700f183a73580666a7979745eb4985a818d2ef6fef072cff1',
-    '92ae22c074c3c2f910c9e72fb1258238722fa53f489ef9ca86b1126561d76a7a',
-    '645b7150edcd8a4803875f28d51ab531e48e7e287d4420eb1d587bde44857719',
-    '45795f3e011bbccc7820cb2312a42ecf6fdedfd62f7f6b83d105c9425f5733bb',
-    '16871e5ca9d5c0db8d78ba513def6189127d4f07db268ee06d3bb86a07384b31'
-  ];
-  for (const language of ['en', 'zh-CN'] as const) {
-    for (let version = 1; version <= 7; version++) {
-      assert.equal(hashBytes(getAgentSystemPrompt({ language, requestProtocolVersion: version })), systemHashes[language][version - 1]);
-    }
-  }
-  for (let version = 1; version <= 7; version++) {
-    assert.equal(hashBytes(JSON.stringify(getAgentTools({ requestProtocolVersion: version }))), toolHashes[version - 1]);
-  }
 });
 
 test('approval mode uses the model selector interaction directly below the subagent model', () => {
@@ -682,7 +623,7 @@ function workflowFixture(options: {
       actionKind: request.actionKind,
       actionHash: request.actionHash,
       policyVersion: 1,
-      approvalSource: Boolean(options.denyTarget) ? 'model_review' : 'host_policy',
+      approvalSource: Boolean(options.denyTarget) ? 'auto_approval_review' : 'host_policy',
       reviewerSourceId: Boolean(options.denyTarget) ? 'review-source' : '',
       reviewerModelId: Boolean(options.denyTarget) ? 'review-model' : '',
       reviewerProvider: Boolean(options.denyTarget) ? 'openai-responses' : 'host_policy',
@@ -698,14 +639,14 @@ function workflowFixture(options: {
     return record;
   };
   const edit = (id: string) => options.deleteOnApplyPath
-    ? {
+    ? createDeleteDraftEdit({
         id, uri: vscode.Uri.file(options.deleteOnApplyPath).toString(), label: path.basename(options.deleteOnApplyPath),
-        action: 'delete' as const, newText: '', reason: `delete ${id}`
-      }
-    : {
-        id, uri: vscode.Uri.file(path.join(os.tmpdir(), id)).toString(), label: id, action: 'create' as const,
-        newText: `content:${id}\n`, reason: `create ${id}`
-      };
+        baseBytes: Buffer.from('preserve these bytes\n'), reason: `delete ${id}`
+      })
+    : createFullTextDraftEdit({
+        id, uri: vscode.Uri.file(path.join(os.tmpdir(), id)).toString(), label: id, action: 'create',
+        content: `content:${id}\n`, reason: `create ${id}`
+      });
   const draftRun = (id: string) => {
     const spec = {
       executable: 'node', args: ['--version'], reason: `run ${id}`, externalCwd: false,
@@ -789,7 +730,7 @@ function workflowFixture(options: {
       approvalStopReason: options.unavailableBeforeEffects ? 'reviewer unavailable' : undefined,
       approvalReviews: options.unavailableBeforeEffects ? [{
         reviewId: 'review-unavailable', sessionId: 's', rootTaskId: 'r', agentRunId: 'r', targetId: 'validation',
-        actionKind: 'validation_run', policyVersion: 1, approvalSource: 'model_review', reviewerSourceId: '',
+        actionKind: 'validation_run', policyVersion: 1, approvalSource: 'auto_approval_review', reviewerSourceId: '',
         reviewerModelId: '', reviewerProvider: '', decision: 'unavailable', risk: 'high', rationale: 'reviewer unavailable',
         createdAt: new Date().toISOString()
       }] : undefined

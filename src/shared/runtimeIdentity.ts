@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type * as vscode from 'vscode';
 import { getAgentTools } from '../agent/protocol';
 import { CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION, CURRENT_PROVIDER_TOOL_SCHEMA_VERSION } from '../agent/providerRequestProjection';
+import { KEEPSEEK_BASELINE_VERSION, KEEPSEEK_EXTENSION_ID, KEEPSEEK_STORAGE_NAMESPACE } from './identity';
 
 let activeIdentity: ReturnType<typeof captureRuntimeIdentity> | undefined;
 
@@ -18,14 +19,15 @@ export function captureRuntimeIdentity(input: {
     catch { activationDiskSha256[file] = null; }
   }
   return Object.freeze({
-    diagnosticVersion: 1, runtimeMarker: 'keepseek-field-identity-v1', activationId: randomUUID(),
+    diagnosticVersion: 1, runtimeMarker: `${KEEPSEEK_STORAGE_NAMESPACE}.runtime.v1`, activationId: randomUUID(),
+    extensionId: KEEPSEEK_EXTENSION_ID, dataBaselineVersion: KEEPSEEK_BASELINE_VERSION,
     activatedAt: new Date().toISOString(), processId: process.pid,
     extensionUri: input.extensionUri.toString(), extensionMode: input.extensionMode,
     packageVersion: input.version, remoteName: input.remoteName ?? null,
     supportedRequestProtocolVersion: CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION,
     supportedToolSchemaVersion: CURRENT_PROVIDER_TOOL_SCHEMA_VERSION,
     // Computed from imported, executing protocol functions, independently of
-    // disk/module directory names. A hot session may still use an older schema.
+    // disk/module directory names. All current sessions use this schema.
     supportedToolSchemaSha256: sha(JSON.stringify(getAgentTools({ requestProtocolVersion: CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION }))),
     activationDiskSha256: Object.freeze(activationDiskSha256)
   });

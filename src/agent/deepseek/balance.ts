@@ -1,4 +1,4 @@
-import type { DeepSeekBalanceState } from '../../shared/types';
+import type { ModelSourceBalanceState } from '../../shared/types';
 
 export interface DeepSeekBalanceRequest {
   apiKey: string;
@@ -8,7 +8,7 @@ export interface DeepSeekBalanceRequest {
 
 const BALANCE_FETCH_TIMEOUT_MS = 10_000;
 
-export async function fetchDeepSeekBalance(input: DeepSeekBalanceRequest): Promise<DeepSeekBalanceState> {
+export async function fetchDeepSeekBalance(input: DeepSeekBalanceRequest): Promise<ModelSourceBalanceState> {
   const apiKey = input.apiKey.trim();
   const endpointUrl = input.endpointUrl.trim();
   if (!apiKey) {
@@ -56,7 +56,7 @@ export async function fetchDeepSeekBalance(input: DeepSeekBalanceRequest): Promi
   }
 }
 
-export function parseDeepSeekBalanceResponse(value: unknown): DeepSeekBalanceState {
+export function parseDeepSeekBalanceResponse(value: unknown): ModelSourceBalanceState {
   const now = new Date().toISOString();
   if (!isRecord(value)) {
     return {
@@ -95,7 +95,7 @@ export function parseDeepSeekBalanceResponse(value: unknown): DeepSeekBalanceSta
   };
 }
 
-function createBalanceError(error: string): DeepSeekBalanceState {
+function createBalanceError(error: string): ModelSourceBalanceState {
   return {
     currency: '¥',
     error,

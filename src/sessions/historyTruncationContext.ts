@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { getAutoProtectedMessageIds } from '../agent/historyProjection';
 import type { ChatMessage, ChatSession, HistorySummary } from '../shared/types';
 
-export type SummaryTruncationInvalidationReason = 'legacy_source_unverified' | 'source_removed_or_changed' | 'summary_dependency_invalid';
+export type SummaryTruncationInvalidationReason = 'source_unverified' | 'source_removed_or_changed' | 'summary_dependency_invalid';
 
 /** Hash every input that can inform a summary, excluding host task/approval/UI state. */
 export function historySummaryMessageHash(message: ChatMessage): string {
@@ -40,7 +40,7 @@ export function reconcileTruncatedContext(session: ChatSession, retainedMessages
       visiting.add(summary.id);
       let reason: SummaryTruncationInvalidationReason | undefined;
       const proof = summary.provenance;
-      if (!proof || proof.version !== 1) reason = 'legacy_source_unverified';
+      if (!proof || proof.version !== 1) reason = 'source_unverified';
       else if (!summary.coveredMessageIds.length
         || summary.coveredMessageIds.some(id => !retained.has(id) || !proof.messageHashes[id])
         || Object.entries(proof.messageHashes).some(([id, expected]) => {
@@ -88,7 +88,7 @@ export function reconcileTruncatedContext(session: ChatSession, retainedMessages
       dynamicHash = message.dynamicContextHash;
       dynamicContextRefreshRequired = false;
     } else if (message.providerContent?.includes('<keepseek-dynamic-context>')) {
-      // A legacy tail cannot prove the effective context hash. Do not parse user text as authority.
+      // A tail without host provenance cannot prove the effective context hash. Do not parse user text as authority.
       dynamicContextRefreshRequired = true;
     }
   }

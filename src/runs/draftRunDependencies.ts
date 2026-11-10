@@ -60,8 +60,8 @@ export function inspectDraftRunDependencies(run: DraftRun, get: (id: string) => 
 
 /** Revalidate fact-producing query identities without re-running their user
  * commands. The existing scope fingerprint covers Git HEAD/ref identity,
- * repository metadata/configuration, executable, environment and paths. Legacy
- * query facts with no snapshot cannot authorize dependent execution. */
+ * repository metadata/configuration, executable, environment and paths. Query facts with no
+ * snapshot cannot authorize dependent execution. */
 export async function inspectDraftRunDependencyFacts(run: DraftRun, get: (id: string) => DraftRun | undefined,
   allowedRunIds?: ReadonlySet<string>): Promise<DraftRunDependencyDecision> {
   const decision = inspectDraftRunDependencies(run, get, allowedRunIds);

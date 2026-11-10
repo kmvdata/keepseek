@@ -84,19 +84,17 @@ test('evidence pages retain root identity, advance UTF-8 ranges, and explicitly 
   assert.equal((await store.read({ ...scope, sessionId: 'other', evidenceRef: root.evidenceRef })).errorType, 'evidence_not_found');
 });
 
-test('session object migration preserves legacy bytes, lazy archives and small durable updates', async t => {
+test('current session objects preserve lazy archives and small durable updates', async t => {
   const root = await mkdtemp(join(tmpdir(), 'keepseek-object-test-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const path = join(root, 'session.json'), uri = vscode.Uri.file(path) as never;
   const cp = createRunCheckpoint(request(), 0, 'test', []); cp.status = 'completed';
   const session: ChatSession = { id: 's', title: 's', isFavorite: false, workspaceKey: 'w', workspaceName: 'w', workspaceFolders: [],
     createdAt: '', updatedAt: '', messages: Array.from({ length: 55 }, (_, i) => ({ id: String(i), role: 'assistant', content: 'done', createdAt: '', runCheckpoint: { ...cp, taskId: `t${i}` } })) };
-  const old = JSON.stringify({ version: 2, workspaceKey: 'w', session }); await writeFile(path, old);
   const storage = new SessionObjectStore(uri);
   await storage.save(snapshotSession(session));
   const manifest = JSON.parse(await readFile(path, 'utf8'));
   assert.equal(manifest.version, 4);
-  assert.equal(await readFile(join(root, 'session.json.objects', 'legacy-v2.json'), 'utf8'), old);
   let written = 0;
   const original = vscode.workspace.fs.writeFile;
   vscode.workspace.fs.writeFile = async (target, bytes) => { written += bytes.byteLength; return original(target, bytes); };
@@ -157,23 +155,21 @@ test('checkpoint persistence snapshots isolate mutable pending journals without 
   assert.ok(Object.isFrozen(next.request.history));
 });
 
-test('migration progress is observable and cancellation before commit preserves the exact legacy authority', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'keepseek-migration-cancel-'));
+test('obsolete session manifests are rejected without importing or rewriting their data', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'keepseek-obsolete-session-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const path = join(root, 'session.json'), uri = vscode.Uri.file(path) as never;
-  const session = { id: 's', workspaceKey: 'w', messages: [0, 1, 2].map(i => ({ id: String(i), role: 'user', content: 'original', createdAt: '' })) } as ChatSession;
-  const original = JSON.stringify({ version: 2, session });
-  await writeFile(path, original);
-  const controller = new AbortController(), phases: string[] = [];
-  const storage = new SessionObjectStore(uri, true, { signal: controller.signal,
-    onProgress: (phase, completed) => { phases.push(phase); if (phase === 'verify' && completed === 1) controller.abort(); } });
-  await assert.rejects(() => storage.save(snapshotSession(session)), /cancelled before commit/);
-  assert.equal(await readFile(path, 'utf8'), original);
-  assert.ok(phases.includes('encode') && phases.includes('verify'));
-  assert.ok(!phases.includes('commit'));
-  await new SessionObjectStore(uri, true).save(snapshotSession(session));
-  assert.equal(JSON.parse(await readFile(path, 'utf8')).version, 4);
-  assert.equal(await readFile(join(root, 'session.json.objects', 'legacy-v2.json'), 'utf8'), original);
+  const session = { id: 's', workspaceKey: 'w', messages: [] } as unknown as ChatSession;
+  for (const version of [1, 2, 3]) {
+    const original = JSON.stringify({ version, sessionId: 's', workspaceKey: 'w', revision: 1,
+      messages: [], session });
+    await writeFile(path, original);
+    const storage = new SessionObjectStore(uri);
+    await assert.rejects(() => storage.load(JSON.parse(original)), /Invalid session manifest/);
+    await assert.rejects(() => storage.save(snapshotSession(session)), /Unsupported session storage version/);
+    assert.equal(await readFile(path, 'utf8'), original);
+    assert.deepEqual(await readdir(join(root, 'session.json.objects')), []);
+  }
 });
 
 test('empty, damaged and stale writer locks fail closed without unlinking another writer authority', async t => {
@@ -250,16 +246,18 @@ test('progress remembers individual facts across alternating batches and ignores
   assert.ok(state.recent!.length <= 64);
 });
 
-test('migration and commit failures preserve authority, retry idempotently and refuse active or foreign writers', async t => {
+test('current manifest commit failures preserve authority and refuse active or foreign writers', async t => {
   const root = await mkdtemp(join(tmpdir(), 'keepseek-fault-test-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const path = join(root, 'session.json'), uri = vscode.Uri.file(path) as never;
   const cp = createRunCheckpoint({ ...request(), history: [] }, 10000, 'test', []); cp.status = 'interrupted'; cp.usedMs = 5000;
   const session: ChatSession = { id: 's', title: 's', isFavorite: false, workspaceKey: 'w', workspaceName: 'w', workspaceFolders: [],
     createdAt: '', updatedAt: '', messages: [{ id: 'a', role: 'assistant', content: '', createdAt: '', runCheckpoint: cp }] };
-  const old = JSON.stringify({ version: 2, workspaceKey: 'w', session }, null, 2); await writeFile(path, old);
-  const originalRename = vscode.workspace.fs.rename, originalWrite = vscode.workspace.fs.writeFile;
   const storage = new SessionObjectStore(uri);
+  await storage.save(snapshotSession(session));
+  const old = await readFile(path, 'utf8');
+  session.title = 'updated';
+  const originalRename = vscode.workspace.fs.rename, originalWrite = vscode.workspace.fs.writeFile;
   vscode.workspace.fs.writeFile = async () => { throw Object.assign(new Error('disk full'), { code: 'ENOSPC' }); };
   try { await assert.rejects(() => storage.save(snapshotSession(session)), /disk full/); }
   finally { vscode.workspace.fs.writeFile = originalWrite; }
@@ -271,8 +269,7 @@ test('migration and commit failures preserve authority, retry idempotently and r
   try { await assert.rejects(() => storage.save(snapshotSession(session)), /manifest interrupted/); }
   finally { vscode.workspace.fs.rename = originalRename; }
   assert.equal(await readFile(path, 'utf8'), old);
-  assert.equal(await readFile(join(root, 'session.json.objects', 'legacy-v2.json'), 'utf8'), old);
-  await new SessionObjectStore(uri).save(snapshotSession(session));
+  await storage.save(snapshotSession(session));
   const fresh = new SessionObjectStore(uri);
   const restored = await fresh.load(JSON.parse(await readFile(path, 'utf8')));
   assert.equal(restored.messages[0].runCheckpoint!.usedMs, 5000);
@@ -284,8 +281,6 @@ test('migration and commit failures preserve authority, retry idempotently and r
   const other = new SessionObjectStore(vscode.Uri.file(join(root, 'foreign.json')) as never);
   await assert.rejects(() => other.save({ ...session, messages: [{ ...session.messages[0], runCheckpoint: undefined,
     runCheckpointArchive: { version: 1, objectHash: 'a'.repeat(64), summary: { taskId: 't', status: 'completed', canResume: false, usedMs: 0, maxExecutionMs: 0, limitSource: 'test', attempt: 0, modelRequests: 0, retries: 0, steps: 0 } } }] }), /ENOENT/);
-  cp.status = 'running'; await writeFile(path, JSON.stringify({ version: 2, session }));
-  await assert.rejects(() => new SessionObjectStore(uri).save(snapshotSession(session)), /still marked running/);
 });
 
 test('lightweight performance tail rotates, survives detailed payload volume and bounds slow-disk backlog', async t => {

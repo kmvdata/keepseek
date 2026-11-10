@@ -93,7 +93,7 @@ test('stream publisher replaces a failed suffix, preserves complete prior rounds
   const posted: Array<Record<string, unknown>> = [];
   const messages: ChatMessage[] = [];
   const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
-    sessionStore: { getActiveSession: () => ({ id: 'session', messages, executionTime: { version: 1, byTask: { a: 1234 }, incomplete: false } }) },
+    sessionStore: { getActiveSession: () => ({ id: 'session', messages, executionTime: { version: 2, byTask: { a: 1234 }, incomplete: false } }) },
     currentRunAbortController: controller,
     agentActivity: { base: 'thinking', phase: 'requesting_model' },
     postToWebview: (message: Record<string, unknown>) => posted.push(message)
@@ -144,48 +144,36 @@ test('cold storage starts with one usable empty session without creating a monol
   await assert.rejects(stat(path.join(root, 'chat-sessions', 'v1', 'workspaces', `${getWorkspaceHash(scope.key)}.json`)));
 });
 
-test('large V1 projects migrate atomically and load only summaries plus the active session', async (t) => {
+test('current projects load only summaries plus the active V4 conversation', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-large-session-start-'));
-  t.after(async () => await rm(root, { recursive: true, force: true }));
+  const storage = new GlobalSessionStorage(vscode.Uri.file(root) as never);
+  t.after(async () => { await storage.flush(); await rm(root, { recursive: true, force: true }); });
   const scope = workspaceScope('large');
-  const sessions = Array.from({ length: 120 }, (_, index) => session(`s-${index}`, scope, 30, index));
-  const legacyPath = await writeLegacyWorkspace(root, scope, sessions, sessions[0].id);
-  const legacyBytes = (await stat(legacyPath)).size;
-
+  const sessions = Array.from({ length: 30 }, (_, index) => session(`s-${index}`, scope, 30, index));
+  await storage.saveWorkspace(scope, { activeSessionId: sessions[0].id, sessions });
   const store = new ChatSessionStore(new GlobalSessionStorage(vscode.Uri.file(root) as never), 'en', scope);
   await store.initialize();
-  assert.equal(store.getSessionSummaries().length, 120);
+  assert.equal(store.getSessionSummaries().length, sessions.length);
   assert.equal(store.getActiveSession().id, 's-0');
   assert.equal(store.messages.length, 30);
   const indexPath = path.join(root, 'chat-sessions', 'v2', 'workspaces', getWorkspaceHash(scope.key), 'index.json');
-  assert.ok((await stat(indexPath)).size < legacyBytes / 5);
-  await assert.rejects(stat(legacyPath));
-
-  const selected = await store.selectSession('s-119');
-  assert.ok(selected?.messages[0]?.content.startsWith('message 119-0'));
-  assert.equal(store.getSessionSummaries().length, 120);
+  assert.ok((await stat(indexPath)).size < Buffer.byteLength(JSON.stringify(sessions)) / 5);
+  const selected = await store.selectSession('s-29');
+  assert.ok(selected?.messages[0]?.content.startsWith('message 29-0'));
 });
 
-test('failed V1 migration keeps the old file as a readable fallback', async (t) => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-session-fallback-'));
+test('obsolete monoliths are never imported or used as fallback during initialization', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-session-no-import-'));
   t.after(async () => await rm(root, { recursive: true, force: true }));
-  const scope = workspaceScope('fallback');
-  const sessions = [session('active', scope, 3, 0), session('older', scope, 2, 1)];
-  const legacyPath = await writeLegacyWorkspace(root, scope, sessions, 'active');
-  const originalRename = vscode.workspace.fs.rename;
-  vscode.workspace.fs.rename = async (source, target, options) => {
-    if (target.fsPath.endsWith('/index.json') && target.fsPath.includes('/chat-sessions/v2/')) {
-      throw new Error('simulated atomic index failure');
-    }
-    await originalRename(source, target, options);
-  };
-  t.after(() => { vscode.workspace.fs.rename = originalRename; });
-
-  const store = new ChatSessionStore(new GlobalSessionStorage(vscode.Uri.file(root) as never), 'en', scope);
-  await store.initialize();
-  assert.equal(store.getActiveSession().id, 'active');
-  assert.equal(store.getSessionSummaries().length, 2);
-  assert.ok((await stat(legacyPath)).size > 0);
+  const scope = workspaceScope('no-import');
+  const sessions = [session('obsolete', scope, 3, 0)];
+  const obsoletePath = await writeLegacyWorkspace(root, scope, sessions, 'obsolete');
+  const storage = new GlobalSessionStorage(vscode.Uri.file(root) as never);
+  assert.deepEqual(await storage.loadWorkspace(scope), { activeSessionId: '', sessions: [], sessionSummaries: [] });
+  assert.equal(await storage.loadSession(scope.key, 'obsolete'), undefined);
+  assert.equal(await storage.loadSession(scope.key, 'obsolete', { readOnly: true }), undefined);
+  assert.deepEqual((await storage.readHistoryCleanupCatalog()).entries, []);
+  assert.ok((await stat(obsoletePath)).size > 0);
 });
 
 test('cleanup is single-flight, limited to once per 24 hours, and preserves favorites', async (t) => {
@@ -478,7 +466,7 @@ test('command settings become ready without waiting for project context or the f
     },
     availableModels: [{ id: 'model', sourceId: 'source' }],
     startupTraceStages: new Set<string>(),
-    sessionStore: { activeSessionId: 'session', getActiveSession: () => ({ id: 'session', messages: [], approvalMode: 'ask' }) },
+    sessionStore: { activeSessionId: 'session', getActiveSession: () => ({ id: 'session', messages: [{ id: 'history', role: 'user', content: 'deliberately restored history' }], approvalMode: 'ask' }) },
     approvalReviews: { initialize: async () => {} },
     changeSets: { initialize: async () => {}, loadSession: async () => {}, reconcileHistoryOrigins: () => {}, flush: async () => {} },
     draftRuns: { initialize: async () => {}, loadSession: async () => {}, reconcileHistoryOrigins: () => {}, flush: async () => {} },

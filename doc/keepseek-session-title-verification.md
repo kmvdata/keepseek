@@ -8,13 +8,13 @@ Host 在真实用户输入正文跨过提交持久化屏障后登记 durable 候
 
 自动每次只使用本条真实 `user.content`，表达“用户要做什么、想解决什么问题”，不总结 AI 做了什么，不把任务目的写成已经完成的结果。寒暄、含糊或脱敏后没有实质内容可 defer/no_material；模型请求失败、超时、无效或保存失败均等待下一条真实用户输入，不重复请求同一条指令。主回答尚未开始、正在 streaming、后续失败或被取消，不使已保存的用户指令失去命名资格。
 
-真实提交共用 `isSessionTitleUserInput()` / `sessionTitleInputId()` 识别：普通输入优先使用 userTask/origin 身份，legacy 无 userTask 时使用既有真实 user 消息身份，不回填旧记录。用户亲自发送的 no-progress recovery 补充仍是新输入，以该消息 ID 取得独立命名机会；它可以沿用旧执行 root 的预算，因此命名输入身份与 `budgetRootTaskId` 分开冻结，不能因新输入重置或扩大旧额度。审批通知、命令/计划/修复自动续跑、工具返回和纯恢复状态刷新不是新真实输入，不额外命名。标题候选只保存输入身份、消息引用及来源/模型快照，不复制正文或凭据。
+真实提交共用 `isSessionTitleUserInput()` / `sessionTitleInputId()` 识别：普通输入优先使用 userTask/origin 身份，直接提交的真实 user 消息可使用其消息身份；不回填历史记录。用户亲自发送的 no-progress recovery 补充仍是新输入，以该消息 ID 取得独立命名机会；它可以沿用旧执行 root 的预算，因此命名输入身份与 `budgetRootTaskId` 分开冻结，不能因新输入重置或扩大旧额度。审批通知、命令/计划/修复自动续跑、工具返回和纯恢复状态刷新不是新真实输入，不额外命名。标题候选只保存输入身份、消息引用及来源/模型快照，不复制正文或凭据。
 
 同会话仍按已观察的真实提交顺序串行处理标题候选；主请求与该会话标题请求可以并行。尚未取得标题槽位的 busy 不算消费。第一条 defer 后可处理已排队第二条，首次 set 持久化成功立即清空余下自动候选。普通新输入和切换查看不取消依据未变的旧标题请求；队列持有目标会话临时驻留引用，清空/终态时释放。启动、历史加载/刷新、只读诊断和重启不制造候选、不扫描历史补发标题请求。
 
 ## 持久状态、提交与恢复
 
-`ChatSession.autoTitle` 仍是唯一标题元数据权威，metadata version 2 与 `stopped: named | manual` 保持原语义。`status` 表达 pending/running/completed，`attempt` / `manualAttempt` 表达独立在途；新输入材料使用独立 basis scope，不以更换触发时机重置成功状态。`attemptedThrough` 记录消费/退休的真实用户输入前缀，常规 Host 串行路径保留最近最多 64 个 `attemptedTaskIds`；legacy 和直接乱序调用的稀疏缺口不能为满足上限而丢弃未消费候选。`lastOutcome` 只供诊断，不代替停止标记。
+`ChatSession.autoTitle` 仍是唯一标题元数据权威，metadata version 2 与 `stopped: named | manual` 保持原语义。`status` 表达 pending/running/completed，`attempt` / `manualAttempt` 表达独立在途；新输入材料使用独立 basis scope，不以更换触发时机重置成功状态。`attemptedThrough` 记录消费/退休的真实用户输入前缀，常规 Host 串行路径保留最近最多 64 个 `attemptedTaskIds`；直接乱序调用的稀疏缺口不能为满足上限而丢弃未消费候选。`lastOutcome` 只供诊断，不代替停止标记。
 
 | 状态/事件 | 后续自动请求 | 保留与恢复语义 |
 | --- | --- | --- |
@@ -28,7 +28,7 @@ Host 在真实用户输入正文跨过提交持久化屏障后登记 durable 候
 
 只有 title 与停止元数据跨过 staged commit、分片和索引 canonical commit 屏障后才公开标题并通知正确历史行。shard 写成功但 index 失败不构成成功；最多重存同一已生成候选一次，不再次请求模型。通知失败不撤销已提交标题。旧响应、旧保存 await 和旧 finally 只能清理自己的 token，不能覆盖新手动操作或清新 spinner。
 
-旧 pending/running/completed、自定义标题以及旧 whole-history/recent-turn basis 继续按旧格式读取。先按原格式核验 canonical commit，再迁移停止语义，不能因旧依据已归档而丢弃真实 completed，也不能把 shard-only/损坏记录伪造成成功。未完成 running 恢复为中断，不恢复 HTTP、队列、permit 或旧 token。旧会话已成功命名/手动锁定时，本次升级不重新主动命名。
+仅接受当前 metadata V2 与 user_inputs_v3 basis。canonical commit 仍须核验，shard-only/损坏记录不能伪造成成功。当前 running 状态在重启后恢复为中断，不恢复 HTTP、队列、permit 或请求 token。已提交的 named/manual 停止状态不会因材料归档而解锁；不导入旧版本标题。
 
 复制会话保留标题及停止语义，重映射身份与普通根任务预算并保留已花额度；不复制手动标题辅助预算、去重游标、请求 token 或可执行队列。只在所选用户正文被修改/删除、目标删除、失信、workspace 改变或销毁时退休相应在途请求；助手回答的新增、streaming、修改或失败不参与新 basis 的有效性。已提交停止状态不依赖旧材料是否仍可读。本次不改历史正文、不批量补 userTask、不改默认空白启动与惰性读取。
 
@@ -47,7 +47,7 @@ Host 在真实用户输入正文跨过提交持久化屏障后登记 durable 候
 
 先选择用户输入再裁剪：自动单条 JSON 总预算最多 4,000 字符，手动最多两条总预算最多 8,000 字符。手动两条输入各有有界份额，最新一条优先保留具体目的；超长正文使用确定性首尾摘录。凭据、邮箱、URL 与路径脱敏，字素安全裁剪后复核 JSON 总长度；不截断 JSON、不用第三条历史补足。相同输入与参数生成相同字节，实际 token 准入仍可收紧输出。
 
-新 `basis.scope: user_inputs_v3` 只绑定实际所选一至两条 user 消息 ID/hash，`lastMessageId` 是目标用户输入 ID；不会计算全历史 fingerprint，也不绑定助手 ID、最终回答或 runDetails。后续普通追加和助手变化不使快照 stale；选中用户正文变化/删除必须拒绝。旧 `recent_turns_v2` 及 whole-history conversation hash 保留原语义读取，不把旧助手依据重解释为输入依据。输入 basis scope 升级不改变 metadata v2 的永久停止权威。
+新 `basis.scope: user_inputs_v3` 只绑定实际所选一至两条 user 消息 ID/hash，`lastMessageId` 是目标用户输入 ID；不会计算全历史 fingerprint，也不绑定助手 ID、最终回答或 runDetails。后续普通追加和助手变化不使快照 stale；选中用户正文变化/删除必须拒绝。不再接受 `recent_turns_v2` 或 whole-history conversation hash。输入 basis scope 升级不改变 metadata v2 的永久停止权威。
 
 ## 请求、来源与并行预算
 
@@ -74,7 +74,7 @@ Host 在真实用户输入正文跨过提交持久化屏障后登记 durable 候
 
 Host 在首个 await 前取得目标 session/request 所有权；相同 requestId 重放状态，旧 finally 不能结束新 spinner。自动失败不弹窗、不阻塞聊天；非活动会话只更新目标历史行/用量，不选择回 active，也不覆盖草稿或焦点。只读 runtime diagnostics 和日志不产生模型请求，日志仅记录有界哈希身份、固定原因、模式、材料数量/字符数和耗时，不记录正文、prompt、凭据、路径或供应商原始错误。
 
-标题只修改标题元数据与辅助账本，不改变主聊天 messages、contextInstructions、静态 system、冻结 tools、replay 或三协议请求投影字节。持久化计时 reconciliation 保持纯投影，不为 legacy 消息回填 userTask。删除助手长回答使标题输入 token 通常下降，实际费用和供应商缓存命中仍以 usage 为准，不能仅凭材料变短保证节省金额。
+标题只修改标题元数据与辅助账本，不改变主聊天 messages、contextInstructions、静态 system、冻结 tools、replay 或三协议请求投影字节。持久化计时 reconciliation 保持纯投影，不回填 userTask。删除助手长回答使标题输入 token 通常下降，实际费用和供应商缓存命中仍以 usage 为准，不能仅凭材料变短保证节省金额。
 
 ## 自动化与本次验证口径
 
@@ -140,10 +140,10 @@ bun run test
 
 | 职责 | 文件 |
 | --- | --- |
-| 标题元数据、真实用户识别、user-only 材料及新旧 basis | `src/sessions/sessionTitle.ts` |
+| 标题元数据、真实用户识别、user-only 材料及当前 basis | `src/sessions/sessionTitle.ts` |
 | 请求协调、抢占、提交回调和终态 | `src/sessions/sessionTitleCoordinator.ts` |
 | 真实输入分类、来源冻结和辅助请求预算 | `src/provider/sessionTitleCompletion.ts`、`src/provider/sessionTitleRequest.ts` |
 | 实际根预算准备、Runner 复用与主请求准入通知 | `src/agent/taskBudget.ts`、`src/agent/runner.ts`、`src/agent/runCheckpoint.ts` |
 | 轻量三协议传输及 reviewer 兼容 | `src/agent/oneShotTextRequest.ts`、`src/approvals/oneShotTextRequest.ts` |
-| claim/staged commit、旧新 hash、截断/复制/恢复 | `src/sessions/chatSessionStore.ts`、`src/sessions/globalSessionStorage.ts` |
+| claim/staged commit、当前 hash、截断/复制/恢复 | `src/sessions/chatSessionStore.ts`、`src/sessions/globalSessionStorage.ts` |
 | 提交屏障、早期实际根预算、并行候选 drain、手动 requestId 与用量接线 | `src/provider/KeepseekChatViewProvider.ts` |

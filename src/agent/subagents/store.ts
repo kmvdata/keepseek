@@ -15,7 +15,6 @@ import type { ChatSession, SubagentActivity } from '../../shared/types';
 import { CoalescedWriter } from '../../sessions/coalescedWriter';
 import { normalizeResultIndex, readResultRange, resultMetadata, saveResultIndex,
   type ResultIndexMetadata, type SubagentResultIndex } from './resultIndex';
-import { legacyVerifiedRanges, verifyLegacyRanges, type LegacyVerifiedRange } from './legacyResultProjection';
 import type {
   StoredSubagentMetadata,
   StoredSubagentTranscript,
@@ -29,9 +28,6 @@ const MAX_DIAGNOSTIC_CHARS = 768;
 const MAX_DIAGNOSTIC_BYTES = 8_192;
 export const DEFAULT_SUBAGENT_RESULT_PAGE_BYTES = 12_288;
 export const MAX_SUBAGENT_RESULT_PAGE_BYTES = 24_576;
-/** V1-V9 compatibility aliases. */
-export const DEFAULT_SUBAGENT_RESULT_PAGE_CHARS = 12_000;
-export const MAX_SUBAGENT_RESULT_PAGE_CHARS = 24_000;
 
 export class SubagentStore {
   private readonly objectStores = new Map<string, SessionObjectStore>();
@@ -57,7 +53,7 @@ export class SubagentStore {
   }
 
   public async save(metadata: StoredSubagentMetadata, transcript: StoredSubagentTranscript): Promise<void> {
-    if (!isSafeId(metadata.id) || transcript.metadataId !== metadata.id) throw new Error('Invalid subagent storage scope');
+    if (metadata.version !== 2 || transcript.version !== 2 || !isSafeId(metadata.id) || transcript.metadataId !== metadata.id) throw new Error('Invalid subagent storage scope');
     const directory = this.getParentDirectory(metadata.parentSessionId);
     const started = performance.now();
     const { messages, checkpoint, ...header } = transcript;
@@ -122,23 +118,20 @@ export class SubagentStore {
     try { files = await vscode.workspace.fs.readDirectory(this.getParentDirectory(parentSessionId)); }
     catch (error) { result.incomplete = !isMissing(error); return result; }
     const ids = new Set(files.flatMap(([name, type]) => type === vscode.FileType.File
-      && /\.(state|run|activity|meta)\.json$/u.test(name) ? [name.replace(/\.(state|run|activity|meta)\.json$/u, '')] : []));
+      && /\.(state|activity)\.json$/u.test(name) ? [name.replace(/\.(state|activity)\.json$/u, '')] : []));
     for (const id of ids) {
       if (!isSafeId(id)) { result.incomplete = true; continue; }
       try {
         const graph = files.some(([name]) => name === `${id}.state.json`);
-        const legacy = files.some(([name]) => name === `${id}.run.json`);
-        const split = files.some(([name]) => name === `${id}.meta.json`);
         const value = JSON.parse(this.decoder.decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(
-          this.getParentDirectory(parentSessionId), `${id}.${graph ? 'state' : legacy ? 'run' : split ? 'meta' : 'activity'}.json`))));
-        const metadata = !graph && (legacy || split) ? normalizeMetadata(legacy ? value.metadata : value) : undefined;
-        const activity = metadata ? activityFromMetadata(metadata) : graph ? value.summary?.activity : value.activity;
+          this.getParentDirectory(parentSessionId), `${id}.${graph ? 'state' : 'activity'}.json`))));
+        const activity = graph ? value.summary?.activity : value.activity;
         if (!validActivity(activity, parentSessionId, id) || graph && (value.version !== 4
           || value.workspaceKey !== this.workspaceKey || value.sessionId !== id || value.summary?.version !== 1
           || value.summaryHash !== createHash('sha256').update(JSON.stringify(value.summary)).digest('hex'))) throw new Error('Invalid child index');
         result.activities.push({ ...copyActivity(activity), ...(activity.status === 'queued' || activity.status === 'running'
           ? { status: 'stopped' as const, interrupted: true } : {}) });
-        const stats = normalizeSubagentRunUsageSummaryValue(metadata?.stats ?? value.summary?.stats);
+        const stats = normalizeSubagentRunUsageSummaryValue(value.summary?.stats);
         if (stats && stats.subagentId === id && stats.parentRunId === activity.parentRunId && stats.rootRunId === activity.rootRunId
           && stats.sourceId === activity.sourceId && stats.modelId === activity.modelId && stats.profile === activity.profile && stats.lane === activity.lane) result.summaries.push(stats);
         else if (activity.status === 'completed' || activity.status === 'failed') result.incomplete = true;
@@ -158,16 +151,15 @@ export class SubagentStore {
       const uri = vscode.Uri.joinPath(this.getParentDirectory(parentSessionId), `${subagentId}.state.json`);
       try {
         const manifest = JSON.parse(this.decoder.decode(await vscode.workspace.fs.readFile(uri)));
-        if (manifest.workspaceKey !== this.workspaceKey || manifest.sessionId !== subagentId) return undefined;
+        if (manifest.version !== 4 || manifest.workspaceKey !== this.workspaceKey || manifest.sessionId !== subagentId
+          || manifest.summary?.version !== 1) return undefined;
         if (manifest.summary && manifest.summaryHash !== createHash('sha256').update(JSON.stringify(manifest.summary)).digest('hex')) return undefined;
-        const indexedResult = manifest.summary && Object.hasOwn(manifest.summary, 'resultIndex')
-          ? normalizeResultIndex(manifest.summary.resultIndex, parentSessionId, subagentId) : undefined;
-        if (manifest.summary && Object.hasOwn(manifest.summary, 'resultIndex') && !indexedResult) return undefined;
+        const indexedResult = normalizeResultIndex(manifest.summary.resultIndex, parentSessionId, subagentId);
+        if (!indexedResult) return undefined;
         const session = await new SessionObjectStore(uri).load(manifest) as unknown as {
-          subagentMetadata: unknown; subagentTranscript: Omit<StoredSubagentTranscript, 'messages'>; messages: StoredSubagentTranscript['messages'] };
+          subagentMetadata: unknown; subagentTranscript: StoredSubagentTranscript };
         const metadata = normalizeMetadata(session.subagentMetadata);
-        const transcript = normalizeTranscript({ ...session.subagentTranscript,
-          messages: (session.subagentTranscript as StoredSubagentTranscript).messages ?? session.messages });
+        const transcript = normalizeTranscript(session.subagentTranscript);
         if (metadata && transcript && indexedResult && (metadata.resultHash && metadata.resultHash !== indexedResult.metadata.resultHash
           || !['queued', 'running'].includes(indexedResult.metadata.status) && metadata.resultStatus !== indexedResult.metadata.resultStatus)) return undefined;
         if (metadata?.status === 'completed' && indexedResult) {
@@ -176,29 +168,7 @@ export class SubagentStore {
         }
         return metadata && transcript && metadata.id === subagentId && metadata.parentSessionId === parentSessionId
           && transcript.metadataId === subagentId ? { metadata, transcript } : undefined;
-      } catch (error) { if (!isMissing(error)) return undefined; }
-      try {
-        const data = JSON.parse(this.decoder.decode(await vscode.workspace.fs.readFile(
-          vscode.Uri.joinPath(this.getParentDirectory(parentSessionId), `${subagentId}.run.json`)
-        ))) as { metadata?: unknown; transcript?: unknown };
-        const metadata = normalizeMetadata(data.metadata);
-        const transcript = normalizeTranscript(data.transcript);
-        if (metadata && transcript && metadata.id === subagentId && metadata.parentSessionId === parentSessionId
-          && transcript.metadataId === metadata.id) return { metadata, transcript };
-        return undefined;
-      } catch (error) {
-        if (!(error instanceof Error) || !('code' in error) || !['FileNotFound', 'ENOENT'].includes(String(error.code))) return undefined;
-      }
-      const [metadataBytes, transcriptBytes] = await Promise.all([
-        vscode.workspace.fs.readFile(this.getMetadataUri(parentSessionId, subagentId)),
-        vscode.workspace.fs.readFile(this.getTranscriptUri(parentSessionId, subagentId))
-      ]);
-      const metadata = normalizeMetadata(JSON.parse(this.decoder.decode(metadataBytes)));
-      const transcript = normalizeTranscript(JSON.parse(this.decoder.decode(transcriptBytes)));
-      if (!metadata || !transcript || metadata.id !== subagentId || metadata.parentSessionId !== parentSessionId || transcript.metadataId !== metadata.id) {
-        return undefined;
-      }
-      return { metadata, transcript };
+      } catch { return undefined; }
     } catch {
       return undefined;
     }
@@ -206,16 +176,12 @@ export class SubagentStore {
 
   public async readResultPage(input: {
     parentSessionId: string;
-    ref?: string;
-    subagentId?: string;
+    ref: string;
     allowedTreeId?: string;
     offsetBytes?: number;
     limitBytes?: number;
-    offset?: number;
-    maxChars?: number;
   }): Promise<Record<string, unknown>> {
-    const ref = input.ref ?? input.subagentId ?? '';
-    const legacy = !input.ref && input.offsetBytes === undefined && input.limitBytes === undefined;
+    const ref = input.ref;
     try {
       const stored = await this.resultSource(input.parentSessionId, ref);
       if (!stored) return { ok: false, errorType: await this.runFileExists(input.parentSessionId, ref)
@@ -225,23 +191,12 @@ export class SubagentStore {
         errorType: 'subagent_result_forbidden', error: 'The result reference is outside the current subagent tree.' };
       if (metadata.status === 'queued' || metadata.status === 'running' || metadata.failureKind === 'interrupted') return {
         ok: false, ref, subagentId: metadata.id, status: metadata.status, errorType: 'subagent_result_pending', error: 'The referenced result is not complete yet.' };
-      if (metadata.resultTruncated && metadata.resultContractVersion !== 2) return { ok: false, ref,
-        resultStatus: 'partial', formatAccepted: false, errorType: 'subagent_result_unavailable',
-        error: 'This legacy result was truncated; its original canonical body is unavailable.' };
       const canonical = await this.resolveResultSource(input.parentSessionId, stored);
       if (!canonical) return { ok: false, ref, errorType: 'subagent_result_corrupt', error: 'The canonical result reference failed its integrity check.' };
       const shared = { ok: true, subagentId: metadata.id, status: manifestStatus(metadata), profile: metadata.profile, lane: metadata.lane,
         resultHash: canonical.hash, resultStatus: metadata.resultStatus ?? 'unknown',
         formatAccepted: metadata.resultFormatAccepted === true, parentAcceptance: 'pending',
         resultTruncated: metadata.resultTruncated === true };
-      if (legacy) {
-        const result = this.decoder.decode(await canonical.range(0, canonical.bytes));
-        const offset = clampInteger(input.offset, 0, result.length, 0);
-        const maxChars = clampInteger(input.maxChars, 1, MAX_SUBAGENT_RESULT_PAGE_CHARS, DEFAULT_SUBAGENT_RESULT_PAGE_CHARS);
-        const content = result.slice(offset, offset + maxChars), nextOffset = offset + content.length;
-        return { ...shared, subagentId: metadata.id, offset, content, totalChars: result.length,
-          usage: metadata.usage, hasMore: nextOffset < result.length, ...(nextOffset < result.length ? { nextOffset } : {}) };
-      }
       if (input.offsetBytes !== undefined && (!Number.isSafeInteger(input.offsetBytes) || input.offsetBytes < 0)) return {
         ok: false, ref, errorType: 'subagent_result_offset_out_of_range', error: 'The byte offset must be a nonnegative integer.' };
       const offsetBytes = input.offsetBytes ?? 0;
@@ -297,16 +252,8 @@ export class SubagentStore {
         if (!index) throw new Error('Invalid child result index');
         return index;
       }
-      const graph = new SessionObjectStore(uri);
-      const metadata = normalizeMetadata(await graph.loadField(manifest, ['subagentMetadata']));
-      const result = await graph.loadField(manifest, ['subagentTranscript', 'result']);
-      const resultRef = await graph.loadField(manifest, ['subagentTranscript', 'resultRef']);
-      if (!metadata || metadata.id !== id || metadata.parentSessionId !== parentSessionId || typeof result !== 'string') throw new Error('Invalid legacy child result');
-      return { metadata: resultMetadata(metadata), result, resultRef: typeof resultRef === 'string' ? resultRef : metadata.reusedFromSubagentId };
-    } catch (error) { if (!isMissing(error)) throw error; }
-    // Legacy combined/split records are immutable after completion. Cache only
-    // extracted, hash-verified result data, keyed by scope and source identity.
-    return this.legacyResultSource(parentSessionId, id);
+      throw new Error('The child result index is missing.');
+    } catch (error) { if (!isMissing(error)) throw error; return undefined; }
   }
 
   private async resolveResultSource(parentSessionId: string, initial: ResultSource): Promise<{
@@ -348,50 +295,6 @@ export class SubagentStore {
     return undefined;
   }
 
-  private readonly legacyResults = new Map<string, { signature: string; bytes: number; source: ResultSource;
-    ranges: Array<{ uri: vscode.Uri; values: LegacyVerifiedRange[] }> }>();
-  private async legacyResultSource(parentSessionId: string, id: string): Promise<ResultSource | undefined> {
-    const directory = this.getParentDirectory(parentSessionId), combined = vscode.Uri.joinPath(directory, `${id}.run.json`);
-    let uris: vscode.Uri[];
-    try { await vscode.workspace.fs.stat(combined); uris = [combined]; }
-    catch (error) { if (!isMissing(error)) throw error; uris = [this.getMetadataUri(parentSessionId, id), this.getTranscriptUri(parentSessionId, id)]; }
-    const signatureFor = async () => JSON.stringify(await Promise.all(uris.map(async uri => {
-      const stat = await vscode.workspace.fs.stat(uri); return [uri.toString(), stat.size, stat.ctime, stat.mtime];
-    })));
-    let signature: string;
-    try { signature = await signatureFor(); } catch (error) { if (isMissing(error)) return undefined; throw error; }
-    const key = `${parentSessionId}/${id}`, cached = this.legacyResults.get(key);
-    if (cached?.signature === signature) {
-      for (const range of cached.ranges) await verifyLegacyRanges(range.uri, range.values);
-      if (signature !== await signatureFor()) throw new Error('Legacy result changed during verification');
-      this.legacyResults.delete(key); this.legacyResults.set(key, cached); return cached.source;
-    }
-    this.legacyResults.delete(key);
-    const texts = await Promise.all(uris.map(async uri => new TextDecoder('utf-8', { fatal: true }).decode(await vscode.workspace.fs.readFile(uri))));
-    const values = texts.map(text => JSON.parse(text));
-    const metadata = normalizeMetadata(uris.length === 1 ? values[0].metadata : values[0]);
-    const transcript = uris.length === 1 ? values[0].transcript : values[1];
-    if (!metadata || metadata.id !== id || metadata.parentSessionId !== parentSessionId || !isRecord(transcript)
-      || transcript.metadataId !== id || typeof transcript.result !== 'string') throw new Error('Invalid legacy child result');
-    const result = transcript.result, bytes = Buffer.byteLength(result), hash = createHash('sha256').update(result).digest('hex');
-    if (metadata.resultHash && metadata.resultHash !== hash && !transcript.resultRef) throw new Error('Legacy result integrity mismatch');
-    // Re-encode only the extracted projection so a sliced string cannot retain
-    // the much larger combined private source buffer in the bounded cache.
-    const source = JSON.parse(JSON.stringify({ metadata: resultMetadata(metadata), result,
-      resultRef: typeof transcript.resultRef === 'string' ? transcript.resultRef : metadata.reusedFromSubagentId })) as ResultSource;
-    if (signature !== await signatureFor()) throw new Error('Legacy result changed during verification');
-    if (bytes <= 2 * 1024 * 1024 && uris.every(uri => uri.scheme === 'file')) {
-      const ranges = uris.map((uri, position) => ({ uri, values: uris.length === 2 && position === 0
-        ? [{ offset: 0, bytes: Buffer.byteLength(texts[position]!), hash: createHash('sha256').update(texts[position]!).digest('hex') }]
-        : legacyVerifiedRanges(texts[position]!, uris.length === 1) }));
-      this.legacyResults.set(key, { signature, bytes, source, ranges });
-      while (this.legacyResults.size > 8 || [...this.legacyResults.values()].reduce((total, value) => total + value.bytes, 0) > 4 * 1024 * 1024) {
-        this.legacyResults.delete(this.legacyResults.keys().next().value!);
-      }
-    }
-    return source;
-  }
-
   public async readCanonicalResult(
     parentSessionId: string,
     initial: { metadata: StoredSubagentMetadata; transcript: StoredSubagentTranscript }
@@ -428,8 +331,8 @@ export class SubagentStore {
       return [];
     }
     const ids = entries
-      .filter(([name, type]) => type === vscode.FileType.File && /\.(run|state)\.json$/u.test(name))
-      .map(([name]) => name.replace(/\.(run|state)\.json$/u, ''))
+      .filter(([name, type]) => type === vscode.FileType.File && /\.state\.json$/u.test(name))
+      .map(([name]) => name.replace(/\.state\.json$/u, ''))
       .filter((id) => id !== input.excludeSubagentId)
       .slice(-64);
     const candidates = (await Promise.all(ids.map(async (id) => await this.read(input.parentSessionId, id))))
@@ -528,7 +431,6 @@ export class SubagentStore {
       const prefix = this.getParentDirectory(parentSessionId).toString() + '/';
       for (const key of this.objectStores.keys()) if (key.startsWith(prefix)) this.objectStores.delete(key);
       for (const key of this.writers.keys()) if (key.startsWith(prefix)) this.writers.delete(key);
-      for (const key of this.legacyResults.keys()) if (key.startsWith(parentSessionId + '/')) this.legacyResults.delete(key);
       const directory = this.getParentDirectory(parentSessionId);
       await assertManagedStoragePath(this.globalStorageUri, directory);
       try { await vscode.workspace.fs.delete(directory, { recursive: true, useTrash: false }); }
@@ -564,29 +466,10 @@ export class SubagentStore {
     return vscode.Uri.joinPath(this.rootUri, parentSessionId);
   }
 
-  private getMetadataUri(parentSessionId: string, subagentId: string): vscode.Uri {
-    if (!isSafeId(subagentId)) {
-      throw new Error('Invalid subagent id.');
-    }
-    return vscode.Uri.joinPath(this.getParentDirectory(parentSessionId), `${subagentId}.meta.json`);
-  }
-
-  private getTranscriptUri(parentSessionId: string, subagentId: string): vscode.Uri {
-    if (!isSafeId(subagentId)) {
-      throw new Error('Invalid subagent id.');
-    }
-    return vscode.Uri.joinPath(this.getParentDirectory(parentSessionId), `${subagentId}.transcript.json`);
-  }
-
   private async runFileExists(parentSessionId: string, subagentId: string): Promise<boolean> {
     if (!isSafeId(parentSessionId) || !isSafeId(subagentId)) return false;
     try {
-      await Promise.resolve(vscode.workspace.fs.stat(vscode.Uri.joinPath(this.getParentDirectory(parentSessionId), `${subagentId}.state.json`))).catch(async error => {
-        if (!isMissing(error)) throw error;
-        try { await vscode.workspace.fs.stat(vscode.Uri.joinPath(this.getParentDirectory(parentSessionId), `${subagentId}.run.json`)); }
-        catch (legacyError) { if (!isMissing(legacyError)) throw legacyError;
-          await vscode.workspace.fs.stat(this.getMetadataUri(parentSessionId, subagentId)); }
-      });
+      await vscode.workspace.fs.stat(vscode.Uri.joinPath(this.getParentDirectory(parentSessionId), `${subagentId}.state.json`));
       return true;
     } catch { return false; }
   }
@@ -620,7 +503,7 @@ function isMissing(error: unknown): boolean {
 
 function normalizeMetadata(value: unknown): StoredSubagentMetadata | undefined {
   if (!isRecord(value)
-    || (value.version !== 1 && value.version !== 2)
+    || value.version !== 2
     || typeof value.id !== 'string'
     || typeof value.parentSessionId !== 'string'
     || typeof value.status !== 'string' || !['queued', 'running', 'completed', 'failed', 'stopped'].includes(value.status)
@@ -647,7 +530,7 @@ function normalizeMetadata(value: unknown): StoredSubagentMetadata | undefined {
 
 function normalizeTranscript(value: unknown): StoredSubagentTranscript | undefined {
   if (!isRecord(value)
-    || (value.version !== 1 && value.version !== 2)
+    || value.version !== 2
     || typeof value.metadataId !== 'string'
     || typeof value.contextInstructions !== 'string'
     || !Array.isArray(value.messages)

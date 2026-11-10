@@ -23,6 +23,7 @@ test('static unknown and incomplete argv reach the current tool loop, durable ev
       const bodies: Record<string, unknown>[] = [];
       const checkpoints: RunCheckpoint[] = [];
       const input = request(lane, `${lane}-${malformed}`);
+      delete input.requestProtocolVersion;
       let original: { draftRunId: string; specHash: string } | undefined;
       let corrected: { id: string; specHash: string } | undefined;
       const originalFetch = globalThis.fetch;
@@ -69,6 +70,8 @@ test('static unknown and incomplete argv reach the current tool loop, durable ev
         assert.equal(result.draftRuns?.[1].capabilityDiagnostic, undefined);
         assert.equal(result.draftRuns?.[1].spec.replacesDraftRun?.draftRunId, original!.draftRunId);
         const checkpoint = checkpoints.at(-1)!;
+        assert.ok(checkpoints.every(value => value.request.requestProtocolVersion === CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION),
+          'default requests persist the same current protocol that produced the payload');
         assert.equal(new Set(checkpoints.map(value => value.taskId)).size, 1, 'correction does not create another logical task');
         assert.equal(checkpoint.commandRecoveryKeys?.length, 1);
         assert.equal(checkpoint.runBudget?.modelRequests, 3);
@@ -191,91 +194,6 @@ test('same-response sibling capability gaps share one observation before the mod
       assert.equal(normalizeRunCheckpoint({ ...checkpoint, commandRecoveryBatch: { id: 'not-a-hash', keys: [] } }), undefined);
     } finally { globalThis.fetch = originalFetch; }
   });
-});
-
-test('legacy V14 commands reject new prerequisite or replacement metadata without discarding gates or preparing drafts', async () => {
-  await inWorkspace(async (_root, storage) => {
-    for (const metadata of [
-      { prerequisites: [{ draftRunId: 'required-fact', specHash: 'a'.repeat(64), condition: 'predicate_true' }] },
-      { replacesDraftRun: { draftRunId: 'old-gap', specHash: 'b'.repeat(64) } }
-    ]) {
-      const originalFetch = globalThis.fetch;
-      let dispatches = 0;
-      globalThis.fetch = (async (_url, init) => {
-        dispatches++;
-        if (dispatches === 1) return streaming('chat', call('legacy-fields', {
-          executable: 'cat', args: ['--', 'README.md'], reason: 'Read only after the required evidence.', ...metadata
-        }));
-        const result = toolPayloads(JSON.parse(String(init?.body))).find(value => value.errorType === 'command_plan_protocol_required');
-        assert.ok(result, 'unsupported plan metadata must be surfaced instead of silently ignored');
-        assert.equal(result.started, false);
-        assert.equal(result.executed, false);
-        assert.equal(result.requiredProtocolVersion, 15);
-        return streaming('chat');
-      }) as typeof fetch;
-      try {
-        const result = await new AgentRunner(undefined, undefined, undefined, undefined, undefined, undefined,
-          storage as unknown as import('vscode').Uri).run({ ...request('chat', `legacy-${Object.keys(metadata)[0]}`), requestProtocolVersion: 14 });
-        assert.equal(dispatches, 2);
-        assert.equal(result.draftRuns?.length ?? 0, 0, 'there is no draft whose prerequisite gates were lost');
-      } finally { globalThis.fetch = originalFetch; }
-    }
-  });
-});
-
-test('a frozen V14 lane corrects in the same loop using evidence without leaving an unreplaceable rejected draft', async () => {
-  await inWorkspace(async (_root, storage) => {
-    const originalFetch = globalThis.fetch;
-    const bodies: Record<string, unknown>[] = [];
-    let checkpoint!: RunCheckpoint;
-    globalThis.fetch = (async (_url, init) => {
-      const body = JSON.parse(String(init?.body));
-      bodies.push(body);
-      if (bodies.length === 1) return streaming('chat', call('legacy-gap', { executable: 'cat', args: ['--future'], reason: 'Read requested file.' }));
-      const diagnostic = toolPayloads(body).find(value => value.status === 'needs_replan');
-      assert.ok(diagnostic);
-      assert.equal(diagnostic.proposalPersisted, false);
-      if (bodies.length === 2) return streaming('chat', call('legacy-correction', { executable: 'cat', args: ['--', 'README.md'], reason: 'Read same file using supported arguments.' }));
-      return streaming('chat');
-    }) as typeof fetch;
-    try {
-      const input = { ...request('chat', 'legacy-correction'), requestProtocolVersion: 14 };
-      const result = await new AgentRunner(undefined, undefined, undefined, undefined, undefined, undefined,
-        storage as unknown as import('vscode').Uri).run(input, { onCheckpoint: async next => { checkpoint = checkpointCopy(next); } });
-      assert.equal(bodies.length, 3);
-      assert.equal(new Set(bodies.map(body => JSON.stringify(body.tools))).size, 1);
-      assert.equal(result.draftRuns?.length, 1);
-      assert.deepEqual(result.draftRuns?.[0].spec.args, ['--', 'README.md']);
-      assert.equal(checkpoint.commandRecoveryKeys?.length, 1);
-      const store = new ToolEvidenceStore(storage as unknown as import('vscode').Uri);
-      const diagnostic = await store.findByToolCall(input.sessionId!, checkpoint.taskId, 'legacy-gap');
-      assert.ok(diagnostic?.providerEnvelope, 'the rejected argv still has durable intent/evidence/envelope');
-      assert.equal(JSON.parse(diagnostic.providerEnvelope).proposalPersisted, false);
-    } finally { globalThis.fetch = originalFetch; }
-  });
-});
-
-test('V15 adds finite command evidence gates at a controlled schema boundary and leaves every V14 prefix byte frozen', () => {
-  const sha = (value: string) => createHash('sha256').update(value).digest('hex');
-  assert.equal(CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION, 15);
-  assert.equal(CURRENT_PROVIDER_TOOL_SCHEMA_VERSION, 15);
-  const legacy = getAgentTools({ requestProtocolVersion: 14 });
-  assert.equal(sha(JSON.stringify(legacy)), '877509b750324fc386331bf203ee16e2ec643fe809dea0a7b9edd60faf968be2');
-  assert.equal(sha(JSON.stringify(getAgentTools({ requestProtocolVersion: 14,
-    toolNames: getAgentToolNamesForPrompt('small question', true, 14) }))), 'cc04b826bee9156b6ebd8f1aaa663222c2ea77613ac32e0c8c07cc3d7b669ca2');
-  const current = getAgentTools({ requestProtocolVersion: 15 });
-  assert.deepEqual(current.filter(tool => tool.function.name !== RUN_DRAFT_TOOL_NAME), legacy.filter(tool => tool.function.name !== RUN_DRAFT_TOOL_NAME));
-  for (const language of ['en', 'zh-CN'] as const) {
-    assert.equal(getAgentSystemPrompt({ language, requestProtocolVersion: 15 }), getAgentSystemPrompt({ language, requestProtocolVersion: 14 }));
-  }
-  for (const lane of ['chat', 'responses', 'anthropic'] as const) for (const version of [14, 15]) {
-    const input = request(lane, 'protocol');
-    const projection = buildProviderRequestProjection({ ...input, agentSettings: input.settings, requestProtocolVersion: version });
-    assert.equal(projection.requestProtocolVersion, version, 'hot legacy lanes are not silently upgraded');
-    const schema = projection.tools.find(tool => tool.function.name === RUN_DRAFT_TOOL_NAME)!.function.parameters as { properties: Record<string, unknown> };
-    assert.equal('prerequisites' in schema.properties, version === 15);
-    assert.equal('replacesDraftRun' in schema.properties, version === 15);
-  }
 });
 
 function request(lane: Lane, sessionId: string): AgentRequest {

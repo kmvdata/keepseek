@@ -6,6 +6,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as vscode from './stubs/vscode';
+import { CURRENT_AGENT_PROTOCOL_VERSION } from '../src/agent/protocol';
 import { AgentRunner } from '../src/agent/runner';
 import { WorkspaceToolService } from '../src/agent/tools/workspaceTools';
 import { createModelCatalog } from '../src/accounts/modelCatalog';
@@ -31,7 +32,7 @@ function request(provider: ModelSourceProvider = 'qwencloud', maxOutputTokens = 
     createdAt: 1, updatedAt: 1
   }])[0];
   return {
-    model, prompt: 'Inspect the workspace and explain.', contextFiles: [], history: [], language: 'en', requestProtocolVersion: 8,
+    model, prompt: 'Inspect the workspace and explain.', contextFiles: [], history: [], language: 'en', requestProtocolVersion: CURRENT_AGENT_PROTOCOL_VERSION,
     settings: { thinkingEnabled: true, reasoningEffort: 'high', compressionThreshold: 'balanced' },
     sourceConfig: { sourceId, provider, baseUrl: 'https://fixture.invalid', apiKey: 'fixture-only-key', supportsBilling: false }
   };
@@ -116,7 +117,7 @@ for (const provider of ['qwencloud', 'openai-responses', 'anthropic-compatible']
     globalThis.fetch = (async () => { count++; return reply(provider, 'truncated'); }) as typeof fetch;
     try {
       await assert.rejects(new AgentRunner(workspace).run(request(provider), {
-        onCheckpoint: async (cp) => { checkpoint = checkpointCopy(cp); }, onUsageLedgerRecord: (record) => { const next = appendUsageLedgerRecord({ version: 1, records: ledger, incomplete: false, legacyAggregate: false }, record); ledger.splice(0, ledger.length, ...next.records); }
+        onCheckpoint: async (cp) => { checkpoint = checkpointCopy(cp); }, onUsageLedgerRecord: (record) => { const next = appendUsageLedgerRecord({ version: 1, records: ledger, incomplete: false }, record); ledger.splice(0, ledger.length, ...next.records); }
       }), /Output length limit/u);
       assert.equal(count, 1, 'semantic truncation is not a network retry');
       assert.equal(tools, 0);
@@ -130,39 +131,26 @@ for (const provider of ['qwencloud', 'openai-responses', 'anthropic-compatible']
   });
 }
 
-test('structured legacy truncation migrates budget before dispatch without resetting task usage', async () => {
+test('unsupported output-budget policy snapshots are rejected without dispatching recovery', async () => {
   const original = globalThis.fetch;
   let checkpoint!: RunCheckpoint;
-  const bodies: Array<Record<string, unknown>> = [];
-  let migrationPersisted = false;
-  globalThis.fetch = (async (_url, init) => {
-    bodies.push(JSON.parse(String(init?.body)));
-    if (bodies.length === 1) return reply('qwencloud', 'truncated');
-    assert.equal(migrationPersisted, true);
-    return reply('qwencloud', 'stop');
-  }) as typeof fetch;
+  let requests = 0;
+  globalThis.fetch = (async () => { requests++; return reply('qwencloud', 'truncated'); }) as typeof fetch;
   try {
-    const old = request('qwencloud', 8192);
-    await assert.rejects(new AgentRunner().run(old, { onCheckpoint: async (cp) => { checkpoint = checkpointCopy(cp); } }), /Output length limit/u);
-    const taskId = checkpoint.taskId;
-    const priorTokens = checkpoint.runBudget!.upstreamTokens;
-    checkpoint.outputBudgetPolicyVersion = 1;
-    checkpoint.outputFailure!.budget.policyVersion = 1;
-    checkpoint = normalizeRunCheckpoint(checkpoint)!;
-    const current = request();
-    await new AgentRunner().run({ ...checkpoint.request, model: current.model, sourceConfig: current.sourceConfig, checkpoint }, {
-      onCheckpoint: async (cp) => {
-        if (cp.outputBudgetMigrations?.length) migrationPersisted = true;
-        checkpoint = checkpointCopy(cp);
-      }
-    });
-    assert.equal(bodies[0].max_tokens, 8192);
-    assert.equal(bodies[1].max_tokens, 393192);
-    assert.equal(checkpoint.taskId, taskId);
-    assert.equal(checkpoint.runBudget?.modelRequests, 2);
-    assert.ok(checkpoint.runBudget!.upstreamTokens >= priorTokens);
-    assert.equal(checkpoint.outputBudgetMigrations?.[0].reason, 'larger_budget');
-    assert.notEqual(checkpoint.outputBudgetMigrations?.[0].oldRequestHash, checkpoint.outputBudgetMigrations?.[0].newRequestHash);
+    await assert.rejects(new AgentRunner().run(request('qwencloud', 8192), {
+      onCheckpoint: async cp => { checkpoint = checkpointCopy(cp); }
+    }), /Output length limit/u);
+    assert.ok(normalizeRunCheckpoint(checkpoint), 'the current structured failure remains recoverable');
+    const before = JSON.stringify(checkpoint);
+    for (const structured of [true, false]) {
+      const unsupported = checkpointCopy(checkpoint);
+      unsupported.outputBudgetPolicyVersion = 1;
+      if (structured) unsupported.outputFailure!.budget.policyVersion = 1;
+      else { unsupported.outputFailure = undefined; unsupported.modelStepRequestHash = undefined; }
+      assert.equal(normalizeRunCheckpoint(unsupported), undefined);
+    }
+    assert.equal(JSON.stringify(checkpoint), before, 'rejection preserves the current checkpoint and its usage');
+    assert.equal(requests, 1);
   } finally { globalThis.fetch = original; }
 });
 
@@ -186,21 +174,6 @@ test('at model cap, Continue changes generation strategy once and refuses identi
     const damaged = checkpointCopy(checkpoint);
     damaged.outputFailure!.toolsExecuted = 1 as 0;
     assert.equal(normalizeRunCheckpoint(damaged), undefined);
-  } finally { globalThis.fetch = original; }
-});
-
-test('ambiguous old failure is not permission to change a frozen request', async () => {
-  const original = globalThis.fetch;
-  let checkpoint!: RunCheckpoint;
-  globalThis.fetch = (async () => reply('qwencloud', 'truncated')) as typeof fetch;
-  try {
-    await assert.rejects(new AgentRunner().run(request(), { onCheckpoint: async (cp) => { checkpoint = checkpointCopy(cp); } }));
-    checkpoint.outputFailure = undefined;
-    checkpoint.outputBudgetPolicyVersion = 1;
-    checkpoint.error = 'Incomplete tool response';
-    assert.match(recoveryBlocker(normalizeRunCheckpoint(checkpoint)!)!, /no structured/u);
-    checkpoint.modelStepRequestHash = undefined;
-    assert.match(recoveryBlocker(normalizeRunCheckpoint(checkpoint)!)!, /no structured/u);
   } finally { globalThis.fetch = original; }
 });
 

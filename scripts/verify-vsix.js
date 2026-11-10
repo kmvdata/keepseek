@@ -1,5 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const { inflateRawSync } = require('node:zlib');
 
 const root = path.resolve(__dirname, '..');
 const packageJson = require(path.join(root, 'package.json'));
@@ -30,10 +31,16 @@ const forbiddenEntries = [
   'extension/out/fileContext.js',
   'extension/out/fileReference.js',
   'extension/out/referenceResources.js',
-  'extension/out/workspaceTools.js'
+  'extension/out/workspaceTools.js',
+  'extension/out/keybindings.js'
 ];
 
 const entries = readZipEntries(vsixPath);
+const packagedManifest = JSON.parse(readZipEntry(vsixPath, 'extension/package.json'));
+if (`${packagedManifest.publisher}.${packagedManifest.name}` !== 'kmvdata.keepseek'
+  || packagedManifest.publisher !== packageJson.publisher || packagedManifest.version !== packageJson.version) {
+  throw new Error('VSIX identity or version does not match the kmvdata.keepseek baseline.');
+}
 const missing = [...requiredEntries].filter((entry) => !entries.has(entry));
 const stale = forbiddenEntries.filter((entry) => entries.has(entry));
 stale.push(...[...entries].filter((entry) => entry.startsWith('extension/.reasonix/')));
@@ -94,4 +101,26 @@ function findEndOfCentralDirectory(buffer) {
     }
   }
   throw new Error('Invalid VSIX: could not find ZIP end of central directory.');
+}
+
+function readZipEntry(filePath, name) {
+  const buffer = fs.readFileSync(filePath);
+  const eocdOffset = findEndOfCentralDirectory(buffer);
+  let offset = buffer.readUInt32LE(eocdOffset + 16);
+  const end = offset + buffer.readUInt32LE(eocdOffset + 12);
+  while (offset < end) {
+    const nameLength = buffer.readUInt16LE(offset + 28);
+    const extraLength = buffer.readUInt16LE(offset + 30);
+    const commentLength = buffer.readUInt16LE(offset + 32);
+    if (buffer.toString('utf8', offset + 46, offset + 46 + nameLength) === name) {
+      const localOffset = buffer.readUInt32LE(offset + 42);
+      const dataOffset = localOffset + 30 + buffer.readUInt16LE(localOffset + 26) + buffer.readUInt16LE(localOffset + 28);
+      const data = buffer.subarray(dataOffset, dataOffset + buffer.readUInt32LE(offset + 20));
+      const method = buffer.readUInt16LE(offset + 10);
+      if (method !== 0 && method !== 8) throw new Error(`Unsupported ZIP compression for ${name}`);
+      return (method === 8 ? inflateRawSync(data) : data).toString('utf8');
+    }
+    offset += 46 + nameLength + extraLength + commentLength;
+  }
+  throw new Error(`Missing ZIP entry: ${name}`);
 }

@@ -9,7 +9,6 @@ import * as vscode from './stubs/vscode';
 import { SessionDeletionAuthority } from '../src/sessions/sessionDeletionAuthority';
 import { GlobalSessionStorage, getWorkspaceHash } from '../src/sessions/globalSessionStorage';
 import type { ChatSession } from '../src/shared/types';
-import { SESSION_STORAGE_KEY } from '../src/sessions/chatSessionStore';
 
 function child(root: string, action: string, events = ''): ChildProcess {
   return fork(path.join(__dirname, 'fixtures', 'historyCleanupProcess.js'), [root, action, 'workspace:cleanup', 'fixture-session', events],
@@ -145,26 +144,17 @@ test('duplicate IDs across workspace indexes are unknown even in current-project
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('reopening an already migrated workspace reclaims only tombstoned legacy Memento records', async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-cleanup-memento-'));
+test('current deletion has no inaccessible compatibility source and remains removed after restart', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-cleanup-current-'));
   try {
     const storage = new GlobalSessionStorage(vscode.Uri.file(root) as never), value = session();
     await storage.saveWorkspace({ key: value.workspaceKey, name: 'Fixture', folderUris: [] }, { activeSessionId: value.id, sessions: [value] });
     const target = (await storage.readHistoryCleanupCatalog(value.workspaceKey)).entries[0];
-    await storage.deleteHistoryCleanupTarget(target, 'memento-op');
-    await storage.deletionAuthority.updateDeletion(value.id, 'committed', ['inaccessible_legacy_source']);
-    const untouched = { ...value, id: 'untouched' };
-    const values = new Map<string, unknown>([
-      ['keepseek.chatSessionsMigratedToGlobalV1', true],
-      ['keepseek.chatSessions', { version: 2, activeSessionId: value.id, activeSessionIdsByWorkspace: { [value.workspaceKey]: value.id }, sessions: [value, untouched] }]
-    ]);
-    // Use the exported key so legacy naming changes do not weaken the contract.
-    const legacy = values.get('keepseek.chatSessions'); values.delete('keepseek.chatSessions'); values.set(SESSION_STORAGE_KEY, legacy);
-    const memento = { get: (key: string, fallback?: unknown) => values.has(key) ? values.get(key) : fallback,
-      update: async (key: string, content: unknown) => { values.set(key, content); }, keys: () => [...values.keys()] };
-    await storage.migrateLegacyWorkspaceState(memento as never, { key: value.workspaceKey, name: 'Fixture', folderUris: [] });
-    assert.deepEqual((values.get(SESSION_STORAGE_KEY) as { sessions: ChatSession[] }).sessions.map(item => item.id), ['untouched']);
-    assert.equal((await storage.deletionAuthority.readRecord(value.id))?.phase, 'reclaimed');
+    const result = await storage.deleteHistoryCleanupTarget(target, 'current-op');
+    assert.equal(result.status, 'removedPendingCleanup');
+    const restarted = new GlobalSessionStorage(vscode.Uri.file(root) as never);
+    assert.equal(await restarted.loadSession(value.workspaceKey, value.id), undefined);
+    assert.deepEqual(await restarted.listWorkspaceSessionSummaries(value.workspaceKey), []);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

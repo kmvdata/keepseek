@@ -1,6 +1,6 @@
 import type { ChatMessage, ChatSession } from '../shared/types';
 import { ExecutionClock } from '../agent/executionPolicy';
-import { executionSegmentId, migrateUserTasks, type UserTaskLink } from './userTask';
+import { executionSegmentId, type UserTaskLink } from './userTask';
 
 interface TaskTime {
   originMessageId: string;
@@ -11,7 +11,7 @@ interface TaskTime {
 }
 /** Display accounting only, never an execution-budget or approval authority. */
 export interface SessionExecutionTime {
-  version: 1 | 2;
+  version: 2;
   byTask: Record<string, number>;
   tasks?: Record<string, TaskTime>;
   currentTaskId?: string;
@@ -22,7 +22,7 @@ function duration(value: unknown): value is number {
 }
 export function reconcileExecutionTime(value: unknown, messages: readonly ChatMessage[]): SessionExecutionTime {
   const raw = value as Partial<SessionExecutionTime> | undefined;
-  const valid = (raw?.version === 1 || raw?.version === 2) && raw.byTask && typeof raw.byTask === 'object' && !Array.isArray(raw.byTask);
+  const valid = raw?.version === 2 && raw.byTask && typeof raw.byTask === 'object' && !Array.isArray(raw.byTask);
   const byTask: Record<string, number> = Object.create(null);
   const tasks: Record<string, TaskTime> = Object.create(null);
   let corrupt = false;
@@ -39,14 +39,9 @@ export function reconcileExecutionTime(value: unknown, messages: readonly ChatMe
     }
   } else if (raw?.version === 2 && raw.tasks !== undefined) corrupt = true;
   let incomplete = corrupt || (valid ? raw.incomplete !== false : true);
-  // Timing is a read-only projection. Legacy task inference belongs to these
-  // disposable headers; normalizing, displaying or saving a title must never
-  // backfill links into the canonical chat history. Explicit execution paths
-  // retain their own migrateUserTasks/taskForSegment boundary.
-  const timingMessages = messages.map(message => ({ ...message }));
-  migrateUserTasks(timingMessages);
+  // Timing uses explicit current host task links and never rewrites history.
   let currentTaskId = typeof raw?.currentTaskId === 'string' ? raw.currentTaskId : undefined;
-  for (const message of timingMessages) {
+  for (const message of messages) {
     const run = message.runCheckpoint ?? message.runCheckpointArchive?.summary ?? message.runState;
     if (!run) continue;
     if (!run.taskId || !duration(run.usedMs)) { incomplete = true; continue; }
@@ -62,7 +57,6 @@ export function reconcileExecutionTime(value: unknown, messages: readonly ChatMe
   for (const task of Object.values(tasks)) {
     if (!task.measured) task.usedMs = Math.max(task.usedMs, task.segments.reduce((sum, id) => sum + (byTask[id] ?? 0), 0));
   }
-  if (raw?.version !== 2) currentTaskId = timingMessages.at(-1)?.userTask?.id ?? currentTaskId;
   return { version: 2, byTask, tasks, currentTaskId, incomplete };
 }
 export function executionTimeView(session: ChatSession): { totalMs?: number; currentMs?: number; incomplete: boolean } {

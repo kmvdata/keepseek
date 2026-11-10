@@ -50,7 +50,7 @@ test('host ledger flush preserves ref damage and does not spin after storage fai
     referenceCostViews: new Map(),
     usageLedgerStore: {
       appendMany: async () => { writes++; if (fail) throw new Error('injected storage failure'); },
-      current: async () => ({ ledger: { version: 1, records, incomplete: false, legacyAggregate: false },
+      current: async () => ({ ledger: { version: 1, records, incomplete: false },
         stats: rebuildSessionUsageStatsFromLedger(records), damagedBucketCount: 0 })
     }, sessionStore: { persist: async () => {} }
   }) as { queueUsageLedgerFlush(session: import('../src/shared/types').ChatSession): void; usageLedgerFlushes: Map<string, Promise<void>> };
@@ -79,7 +79,7 @@ test('reference fees propagate to child totals, model groups, work types and ind
   const records = createUsageLedgerRecords({ requestId: 'child-request', attempts: [snapshot],
     source: 'subagent', usage: event('subagent').usage, cacheObservations: [observation] });
   const original = JSON.stringify(subagents);
-  const view = buildReferenceCostView({ version: 1, records, incomplete: false, legacyAggregate: false }, { subagentUsageStats: subagents });
+  const view = buildReferenceCostView({ version: 1, records, incomplete: false }, { subagentUsageStats: subagents });
   const expected = view.session!.sessionCost;
   assert.ok(expected > 0);
   assert.equal(view.subagents?.byModel[0].usage?.cost, expected);
@@ -122,7 +122,7 @@ test('automatic title reference costs join session totals while preserving the l
   const main = createUsageLedgerRecords({ requestId: 'main_reply', attempts: [price], source: 'executor', usage: event('executor').usage });
   const title = createUsageLedgerRecords({ requestId: 'session_title_cost', attempts: [price], source: 'subagent', usage: event('subagent').usage })
     .map(record => ({ ...record, purpose: 'session_title' as const }));
-  const ledger = (records: typeof main) => ({ version: 1 as const, records, incomplete: false, legacyAggregate: false });
+  const ledger = (records: typeof main) => ({ version: 1 as const, records, incomplete: false });
   const index = new ReferenceCostIndex();
   const before = buildReferenceCostView(ledger(main), { lastUserAt }, index);
   const after = buildReferenceCostView(ledger([...main, ...title]), { lastUserAt }, index);
@@ -169,7 +169,7 @@ test('durable ledger rebuild includes attempts arriving during its await without
   const first = createUsageLedgerRecords({ requestId: 'first', attempts: [price], source: 'executor' })[0];
   const late = createUsageLedgerRecords({ requestId: 'late', attempts: [price], source: 'executor',
     usage: { promptTokens: 10, completionTokens: 1, totalTokens: 11, cacheHitTokens: 0, cacheMissTokens: 10, cacheDataStatus: 'unavailable' } })[0];
-  const durable = { version: 1 as const, records: [first], legacyAggregate: false, incomplete: false };
+  const durable = { version: 1 as const, records: [first], incomplete: false };
   const pending = { ...durable, records: [first, late] };
   const merged = mergePendingUsageLedger(durable, pending);
   assert.equal(summarizeUsageLedger(merged).providerAttemptCount, 2);
@@ -183,7 +183,7 @@ test('ledger reconstruction preserves incomplete durable and pending provenance 
   const price = createUsagePriceSnapshot({ originalModelId: 'fixture', sourceId: 'fixture', provider: 'qwencloud',
     protocol: 'chat_completions', supportsBilling: false });
   const records = createUsageLedgerRecords({ requestId: 'surviving-bucket', attempts: [price], source: 'executor' });
-  for (const metadata of [{ incomplete: true }, { legacyAggregate: true }]) {
+  for (const metadata of [{ incomplete: true }]) {
     const stats = rebuildSessionUsageStatsFromLedger(records, metadata);
     const view = createUsageDetailsViewModel({ sessionUsageStats: normalizeSessionUsageStatsValue(stats) });
     assert.equal(view.session.total.providerAttemptCount, 1, 'surviving attempts are a lower bound');
@@ -213,17 +213,19 @@ test('source usage keeps separate currencies, priced zero cost, partial pricing,
   assert.deepEqual(grouped.byModel[0].usage?.costByCurrency, { USD: 0 });
 });
 
-test('old source usage inherits only an unambiguous currency and missing cache data stays unavailable', () => {
-  const legacy = {
+test('scalar source costs are not promoted into current currency attribution', () => {
+  const incomplete = {
     promptTokens: 100, completionTokens: 20, totalTokens: 120,
     cacheHitTokens: 0, cacheMissTokens: 0, requestCount: 1, cost: 0.5
   };
-  const single = normalizeSessionUsageStatsValue({ ...legacy, sessionCost: 0.5, currency: 'CNY', bySource: { executor: legacy } })!;
-  assert.deepEqual(single.bySource?.executor?.costByCurrency, { CNY: 0.5 });
+  const single = normalizeSessionUsageStatsValue({ ...incomplete, sessionCost: 0.5, currency: 'CNY', bySource: { executor: incomplete } })!;
+  assert.deepEqual(single.bySource?.executor?.costByCurrency, {});
+  assert.equal(single.sessionCost, 0);
+  assert.equal(single.bySource?.executor?.cost, 0);
   assert.equal(single.bySource?.executor?.cacheDataRequestCount, 0);
   assert.equal(single.bySource?.executor?.cacheDataMissingRequestCount, 1);
   const mixed = normalizeSessionUsageStatsValue({
-    ...legacy, sessionCost: 0, currency: 'USD', costByCurrency: { CNY: 1, USD: 2 }, bySource: { executor: legacy }
+    ...incomplete, sessionCost: 0, currency: 'USD', costByCurrency: { CNY: 1, USD: 2 }, bySource: { executor: incomplete }
   })!;
   assert.deepEqual(mixed.bySource?.executor?.costByCurrency, {});
   assert.deepEqual(splitActualUsage(mixed).unattributed.costByCurrency, { CNY: 1, USD: 2 });
@@ -232,7 +234,7 @@ test('old source usage inherits only an unambiguous currency and missing cache d
 test('main-session attribution keeps reviewer and subagent calls separate and does not absorb unclassified history', () => {
   let stats = normalizeSessionUsageStatsValue({
     promptTokens: 80, completionTokens: 20, totalTokens: 100, cacheHitTokens: 0, cacheMissTokens: 0,
-    requestCount: 1, sessionCost: 0.25, currency: 'CNY'
+    requestCount: 1, sessionCost: 0.25, costByCurrency: { CNY: 0.25 }, currency: 'CNY', attemptStatsIncomplete: true
   });
   const mainSources: UsageSource[] = ['executor', 'retry', 'continuation', 'summary', 'background', 'retrieval', 'router'];
   for (const source of mainSources) { stats = addUsageEventToSessionStats(stats, event(source, 10, 'CNY', 0.01)); }
@@ -351,10 +353,10 @@ test('session persistence and the Webview view model whitelist statistics, never
   const main = addUsageEventToSessionStats(undefined, event('executor'));
   assert.equal(createUsageDetailsViewModel({ sessionUsageStats: main }).session.mainSession.totalTokens, 120);
   assert.equal(createUsageDetailsViewModel({ sessionUsageStats: main }).subagents, undefined);
-  const legacyChild = addUsageEventToSessionStats(undefined, event('subagent'));
-  assert.equal(createUsageDetailsViewModel({ sessionUsageStats: legacyChild }).subagents?.estimatesAvailable, false);
-  assert.equal(createUsageDetailsViewModel({ sessionUsageStats: legacyChild }).subagents?.byModel[0].usage.totalTokens, 120);
-  assert.equal(createUsageDetailsViewModel({ sessionUsageStats: legacyChild }).subagents?.byModel[0].taskCountsAvailable, false);
+  const untrackedChild = addUsageEventToSessionStats(undefined, event('subagent'));
+  assert.equal(createUsageDetailsViewModel({ sessionUsageStats: untrackedChild }).subagents?.estimatesAvailable, false);
+  assert.equal(createUsageDetailsViewModel({ sessionUsageStats: untrackedChild }).subagents?.byModel[0].usage.totalTokens, 120);
+  assert.equal(createUsageDetailsViewModel({ sessionUsageStats: untrackedChild }).subagents?.byModel[0].taskCountsAvailable, false);
   const progress = toSubagentProgressViewModel({ id: 'sa_child', parentSessionId: 'session', parentRunId: 'root',
     profile: 'research', lane: 'research-read', depth: 1, status: 'failed', summary: 'PRIVATE_ERROR_AND_RESULT', updatedAt: '' });
   assert.doesNotMatch(JSON.stringify(progress), /PRIVATE_|summary/u);
@@ -663,8 +665,8 @@ test('source identities remain distinct and shares use Tokens instead of respons
 
 test('execution rows retain all four responsibilities and use the authoritative coverage total once', () => {
   const ui = createUsageAnalysisHarness('en', true);
-  const legacy = normalizeSessionUsageStatsValue({ ...event('executor', 40).usage, requestCount: 1, sessionCost: 0.01, currency: 'CNY' })!;
-  const stats = addUsageEventToSessionStats(addUsageEventToSessionStats(addUsageEventToSessionStats(legacy,
+  const incomplete = normalizeSessionUsageStatsValue({ ...event('executor', 40).usage, requestCount: 1, sessionCost: 0.01, costByCurrency: { CNY: 0.01 }, currency: 'CNY', attemptStatsIncomplete: true })!;
+  const stats = addUsageEventToSessionStats(addUsageEventToSessionStats(addUsageEventToSessionStats(incomplete,
     event('executor', 100)), event('subagent', 200)), event('reviewer', 60));
   ui.setSession({ sessionUsageStats: stats, subagentUsageStats: upsertSubagentRunUsageSummary(undefined, run('scope')) });
   const total = ui.state.usageMetrics.usageDetails.session.total;
@@ -672,7 +674,7 @@ test('execution rows retain all four responsibilities and use the authoritative 
   const types = ui.body.querySelector('.usage-analysis-type')!;
   const rows = types.children[2].children;
   assert.deepEqual(rows.map(row => row.querySelector('.usage-compact-name')!.textContent),
-    [WEBVIEW_TRANSLATIONS.en.usageMainSession, WEBVIEW_TRANSLATIONS.en.usageReviewerLabel, WEBVIEW_TRANSLATIONS.en.usageSubagentLabel, WEBVIEW_TRANSLATIONS.en.usageHistoricalUnattributed]);
+    [WEBVIEW_TRANSLATIONS.en.usageMainSession, WEBVIEW_TRANSLATIONS.en.usageReviewerLabel, WEBVIEW_TRANSLATIONS.en.usageSubagentLabel, WEBVIEW_TRANSLATIONS.en.usageUnattributed]);
   assert.deepEqual(rows.map(row => row.querySelector('.usage-compact-values')!.children[0].textContent),
     ['100 Tokens', '60 Tokens', '200 Tokens', '40 Tokens']);
   assert.ok(types.textContent.includes(WEBVIEW_TRANSLATIONS.en.usageResponsibilityScope));
@@ -691,7 +693,7 @@ test('reviewer-only, child-only, and historical-only sessions keep explicit type
     const type = ui.body.querySelector('.usage-analysis-type')!;
     assert.equal(type.children[2].children.length, 1);
     assert.equal(type.children[2].querySelector('.usage-compact-name')!.textContent,
-      source === 'reviewer' ? WEBVIEW_TRANSLATIONS.en.usageReviewerLabel : source === 'subagent' ? WEBVIEW_TRANSLATIONS.en.usageSubagentLabel : WEBVIEW_TRANSLATIONS.en.usageHistoricalUnattributed);
+      source === 'reviewer' ? WEBVIEW_TRANSLATIONS.en.usageReviewerLabel : source === 'subagent' ? WEBVIEW_TRANSLATIONS.en.usageSubagentLabel : WEBVIEW_TRANSLATIONS.en.usageUnattributed);
     assert.equal(ui.body.querySelector('.usage-source-attribution-note'), null,
       'execution attribution is independent from complete per-model source attribution');
   }
@@ -982,7 +984,7 @@ function usageFixture(...events: ReturnType<typeof event>[]) {
     counts[value.source] = { providerAttemptCount: count.providerAttemptCount + 1, usageResponseCount: count.usageResponseCount + 1 };
   }
   return applyUsageLedgerSummaryToSessionStats(stats, { ...summarizeUsageLedger(undefined),
-    incomplete: false, legacyAggregate: false, providerAttemptCount: events.length, usageResponseCount: events.length,
+    incomplete: false, providerAttemptCount: events.length, usageResponseCount: events.length,
     bySourceCounts: counts })!;
 }
 

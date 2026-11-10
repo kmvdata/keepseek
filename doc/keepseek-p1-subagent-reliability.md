@@ -90,7 +90,7 @@ parallel 按输入顺序组织，在默认 20,480 UTF-8 字节总预算内先保
 
 跳过项仍是本地 HTTP 故障服务端口测试：沙箱不允许 bind；其它模拟传输、三协议、审批/permit、恢复、P0 持久化与用量回归均进入本次全量运行。中间全量曾检出新增继承测试依赖其它测试遗留 workspace roots 的夹具问题；显式设置并恢复测试工作区后重新构建、完整复跑通过，未放宽生产权限检查。验收计数另存 `doc/benchmarks/keepseek-p1-validation-20261101.json`。
 
-- `doc/benchmarks/keepseek-p1-frozen-protocol-f313a00.json`：隔离基线的 V1–V10 两语言 system 与 full/slim schema hash。
+- 旧 V1–V10 协议冻结 fixture 已随 0.5.2 初始基线移除；当前仅验证 V15。
 - `doc/benchmarks/keepseek-p1-p0-baseline-20261101.json`：原 P0 benchmark 在 `f313a00` 上的 3 轮重新实测，不沿用 `9a874e8` 改善率。
 - `doc/benchmarks/keepseek-p1-result-reader-20261101.json`：比较小/大 canonical、相同结果加大量私有历史、冷/热/不同页/重复页与并发 child 的时间、读取对象/字节和内存口径。
 - `doc/benchmarks/keepseek-p1-delegation-20261101.json`：同一源码定位任务的离线单主与委派对照。三协议使用同一投影口径，包含 child 输入及整个任务估算；真实 usage 为 null，实际 Provider 尝试为 0，不提供虚构节省比例。

@@ -10,33 +10,26 @@ import { hashBytes, inspectTextEncoding } from './textPatch';
 
 const encoder = new TextEncoder();
 
-export type DraftEditKind = 'legacy_full_text_v0' | 'full_text_v1' | 'text_patch_v1' | 'delete_v1' | 'move_v1';
+export type DraftEditKind = 'full_text_v1' | 'text_patch_v1' | 'delete_v1' | 'move_v1';
 
 export function getDraftEditKind(edit: DraftEdit): DraftEditKind {
-  return edit.kind ?? 'legacy_full_text_v0';
+  return edit.kind;
 }
 
 export function getDraftEditBase(edit: DraftEdit): FileContentIdentity | undefined {
   if (edit.kind === 'text_patch_v1' || edit.kind === 'delete_v1' || edit.kind === 'move_v1') return edit.kind === 'text_patch_v1' ? edit.patch.base : edit.base;
   if (edit.kind === 'full_text_v1') return edit.base;
-  if (edit.expectedOriginalTextHash === undefined && edit.expectedOriginalSize === undefined) return undefined;
-  return {
-    sha256: edit.expectedOriginalTextHash ?? '',
-    sizeBytes: edit.expectedOriginalSize ?? -1
-  };
+  return undefined;
 }
 
 export function getDraftEditResult(edit: DraftEdit): FileContentIdentity | undefined {
   if (edit.kind === 'text_patch_v1') return edit.patch.result;
   if (edit.kind === 'full_text_v1') return edit.result;
-  if (edit.kind === 'delete_v1' || edit.action === 'delete' || edit.kind === 'move_v1') return undefined;
-  const bytes = encoder.encode(edit.newText);
-  return { sha256: hashBytes(bytes), sizeBytes: bytes.byteLength };
+  return undefined;
 }
 
 export function getDraftEditFullText(edit: DraftEdit): string | undefined {
   if (edit.kind === 'full_text_v1') return edit.content;
-  if (!edit.kind) return edit.newText;
   return undefined;
 }
 
@@ -80,18 +73,6 @@ export function createDeleteDraftEdit(input: {
     reason: input.reason,
     base: { sha256: hashBytes(input.baseBytes), sizeBytes: input.baseBytes.byteLength },
     encoding: inspectTextEncoding(input.baseBytes)
-  };
-}
-
-export function legacyDraftEditActionPayload(edit: DraftEdit): Record<string, unknown> {
-  if (edit.kind) throw new Error('Legacy DraftEdit payload requested for a versioned edit.');
-  return {
-    action: edit.action,
-    uri: edit.uri,
-    newText: edit.newText,
-    reason: edit.reason,
-    expectedOriginalTextHash: edit.expectedOriginalTextHash ?? '',
-    expectedOriginalSize: edit.expectedOriginalSize ?? null
   };
 }
 

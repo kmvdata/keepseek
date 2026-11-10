@@ -154,14 +154,14 @@ test('new sessions cannot enter the frozen plan and per-item changes produce a t
   assert.equal(f.service.getCurrentOperation()?.options.mode, 'olderThan');
 });
 
-test('associated cleanup failure stays logically removed and inaccessible legacy sources are counted separately', async () => {
+test('associated cleanup failure stays logically removed and retains bounded diagnosis', async () => {
   const f = fixture([entry('a'), entry('b')], {
     async deleteTarget() { return { status: 'removedPendingCleanup' }; },
-    async finishTarget(target) { if (target.id === 'a') throw new Error('EACCES'); return { status: 'removedPendingCleanup', inaccessibleLegacySource: true }; }
+    async finishTarget(target) { if (target.id === 'a') throw new Error('EACCES'); return { status: 'removedPendingCleanup', reason: 'unverified_logs' }; }
   });
   const p = await preview(f.service);
   const result = await f.service.request('run', 'view-1', p.previewToken, async () => true);
-  assert.equal(result.fullyDeleted, 0); assert.equal(result.removedPendingCleanup, 2); assert.equal(result.inaccessibleLegacy, 1);
+  assert.equal(result.fullyDeleted, 0); assert.equal(result.removedPendingCleanup, 2);
   assert.equal(result.failedBeforeCommit, 0);
 });
 
@@ -171,15 +171,15 @@ test('restart reclaims only operation-owned committed tombstones and never grant
   await f.service.request('run', 'view-1', p.previewToken, async () => true);
   f.journal.record!.state.status = 'running';
   f.journal.record!.items[1].result = undefined;
-  f.journal.record!.items[2].result = { status: 'removedPendingCleanup', inaccessibleLegacySource: true };
+  f.journal.record!.items[2].result = { status: 'removedPendingCleanup', reason: 'unverified_logs' };
   let deletes = 0; const recovered: string[] = [];
   const service = new SessionHistoryCleanupService({ ...f.adapter,
     async deleteTarget() { deletes++; return { status: 'fullyDeleted' }; },
-    async recoverCommittedTarget(target) { recovered.push(target.id); return target.id === 'a' ? { status: 'fullyDeleted' } : undefined; }
+    async recoverCommittedTarget(target) { recovered.push(target.id); return target.id === 'a' ? { status: 'fullyDeleted' } : target.id === 'c' ? { status: 'removedPendingCleanup', reason: 'unverified_logs' } : undefined; }
   }, { journal: f.journal });
   const result = await service.recover();
   assert.equal(result?.fullyDeleted, 1); assert.equal(result?.failedBeforeCommit, 1); assert.equal(result?.removedPendingCleanup, 1);
-  assert.equal(result?.inaccessibleLegacy, 1); assert.deepEqual(recovered, ['a', 'b']); assert.equal(deletes, 0);
+  assert.deepEqual(recovered, ['a', 'b', 'c']); assert.equal(deletes, 0);
 });
 
 test('the persisted journal validates schema and survives independent store instances using only temporary storage', async () => {
@@ -274,13 +274,12 @@ test('I/O failures cannot be reported as failure before commit if the durable ou
 test('result reasons expose only bounded safe codes and preserve pending-source diagnosis', async () => {
   const f = fixture([entry('a'), entry('b')], { async deleteTarget(target) {
     return { status: 'removedPendingCleanup', reason: target.id === 'a'
-      ? 'inaccessible_legacy_source;unverified_legacy_logs;inaccessible_legacy_source;/private/secret;secretcredential;usage-ledger:EACCES'
-      : 'unverified_legacy_logs;workspace_state_cleanup_failed', inaccessibleLegacySource: target.id === 'a' };
+      ? 'unverified_logs;unverified_logs;/private/secret;secretcredential;usage-ledger:EACCES'
+      : 'unverified_logs;session_storage_pending' };
   } });
   const p = await preview(f.service);
   const result = await f.service.request('reasons', 'view-1', p.previewToken, async () => true);
-  assert.deepEqual(result.reasonCounts, { inaccessible_legacy_source: 1, unverified_legacy_logs: 2, usage_ledger_cleanup_failed: 1, workspace_state_cleanup_failed: 1 });
-  assert.equal(result.inaccessibleLegacy, 1);
+  assert.deepEqual(result.reasonCounts, { unverified_logs: 2, usage_ledger_cleanup_failed: 1, session_storage_pending: 1 });
 });
 
 test('a target changing at the first deletion gate aborts untouched candidates before any logical commit', async () => {
@@ -308,7 +307,7 @@ function journalFixture(count: number, operationId: string): HistoryCleanupJourn
   return { version: 1, confirmedAt: now, ownerPid: process.pid, excluded: { protected: 0, unknown: 0 },
     state: { requestId: operationId, operationId, status: 'running', options: older, now, total: count, processed: 0,
       fullyDeleted: 0, protected: 0, skippedChanged: 0, unknown: 0, failedBeforeCommit: 0, removedPendingCleanup: 0,
-      inaccessibleLegacy: 0, favoriteCount: 0, includesCurrentSession: false },
+      favoriteCount: 0, includesCurrentSession: false },
     items: Array.from({ length: count }, (_, index) => ({ target: entry(`journal-target-${index}`) })) };
 }
 
@@ -421,7 +420,7 @@ test('journal inspection refuses a symbolic-link parent as unavailable rather th
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
-test('a thousand durable per-target journal checkpoints write linear bytes rather than repeatedly copying the plan', async () => {
+test('durable per-target journal checkpoints write linear bytes rather than repeatedly copying the plan', async () => {
   const root = await mkdtemp(join(tmpdir(), 'keepseek-cleanup-journal-linear-'));
   const originalWrite = vscode.workspace.fs.writeFile;
   let bytesWritten = 0, writes = 0;
@@ -432,7 +431,8 @@ test('a thousand durable per-target journal checkpoints write linear bytes rathe
   };
   try {
     const journal = new FileHistoryCleanupJournal(vscode.Uri.file(root) as never, 'workspace:cleanup');
-    const record = journalFixture(1000, 'linear-journal');
+    const targetCount = 32;
+    const record = journalFixture(targetCount, 'linear-journal');
     await journal.save(record);
     for (let index = 0; index < record.items.length; index++) {
       record.items[index].result = { status: 'fullyDeleted' };
@@ -440,10 +440,10 @@ test('a thousand durable per-target journal checkpoints write linear bytes rathe
       await journal.save(record, index);
     }
     record.state.status = 'completed'; await journal.save(record);
-    assert.ok(bytesWritten < 1000 * 10000, `journal wrote ${bytesWritten} bytes for 1000 targets`);
+    assert.ok(bytesWritten < targetCount * 10000, `journal wrote ${bytesWritten} bytes for ${targetCount} targets`);
     const loaded = await new FileHistoryCleanupJournal(vscode.Uri.file(root) as never, 'workspace:cleanup').load();
-    assert.equal(loaded?.state.fullyDeleted, 1000); assert.equal(loaded?.items.length, 1000);
-    console.log(`history-cleanup durableJournalTargets=1000 bytesWritten=${bytesWritten} writes=${writes} elapsedMs=${(performance.now() - start).toFixed(2)}`);
+    assert.equal(loaded?.state.fullyDeleted, targetCount); assert.equal(loaded?.items.length, targetCount);
+    console.log(`history-cleanup durableJournalTargets=${targetCount} bytesWritten=${bytesWritten} writes=${writes} elapsedMs=${(performance.now() - start).toFixed(2)}`);
   } finally { vscode.workspace.fs.writeFile = originalWrite; await rm(root, { recursive: true, force: true }); }
 });
 

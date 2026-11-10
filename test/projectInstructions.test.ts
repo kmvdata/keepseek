@@ -151,7 +151,7 @@ test('source snapshots freeze until host refresh; refreshed contexts are byte-st
   }
 });
 
-test('session normalization preserves chosen scope, immutable old context bytes and historical memory audit only', () => {
+test('session normalization preserves frozen context bytes and rejects retired memory sources', () => {
   const session = createEmptySession('en'); session.projectScopeUri = 'file:///workspace/sub'; session.contextInstructions = 'OLD STORED PREFIX';
   session.messages = [{ id: 'old', role: 'user', content: 'old user', createdAt: '2026-11-04' }];
   const scope = { key: session.workspaceKey, name: session.workspaceName, folderUris: session.workspaceFolders };
@@ -165,9 +165,10 @@ test('session normalization preserves chosen scope, immutable old context bytes 
       { id: 'new-scope', kind: 'project-instructions', scopeUri: 'file:///workspace/sub', order: 2 }
     ], contextDiscarded: [{ id: 'same-name', kind: 'skill', reason: 'ambiguous_name' }] }
   }] }] }, scope);
-  assert.equal(audit.messages[0].runDetails?.contextSources[0].kind, 'legacy-memory');
-  assert.equal(audit.messages[0].runDetails?.contextSources[1].scopeUri, 'file:///workspace/sub');
-  assert.equal(audit.messages[0].runDetails?.contextSources[1].order, 2);
+  assert.equal(audit.messages[0].runDetails?.contextSources.length, 1);
+  assert.equal(audit.messages[0].runDetails?.contextSources[0].kind, 'project-instructions');
+  assert.equal(audit.messages[0].runDetails?.contextSources[0].scopeUri, 'file:///workspace/sub');
+  assert.equal(audit.messages[0].runDetails?.contextSources[0].order, 2);
   assert.equal(audit.messages[0].runDetails?.contextDiscarded[0].reason, 'ambiguous_name');
 });
 

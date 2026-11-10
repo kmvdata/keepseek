@@ -118,9 +118,9 @@ Anthropic 账号请求规范化后的 Messages endpoint：常规 `/v1` base 使�
 
 单次输出规则为 `min(本次模型有效 maxOutputTokens, 有效窗口 - 完整输入预算 - 安全余量)`。`shared/outputBudget.ts` 负责计算，`agent/requestBudget.ts` 对实际协议投影及完整工具 schema/native replay 估算并生成版本化快照。空间不足先压缩或 rollover，再重新准入；没有合法输出空间时停止，不制造正数保底。工具、回答、续写、修复、子代理、摘要和 reviewer 均使用各自实际模型的额度，无阶段比例或阶段默认上限。旧四项 `agent.*MaxOutputTokens` 设置仅保留废弃说明，不再参与运行决策。
 
-Chat Completions / Ollama 写入 `max_tokens`，Responses 写入 `max_output_tokens`，Anthropic 写入 `max_tokens`；输出预留、物理请求 token/费用预留、用量显示和 checkpoint 使用同一快照。Anthropic 显式 thinking budget 必须小于准入后的 max_tokens，否则明确拒绝，不关闭用户推理模式。Provider 的真实 input usage 按来源/endpoint/model 校准估算比例；context-too-long 会降低 learned window 并重建 epoch，明确的输出参数拒绝不视为窗口缩小证据。人工 metadata 与名称猜测只是声明，不代表供应商已验证支持。完整规则、恢复兼容性及验收证据见 [输出预算整改记录](model-output-budget-rectification.md)。
+Chat Completions / Ollama 写入 `max_tokens`，Responses 写入 `max_output_tokens`，Anthropic 写入 `max_tokens`；输出预留、物理请求 token/费用预留、用量显示和 checkpoint 使用同一快照。Anthropic 显式 thinking budget 必须小于准入后的 max_tokens，否则明确拒绝，不关闭用户推理模式。Provider 的真实 input usage 按来源/endpoint/model 校准估算比例；context-too-long 会降低 learned window 并重建 epoch，明确的输出参数拒绝不视为窗口缩小证据。人工 metadata 与名称猜测只是声明，不代表供应商已验证支持。完整规则与历史验收证据见 [输出预算整改记录](model-output-budget-rectification.md)。
 
-模型切换会迁移 provider/cache lane，但不会删除或强制重建语义摘要。`HistorySummary.modelId` 保留生成 provenance；`requestProtocolVersion` 表示序列化/schema 兼容版本，不表示模型能力等级。新建主会话的 request protocol 与 tool schema 均为 14，权威分别是 `providerRequestProjection.ts` 的 `CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION` 与 `CURRENT_PROVIDER_TOOL_SCHEMA_VERSION`。V8 引入 `keepseek_read_evidence`，V9 引入 `keepseek_apply_patch`，V10 将 `keepseek_read_subagent_result` 升级为 UTF-8 byte-offset 分页，V11 增加分工评估与父验收，V12 增加显式插件 Skill 读取，V13 更新 ask/delegate 审批提示与 DraftRun 说明，V14 隐藏已暂停的插件读取工具。工具按名稳定排序。受支持的 V1–V13 热主会话保持各自 provider-visible bytes，旧插件工具调用在宿主拒绝；只在缓存已冷或受控 epoch rollover 边界迁移，历史消息和旧预算文本不改写；独立 child runtime 仍使用协议 11，不能随主协议数字一起替换。结果合同、handoff manifest、审批与存储格式各自管理，见 [版本权威表](README.md#版本维度)。
+模型切换会重建 provider/cache lane，但不会删除或强制重建语义摘要。`HistorySummary.modelId` 保留生成 provenance；`requestProtocolVersion` 表示序列化/schema 版本，不表示模型能力等级。主会话和 child runtime 仅支持当前协议 **15**；工具按名稳定排序，集合按会话冻结，旧协议及插件工具桥接不再读取。结果合同 V2、handoff manifest V3、审批与存储格式各自管理，见[版本权威表](README.md#版本维度)。
 
 rollover 的完整宿主权威状态保存为可分页 checkpoint evidence；Provider seed 只带最近条目、总量/hash 和 manifest `evidenceRef`，因此长期任务的恢复前缀不会随累计工具次数无限增长。
 
@@ -259,7 +259,7 @@ Webview 的 `serializePrompt()` 会把富文本 chip 还原为上述格式。
 3. 验证文件在工作区内或已被授权（外部文件需先授权）
 4. 跳过 Markdown fence 内的引用（避免误展开代码块中的路径）
 5. 跳过二进制、图片、媒体、归档等不可读文件
-6. 全文引用受 `keepseek.maxFileBytes`（默认 200KB）限制
+6. 全文引用受 `kmvdata.keepseek.maxFileBytes`（默认 200KB）限制
 7. 通过 VS Code `openTextDocument` 读取实际内容
 8. 将引用替换为带语言标记的 Markdown 代码块
 
@@ -343,7 +343,7 @@ export async function loginUser(
 
 **关键点**：
 - 目录引用展开为「锚点 + 使用说明 + 受限条目清单」
-- 条目数量上限为 `min(100, keepseek.maxWorkspaceToolFiles)`
+- 条目数量上限为 `min(100, kmvdata.keepseek.maxWorkspaceToolFiles)`
 - 不会递归展开子目录
 - 模型需要更多信息时应调用 `keepseek_list_workspace_directory` 或 `keepseek_read_workspace_file`
 - 跳过 `.git`、`node_modules`、`dist` 等目录
@@ -373,7 +373,7 @@ Skill 引用在 prompt 展开阶段处理，但 Skill 内容最终通过 `format
 3. 识别任务类型、解决下一个关键不确定性、按证据逐步扩大范围的自适应循环；
 4. 直接回答、理解/架构、诊断、审查、修改/重构和决策的短分支；
 5. 优先使用用户给出的路径、符号、错误、堆栈、diff 和上下文，避免无目的全仓库扫描；历史工具结果被投影省略时优先搜索 session archive；
-6. V9 局部/多文件修改优先 canonical patch；incremental 是兼容入口，新文件或整体重写才使用 full-text DraftEdit；
+6. 局部/多文件修改优先 canonical patch；incremental 同样生成 canonical text patch，新文件或整体重写才使用 full-text DraftEdit；
 7. validation 只验证已落盘工作区：DraftEdit 前可建立基线，任一 DraftEdit 成功后必须等待 Apply，不能把基线说成修改后验证；
 8. 观察与推断、澄清阈值、预算停止、结论优先的最终回答和准确的修改/验证状态；
 9. 项目指令和 Skills 的优先级。
@@ -643,9 +643,9 @@ export async function loginUser(
 - 调用 `keepseek_list_workspace_directory` 深入探索目录
 - 调用 `keepseek_read_workspace_file_range` 读取更多文件
 - 调用 `keepseek_search_workspace` 搜索相关代码
-- 在用户授权修改时调用 V9 patch、兼容 incremental 或 full-text DraftEdit 创建待确认修改；分析、诊断和审查请求仍保持只读
+- 在用户授权修改时调用 canonical patch、incremental 或 full-text DraftEdit 创建待确认修改；分析、诊断和审查请求仍保持只读
 - 当旧工具证据已从投影省略时调用 `keepseek_search_session_archive`
-- 当前工具大结果按返回的 `evidenceRef` 通过 `keepseek_read_evidence` 分页；子代理完整结果也有父 session 隔离的 result reference，V10 及以后可用 `keepseek_read_subagent_result` 按 UTF-8 byte-offset 读取。根 V8 的旧 schema 仍保留 V1–V7 结果桥接，不能将这条历史兼容路径描述为当前 reader 的全部职责。读取结果同样进入通用 evidence/admission 管线
+- 当前工具大结果按返回的 `evidenceRef` 通过 `keepseek_read_evidence` 分页；子代理完整结果使用父 session 隔离的 `resultRef`，由 `keepseek_read_subagent_result` 按 UTF-8 byte-offset 读取。读取结果同样进入通用 evidence/admission 管线
 
 validation 只观察当前已落盘工作区：可在 DraftEdit 前复现/建立基线；任一 DraftEdit 成功后，Runner 会在 Apply 前硬性拒绝新的 validation。该约束同时覆盖普通 DraftEdit 和 repair DraftEdit，不能只依赖模型遵守 prompt。
 
@@ -745,7 +745,7 @@ Runner 在执行前保存 intent；执行完成后先保存下列完整 raw resu
 
 若其中任一结果过大，`content` 改为此前展示的不可变 evidence envelope；两个 `tool_result` 仍必须一次完整、同序回传。若旧 epoch 没有容纳这组最小信封的空间，KeepSeek 保存两份证据并从新 epoch 的权威 checkpoint 继续，不复制 opaque signature，也不重跑工具。
 
-### 7.5 V9 `keepseek_apply_patch` 与 canonical payload
+### 7.5 `keepseek_apply_patch` 与 canonical payload
 
 Tool wire 参数只有 `patch` 和 `reason`。`patch` 是严格 JSON 文本，不是 unified diff，也不作为审批或恢复的权威格式：
 
@@ -783,7 +783,7 @@ Patch checkpoint 只保存 inverse patch，不保存完整 before/after。Delete
 
 - **目录引用不展开内容**：如果 `<keepseek-dir:src>` 展开所有文件内容，对于大型项目可能产生几十 MB 的文本，远超上下文窗口
 - **大文件不全文展开**：超过 `maxFileBytes`（默认 200KB）的全文引用会被静默跳过
-- **大文件可小改**：`maxFileBytes` 不参与本地 `text_patch_v1` Apply；变化量、provider fallback、备份、ChangeSet artifact 与 blob store 使用独立 `keepseek.patch.*` 配额
+- **大文件可小改**：`maxFileBytes` 不参与本地 `text_patch_v1` Apply；变化量、provider fallback、备份、ChangeSet artifact 与 blob store 使用独立 `kmvdata.keepseek.patch.*` 配额
 - **设计哲学**：用户显式提供的片段优先进入 prompt；其余信息由模型通过工具按需获取
 
 ### 8.2 Context files 和文件引用的区别
@@ -807,7 +807,7 @@ Patch checkpoint 只保存 inverse patch，不保存完整 before/after。Delete
 - evidence 是当时结果的不可变快照；源文件变化后如需当前事实，应重新读取源；
 - 最小信封空间不足触发同 task 的 epoch rollover，不产生聊天 user 消息或新审批。
 
-宿主显式停止预算不进入 Provider payload：`keepseek.agent.maxExecutionMs` 与 `keepseek.agent.maxCost` 冻结在逻辑任务检查点，Context Epoch 不会重置。费用上限按每种计费币种分别应用于主任务、子代理与恢复；正值配置要求来源、模型和响应都有可计价用量，否则在下一次无法核算的请求前 fail-closed。它与动态结果准入无关，不能把 evidence 大小或上下文压力解释成费用/时间耗尽。
+宿主显式停止预算不进入 Provider payload：`kmvdata.keepseek.agent.maxExecutionMs` 与 `kmvdata.keepseek.agent.maxCost` 冻结在逻辑任务检查点，Context Epoch 不会重置。费用上限按每种计费币种分别应用于主任务、子代理与恢复；正值配置要求来源、模型和响应都有可计价用量，否则在下一次无法核算的请求前 fail-closed。它与动态结果准入无关，不能把 evidence 大小或上下文压力解释成费用/时间耗尽。
 
 ### 8.4 Slim tool mode
 

@@ -85,7 +85,7 @@ test('P1 parent acceptance verifies tail chunks and refuses missing or corrupt u
   await rm(tail);
   assert.equal(await store.verifyResult({ parentSessionId: 'parent', ref: 'child' }), undefined);
 });
-test('P1 legacy V4 field projection skips private messages and checkpoint objects', async t => {
+test('P1 missing result indexes fail closed without decoding private objects', async t => {
   const { store, directory } = await fixture(t), result = '旧正文😀'.repeat(20_000);
   await save(store, meta('child', result), result, 100_000);
   const path = join(directory, 'child.state.json'), manifest = JSON.parse(await readFile(path, 'utf8'));
@@ -95,36 +95,17 @@ test('P1 legacy V4 field projection skips private messages and checkpoint object
   vscode.workspace.fs.readFile = async uri => { const bytes = await original(uri); readBytes.push(bytes.length); return bytes; };
   try {
     const page = await store.readResultPage({ parentSessionId: 'parent', ref: 'child', limitBytes: 20 });
-    assert.equal(page.ok, true); assert.ok(result.startsWith(String(page.content))); assert.ok(Buffer.byteLength(String(page.content)) <= 20);
+    assert.equal(page.ok, false); assert.equal(page.errorType, 'subagent_result_corrupt');
     assert.ok(Math.max(...readBytes) < 650_000, 'private message object should not be loaded');
   } finally { vscode.workspace.fs.readFile = original; }
 });
-test('P1 legacy combined extraction is bounded and invalidates on source changes', async t => {
-  const { store, directory } = await fixture(t), result = 'legacy body';
+test('P1 retired combined results are unavailable and never decoded', async t => {
+  const { store, directory } = await fixture(t);
   await save(store, meta('bootstrap', ''), '');
-  const record = { metadata: meta('legacy', result), transcript: { version: 2, metadataId: 'legacy', contextInstructions: '',
-    messages: [{ content: 'fake "result": "\\\\escape"' + 'PRIVATE'.repeat(100_000) }], result } };
-  const path = join(directory, 'legacy.run.json'); await writeFile(path, JSON.stringify(record));
-  const original = vscode.workspace.fs.readFile; let combinedReads = 0;
-  vscode.workspace.fs.readFile = async uri => { if (uri.fsPath === path) combinedReads++; return original(uri); };
-  try {
-    assert.equal((await store.readResultPage({ parentSessionId: 'parent', ref: 'legacy', limitBytes: 4 })).content, 'lega');
-    assert.equal((await store.readResultPage({ parentSessionId: 'parent', ref: 'legacy', offsetBytes: 4 })).content, 'cy body');
-    assert.equal(combinedReads, 1);
-    const stat = vscode.workspace.fs.stat, identity = await stat(vscode.Uri.file(path));
-    await writeFile(path, JSON.stringify({ ...record, transcript: { ...record.transcript, result: 'legacy bodX' } }));
-    vscode.workspace.fs.stat = async uri => uri.fsPath === path ? identity : stat(uri);
-    try { assert.equal((await store.readResultPage({ parentSessionId: 'parent', ref: 'legacy' })).errorType, 'subagent_result_corrupt'); }
-    finally { vscode.workspace.fs.stat = stat; }
-    await writeFile(path, '{corrupt');
-    assert.equal((await store.readResultPage({ parentSessionId: 'parent', ref: 'legacy' })).errorType, 'subagent_result_corrupt');
-    const escapedResult = '"反\\证😀\n';
-    await writeFile(join(directory, 'escaped.run.json'), JSON.stringify({ metadata: meta('escaped', escapedResult),
-      transcript: { ...record.transcript, metadataId: 'escaped', result: escapedResult } }));
-    for (let iteration = 0; iteration < 2; iteration++) {
-      assert.equal((await store.readResultPage({ parentSessionId: 'parent', ref: 'escaped' })).content, escapedResult);
-    }
-  } finally { vscode.workspace.fs.readFile = original; }
+  await writeFile(join(directory, 'old.run.json'), JSON.stringify({ metadata: meta('old', 'old'),
+    transcript: { version: 1, metadataId: 'old', contextInstructions: '', messages: [], result: 'old' } }));
+  assert.equal((await store.readResultPage({ parentSessionId: 'parent', ref: 'old' })).errorType, 'subagent_result_not_found');
+  assert.equal(await store.read('parent', 'old'), undefined);
 });
 test('P1 canonical capacity and reuse-chain integrity fail closed, partial is readable with explicit status', async t => {
   const { store, directory } = await fixture(t), result = 'source complete';
@@ -144,6 +125,6 @@ test('P1 canonical capacity and reuse-chain integrity fail closed, partial is re
   await save(store, { ...meta('failed', '{}'), status: 'failed', resultStatus: 'failed', resultFormatAccepted: false }, '{}');
   const rejected = await store.verifyResult({ parentSessionId: 'parent', ref: 'failed' });
   assert.equal(rejected?.resultStatus, 'failed'); assert.equal(rejected?.formatAccepted, false);
-  await save(store, { ...meta('truncated', '{broken'), resultContractVersion: undefined, resultTruncated: true }, '{broken');
-  assert.equal((await store.readResultPage({ parentSessionId: 'parent', ref: 'truncated' })).errorType, 'subagent_result_unavailable');
+  await save(store, { ...meta('truncated', '{broken'), resultStatus: 'partial', resultTruncated: true }, '{broken');
+  assert.equal((await store.readResultPage({ parentSessionId: 'parent', ref: 'truncated' })).resultStatus, 'partial');
 });

@@ -47,34 +47,33 @@ function assistantMessage(
   };
 }
 
-test('v2 keeps ordinary final-answer reasoning local while v1 preserves legacy bytes', () => {
+test('current requests keep ordinary final-answer reasoning local and preserve stored reasoning', () => {
   const history = [
     userMessage('u1', 'question'),
     assistantMessage('a1', 'answer', undefined, 'private final reasoning')
   ];
-  const legacy = buildInitialAgentMessages({
+  const defaults = buildInitialAgentMessages({
     prompt: 'next',
     contextFiles: [],
     history,
-    language: 'en',
-    requestProtocolVersion: 1
+    language: 'en'
   });
   const optimized = buildInitialAgentMessages({
     prompt: 'next',
     contextFiles: [],
     history,
     language: 'en',
-    requestProtocolVersion: 2
+    requestProtocolVersion: 15
   });
 
-  const legacyFinal = legacy.find((message) => message.role === 'assistant');
+  const defaultFinal = defaults.find((message) => message.role === 'assistant');
   const optimizedFinal = optimized.find((message) => message.role === 'assistant');
-  assert.equal(legacyFinal?.reasoning_content, 'private final reasoning');
+  assert.equal(defaultFinal?.reasoning_content, undefined);
   assert.equal(optimizedFinal?.reasoning_content, undefined);
   assert.equal(history[1]?.reasoningContent, 'private final reasoning');
 });
 
-test('v2 omits only final reasoning and keeps tool-call reasoning atomically paired', () => {
+test('current protocol omits only final reasoning and keeps tool-call reasoning atomically paired', () => {
   const toolCall: AgentToolCall = {
     id: 'call_v2',
     type: 'function',
@@ -94,7 +93,7 @@ test('v2 omits only final reasoning and keeps tool-call reasoning atomically pai
       assistantMessage('a1', 'done', [round], 'local final reasoning')
     ],
     language: 'en',
-    requestProtocolVersion: 2
+    requestProtocolVersion: 15
   });
 
   const toolAssistant = messages.find((message) => message.tool_calls?.length);
@@ -161,7 +160,7 @@ test('tail-appended providerContent is reused as history without duplicating the
     contextFiles: [],
     history: [current],
     language: 'en',
-    requestProtocolVersion: 2
+    requestProtocolVersion: 15
   });
   assert.equal(messages.filter((message) => message.role === 'user').length, 1);
   assert.equal(messages.at(-1)?.content, current.providerContent);

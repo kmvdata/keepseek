@@ -47,8 +47,8 @@ test('attempt upgrades survive duplication, late weaker callbacks, restart and d
   const restored = await new UsageLedgerStore(uri).rebuild('parent');
   assert.deepEqual(restored.ledger.records, hot.ledger.records);
   assert.deepEqual(hot.stats?.bySource, rebuildSessionUsageStatsFromLedger(restored.ledger.records)?.bySource);
-  const merged = mergePendingUsageLedger({ version: 1, records: [record()], incomplete: false, legacyAggregate: false },
-    { version: 1, records: [record(true), record()], incomplete: false, legacyAggregate: false });
+  const merged = mergePendingUsageLedger({ version: 1, records: [record()], incomplete: false },
+    { version: 1, records: [record(true), record()], incomplete: false });
   assert.equal(merged.records.length, 1); assert.equal(merged.records[0].kind, 'usage_response');
   assert.equal(appendUsageLedgerRecord(merged, record()).records[0].kind, 'usage_response');
   const files = await readdir(root, { recursive: true });
@@ -93,10 +93,43 @@ test('host sees durable attempt upgrades once before flush and never saves the w
   assert.equal(session.usageStats?.totalTokens, 12); assert.equal(sessionSaves, 0);
 });
 
-test('standalone compression waits for ledger commit and retains legacy-compatible inline recovery until then', async () => {
+test('ledger flush keeps records arriving during the durable read visible and pending until committed', async () => {
+  let release!: () => void, entered!: () => void;
+  const reading = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const stored: ReturnType<typeof record>[] = [];
+  let first = true;
+  const session = { id: 'parent', messages: [], usageLedger: appendUsageLedgerRecord(undefined, record(true, 'first')) } as unknown as ChatSession;
+  const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
+    usageLedgerStore: {
+      appendMany: async (_sessionId: string, records: ReturnType<typeof record>[]) => { stored.push(...records); },
+      current: async () => {
+        const records = [...stored];
+        if (first) { first = false; entered(); await gate; }
+        return { ledger: { version: 1 as const, records, incomplete: false }, stats: rebuildSessionUsageStatsFromLedger(records), damagedBucketCount: 0 };
+      }
+    },
+    usageLedgerFlushes: new Map(), referenceCostViews: new Map(), referenceCostIndexes: new Map(),
+    sessionStore: { activeSessionId: 'other' }
+  }) as { queueUsageLedgerFlush(session: ChatSession): void; usageLedgerFlushes: Map<string, Promise<void>> };
+  host.queueUsageLedgerFlush(session);
+  const flush = host.usageLedgerFlushes.get('parent');
+  await reading;
+  session.usageLedger = appendUsageLedgerRecord(session.usageLedger, record(true, 'second'));
+  release();
+  await flush;
+  assert.equal(session.usageStats?.totalTokens, 24);
+  assert.equal(session.usageStats?.providerAttemptCount, 2);
+  assert.equal(session.usageLedger?.records[0]?.requestId, 'second');
+  await host.usageLedgerFlushes.get('parent');
+  assert.equal(session.usageLedger, undefined);
+  assert.equal(stored.length, 2);
+});
+
+test('standalone compression waits for ledger commit and retains current pending records until then', async () => {
   let release!: () => void, settled = false;
   const gate = new Promise<void>(resolve => { release = resolve; });
-  const session = { id: 'parent', messages: [], usageStats: rebuildSessionUsageStatsFromLedger([record(true, 'old-aggregate')]) } as unknown as ChatSession;
+  const session = { id: 'parent', messages: [], usageStats: rebuildSessionUsageStatsFromLedger([record(true, 'prior-record')]) } as unknown as ChatSession;
   const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), { applyUsageLedgerRecord: async () => gate }) as {
     applyContextCompressionRefreshResult(session: ChatSession, result: unknown): Promise<boolean> };
   const committing = host.applyContextCompressionRefreshResult(session, { changed: true, reason: 'created',
@@ -105,18 +138,19 @@ test('standalone compression waits for ledger commit and retains legacy-compatib
   await Promise.resolve();
   assert.equal(settled, false);
   assert.equal(session.usageLedger?.records[0].kind, 'usage_response');
-  assert.equal(session.usageLedger?.legacyAggregate, true, 'unattributed old aggregates must not become exact ledger totals');
+  assert.equal(session.usageLedger?.incomplete, false);
+  assert.equal(session.usageStats?.totalTokens, 12, 'the pending commit must preserve previously confirmed usage');
   release(); assert.equal(await committing, true);
 });
 
-test('ledger-owned session events do not double usage, while unknown legacy aggregates retain new usage', () => {
+test('ledger-owned session events do not double usage even when the ledger is incomplete', () => {
   const host = Object.create(KeepseekChatViewProvider.prototype) as {
     applyUsageEvent(session: ChatSession, current: undefined, event: ReturnType<typeof createUsageEvent>): unknown };
   const session = { id: 'parent', messages: [], usageStats: rebuildSessionUsageStatsFromLedger([record(true)]) } as unknown as ChatSession;
   const event = createUsageEvent({ usage, cost: 0, currency: '', modelId: 'fixture', source: 'subagent', ledgerRecorded: true });
   host.applyUsageEvent(session, undefined, event); assert.equal(session.usageStats?.totalTokens, 12);
-  session.usageLedgerRef = { version: 2, sessionId: 'parent', legacyAggregate: true, incomplete: true };
-  host.applyUsageEvent(session, undefined, event); assert.equal(session.usageStats?.totalTokens, 24);
+  session.usageLedgerRef = { version: 2, sessionId: 'parent', incomplete: true };
+  host.applyUsageEvent(session, undefined, event); assert.equal(session.usageStats?.totalTokens, 12);
 });
 
 test('attempt-only and active children are visible; accounts and task counts stay separate from responses', () => {
@@ -168,19 +202,24 @@ test('child summaries recover before parent callbacks without reading private ob
   assert.equal((await store.readSummaries('parent')).incomplete, true);
 });
 
-test('V3 graph upgrades preserve an exact rollback manifest and remain readable as V4', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'keepseek-v3-rollback-')); t.after(() => rm(root, { recursive: true, force: true }));
+test('current graph updates preserve identity and revision without creating rollback formats', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'keepseek-current-graph-')); t.after(() => rm(root, { recursive: true, force: true }));
   const uri = vscode.Uri.file(join(root, 'session.json')) as never;
-  await vscode.workspace.fs.createDirectory(vscode.Uri.file(join(root, 'session.json.objects')));
-  const node = { kind: 'object', entries: [['id', 's'], ['workspaceKey', 'w']] };
-  const bytes = JSON.stringify(node), hash = createHash('sha256').update(bytes).digest('hex');
-  await writeFile(join(root, 'session.json.objects', `${hash}.json`), bytes);
-  const original = JSON.stringify({ version: 3, sessionId: 's', workspaceKey: 'w', header: hash, revision: 7, messages: [] });
-  await writeFile(join(root, 'session.json'), original);
-  const store = new SessionObjectStore(uri), session = await store.load(JSON.parse(original));
+  const store = new SessionObjectStore(uri);
+  const session = { id: 's', workspaceKey: 'w', title: 'first', messages: [] } as unknown as ChatSession;
   await store.save(snapshotSession(session));
-  assert.equal(await readFile(join(root, 'session.json.objects/legacy-v3.json'), 'utf8'), original);
-  assert.equal((await new SessionObjectStore(uri).load(JSON.parse(await readFile(join(root, 'session.json'), 'utf8')))).id, 's');
+  const original = JSON.parse(await readFile(join(root, 'session.json'), 'utf8'));
+  assert.equal(original.version, 4);
+  const reopened = new SessionObjectStore(uri), restored = await reopened.load(original);
+  restored.title = 'second';
+  await reopened.save(snapshotSession(restored));
+  const current = JSON.parse(await readFile(join(root, 'session.json'), 'utf8'));
+  assert.equal(current.version, 4);
+  assert.equal(current.revision, original.revision + 1);
+  const latest = await new SessionObjectStore(uri).load(current);
+  assert.equal(latest.id, 's');
+  assert.equal(latest.title, 'second');
+  assert.ok((await readdir(join(root, 'session.json.objects'))).every(file => !file.startsWith('legacy-')));
 });
 
 test('a failed child manifest switch leaves the prior result authoritative and allows an explicit retry', async t => {
@@ -199,7 +238,7 @@ test('a failed child manifest switch leaves the prior result authoritative and a
   assert.equal((await store.read('parent', meta.id))?.transcript.result, 'next result');
 });
 
-test('legacy combined and split child stores retain scope checks and terminal summary compatibility', async t => {
+test('retired combined and split child files are ignored', async t => {
   const root = await mkdtemp(join(tmpdir(), 'keepseek-child-legacy-')); t.after(() => rm(root, { recursive: true, force: true }));
   const hash = createHash('sha256').update('workspace').digest('hex').slice(0, 24);
   const directory = vscode.Uri.file(join(root, 'chat-sessions/v1/subagents', hash, 'parent'));
@@ -207,14 +246,14 @@ test('legacy combined and split child stores retain scope checks and terminal su
   const meta = { ...metadata(), status: 'completed' };
   await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(directory, 'sa_child.run.json'), Buffer.from(JSON.stringify({ version: 1, metadata: meta, transcript: transcript() })));
   const store = new SubagentStore(vscode.Uri.file(root) as never, 'workspace');
-  assert.equal((await store.read('parent', 'sa_child'))?.transcript.result, 'private result');
+  assert.equal(await store.read('parent', 'sa_child'), undefined);
   await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(directory, 'sa_forged.run.json'), Buffer.from(JSON.stringify({ version: 1, metadata: meta, transcript: transcript() })));
   assert.equal(await store.read('parent', 'sa_forged'), undefined);
-  assert.equal((await store.readSummaries('parent')).incomplete, true);
+  assert.equal((await store.readSummaries('parent')).incomplete, false);
   await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(directory, 'sa_split.meta.json'), Buffer.from(JSON.stringify({ ...metadata('sa_split'), status: 'stopped' })));
   await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(directory, 'sa_split.transcript.json'), Buffer.from(JSON.stringify(transcript('sa_split'))));
-  assert.equal((await store.read('parent', 'sa_split'))?.metadata.status, 'stopped');
-  assert.ok((await store.readSummaries('parent')).activities.some(item => item.id === 'sa_split'));
+  assert.equal(await store.read('parent', 'sa_split'), undefined);
+  assert.deepEqual((await store.readSummaries('parent')).activities, []);
 });
 
 test('coalescing bounds snapshots and waits for a committed newer revision; failures do not retry', async () => {
@@ -296,7 +335,7 @@ test('unchanged message bodies skip re-encoding while in-place mutable metadata 
 
 test('incremental reference costs match a fresh projection and drop records removed by an integrity rebuild', () => {
   const index = new ReferenceCostIndex(), records = [record(), record(true, 'second')];
-  const ledger = { version: 1 as const, records, incomplete: false, legacyAggregate: false };
+  const ledger = { version: 1 as const, records, incomplete: false };
   buildReferenceCostView(ledger, {}, index);
   records[0] = record(true);
   const updated = buildReferenceCostView(ledger, {}, index), fresh = buildReferenceCostView(ledger, {});

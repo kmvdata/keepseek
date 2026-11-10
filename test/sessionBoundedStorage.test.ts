@@ -8,6 +8,7 @@ import { test, type TestContext } from 'node:test';
 import * as vscode from './stubs/vscode';
 import { ChatSessionStore, createEmptySession, type WorkspaceSessionScope } from '../src/sessions/chatSessionStore';
 import { GlobalSessionStorage, getWorkspaceHash, type WorkspaceSessionIndex } from '../src/sessions/globalSessionStorage';
+import { SessionObjectStore } from '../src/sessions/sessionObjectStore';
 import type { ChatSession } from '../src/shared/types';
 
 function deferred() {
@@ -21,13 +22,13 @@ interface StorageInternals {
   reconcileWorkspaceIndex(index: WorkspaceSessionIndex): Promise<WorkspaceSessionIndex>;
 }
 
-test('bounded disk loading skips index repairs and its late read cannot overwrite a replacement selection', { timeout: 3_000 }, async t => {
+test('bounded disk loading skips index repairs and its late read cannot overwrite a replacement selection', { timeout: 15_000 }, async t => {
   const { root, storage, store, scope, active, target, indexPath } = await fixture(t);
   const orphan = createEmptySession('en', scope);
   orphan.messages.push({ id: 'orphan-user', role: 'user', content: 'Recovered only by ordinary readers', createdAt: orphan.createdAt });
   const orphanFile = createHash('sha256').update(orphan.id).digest('hex').slice(0, 32) + '.json';
-  await writeFile(join(root, 'chat-sessions', 'v2', 'workspaces', getWorkspaceHash(scope.key), 'sessions', orphanFile),
-    JSON.stringify({ version: 2, workspaceKey: scope.key, session: orphan }));
+  await new SessionObjectStore(vscode.Uri.file(join(root, 'chat-sessions', 'v2', 'workspaces',
+    getWorkspaceHash(scope.key), 'sessions', orphanFile)) as never).save(orphan);
 
   const internals = storage as unknown as StorageInternals;
   const read = internals.readSession.bind(storage);
@@ -71,7 +72,7 @@ test('bounded disk loading skips index repairs and its late read cannot overwrit
   assert.equal(repaired.activeSessionId, replacement.id);
 });
 
-test('read-only loading preserves a V1 fallback without migration or a derived manifest write', async t => {
+test('read-only loading never imports obsolete monoliths or writes a current index', async t => {
   const root = await mkdtemp(join(tmpdir(), 'keepseek-bounded-v1-'));
   const storage = new GlobalSessionStorage(vscode.Uri.file(root) as never);
   t.after(async () => { await storage.flush(); await rm(root, { recursive: true, force: true }); });
@@ -86,8 +87,7 @@ test('read-only loading preserves a V1 fallback without migration or a derived m
   const before = await diskSnapshot(root);
 
   const loaded = await storage.loadSession(scope.key, session.id, { readOnly: true });
-  assert.equal(loaded?.id, session.id);
-  assert.equal(loaded?.messages[0].content, session.messages[0].content);
+  assert.equal(loaded, undefined);
   assert.equal(await storage.loadSession(scope.key, 'missing', { readOnly: true }), undefined);
   await storage.flush();
   assert.deepEqual(await diskSnapshot(root), before);

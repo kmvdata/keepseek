@@ -293,7 +293,7 @@ test('deleteSource physically removes only that source balance file', async () =
   }
 });
 
-test('the default source can read and clear the legacy shared balance file', async () => {
+test('the default source ignores the retired shared balance file', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'keepseek-balance-'));
   try {
     mkdirSync(join(dir, 'balance'), { recursive: true });
@@ -304,11 +304,11 @@ test('the default source can read and clear the legacy shared balance file', asy
     const store = new GlobalBalanceStore(vscode.Uri.file(dir));
 
     await store.refreshFromDisk();
-    assert.equal(store.getBalance()?.totalBalance, 9.99);
-    assert.equal(await store.isRefreshDue(NOW + 1, INTERVAL_MS), false);
+    assert.equal(store.getBalance(), undefined);
+    assert.equal(await store.isRefreshDue(NOW + 1, INTERVAL_MS), true);
 
     await store.clear();
-    assert.equal(existsSync(join(dir, 'balance', 'balance.json')), false);
+    assert.equal(existsSync(join(dir, 'balance', 'balance.json')), true);
     assert.equal(store.getBalance(), undefined);
   } finally {
     rmSync(dir, { recursive: true, force: true });

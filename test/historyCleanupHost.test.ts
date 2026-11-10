@@ -138,7 +138,7 @@ test('duplicate cleanup requests share one native modal and deleting the viewed 
   assert.equal(f.service.getCurrentOperation()?.fullyDeleted, 2);
   assert.equal(f.store.messages.length, 0);
   assert.equal(f.host.sessionRecoveryReady, true);
-  assert.equal(f.host.runContextReadiness, 'ready');
+  assert.equal(f.host.runContextReadiness, 'deferred');
   const replacement = f.posts.find(post => post.type === 'historyCleanupSessionReplacement');
   assert.equal(replacement?.previousSessionId, 'current');
   assert.equal(replacement?.sessionId, f.store.activeSessionId);
@@ -288,7 +288,7 @@ test('a 120-session non-current cleanup batches list invalidation without repeat
   f.host.publishHistoryCleanupState({ requestId: 'batch', operationId: 'batch-operation', status: 'completed',
     options: { scope: 'current', mode: 'all' }, now: Date.now(), total: 120, processed: 120,
     fullyDeleted: 120, protected: 0, skippedChanged: 0, unknown: 0, failedBeforeCommit: 0,
-    removedPendingCleanup: 0, inaccessibleLegacy: 0, favoriteCount: 0, includesCurrentSession: false });
+    removedPendingCleanup: 0, favoriteCount: 0, includesCurrentSession: false });
   const invalidations = f.posts.filter(post => post.type === 'historyCleanupDeleted');
   assert.equal(invalidations.length, 1);
   assert.deepEqual(new Set(invalidations[0].sessionIds as string[]), new Set(targets.map(target => target.id)));

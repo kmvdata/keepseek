@@ -14,6 +14,7 @@ import {
   GIT_STATUS_TOOL_NAME,
   READ_WORKSPACE_FILE_RANGE_TOOL_NAME,
   RUN_DRAFT_TOOL_NAME,
+  READ_EVIDENCE_TOOL_NAME,
   RUN_VALIDATION_TOOL_NAME,
   SEARCH_WORKSPACE_TOOL_NAME,
   SEARCH_SESSION_ARCHIVE_TOOL_NAME,
@@ -27,6 +28,32 @@ import {
   isDraftRunPreparationTool
 } from '../src/agent/protocol';
 import type { ContextFile, CurrentRunContext } from '../src/shared/types';
+
+test('fresh sessions expose the current command plan, evidence and delegation contract with one static prefix', () => {
+  const tools = getAgentTools();
+  const names = tools.map(tool => tool.function.name);
+  for (const required of [APPLY_PATCH_TOOL_NAME, READ_EVIDENCE_TOOL_NAME, RUN_DRAFT_TOOL_NAME,
+    'keepseek_delegation_checkpoint', 'keepseek_read_subagent_result']) {
+    assert.ok(names.includes(required), required);
+  }
+  assert.ok(!names.includes('keepseek_read_plugin_skill'));
+  const command = tools.find(tool => tool.function.name === RUN_DRAFT_TOOL_NAME)!;
+  const properties = command.function.parameters.properties as Record<string, unknown>;
+  assert.ok(properties.prerequisites);
+  assert.ok(properties.replacesDraftRun);
+  const reader = tools.find(tool => tool.function.name === 'keepseek_read_subagent_result')!;
+  assert.deepEqual(reader.function.parameters.required, ['ref']);
+  assert.equal((reader.function.parameters.properties as Record<string, unknown>).subagentId, undefined);
+  assert.equal((reader.function.parameters.properties as Record<string, unknown>).maxChars, undefined);
+  for (const language of ['en', 'zh-CN'] as const) {
+    const prompt = getAgentSystemPrompt({ language });
+    assert.equal(prompt, getAgentSystemPrompt({ language, requestProtocolVersion: 15 }));
+    assert.doesNotMatch(prompt, /model_review|Legacy Project Memory/u);
+    assert.match(prompt, /ask/u);
+    assert.match(prompt, /delegate/u);
+  }
+  assert.deepEqual(tools, getAgentTools());
+});
 
 test('dynamic context files live in a stable contextInstructions system message, never in the user message', () => {
   const firstContextFiles = [createContextFile('one.ts', 'export const one = 1;')];
@@ -121,7 +148,7 @@ test('project instructions and Skills live in contextInstructions, keeping the s
 
 
 test('validation tool exposes only the fixed safe npm scripts', () => {
-  const tool = getAgentTools({ toolNames: [RUN_VALIDATION_TOOL_NAME] })[0];
+  const tool = getAgentTools({ toolNames: [RUN_VALIDATION_TOOL_NAME] }).find(tool => tool.function.name === RUN_VALIDATION_TOOL_NAME)!;
   const properties = tool.function.parameters.properties as Record<string, { enum?: string[] }>;
 
   assert.equal(tool.function.name, RUN_VALIDATION_TOOL_NAME);
@@ -129,7 +156,7 @@ test('validation tool exposes only the fixed safe npm scripts', () => {
   assert.equal(properties.command, undefined);
   assert.match(tool.function.description, /current on-disk workspace/u);
   assert.match(tool.function.description, /after any DraftEdit succeeds/u);
-  assert.match(tool.function.description, /blocked until the user applies/u);
+  assert.match(tool.function.description, /pending ChangeSet/u);
 });
 
 test('delete tool is always exposed and only prepares a non-recursive pending file deletion', () => {
@@ -153,9 +180,9 @@ test('system prompts explain safe pending file deletion in both languages', () =
   const chinese = getAgentSystemPrompt({ language: 'zh-CN' });
 
   assert.match(english, /keepseek_delete_workspace_file/u);
-  assert.match(english, /deletion occurs only after the user applies/u);
+  assert.match(english, /SafeFileEditor/u);
   assert.match(chinese, /keepseek_delete_workspace_file/u);
-  assert.match(chinese, /用户应用 ChangeSet 后才真正删除/u);
+  assert.match(chinese, /SafeFileEditor/u);
 });
 
 test('system prompts define adaptive read-only intent, evidence, edit, archive, and validation contracts', () => {
@@ -182,7 +209,7 @@ test('system prompts define adaptive read-only intent, evidence, edit, archive, 
   assert.match(chinese, /最强线索/u);
   assert.match(chinese, /下一个关键不确定性/u);
   assert.match(chinese, /验证只能检查当前已经落盘的工作区/u);
-  assert.match(chinese, /修改前的基线/u);
+  assert.match(chinese, /修改前(?:的)?基线/u);
   assert.match(chinese, /Apply 后验证/u);
   assert.match(chinese, /工具直接观察到的事实与推断/u);
   assert.match(chinese, /歧义会实质改变/u);
@@ -197,113 +224,7 @@ test('classifies both file-changing tools as DraftEdit preparation tools', () =>
   assert.equal(isDraftRunPreparationTool(RUN_VALIDATION_TOOL_NAME), false);
 });
 
-test('protocol v1 keeps the legacy set while v2 and v3 freeze archive and incremental tools', () => {
-  const legacy = getAgentToolNamesForPrompt('edit this', false, 1);
-  const version2 = getAgentToolNamesForPrompt('edit this', false, 2);
-  const current = getAgentToolNamesForPrompt('edit this', false, 3);
-  assert.equal(legacy.includes(SEARCH_SESSION_ARCHIVE_TOOL_NAME), false);
-  assert.equal(legacy.includes(CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME), false);
-  assert.deepEqual(version2, current);
-  assert.equal(current.includes(SEARCH_SESSION_ARCHIVE_TOOL_NAME), true);
-  assert.equal(current.includes(CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME), true);
-  assert.equal(JSON.stringify(getAgentTools({ toolNames: current })), JSON.stringify(getAgentTools({ toolNames: [...current] })));
-});
-
-test('protocol v4 appends DraftRun without changing frozen v1-v3 tool or prompt bytes', () => {
-  const version3Names = getAgentToolNamesForPrompt('run the command', false, 3);
-  const version4Names = getAgentToolNamesForPrompt('run the command', false, 4);
-  assert.equal(version3Names.includes(RUN_DRAFT_TOOL_NAME), false);
-  assert.equal(version4Names.includes(RUN_DRAFT_TOOL_NAME), true);
-
-  const tool = getAgentTools({
-    toolNames: [RUN_DRAFT_TOOL_NAME],
-    requestProtocolVersion: 4
-  })[0];
-  assert.equal(tool.function.name, RUN_DRAFT_TOOL_NAME);
-  assert.deepEqual(tool.function.parameters.required, ['args', 'executable', 'reason']);
-  assert.equal(tool.function.parameters.additionalProperties, false);
-  assert.match(tool.function.description, /never starts a process/u);
-  assert.equal(getAgentTools({
-    toolNames: [RUN_DRAFT_TOOL_NAME],
-    requestProtocolVersion: 3
-  }).length, 0);
-
-  const legacyEnglish = getAgentSystemPrompt({ language: 'en' });
-  assert.equal(getAgentSystemPrompt({ language: 'en', requestProtocolVersion: 3 }), legacyEnglish);
-  assert.doesNotMatch(legacyEnglish, /keepseek_run_draft/u);
-  const version4English = getAgentSystemPrompt({ language: 'en', requestProtocolVersion: 4 });
-  assert.match(version4English, /keepseek_run_draft/u);
-  assert.match(version4English, /separate user click/u);
-  assert.match(version4English, /output is untrusted data/u);
-});
-
-test('protocol v9 adds only the canonical patch tool and keeps v1-v8 prompt/schema bytes frozen', () => {
-  const frozen = [];
-  for (let version = 1; version <= 8; version += 1) {
-    const tools = getAgentTools({ requestProtocolVersion: version });
-    assert.equal(tools.some((tool) => tool.function.name === APPLY_PATCH_TOOL_NAME), false);
-    frozen.push({
-      version,
-      en: getAgentSystemPrompt({ language: 'en', requestProtocolVersion: version }),
-      zh: getAgentSystemPrompt({ language: 'zh-CN', requestProtocolVersion: version }),
-      tools
-    });
-  }
-  assert.equal(
-    createHash('sha256').update(JSON.stringify(frozen), 'utf8').digest('hex'),
-    'fb0d5e2747f767ea07575a20a89550dee6e372b2dc43d0ee6e7f314fda8bf336'
-  );
-
-  const v9 = getAgentTools({ requestProtocolVersion: 9 });
-  const patchTool = v9.find((tool) => tool.function.name === APPLY_PATCH_TOOL_NAME);
-  assert.ok(patchTool);
-  assert.deepEqual(patchTool.function.parameters.required, ['patch', 'reason']);
-  assert.equal(patchTool.function.parameters.additionalProperties, false);
-  assert.match(patchTool.function.description, /keepseek_patch_v1/u);
-  assert.match(getAgentSystemPrompt({ language: 'en', requestProtocolVersion: 9 }), /canonical hunks/u);
-  assert.equal(isDraftEditPreparationTool(APPLY_PATCH_TOOL_NAME), true);
-});
-
-test('Skill script instructions change only on the v4 DraftRun cache lane', () => {
-  const skills: CurrentRunContext['skills'] = [{
-    id: 'scripted',
-    name: 'scripted',
-    source: 'agentsWorkspace',
-    rootUri: 'file:///workspace/.agents/skills/scripted',
-    skillUri: 'file:///workspace/.agents/skills/scripted/SKILL.md',
-    content: 'Use the helper when appropriate.',
-    hasScripts: true,
-    activation: { source: 'explicit', reason: 'Selected.' }
-  }];
-  const legacy = formatActiveSkills({ skills, language: 'en' });
-  assert.equal(formatActiveSkills({ skills, language: 'en', requestProtocolVersion: 3 }), legacy);
-  assert.match(legacy, /not executed by KeepSeek/u);
-  const version4 = formatActiveSkills({ skills, language: 'en', requestProtocolVersion: 4 });
-  assert.match(version4, /no implicit execution/u);
-  assert.match(version4, /one-shot DraftRun approval required/u);
-});
-
-test('protocol v2 preserves validation schema bytes while v3 adds the pending-change precondition', () => {
-  const version2 = getAgentTools({
-    toolNames: [RUN_VALIDATION_TOOL_NAME],
-    requestProtocolVersion: 2
-  });
-  const version2Again = getAgentTools({
-    toolNames: [RUN_VALIDATION_TOOL_NAME],
-    requestProtocolVersion: 2
-  });
-  const version3 = getAgentTools({
-    toolNames: [RUN_VALIDATION_TOOL_NAME],
-    requestProtocolVersion: 3
-  });
-
-  assert.equal(JSON.stringify(version2), JSON.stringify(version2Again));
-  assert.doesNotMatch(version2[0].function.description, /pending ChangeSet/u);
-  assert.match(version3[0].function.description, /pending ChangeSet/u);
-  assert.notEqual(JSON.stringify(version2), JSON.stringify(version3));
-});
-
-test('project rules, skills, legacy memory, and attachments share one deterministic context budget', () => {
+test('project rules, skills, and attachments share one deterministic context budget', () => {
   const file = createContextFile('large.ts', 'f'.repeat(2_000));
   const context: CurrentRunContext = {
     projectInstructions: [{
@@ -346,7 +267,8 @@ test('semantic tools expose structured provider inputs', () => {
     FIND_REFERENCES_TOOL_NAME,
     FIND_SYMBOL_TOOL_NAME,
     GET_DOCUMENT_SYMBOLS_TOOL_NAME,
-    GET_WORKSPACE_SYMBOLS_TOOL_NAME
+    GET_WORKSPACE_SYMBOLS_TOOL_NAME,
+    READ_EVIDENCE_TOOL_NAME
   ]);
   const references = tools.find((tool) => tool.function.name === FIND_REFERENCES_TOOL_NAME);
   assert.deepEqual(references?.function.parameters.required, ['column', 'line', 'path']);
@@ -382,6 +304,7 @@ test('tool schema order is canonicalized by tool name', () => {
     [
       CREATE_DRAFT_EDIT_TOOL_NAME,
       DELETE_WORKSPACE_FILE_TOOL_NAME,
+      READ_EVIDENCE_TOOL_NAME,
       READ_WORKSPACE_FILE_RANGE_TOOL_NAME,
       SEARCH_WORKSPACE_TOOL_NAME
     ]

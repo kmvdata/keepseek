@@ -46,39 +46,28 @@ test('unloaded approval and command records are removed without replacing anothe
   assert.ok(stored.batchDisplays.every((record: { sessionId: string }) => record.sessionId !== 'delete'));
 }));
 
-test('unloaded ChangeSet V4, V3 and legacy owners are reclaimed; shared checkpoints remain', async () => fixture(async (directory, uri) => {
-  const file = (id: string) => createHash('sha256').update(id).digest('hex') + '.json';
-  // Match the Store filename authority, whose current format truncates hashes.
-  const actualFile = (id: string) => file(id).slice(0, 32) + '.json';
-  for (const version of [4, 3]) {
-    const root = join(directory, 'change-sets', `v${version}`);
-    await mkdir(join(root, 'runtime'), { recursive: true });
-    await mkdir(join(root, 'checkpoints'), { recursive: true });
-    const entries = [
-      { id: 'delete-change', sessionId: 'delete', kind: 'runtime', storageFile: `runtime/${actualFile('delete-change')}`, checkpointIds: ['shared', 'owned'], updatedAt: '2026-01-01T00:00:00.000Z' },
-      { id: 'retained-change', sessionId: 'retain', kind: 'runtime', storageFile: `runtime/${actualFile('retained-change')}`, checkpointIds: ['shared'], updatedAt: '2026-01-01T00:00:00.000Z' }
-    ];
-    await writeFile(join(root, 'index.json'), JSON.stringify({ version, entries }));
-    await writeFile(join(root, 'runtime', actualFile('delete-change')), JSON.stringify({ version, changeSet: { id: 'delete-change', sessionId: 'delete', files: [{ checkpointId: 'owned' }, { checkpointId: 'shared' }] } }));
-    await writeFile(join(root, 'runtime', actualFile('retained-change')), JSON.stringify({ version, changeSet: { id: 'retained-change', sessionId: 'retain', files: [] } }));
-    for (const id of ['shared', 'owned']) await writeFile(join(root, 'checkpoints', actualFile(id)), JSON.stringify({ checkpoint: { id, changeSetId: 'delete-change' } }));
-  }
-  await writeFile(join(directory, 'change-sets.json'), JSON.stringify({ version: 2,
-    changeSets: [{ id: 'deleted-legacy', sessionId: 'delete' }, { id: 'keep-legacy', sessionId: 'retain' }],
-    history: [], checkpoints: [{ changeSetId: 'deleted-legacy' }, { changeSetId: 'keep-legacy' }] }));
+test('unloaded current ChangeSet owners are reclaimed while shared checkpoints remain', async () => fixture(async (directory, uri) => {
+  const actualFile = (id: string) => createHash('sha256').update(id).digest('hex').slice(0, 32) + '.json';
+  const root = join(directory, 'change-sets', 'v4');
+  await mkdir(join(root, 'runtime'), { recursive: true });
+  await mkdir(join(root, 'checkpoints'), { recursive: true });
+  const entries = [
+    { id: 'delete-change', sessionId: 'delete', kind: 'runtime', storageFile: `runtime/${actualFile('delete-change')}`, checkpointIds: ['shared', 'owned'], updatedAt: '2026-01-01T00:00:00.000Z' },
+    { id: 'retained-change', sessionId: 'retain', kind: 'runtime', storageFile: `runtime/${actualFile('retained-change')}`, checkpointIds: ['shared'], updatedAt: '2026-01-01T00:00:00.000Z' }
+  ];
+  await writeFile(join(root, 'index.json'), JSON.stringify({ version: 4, entries }));
+  await writeFile(join(root, 'runtime', actualFile('delete-change')), JSON.stringify({ version: 4, changeSet: { id: 'delete-change', sessionId: 'delete', files: [{ checkpointId: 'owned' }, { checkpointId: 'shared' }] } }));
+  const retained = JSON.stringify({ version: 4, changeSet: { id: 'retained-change', sessionId: 'retain', files: [] } });
+  await writeFile(join(root, 'runtime', actualFile('retained-change')), retained);
+  for (const id of ['shared', 'owned']) await writeFile(join(root, 'checkpoints', actualFile(id)), JSON.stringify({ version: 4, checkpoint: { id, changeSetId: 'delete-change' } }));
   await tombstone(uri, 'delete');
   await deleteStoredChangeSetsForSession(uri, 'delete');
   await deleteStoredChangeSetsForSession(uri, 'delete');
-  for (const version of [4, 3]) {
-    const root = join(directory, 'change-sets', `v${version}`);
-    assert.equal(JSON.parse(await readFile(join(root, 'index.json'), 'utf8')).entries.length, 1);
-    await assert.rejects(readFile(join(root, 'runtime', actualFile('delete-change'))), { code: 'ENOENT' });
-    assert.ok(await readFile(join(root, 'checkpoints', actualFile('shared'))));
-    await assert.rejects(readFile(join(root, 'checkpoints', actualFile('owned'))), { code: 'ENOENT' });
-  }
-  const legacy = JSON.parse(await readFile(join(directory, 'change-sets.json'), 'utf8'));
-  assert.deepEqual(legacy.changeSets.map((value: { id: string }) => value.id), ['keep-legacy']);
-  assert.deepEqual(legacy.checkpoints, [{ changeSetId: 'keep-legacy' }]);
+  assert.deepEqual(JSON.parse(await readFile(join(root, 'index.json'), 'utf8')).entries, [entries[1]]);
+  await assert.rejects(readFile(join(root, 'runtime', actualFile('delete-change'))), { code: 'ENOENT' });
+  assert.equal(await readFile(join(root, 'runtime', actualFile('retained-change')), 'utf8'), retained);
+  assert.ok(await readFile(join(root, 'checkpoints', actualFile('shared'))));
+  await assert.rejects(readFile(join(root, 'checkpoints', actualFile('owned'))), { code: 'ENOENT' });
 }));
 
 test('a stale command proposal cannot execute or repersist after durable deletion', async () => fixture(async (directory, uri) => {
@@ -107,23 +96,33 @@ test('usage ledger deletion propagates permission failures instead of claiming p
   finally { vscode.workspace.fs.delete = original; }
 }));
 
-test('blank-history proof checks owned records without reading a legacy checkpoint body', async () => fixture(async (directory, uri) => {
+test('blank-history proof uses current owner indexes without hydrating checkpoint or runtime bodies', async () => fixture(async (directory, uri) => {
   const { SessionAssociatedDataCleanup } = await import('../src/sessions/sessionAssociatedDataCleanup.js');
   const { ToolEvidenceStore } = await import('../src/agent/evidence/store.js');
   const associated = new SessionAssociatedDataCleanup(uri);
   assert.equal(await associated.hasSessionHistory('blank', 'workspace'), false);
   await new ToolEvidenceStore(uri).ensureIntent({ sessionId: 'owned', taskId: 'task', toolCallId: 'call', toolName: 'synthetic', argumentsHash: 'hash', effectKind: 'read' });
   assert.equal(await associated.hasSessionHistory('owned', 'workspace'), true);
-  await writeFile(join(directory, 'change-sets.json'), JSON.stringify({ version: 2, checkpoints: [{ privateCheckpoint: 'must not be hydrated' }] }));
+  const root = join(directory, 'change-sets', 'v4');
+  const shard = createHash('sha256').update('current-change').digest('hex').slice(0, 32) + '.json';
+  const checkpoint = createHash('sha256').update('private-checkpoint').digest('hex').slice(0, 32) + '.json';
+  await mkdir(join(root, 'runtime'), { recursive: true });
+  await mkdir(join(root, 'checkpoints'), { recursive: true });
+  await writeFile(join(root, 'index.json'), JSON.stringify({ version: 4, entries: [{ id: 'current-change', sessionId: 'has-checkpoint',
+    kind: 'runtime', storageFile: `runtime/${shard}`, checkpointIds: ['private-checkpoint'], updatedAt: '2026-01-01T00:00:00.000Z' }] }));
+  await writeFile(join(root, 'runtime', shard), JSON.stringify({ version: 4, changeSet: { id: 'current-change', sessionId: 'has-checkpoint', files: [] } }));
+  await writeFile(join(root, 'checkpoints', checkpoint), JSON.stringify({ version: 4, checkpoint: { id: 'private-checkpoint', originalText: 'must not be hydrated' } }));
   const originalRead = vscode.workspace.fs.readFile;
-  let checkpointReads = 0;
+  let bodyReads = 0;
   vscode.workspace.fs.readFile = async target => {
-    if (target.fsPath === join(directory, 'change-sets.json')) checkpointReads++;
+    if (target.fsPath.startsWith(join(root, 'runtime') + '/') || target.fsPath.startsWith(join(root, 'checkpoints') + '/')) bodyReads++;
     return originalRead(target);
   };
-  try { await assert.rejects(associated.hasSessionHistory('blank', 'workspace'), /checkpoint hydration/); }
-  finally { vscode.workspace.fs.readFile = originalRead; }
-  assert.equal(checkpointReads, 0);
+  try {
+    assert.equal(await associated.hasSessionHistory('has-checkpoint', 'workspace'), true);
+    assert.equal(await associated.hasSessionHistory('blank', 'workspace'), false);
+  } finally { vscode.workspace.fs.readFile = originalRead; }
+  assert.equal(bodyReads, 0);
 }));
 
 test('one trace batch recycler sees owners created after its first metadata scan', async () => fixture(async (directory, uri) => {

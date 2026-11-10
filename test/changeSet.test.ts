@@ -21,7 +21,7 @@ test('creates one structured ChangeSet for multiple draft edits', () => {
         uri: 'file:///workspace/a.ts',
         label: 'a.ts',
         action: 'modify',
-        newText: 'export const a = 1;\n',
+        kind: 'full_text_v1', content: 'export const a = 1;\n', result: { sha256: hash('export const a = 1;\n'), sizeBytes: 20 }, encoding: encoding(),
         reason: 'Update A'
       },
       {
@@ -29,7 +29,7 @@ test('creates one structured ChangeSet for multiple draft edits', () => {
         uri: 'file:///workspace/b.ts',
         label: 'b.ts',
         action: 'create',
-        newText: 'export const b = 2;\n',
+        kind: 'full_text_v1', content: 'export const b = 2;\n', result: { sha256: hash('export const b = 2;\n'), sizeBytes: 20 }, encoding: encoding(),
         reason: 'Add B'
       }
     ]
@@ -250,41 +250,6 @@ test('merges cumulative checkpoint DraftEdits and the final response into one Ch
   assert.deepEqual(result?.appliedEditIds, ['a', 'b', 'c']);
 });
 
-test('consolidates previously persisted split ChangeSets for one Agent run', async () => {
-  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-change-stored-merge-'));
-  const scope = {
-    runId: 'run-stored',
-    sessionId: 'session-1',
-    messageId: 'assistant-stored'
-  };
-  const first = createChangeSet({ ...scope, edits: [draft('a', 'a.ts')] });
-  const second = createChangeSet({ ...scope, edits: [draft('b', 'b.ts')] });
-  assert.ok(first && second);
-  second.createdAt = new Date(Date.parse(first.createdAt) + 1_000).toISOString();
-  second.updatedAt = second.createdAt;
-  await writeFile(path.join(root, 'change-sets.json'), JSON.stringify({
-    version: 2,
-    changeSets: [second, first],
-    history: [],
-    checkpoints: []
-  }));
-
-  const fixture = createStoreFixture(root);
-  await fixture.store.initialize();
-  const state = fixture.store.toWebviewState('session-1');
-  assert.equal(state.length, 1);
-  assert.equal(state[0]?.id, first.id);
-  assert.equal(state[0]?.fileCount, 2);
-  assert.deepEqual(state[0]?.files.map((file) => file.id), ['a', 'b']);
-
-  await fixture.store.flush();
-  const persisted = JSON.parse(await readFile(path.join(root, 'change-sets', 'v4', 'index.json'), 'utf8')) as {
-    entries?: Array<{ kind?: string }>;
-  };
-  assert.equal(persisted.entries?.filter((entry) => entry.kind === 'runtime').length, 1);
-  await assert.rejects(readFile(path.join(root, 'change-sets.json'), 'utf8'));
-});
-
 test('keeps multiple rounds associated with their assistant message and omits newText from Webview state', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'keepseek-change-association-'));
   const fixture = createStoreFixture(root);
@@ -333,10 +298,10 @@ test('keeps delete baselines internal and exposes only pending delete targets fo
         uri: 'file:///workspace/a.ts',
         label: 'a.ts',
         action: 'delete',
-        newText: '',
+        kind: 'delete_v1',
         reason: 'Remove A',
-        expectedOriginalTextHash: 'private-hash',
-        expectedOriginalSize: 42
+        base: { sha256: 'private-hash', sizeBytes: 42 },
+        encoding: { name: 'utf-8', bom: 'none', eol: 'none', finalEol: false }
       },
       draft('modify-b', 'b.ts')
     ]
@@ -436,12 +401,9 @@ test('reconciles already-persisted sibling drafts as superseded on startup', asy
   assert.ok(accepted && stale);
   accepted.files[0].status = 'applied';
   accepted.status = 'applied';
-  await writeFile(path.join(root, 'change-sets.json'), JSON.stringify({
-    version: 2,
-    changeSets: [accepted, stale],
-    history: [],
-    checkpoints: []
-  }));
+  const before = createStoreFixture(root);
+  before.store.add(accepted); before.store.add(stale);
+  await before.store.flush();
 
   const fixture = createStoreFixture(root);
   await fixture.store.initialize();
@@ -472,7 +434,7 @@ test('journal Apply I/O stays constant with large history and does not run GC be
     ): Promise<ChangeCheckpoint> {
       const checkpoint: ChangeCheckpoint = {
         version: 2, id: `checkpoint-${file.id}`, changeSetId, editId: file.id, uri: file.uri,
-        label: file.label, action: file.action, draftKind: 'legacy_full_text_v0', state: 'prepared',
+        label: file.label, action: file.action, draftKind: 'full_text_v1', hashMode: 'utf8_bytes', state: 'prepared',
         operation: 'apply', originalExists: true, appliedExists: true, createdAt: now
       };
       await journal.persist(checkpoint);
@@ -569,6 +531,7 @@ test('overlapping single and batch Apply never execute the same DraftEdit twice'
         await firstGate;
       }
       return {
+        version: 2, hashMode: 'utf8_bytes', draftKind: file.kind, state: 'applied', operation: 'apply',
         id: `checkpoint-${file.id}`, changeSetId, editId: file.id, uri: file.uri, label: file.label,
         action: file.action, originalExists: true, appliedExists: true, createdAt: now, appliedAt: now
       };
@@ -621,7 +584,7 @@ test('opens a pending edit file that exists inside the workspace', async (t) => 
       uri: vscode.Uri.file(targetPath).toString(),
       label: 'open.ts',
       action: 'modify',
-      newText: 'export const open = true;\n',
+      kind: 'full_text_v1', content: 'export const open = true;\n', result: { sha256: hash('export const open = true;\n'), sizeBytes: 26 }, encoding: encoding(),
       reason: 'Open A'
     }]
   });
@@ -636,7 +599,7 @@ test('opens a pending edit file that exists inside the workspace', async (t) => 
       uri: vscode.Uri.file(path.join(root, 'missing.ts')).toString(),
       label: 'missing.ts',
       action: 'create',
-      newText: '// pending\n',
+      kind: 'full_text_v1', content: '// pending\n', result: { sha256: hash('// pending\n'), sizeBytes: 11 }, encoding: encoding(),
       reason: 'Missing A'
     }]
   });
@@ -691,30 +654,6 @@ test('persists discarded and reverted terminal history without source text', asy
   assert.ok(state.every((changeSet) => changeSet.files.every((file) => !('newText' in file))));
 });
 
-test('loads legacy pending ChangeSets without messageId as unlinked instead of inferring a round', async () => {
-  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-change-legacy-'));
-  const legacy = createChangeSet({
-    runId: 'run-legacy',
-    sessionId: 'session-1',
-    edits: [draft('legacy', 'legacy.ts')]
-  });
-  assert.ok(legacy);
-  const stored = { ...legacy } as Partial<typeof legacy>;
-  delete stored.messageId;
-  await writeFile(path.join(root, 'change-sets.json'), JSON.stringify({
-    version: 1,
-    changeSets: [stored],
-    checkpoints: []
-  }));
-
-  const fixture = createStoreFixture(root);
-  await fixture.store.initialize();
-  const state = fixture.store.toWebviewState('session-1');
-  assert.equal(state.length, 1);
-  assert.equal(state[0]?.messageId, '');
-  assert.equal(state[0]?.status, 'pending');
-});
-
 test('sharded ChangeSets load only the active session and remain inoperable until an old session is loaded', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'keepseek-change-lazy-'));
   const fixture = createStoreFixture(root);
@@ -757,35 +696,23 @@ test('runtime records recover checkpoint links when an older index commit is obs
   assert.deepEqual(result?.revertedEditIds, ['race']);
 });
 
-test('failed ChangeSet migration keeps the monolith readable in memory', async (t) => {
-  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-change-migration-fallback-'));
-  const pending = createChangeSet({
-    runId: 'legacy-run', sessionId: 'session-1', messageId: 'legacy-message', edits: [draft('legacy-fallback', 'fallback.ts')]
-  });
-  assert.ok(pending);
+test('older monolithic and V3 ChangeSets are never read or migrated', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-change-current-only-'));
+  const pending = createChangeSet({ runId: 'old', sessionId: 'session-1', edits: [draft('old', 'old.ts')] });
   const monolithPath = path.join(root, 'change-sets.json');
-  await writeFile(monolithPath, JSON.stringify({ version: 2, changeSets: [pending], history: [], checkpoints: [] }));
-  const originalRename = vscode.workspace.fs.rename;
-  vscode.workspace.fs.rename = async (source, target, options) => {
-    if (target.fsPath.endsWith('/change-sets/v4/index.json')) throw new Error('simulated index failure');
-    await originalRename(source, target, options);
-  };
-  t.after(() => { vscode.workspace.fs.rename = originalRename; });
+  const original = JSON.stringify({ version: 2, changeSets: [pending] });
+  await writeFile(monolithPath, original);
   const fixture = createStoreFixture(root);
   await fixture.store.initialize();
-  assert.equal(fixture.store.toWebviewState('session-1')[0]?.id, pending.id);
-  assert.equal(JSON.parse(await readFile(monolithPath, 'utf8')).changeSets.length, 1);
+  assert.deepEqual(fixture.store.toWebviewState('session-1'), []);
+  assert.equal(await readFile(monolithPath, 'utf8'), original);
 });
 
+function hash(value: string) { return createHash('sha256').update(value).digest('hex'); }
+function encoding() { return { name: 'utf-8' as const, bom: 'none' as const, eol: 'none' as const, finalEol: false }; }
 function draft(id: string, label: string) {
-  return {
-    id,
-    uri: `file:///workspace/${label}`,
-    label,
-    action: 'modify' as const,
-    newText: `source for ${label}`,
-    reason: `Update ${label}`
-  };
+  return createFullTextDraftEdit({ id, uri: `file:///workspace/${label}`, label,
+    action: 'modify', content: `source for ${label}`, reason: `Update ${label}` });
 }
 
 async function readStoredChangeSets(root: string): Promise<Array<{ id: string; historyInvalidationId?: string; historyOriginUnverified?: boolean; files: ChangeSetFile[] }>> {
@@ -829,6 +756,7 @@ function createStoreFixture(root: string, failLabel?: string) {
     async applyDraftEdit(file: ChangeSetFile, changeSetId: string): Promise<ChangeCheckpoint> {
       if (file.label === failLabel) throw new Error(`failed ${file.label}`);
       return {
+        version: 2, hashMode: 'utf8_bytes', draftKind: file.kind, state: 'applied', operation: 'apply',
         id: `checkpoint-${file.id}`,
         changeSetId,
         editId: file.id,

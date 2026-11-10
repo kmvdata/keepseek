@@ -31,7 +31,7 @@ export async function inspectAutomaticRunAuthorization(run: DraftRun, grants: Ex
   checkDraftRunApprovalIdentity(run);
   const allowed = scope.externalUris.length === 0 || grants.matches(draftRunIdentity(run), scope);
   const authorizedUris = new Set(allowed ? scope.externalUris : []);
-  // Preserve exact legacy cwd spelling only after its canonical scope is granted.
+  // Preserve exact requested cwd spelling only after its canonical scope is granted.
   if (allowed && run.spec.externalCwd && scope.externalUris.length) authorizedUris.add(run.spec.cwdUri);
   const reviewableUncertainty = scope.uncertain && scope.verifiedLauncher && scope.diagnostics.every(item => item.code === 'environment_override')
     && run.spec.env.every(({ name }) => ['LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'COLORTERM'].includes(name));

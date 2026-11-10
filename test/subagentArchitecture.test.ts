@@ -1,3 +1,4 @@
+import { createWorkspaceScopeRoots, resolveProposalPathScope } from '../src/agent/subagents/pathScope';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -6,7 +7,11 @@ import * as path from 'node:path';
 import { afterEach, test } from 'node:test';
 import * as vscode from 'vscode';
 import { ModelSourceStore } from '../src/accounts/accountStore';
-import { SubagentSettingsStore, normalizeSubagentModelSetting } from '../src/accounts/subagentSettingsStore';
+import {
+  SubagentSettingsStore,
+  normalizeSubagentModelSetting,
+  normalizeSubagentModelSettingsSnapshot
+} from '../src/accounts/subagentSettingsStore';
 import {
   DELEGATE_PARALLEL_TOOL_NAME,
   DELEGATE_TASK_TOOL_NAME,
@@ -29,6 +34,7 @@ import type {
   SubagentToolAdapter,
   SubagentToolExecution
 } from '../src/agent/subagents/types';
+import { createFullTextDraftEdit } from '../src/edits/draftEdit';
 import type { AgentRequest, DraftEdit, DraftRunProposal } from '../src/shared/types';
 import { parseSkillFrontmatter } from '../src/skills/skillDiscovery';
 
@@ -40,35 +46,7 @@ afterEach(async () => {
   }));
 });
 
-test('protocol v5 adds stable delegation tools without changing the frozen v4 lane', () => {
-  const v4Names = getAgentToolNamesForPrompt('investigate the workspace', false, 4);
-  const v5Names = getAgentToolNamesForPrompt('investigate the workspace', false, 5);
-  assert.equal(v4Names.includes(DELEGATE_TASK_TOOL_NAME), false);
-  assert.equal(v4Names.includes(DELEGATE_PARALLEL_TOOL_NAME), false);
-  assert.equal(v4Names.includes(READ_SUBAGENT_RESULT_TOOL_NAME), false);
-  assert.equal(v5Names.includes(DELEGATE_TASK_TOOL_NAME), true);
-  assert.equal(v5Names.includes(DELEGATE_PARALLEL_TOOL_NAME), true);
-  assert.equal(v5Names.includes(READ_SUBAGENT_RESULT_TOOL_NAME), true);
-
-  const v4Prompt = getAgentSystemPrompt({ language: 'en', requestProtocolVersion: 4 });
-  const v5Prompt = getAgentSystemPrompt({ language: 'en', requestProtocolVersion: 5 });
-  assert.doesNotMatch(v4Prompt, /keepseek_delegate_task/u);
-  assert.match(v5Prompt, /self-contained/u);
-  assert.match(v5Prompt, /no parent history/u);
-
-  const tools = getAgentTools({
-    requestProtocolVersion: 5,
-    toolNames: [DELEGATE_TASK_TOOL_NAME, DELEGATE_PARALLEL_TOOL_NAME, READ_SUBAGENT_RESULT_TOOL_NAME]
-  });
-  assert.deepEqual(tools.map((tool) => tool.function.name), [
-    DELEGATE_PARALLEL_TOOL_NAME,
-    DELEGATE_TASK_TOOL_NAME,
-    READ_SUBAGENT_RESULT_TOOL_NAME
-  ]);
-  assert.equal(tools.every((tool) => tool.function.parameters.additionalProperties === false), true);
-});
-
-test('subagent Skill profiles keep full instructions out of the v5 parent context', () => {
+test('subagent Skill profiles keep full instructions out of the parent context', () => {
   const secretInstructions = 'FULL CHILD ONLY INSTRUCTIONS '.repeat(200);
   const skill = {
     id: 'agentsWorkspace:reviewer',
@@ -86,11 +64,9 @@ test('subagent Skill profiles keep full instructions out of the v5 parent contex
     }
   };
   const parent = formatActiveSkills({ skills: [skill], language: 'en', requestProtocolVersion: 5 });
-  const legacy = formatActiveSkills({ skills: [skill], language: 'en', requestProtocolVersion: 4 });
   assert.match(parent, /focused-reviewer/u);
   assert.doesNotMatch(parent, /FULL CHILD ONLY INSTRUCTIONS/u);
   assert.ok(parent.length <= 4_000);
-  assert.match(legacy, /FULL CHILD ONLY INSTRUCTIONS/u);
 });
 
 test('subagent frontmatter parses typed profile policy including block-list tools', () => {
@@ -140,13 +116,31 @@ test('workspace subagent model settings persist independently and default safely
   assert.equal(incomplete.modelId, 'x');
 });
 
+test('subagent settings accept only the current snapshot format', () => {
+  const defaultSetting = { version: 1, mode: 'fixed', sourceId: 'source-a', modelId: 'model-a' };
+  assert.equal(normalizeSubagentModelSettingsSnapshot(defaultSetting).default.mode, 'follow-main');
+  assert.equal(normalizeSubagentModelSettingsSnapshot({
+    version: 1, default: defaultSetting, profiles: { review: defaultSetting }
+  }).default.mode, 'follow-main');
+  const current = normalizeSubagentModelSettingsSnapshot({
+    version: 2, default: defaultSetting, profiles: { review: defaultSetting }
+  });
+  assert.equal(current.default.mode, 'fixed');
+  assert.equal(current.profiles.review?.modelId, 'model-a');
+});
+
 test('scheduler enforces depth, tree budgets, path claims, and bounded root concurrency', async () => {
   const scheduler = new SubagentScheduler();
+  const roots = createWorkspaceScopeRoots([{ uri: vscode.Uri.file('/workspace'), name: 'workspace', index: 0 }]);
+  const resolved = resolveProposalPathScope(['src/a.ts'], roots);
+  assert.equal(resolved.ok, true);
+  if (!resolved.ok) return;
+  const scope = resolved.scope;
   assert.deepEqual(scheduler.reserve({
-    treeId: 'tree-path', parentRunId: 'parent-path', ownerId: 'one', depth: 1, proposal: true, paths: ['src/a.ts']
+    treeId: 'tree-path', parentRunId: 'parent-path', ownerId: 'one', depth: 1, proposal: true, scope, roots
   }), { ok: true });
   const conflict = scheduler.reserve({
-    treeId: 'tree-path', parentRunId: 'parent-path', ownerId: 'two', depth: 1, proposal: true, paths: ['./src/a.ts']
+    treeId: 'tree-path', parentRunId: 'parent-path', ownerId: 'two', depth: 1, proposal: true, scope, roots
   });
   assert.equal(conflict.ok, false);
   assert.equal(scheduler.reserve({
@@ -173,7 +167,7 @@ test('subagent store returns bounded final-result pages without transcript or re
   const storageRoot = await createTemporaryDirectory('keepseek-subagent-store-');
   const store = new SubagentStore(vscode.Uri.file(storageRoot), 'workspace-key');
   const metadata: StoredSubagentMetadata = {
-    version: 1,
+    version: 2,
     id: 'sa_one',
     treeId: 'tree-one',
     parentSessionId: 'session-one',
@@ -199,7 +193,7 @@ test('subagent store returns bounded final-result pages without transcript or re
     completedAt: '2026-01-01T00:01:00.000Z'
   };
   await store.save(metadata, {
-    version: 1,
+    version: 2,
     metadataId: metadata.id,
     contextInstructions: 'PRIVATE CHILD CONTEXT',
     messages: [{ id: 'reasoning', role: 'assistant', content: 'private transcript', createdAt: metadata.createdAt }],
@@ -207,9 +201,9 @@ test('subagent store returns bounded final-result pages without transcript or re
   });
   const page = await store.readResultPage({
     parentSessionId: metadata.parentSessionId,
-    subagentId: metadata.id,
-    offset: 12_000,
-    maxChars: 50_000
+    ref: metadata.id,
+    offsetBytes: 12_000,
+    limitBytes: 50_000
   });
   assert.equal(page.ok, true);
   assert.equal(String(page.content).length, 18_000);
@@ -218,20 +212,20 @@ test('subagent store returns bounded final-result pages without transcript or re
   assert.equal(JSON.stringify(page).includes('private transcript'), false);
   assert.equal((await store.readResultPage({
     parentSessionId: 'another-session',
-    subagentId: metadata.id
+    ref: metadata.id
   })).ok, false);
 });
 
 test('main AgentRunner routes delegation through the isolated adapter and rejects overlapping child edits', async () => {
   assert.notEqual(AgentRunner, AgentLoop);
-  const childEdit: DraftEdit = {
+  const childEdit: DraftEdit = createFullTextDraftEdit({
     id: 'child-edit',
     uri: 'file:///workspace/src/a.ts',
     label: 'src/a.ts',
     action: 'modify',
-    newText: 'child',
+    content: 'child',
     reason: 'child proposal'
-  };
+  });
   const adapter = new FakeSubagentAdapter({
     content: JSON.stringify({ ok: true, subagentId: 'sa_child' }),
     draftEdits: [childEdit]
@@ -366,7 +360,7 @@ test('real child provider request disables thinking and excludes parent-only con
       version: number; ok: boolean; kind: string; preview: string; resultRef: string; hasMore: boolean
     };
     assert.equal(toolResult.ok, true);
-    assert.equal(toolResult.version, 2);
+    assert.equal(toolResult.version, 3);
     assert.equal(toolResult.kind, 'subagent_result_manifest');
     assert.ok(Buffer.byteLength(toolResult.preview, 'utf8') <= 10_240);
     assert.equal(toolResult.hasMore, true);

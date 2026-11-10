@@ -1,3 +1,4 @@
+import { CURRENT_AGENT_PROTOCOL_VERSION } from '../src/agent/protocol';
 import './registerVscodeStub';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -86,7 +87,7 @@ test('estimated prompt plus output reserve is admitted before any Provider reque
   }
 });
 
-test('checkpoint normalization migrates old counters and clamps malformed budget values', () => {
+test('checkpoint normalization rejects old records and preserves current budget values', () => {
   const input = request();
   const raw = {
     version: 2,
@@ -110,21 +111,8 @@ test('checkpoint normalization migrates old counters and clamps malformed budget
       repairLoop: { status: 'idle', iteration: 0, maxIterations: 2, pendingDraftEditIds: [] }
     }
   } as unknown as RunCheckpoint;
-  const migrated = normalizeRunCheckpoint(raw);
-  assert.equal(migrated?.runBudget?.modelRequests, 4);
-  assert.equal(migrated?.runBudget?.toolRounds, 3);
-  assert.equal(migrated?.runBudget?.toolCalls, 7);
-
-  raw.stopReason = 'budget_exhausted';
-  raw.state!.budgetStopReason = 'tool_iterations_exhausted';
-  const legacyCapacity = normalizeRunCheckpoint(raw);
-  assert.equal(legacyCapacity?.runBudget?.toolRounds, 3, 'legacy tool stops gain an auditable cumulative ledger');
-  assert.equal(legacyCapacity?.runBudget?.toolCalls, 7);
-  assert.equal(legacyCapacity?.request.executionLimits?.maxToolIterations, 0,
-    'old root profile ceilings migrate to the new unlimited default');
-  assert.equal(legacyCapacity?.stopReason, 'budget_pause');
-  raw.stopReason = 'extension_restart';
-  raw.state!.budgetStopReason = undefined;
+  assert.equal(normalizeRunCheckpoint({ ...raw, version: 1 }), undefined);
+  assert.equal(normalizeRunCheckpoint(raw)?.runBudget, undefined, 'unstarted current checkpoints have no budget yet');
 
   raw.runBudget = createLogicalRunBudgetState({ modelRequests: -10, upstreamTokens: Number.NaN, finalizationAttempted: true });
   const normalized = normalizeRunCheckpoint(raw);
@@ -133,24 +121,15 @@ test('checkpoint normalization migrates old counters and clamps malformed budget
   assert.equal(normalized?.runBudget?.finalizationAttempted, true);
 
   raw.status = 'blocked';
-  raw.stopReason = 'budget_exhausted';
+  raw.stopReason = 'budget_pause';
   raw.request.executionLimits = { maxToolIterations: 16, maxToolCalls: 48 };
-  raw.finalResponse = {
-    message: 'legacy tool stop',
-    draftEdits: [],
-    repairLoop: { status: 'idle', iteration: 0, maxIterations: 2, pendingDraftEditIds: [] },
-    taskPlan: raw.state!.repairLoop as never,
-    runId: 'legacy-run',
-    runDetails: { budgetStopReason: 'tool_budget_exhausted' } as never
-  } as never;
-  const oldSerialized = JSON.stringify(raw);
-  const migratedToolPause = normalizeRunCheckpoint(raw);
-  assert.equal(migratedToolPause?.status, 'interrupted');
-  assert.equal(migratedToolPause?.stopReason, 'budget_pause');
-  assert.equal(migratedToolPause?.request.executionLimits?.maxToolIterations, 0);
-  assert.equal(migratedToolPause?.request.executionLimits?.maxToolCalls, 0);
-  assert.equal(recoveryBlocker(migratedToolPause!), undefined);
-  assert.equal(JSON.stringify(raw), oldSerialized, 'normalization must not mutate the stored legacy object');
+  const serialized = JSON.stringify(raw);
+  const paused = normalizeRunCheckpoint(raw)!;
+  assert.equal(paused.stopReason, 'budget_pause');
+  assert.equal(paused.request.executionLimits?.maxToolIterations, 16);
+  assert.equal(paused.request.executionLimits?.maxToolCalls, 48);
+  assert.equal(recoveryBlocker(paused), undefined);
+  assert.equal(JSON.stringify(raw), serialized, 'normalization must not mutate the stored object');
 });
 
 test('a restored finalization attempt cannot dispatch a second finalization request', async () => {
@@ -267,7 +246,7 @@ function request(): AgentRequest {
     prompt: 'Inspect the workspace',
     model: { id: 'model', label: 'Model', provider: 'openai-compatible', sourceId: 'source', contextWindowTokens: 128_000 },
     settings: { thinkingEnabled: false, reasoningEffort: 'high', compressionThreshold: 'balanced' },
-    contextFiles: [], history: [], language: 'en', requestProtocolVersion: 8,
+    contextFiles: [], history: [], language: 'en', requestProtocolVersion: CURRENT_AGENT_PROTOCOL_VERSION,
     sourceConfig: { sourceId: 'source', provider: 'openai-compatible', baseUrl: 'https://example.invalid', apiKey: '', supportsBilling: false }
   };
 }

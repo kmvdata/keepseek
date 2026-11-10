@@ -138,7 +138,6 @@ export class ApprovalReviewStore {
       || record.approvalMode !== input.approvalMode || record.scopeFingerprint !== input.scopeFingerprint
       || record.reviewerConfigFingerprint !== input.reviewerConfigFingerprint
       || (input.expectedSource === 'auto_approval_review' && !input.reviewerConfigFingerprint)
-      || (input.expectedSource === 'host_policy' && input.approvalMode === 'model_review')
       || (input.expectedSource === 'auto_approval_review' && input.expectedSource !== reviewerRoute(input.approvalMode))) {
       throw new Error('No current matching approval record exists for this exact operation.');
     }
@@ -154,7 +153,7 @@ export class ApprovalReviewStore {
     for (const record of this.records.values()) {
       if (record.reviewId === beforeReviewId) break;
       if (!record.historyInvalidatedBy && record.sessionId === sessionId && record.rootTaskId === rootTaskId
-        && ['auto_approval_review', 'model_review', 'local_policy'].includes(record.approvalSource)
+        && ['auto_approval_review', 'local_policy'].includes(record.approvalSource)
         && (record.decision === 'approve' || record.decision === 'deny')) history.push(record.decision);
     }
     return history.slice(-50);
@@ -191,8 +190,8 @@ export class ApprovalReviewStore {
       const merged = new Map<string, ApprovalReviewRecord>();
       for (const value of stored?.records as unknown[] ?? []) {
         if (value && typeof value === 'object' && typeof (value as ApprovalReviewRecord).reviewId === 'string') {
-          const record = value as ApprovalReviewRecord;
-          if (!this.knownRecordIds.has(record.reviewId) || this.records.has(record.reviewId)) merged.set(record.reviewId, record);
+          const record = normalizeRecord(value);
+          if (record && (!this.knownRecordIds.has(record.reviewId) || this.records.has(record.reviewId))) merged.set(record.reviewId, record);
         }
       }
       for (const record of this.records.values()) merged.set(record.reviewId, record);
@@ -239,10 +238,11 @@ function toDisplay(record: ApprovalReviewRecord): ApprovalReviewDisplay {
 function normalizeRecord(value: unknown): ApprovalReviewRecord | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const record = value as ApprovalReviewRecord;
-  if (!record.reviewId || !record.runtimeId || !record.sessionId || !record.agentRunId || !record.targetId
+  if (!record.reviewId || !record.runtimeId || !record.sessionId || !record.rootTaskId || !record.agentRunId || !record.targetId
     || !['external_file_access', 'validation_run', 'draft_edit_apply', 'draft_delete_apply', 'draft_run_execute'].includes(record.actionKind)
     || !record.actionHash || !Number.isInteger(record.policyVersion)
-    || !['auto_approval_review', 'model_review', 'host_policy', 'local_policy', 'user_click'].includes(record.approvalSource)
+    || !['auto_approval_review', 'host_policy', 'local_policy', 'user_click'].includes(record.approvalSource)
+    || (record.approvalMode !== undefined && record.approvalMode !== 'delegate')
     || !['approve', 'needs_user', 'deny', 'unavailable'].includes(record.decision)
     || !['low', 'medium', 'high', 'critical'].includes(record.risk)
     || typeof record.rationale !== 'string' || !Array.isArray(record.policyRules)
@@ -259,7 +259,6 @@ function normalizeRecord(value: unknown): ApprovalReviewRecord | undefined {
     reviewerConfigFingerprint: typeof record.reviewerConfigFingerprint === 'string' && /^[a-f0-9]{64}$/u.test(record.reviewerConfigFingerprint)
       ? record.reviewerConfigFingerprint : undefined,
     originalActionHash: typeof record.originalActionHash === 'string' && /^[a-f0-9]{64}$/u.test(record.originalActionHash)
-      ? record.originalActionHash : undefined,
-    rootTaskId: typeof record.rootTaskId === 'string' && record.rootTaskId ? record.rootTaskId : record.agentRunId
+      ? record.originalActionHash : undefined
   });
 }

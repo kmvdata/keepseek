@@ -110,7 +110,7 @@ export function acceptSubagentResult(input: {
     return { ok: false, diagnostics };
   }
   const extra: Partial<CommonSubagentResultEnvelope> = {};
-  if (input.contractVersion === 2) {
+  {
     for (const key of ['coverage', 'missing', 'nextSteps'] as const) {
       if (parsed[key] === undefined) continue;
       const values = normalizeStringArray(parsed[key]);
@@ -133,7 +133,7 @@ export function acceptSubagentResult(input: {
   }
   const common = {
     ...(taskHash ? { taskHash } : {}), status, summary,
-    evidence: input.contractVersion === 2 ? evidence.map((item) => ({ ...item, verification: 'unverified' as const })) : evidence,
+    evidence: evidence.map((item) => ({ ...item, verification: 'unverified' as const })),
     uncertainties, ...extra
   };
   if (input.lane === 'review-read') {
@@ -144,7 +144,7 @@ export function acceptSubagentResult(input: {
     if (!reviewedPaths?.length) diagnostics.push('reviewed_paths_missing');
     if (!findings) diagnostics.push('review_findings_invalid');
     if ((verdict === 'warn' || verdict === 'block') && !findings?.length
-      && !(input.contractVersion === 2 && status !== 'complete')) diagnostics.push('review_findings_required');
+      && status === 'complete') diagnostics.push('review_findings_required');
     if (diagnostics.length || !verdict || !reviewedPaths || !findings) return { ok: false, diagnostics };
     return { ok: true, diagnostics, envelope: { kind: 'review', ...common, verdict, reviewedPaths, findings } };
   }
@@ -171,10 +171,9 @@ export function acceptSubagentResult(input: {
   return { ok: true, diagnostics, envelope: { kind: 'research', ...common } };
 }
 
-export function getSubagentResultFormatInstruction(lane: SubagentLane, contractVersion: 1 | 2 = 1): string {
+export function getSubagentResultFormatInstruction(lane: SubagentLane, _contractVersion: 2 = 2): string {
   const common = 'Return exactly one JSON object with taskHash (copy the exact deterministic value from the current task binding), status (complete|partial|failed), summary, evidence (array of {claim,path?,startLine?,endLine?}), and uncertainties (string array). Do not wrap it in Markdown.';
-  const extended = contractVersion === 2
-    ? ' Include compact coverage, missing, nextSteps string arrays when relevant, and verification entries {claim,method,result} only for checks actually performed. Mark incomplete work partial. Evidence and verification are model reports pending parent verification; do not claim host verification. A review verdict is not approval permission. Return essential conclusions first; the parent reads disputed details on demand.' : '';
+  const extended = ' Include compact coverage, missing, nextSteps string arrays when relevant, and verification entries {claim,method,result} only for checks actually performed. Mark incomplete work partial. Evidence and verification are model reports pending parent verification; do not claim host verification. A review verdict is not approval permission. Return essential conclusions first; the parent reads disputed details on demand.';
   if (lane === 'review-read') {
     return `${common} Also include verdict (pass|warn|block), reviewedPaths (string array), and findings (array of {severity,title,evidence,impact,path?,startLine?,endLine?}).${extended}`;
   }

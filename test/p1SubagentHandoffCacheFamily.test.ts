@@ -12,7 +12,7 @@ import {
   utf8ByteLength
 } from '../src/agent/subagents/handoff';
 import { SubagentStore } from '../src/agent/subagents/store';
-import type { StoredSubagentMetadata, SubagentResultManifestV2 } from '../src/agent/subagents/types';
+import type { StoredSubagentMetadata, SubagentResultManifest } from '../src/agent/subagents/types';
 import { prepareEvidenceEnvelope } from '../src/agent/evidence/shaping';
 import type { ToolEvidence } from '../src/agent/evidence/types';
 import {
@@ -94,7 +94,7 @@ test('V3 parallel preserves semantic summaries and recomputes hasMore under esca
 
 const HANDOFF_LIMIT = 12_288;
 
-test('1KB, 120KB and 1MB child results produce the same bounded V2 handoff shape', () => {
+test('1KB, 120KB and 1MB child results produce the same bounded V3 handoff shape', () => {
   for (const size of [1_024, 120_000, 1_000_000]) {
     const result = `结论-${'x'.repeat(size)}`;
     const manifest = manifestFor(`sa_${size}`, result, 10_240, HANDOFF_LIMIT);
@@ -208,21 +208,10 @@ test('result reader uses UTF-8 byte pages and enforces session/tree/ref boundari
   const workspaceHash = createHash('sha256').update('workspace-a', 'utf8').digest('hex').slice(0, 24);
   const corruptId = 'sa_corrupt';
   const corruptUri = vscode.Uri.joinPath(vscode.Uri.file(directory), 'chat-sessions', 'v1', 'subagents', workspaceHash,
-    'session-a', `${corruptId}.run.json`);
+    'session-a', `${corruptId}.state.json`);
   await vscode.workspace.fs.writeFile(corruptUri, new TextEncoder().encode('{broken'));
   assert.equal((await store.readResultPage({ parentSessionId: 'session-a', ref: corruptId })).errorType,
     'subagent_result_corrupt');
-});
-
-test('V10 reader schema is byte-based while frozen V9 schema remains character-based', () => {
-  const v9 = getAgentTools({ requestProtocolVersion: 9, toolNames: [READ_SUBAGENT_RESULT_TOOL_NAME] })
-    .find((tool) => tool.function.name === READ_SUBAGENT_RESULT_TOOL_NAME)!;
-  const v10 = getAgentTools({ requestProtocolVersion: 10, toolNames: [READ_SUBAGENT_RESULT_TOOL_NAME] })
-    .find((tool) => tool.function.name === READ_SUBAGENT_RESULT_TOOL_NAME)!;
-  assert.deepEqual(v9.function.parameters.required, ['subagentId']);
-  assert.deepEqual(v10.function.parameters.required, ['ref']);
-  assert.ok(Object.hasOwn(v10.function.parameters.properties, 'offsetBytes'));
-  assert.equal(Object.hasOwn(v9.function.parameters.properties, 'offsetBytes'), false);
 });
 
 test('cache family excludes random ids/tasks and separates model, profile and permissions', () => {
@@ -283,7 +272,7 @@ test('cache metrics are token-weighted, keep unreported unknown, and split sourc
     ...record,
     cacheObservation: record.cacheObservation ? { ...record.cacheObservation, version: 1, stablePrefix: undefined,
       cacheFamilyKey: undefined, cacheFamilyId: undefined, prefixRelation: 'cold' } : undefined
-  })), legacyAggregate: false, incomplete: false });
+  })), incomplete: false });
   assert.equal(migrated?.records.length, 3, 'old observation records remain loadable');
 });
 
@@ -293,12 +282,12 @@ function manifestFor(
   previewBytes: number,
   maxBytes: number,
   ok = true
-): SubagentResultManifestV2 {
+): SubagentResultManifest {
   return createSubagentResultManifest({
     metadata: {
       id, treeId: 'tree-a', profile: 'research', lane: 'research-read', depth: 1,
       sourceId: 'source-a', modelId: 'model-a', resultHash: hash(result), resultChars: result.length,
-      resultBytes: utf8ByteLength(result)
+      resultBytes: utf8ByteLength(result), resultStatus: ok ? 'complete' : 'failed', resultFormatAccepted: ok
     },
     result,
     status: ok ? 'completed' : 'failed',

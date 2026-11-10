@@ -3,11 +3,9 @@ import type { ChatMessage } from '../shared/types';
 
 /** Host metadata only; none of these fields belong in the main request projection. */
 export interface SessionTitleBasis {
-  /** Absent on legacy whole-history / automatic excerpt provenance. */
-  scope?: 'recent_turns_v2' | 'user_inputs_v3';
+  scope: 'user_inputs_v3';
   messages: Array<{ id: string; hash: string }>;
   lastMessageId: string;
-  conversation?: { messageCount: number; hash: string };
 }
 export interface SessionTitleAttempt {
   token: string;
@@ -16,7 +14,7 @@ export interface SessionTitleAttempt {
 }
 export type SessionTitleOutcome = 'set' | 'defer' | 'invalid' | 'failed' | 'interrupted' | 'stale' | 'manual' | 'save_failed';
 export interface SessionTitleMetadata {
-  version: 1 | 2;
+  version: 2;
   status: 'pending' | 'running' | 'completed';
   /** Durable product semantics, independent from retained naming provenance. */
   stopped?: 'named' | 'manual';
@@ -24,7 +22,7 @@ export interface SessionTitleMetadata {
   lastAttemptTaskId?: string;
   /** Bounded recent identities supplement the ordered consumption cursor. */
   attemptedTaskIds?: string[];
-  /** Consumed real-origin prefix; sparse compatibility IDs cover any later gaps. */
+  /** Consumed real-origin prefix; sparse consumed IDs cover any later gaps. */
   attemptedThrough?: { taskId: string; originMessageId: string };
   attempt?: SessionTitleAttempt;
   /** An explicit regeneration claim does not unlock or discard the old title. */
@@ -55,23 +53,13 @@ function normalizeBasis(value: unknown): SessionTitleBasis | undefined {
     messages.push({ id: message.id, hash: message.hash });
   }
   if (messages.at(-1)?.id !== value.lastMessageId) return undefined;
-  if (value.conversation !== undefined && (!record(value.conversation)
-    || !Number.isSafeInteger(value.conversation.messageCount) || (value.conversation.messageCount as number) < 1
-    || typeof value.conversation.hash !== 'string' || !/^[a-f0-9]{64}$/u.test(value.conversation.hash))) return undefined;
-  if (value.scope !== undefined && !['recent_turns_v2', 'user_inputs_v3'].includes(String(value.scope))) return undefined;
-  if (value.scope === 'recent_turns_v2' && (messages.length > 4 || value.conversation !== undefined)) return undefined;
-  if (value.scope === 'user_inputs_v3' && (messages.length > 2 || value.conversation !== undefined)) return undefined;
-  return { messages, lastMessageId: value.lastMessageId,
-    ...(value.scope === 'recent_turns_v2' || value.scope === 'user_inputs_v3' ? { scope: value.scope } : {}),
-    ...(value.conversation ? { conversation: { messageCount: value.conversation.messageCount as number,
-      hash: value.conversation.hash as string } } : {}) };
+  if (value.scope !== 'user_inputs_v3' || value.conversation !== undefined || messages.length > 2) return undefined;
+  return { messages, lastMessageId: value.lastMessageId, scope: 'user_inputs_v3' };
 }
 
-/** A running claim is diagnostic only after restart; HTTP work is never replayed.
- * Storage verifies the old canonical index hash before granting
- * confirmedLegacyCompletion, including when old provenance has been archived. */
+/** A running claim is diagnostic only after restart; HTTP work is never replayed. */
 export function normalizeSessionTitle(value: unknown, customTitle?: string,
-  options: { preserveRunning?: boolean; messages?: readonly ChatMessage[]; confirmedLegacyCompletion?: boolean } = {}): SessionTitleMetadata {
+  options: { preserveRunning?: boolean; messages?: readonly ChatMessage[] } = {}): SessionTitleMetadata {
   const raw = record(value) ? value : {};
   const result: SessionTitleMetadata = {
     version: 2, status: 'pending',
@@ -82,7 +70,7 @@ export function normalizeSessionTitle(value: unknown, customTitle?: string,
     ...(record(raw.attemptedThrough) && id(raw.attemptedThrough.taskId) && id(raw.attemptedThrough.originMessageId)
       ? { attemptedThrough: { taskId: raw.attemptedThrough.taskId, originMessageId: raw.attemptedThrough.originMessageId } } : {})
   };
-  if (raw.version !== 1 && raw.version !== 2) return customTitle?.trim()
+  if (raw.version !== 2) return customTitle?.trim()
     ? { ...result, stopped: 'manual', lastOutcome: 'manual' } : result;
   if (record(raw.regenerationPrevious) && typeof raw.regenerationPrevious.title === 'string'
     && raw.regenerationPrevious.title.trim() && raw.regenerationPrevious.title.length <= 512
@@ -106,9 +94,7 @@ export function normalizeSessionTitle(value: unknown, customTitle?: string,
   const completed = record(raw.completed) ? raw.completed : undefined;
   const basis = normalizeBasis(completed?.basis);
   if (id(completed?.taskId)) result.lastAttemptTaskId ??= completed.taskId;
-  const validLegacy = raw.version === 1 && raw.status === 'completed' && id(completed?.taskId) && basis
-    && (options.confirmedLegacyCompletion || !options.messages || sessionTitleTaskBasisMatches(options.messages, completed.taskId, basis));
-  if ((raw.version === 2 && raw.stopped === 'named' && raw.status === 'completed') || validLegacy) {
+  if (raw.stopped === 'named' && raw.status === 'completed') {
     return { ...result, status: 'completed', stopped: 'named',
       ...(completed && id(completed.taskId) && basis ? { completed: { taskId: completed.taskId, basis } } : {}) };
   }
@@ -180,7 +166,7 @@ export function recordSessionTitleAttempt(state: SessionTitleMetadata, messages:
       frontier = { taskId: originTask, originMessageId: origin.id };
     }
   }
-  // Compatibility arrays without a frontier may be large. Discard only IDs
+  // Out-of-order consumption arrays may be large. Discard only IDs
   // whose known origin is covered (or is absent and cannot supply material).
   const sparse = consumed.filter(value => { const index = indices.get(value); return index !== undefined && index > boundary; });
   const sparseSet = new Set(sparse);
@@ -204,60 +190,25 @@ export function sessionTitleBasisMatches(messages: readonly ChatMessage[], basis
       if (!located || located.index <= previousIndex || sessionTitleMessageHash(located.message) !== item.hash) return false;
       previousIndex = located.index;
       return true;
-    }) && (!basis.conversation || (() => {
-      const current = sessionTitleConversationFingerprint(messages, basis.lastMessageId);
-      return current?.messageCount === basis.conversation.messageCount && current.hash === basis.conversation.hash;
-    })());
+    });
 }
 
-/** Compatibility entry point; all consumers share the persisted prefix and
+/** All consumers share the persisted prefix and
  * sparse-gap authority rather than guessing from the latest attempted ID. */
 export function hasConsumedTitleRound(messages: readonly ChatMessage[], state: SessionTitleMetadata | undefined, taskId: string): boolean {
   return !!state && sessionTitleTaskWasAttempted(state, messages, taskId);
 }
 
-/** New in-flight provenance binds only the selected user instructions. Legacy
- * answer/whole-history records retain their original validation semantics. */
+/** In-flight provenance binds only the selected user instructions. */
 export function sessionTitleTaskBasisMatches(messages: readonly ChatMessage[], taskId: string, basis: SessionTitleBasis): boolean {
-  if (!sessionTitleBasisMatches(messages, basis)) return false;
-  if (basis.scope === 'user_inputs_v3') {
-    if (basis.messages.length < 1 || basis.messages.length > 2 || basis.conversation) return false;
-    const selected = basis.messages.map(reference => messages.find(message => message.id === reference.id));
-    if (selected.some(message => !message || !isSessionTitleUserInput(message))) return false;
-    const target = selected.at(-1)!;
-    const expected = selectSessionTitleInputs(messages, taskId, basis.messages.length);
-    return sessionTitleInputId(target) === taskId && target.id === basis.lastMessageId
-      && expected.length === selected.length && expected.every((message, index) => message.id === selected[index]!.id);
-  }
-  const answer = messages.find(message => message.id === basis.lastMessageId);
-  if (!answer || !isSessionTitleFinalAnswer(answer)) return false;
-  if (basis.scope === 'recent_turns_v2') {
-    if (![2, 4].includes(basis.messages.length)) return false;
-    for (let i = 0; i < basis.messages.length; i += 2) {
-      const origin = messages.find(message => message.id === basis.messages[i].id);
-      if (!origin || !isSessionTitleOrigin(origin)) return false;
-      const ownerId = origin.userTask?.id ?? origin.id;
-      if (i + 2 === basis.messages.length && taskId !== ownerId) return false;
-      const round = selectSessionTitleRounds(messages, ownerId).at(-1);
-      if (round?.user.id !== origin.id || round.assistant.id !== basis.messages[i + 1].id) return false;
-    }
-    return true;
-  }
-  if (!answer.userTask) {
-    // New scoped provenance supports legacy records without manufacturing links.
-    if (!basis.conversation) return false;
-    const answerIndex = messages.indexOf(answer);
-    let origin: ChatMessage | undefined;
-    for (let index = answerIndex - 1; index >= 0; index--) {
-      if (isSessionTitleOrigin(messages[index])) { origin = messages[index]; break; }
-    }
-    return !!origin && !origin.userTask && origin.id === taskId
-      && basis.messages.some(reference => reference.id === origin.id);
-  }
-  if (answer.userTask.id !== taskId) return false;
-  const origin = messages.find(message => message.id === answer.userTask?.originMessageId);
-  return !!origin && isSessionTitleOrigin(origin) && (origin.userTask?.id ?? origin.id) === taskId
-    && basis.messages.some(reference => reference.id === origin.id);
+  if (basis.scope !== 'user_inputs_v3' || !sessionTitleBasisMatches(messages, basis)
+    || basis.messages.length < 1 || basis.messages.length > 2) return false;
+  const selected = basis.messages.map(reference => messages.find(message => message.id === reference.id));
+  if (selected.some(message => !message || !isSessionTitleUserInput(message))) return false;
+  const target = selected.at(-1)!;
+  const expected = selectSessionTitleInputs(messages, taskId, basis.messages.length);
+  return sessionTitleInputId(target) === taskId && target.id === basis.lastMessageId
+    && expected.length === selected.length && expected.every((message, index) => message.id === selected[index]!.id);
 }
 
 /** Committed naming is a product decision, not a renewable cache of evidence.
@@ -300,14 +251,8 @@ export function cloneSessionTitleMetadata(value: unknown, customTitle: string | 
   }
   const lastMessageId = messageIdMap.get(previous.completed.basis.lastMessageId);
   if (!lastMessageId) return stopped;
-  const taskId = messageIdMap.get(previous.completed.taskId)
-    ?? (previous.completed.basis.scope === 'user_inputs_v3' ? lastMessageId : refs[0]?.id);
-  const conversation = previous.completed.basis.conversation
-    ? sessionTitleConversationFingerprint(copiedMessages, lastMessageId) : undefined;
-  return taskId ? { ...stopped,
-    completed: { taskId, basis: { messages: refs, lastMessageId,
-      ...(previous.completed.basis.scope ? { scope: previous.completed.basis.scope } : {}),
-      ...(conversation ? { conversation } : {}) } } } : stopped;
+  const taskId = messageIdMap.get(previous.completed.taskId) ?? lastMessageId;
+  return { ...stopped, completed: { taskId, basis: { scope: 'user_inputs_v3', messages: refs, lastMessageId } } };
 }
 
 const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
@@ -403,65 +348,9 @@ export function isSessionTitleUserInput(message: ChatMessage): boolean {
 }
 
 /** Naming belongs to an input; recovery continues to spend its original root
- * allowance elsewhere. Original/legacy roots keep their existing identities. */
+ * allowance elsewhere. Original roots keep their existing identities. */
 export function sessionTitleInputId(message: ChatMessage): string {
   return message.userTask?.reason === 'recovery' ? message.id : message.userTask?.id ?? message.id;
-}
-
-function assistantTurnMessage(message: ChatMessage): boolean {
-  const reason = message.contextMeta?.protectedReason;
-  return message.role === 'assistant' && !message.contextMeta?.displayKind && (!reason
-    || (!!message.userTask && !!message.runDetails && ['draft_edit_result', 'draft_run_proposal'].includes(reason)));
-}
-
-export function isSessionTitleFinalAnswer(message: ChatMessage): boolean {
-  if (!assistantTurnMessage(message) || message.isStreaming || message.incompleteForTitle || !message.content.trim()) return false;
-  const details = message.runDetails;
-  const checkpoint = message.runCheckpoint ?? message.runCheckpointArchive?.summary ?? message.runState;
-  const completeEngineeringAnswer = details && ['failed', 'blocked'].includes(details.status)
-    && checkpoint?.status === 'completed'
-    && (!checkpoint.stopReason || ['completed', 'waiting_for_user'].includes(checkpoint.stopReason));
-  if (details && ((!['succeeded', 'waiting'].includes(details.status) && !completeEngineeringAnswer) || details.failureReason
-    || details.budgetStopReason || details.budgetPause || details.outputTruncation)) return false;
-  if (checkpoint && (checkpoint.status !== 'completed'
-    || checkpoint.stopReason && !['completed', 'waiting_for_user'].includes(checkpoint.stopReason))) return false;
-  return true;
-}
-
-export interface SessionTitleRound {
-  taskId: string;
-  user: ChatMessage;
-  assistant: ChatMessage;
-}
-
-/** Select by actual user boundaries first, then the final visible answer in
- * each boundary. Host continuation records never manufacture extra rounds. */
-export function selectSessionTitleRounds(messages: readonly ChatMessage[], taskId?: string): SessionTitleRound[] {
-  const rounds: SessionTitleRound[] = [];
-  let end = messages.length;
-  let foundTarget = false;
-  for (let i = end - 1; i >= 0 && rounds.length < 2; --i) {
-    const user = messages[i];
-    if (!isSessionTitleOrigin(user)) continue;
-    const currentTaskId = user.userTask?.id ?? user.id;
-    if (!foundTarget && taskId !== undefined && taskId !== currentTaskId) { end = i; continue; }
-    const target = !foundTarget;
-    foundTarget = true;
-    let answer: ChatMessage | undefined;
-    for (let j = end - 1; j > i; --j) {
-      const candidate = messages[j];
-      // A pending continuation has no final answer yet.
-      if (candidate.role === 'user') break;
-      if (!assistantTurnMessage(candidate)) continue;
-      if (candidate.userTask ? candidate.userTask.id === currentTaskId && candidate.userTask.originMessageId === user.id
-        : !user.userTask) answer = candidate;
-      break;
-    }
-    if (answer && isSessionTitleFinalAnswer(answer)) rounds.unshift({ taskId: currentTaskId, user, assistant: answer });
-    else if (target) return [];
-    end = i;
-  }
-  return rounds;
 }
 
 /** User input is the event boundary; no answer, success or streaming state is
@@ -489,33 +378,6 @@ export function getSessionTitleRegenerationTaskId(messages: readonly ChatMessage
 
 export const SESSION_TITLE_AUTOMATIC_MAX_CHARS = 4000;
 export const SESSION_TITLE_REGENERATION_MAX_CHARS = 8000;
-
-/** Legacy whole-history fingerprints keep their original selection semantics.
- * New recent-turn provenance never calls this full-history hasher. */
-function titleConversationMessage(message: ChatMessage): boolean {
-  return (message.role === 'user' && !message.contextMeta?.displayKind
-    && (!message.userTask || message.userTask.reason === 'user'))
-    || (message.role === 'assistant' && !message.isStreaming
-      && !message.contextMeta?.displayKind && !message.contextMeta?.protectedReason && !!message.content.trim());
-}
-
-export function sessionTitleConversationFingerprint(messages: readonly ChatMessage[], lastMessageId: string): {
-  messageCount: number; hash: string;
-} | undefined {
-  const boundary = messages.findIndex(message => message.id === lastMessageId);
-  if (boundary < 0) return undefined;
-  const hash = createHash('sha256');
-  let messageCount = 0;
-  for (let index = 0; index <= boundary; index++) {
-    const message = messages[index];
-    if (!titleConversationMessage(message)) continue;
-    // One JSON record per line makes record boundaries unambiguous. Metadata,
-    // hidden reasoning and replay are intentionally outside this fingerprint.
-    hash.update(JSON.stringify([message.id, message.role, message.content])).update('\n');
-    messageCount++;
-  }
-  return { messageCount, hash: hash.digest('hex') };
-}
 
 function clipGraphemeTail(text: string, maxChars: number): string {
   const start = Math.max(0, text.length - maxChars - 32);

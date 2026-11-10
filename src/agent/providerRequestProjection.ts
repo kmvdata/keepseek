@@ -28,17 +28,15 @@ import type {
 } from './providers/anthropicTypes';
 import { buildHistoryProjection, type HistoryProjectionResult } from './historyProjection';
 import {
+  CURRENT_AGENT_PROTOCOL_VERSION,
   buildInitialAgentMessages,
   getMessageContentForAgent,
   getAgentToolNamesForPrompt,
   getAgentTools
 } from './protocol';
 
-export { PLUGIN_SKILL_REQUEST_PROTOCOL_VERSION } from './protocol';
-export const CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION = 15;
-export const LEGACY_PROVIDER_REQUEST_PROTOCOL_VERSION = 1;
-export const PROVIDER_PROJECTION_REQUEST_PROTOCOL_VERSION = 2;
-export const CURRENT_PROVIDER_TOOL_SCHEMA_VERSION = 15;
+export const CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION = CURRENT_AGENT_PROTOCOL_VERSION;
+export const CURRENT_PROVIDER_TOOL_SCHEMA_VERSION = CURRENT_AGENT_PROTOCOL_VERSION;
 
 /** Final context surface shared by dispatch, candidate admission and usage.
  * Candidate results are explicit additions; native replay is never rebuilt or
@@ -186,7 +184,7 @@ export function buildProviderRequestProjection(
   input: ProviderRequestProjectionInput
 ): ProviderRequestProjection {
   const profile = getAgentRuntimeProfile(input.model, input.agentSettings);
-  const requestProtocolVersion = normalizeRequestProtocolVersion(input.requestProtocolVersion);
+  const requestProtocolVersion = CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION;
   const provider = input.provider ?? input.model.provider;
   const lane = getProviderRequestLane({ provider: input.provider ?? (provider === 'openai-responses' || provider === 'anthropic-compatible' ? provider : 'openai-compatible'),
     sourceId: input.sourceId ?? input.model.sourceId ?? '', baseUrl: input.baseUrl ?? '', modelId: input.model.id });
@@ -355,7 +353,7 @@ function buildOpenAiResponsesRequestProjection(input: {
 
   // System/context/summary messages are already ordered by the authoritative
   // Chat projection. They contain no tool rounds, so projecting just this stable
-  // prefix cannot alter the legacy Chat Completions serialization.
+  // prefix cannot alter the Chat Completions serialization.
   for (const message of input.messages) {
     if (message.role !== 'system' || typeof message.content !== 'string' || !message.content) {
       continue;
@@ -464,30 +462,4 @@ export function normalizeAnthropicMessagesLaneBaseUrl(rawBaseUrl: string): strin
 
 export function normalizeChatCompletionsLaneBaseUrl(rawBaseUrl: string): string {
   return rawBaseUrl.trim().replace(/\/+$/u, '').replace(/#.*$/u, '');
-}
-
-function normalizeRequestProtocolVersion(value: number | undefined): number {
-  const normalized = Number.isFinite(value) ? Math.floor(Number(value)) : LEGACY_PROVIDER_REQUEST_PROTOCOL_VERSION;
-  if (normalized >= CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION) {
-    return CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION;
-  }
-  if (normalized >= 14) return 14;
-  if (normalized >= 13) return 13;
-  if (normalized >= 12) return 12;
-  if (normalized >= 11) return 11;
-  if (normalized >= 10) return 10;
-  if (normalized >= 9) return 9;
-  if (normalized >= 8) return 8;
-  if (normalized >= 7) return 7;
-  if (normalized >= 6) return 6;
-  if (normalized >= 5) return 5;
-  if (normalized >= 4) {
-    return 4;
-  }
-  if (normalized >= 3) {
-    return 3;
-  }
-  return normalized >= PROVIDER_PROJECTION_REQUEST_PROTOCOL_VERSION
-    ? PROVIDER_PROJECTION_REQUEST_PROTOCOL_VERSION
-    : LEGACY_PROVIDER_REQUEST_PROTOCOL_VERSION;
 }

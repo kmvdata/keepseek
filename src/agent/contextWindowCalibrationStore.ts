@@ -4,16 +4,16 @@ import type { ModelSourceProvider } from '../accounts/types';
 import { writeJsonAtomic } from '../shared/atomicStorage';
 import {
   CONTEXT_WINDOW_CALIBRATION_VERSION,
+  isCurrentContextWindowCalibrationState,
   migrateContextWindowCalibrationState,
   type ContextWindowCalibrationState,
-  type ContextWindowDeclaration,
-  type RestoredContextWindowCalibrationState
+  type ContextWindowDeclaration
 } from './toolResultAdmission';
 
 export interface ContextWindowCalibrationKey {
   sourceId: string;
   provider: ModelSourceProvider;
-  /** Original wire model ID, retained only for locating v1 records. */
+  /** Wire model ID used when no canonical model identity is available. */
   modelId: string;
   /** Canonical local identity used by v2 records. */
   canonicalModelId?: string;
@@ -38,39 +38,24 @@ export class ContextWindowCalibrationStore {
     declaration?: ContextWindowDeclaration & { declaredWindowTokens: number }
   ): Promise<ContextWindowCalibrationState | undefined> {
     if (!this.globalStorageUri) return undefined;
-    const v2Hash = hashKey(key, true);
-    const current = await this.read(this.uri(v2Hash, 2));
-    let raw: RestoredContextWindowCalibrationState | undefined = isStoredCalibrationV2(current)
-      && current.keyHash === v2Hash ? current.state : undefined;
-    let migratedFromV1 = false;
-    if (!raw) {
-      const v1Hash = hashKey(key, false);
-      const legacy = await this.read(this.uri(v1Hash, 1));
-      if (isStoredCalibrationV1(legacy) && legacy.keyHash === v1Hash) {
-        raw = legacy.state;
-        migratedFromV1 = true;
-      }
-    }
+    const keyHash = hashKey(key);
+    const current = await this.read(this.uri(keyHash));
+    const raw = isStoredCalibrationV2(current) && current.keyHash === keyHash ? current.state : undefined;
     if (!raw) return undefined;
     const normalized = migrateContextWindowCalibrationState(
       raw,
       declaration?.declaredWindowTokens ?? raw.declaredWindowTokens,
       {
-        identity: declaration?.identity
-          ?? (raw.version === 2 ? raw.declaredIdentity : undefined)
-          ?? key.canonicalModelId ?? key.modelId,
-        version: declaration?.version
-          ?? (raw.version === 2 ? raw.declaredVersion : undefined)
-          ?? 'context-capability-v2'
+        identity: declaration?.identity ?? raw.declaredIdentity,
+        version: declaration?.version ?? raw.declaredVersion
       }
     ).state;
-    if (declaration || migratedFromV1) {
-      // A failed write leaves the v1 source intact, so migration is retryable.
+    if (declaration) {
       try {
         await this.save(key, normalized);
       } catch {
-        // The normalized in-memory state is still safe to use. Never delete or
-        // rewrite the v1 source before the atomic v2 write succeeds.
+        // Optional local metadata can remain in memory after an atomic write
+        // fails. The last committed current record stays authoritative on disk.
       }
     }
     return normalized;
@@ -78,8 +63,9 @@ export class ContextWindowCalibrationStore {
 
   public async save(key: ContextWindowCalibrationKey, state: ContextWindowCalibrationState): Promise<void> {
     if (!this.globalStorageUri) return;
-    const keyHash = hashKey(key, true);
-    await writeJsonAtomic(this.uri(keyHash, 2), {
+    if (!isCurrentContextWindowCalibrationState(state)) throw new Error('Invalid current context-window calibration state');
+    const keyHash = hashKey(key);
+    await writeJsonAtomic(this.uri(keyHash), {
       version: CONTEXT_WINDOW_CALIBRATION_VERSION,
       keyHash,
       state: structuredClone(state),
@@ -95,16 +81,16 @@ export class ContextWindowCalibrationStore {
     }
   }
 
-  private uri(keyHash: string, version: 1 | 2): vscode.Uri {
-    return vscode.Uri.joinPath(this.globalStorageUri!, 'model-calibration', `v${version}`, `${keyHash}.json`);
+  private uri(keyHash: string): vscode.Uri {
+    return vscode.Uri.joinPath(this.globalStorageUri!, 'model-calibration', 'v2', `${keyHash}.json`);
   }
 }
 
-function hashKey(key: ContextWindowCalibrationKey, canonical: boolean): string {
+function hashKey(key: ContextWindowCalibrationKey): string {
   return createHash('sha256').update(JSON.stringify([
     key.provider,
     key.sourceId.trim(),
-    canonical ? (key.canonicalModelId ?? key.modelId).trim() : key.modelId.trim(),
+    (key.canonicalModelId ?? key.modelId).trim(),
     key.endpointHash
   ]), 'utf8').digest('hex');
 }
@@ -112,29 +98,5 @@ function hashKey(key: ContextWindowCalibrationKey, canonical: boolean): string {
 function isStoredCalibrationV2(value: unknown): value is StoredCalibrationV2 {
   if (!value || typeof value !== 'object') return false;
   const item = value as Partial<StoredCalibrationV2>;
-  const state = item.state;
-  return item.version === 2 && typeof item.keyHash === 'string' && state?.version === 2
-    && isFinitePositive(state.declaredWindowTokens)
-    && isFinitePositive(state.learnedEffectiveWindowTokens)
-    && Number.isFinite(state.estimatorScale)
-    && Number.isFinite(state.observations)
-    && Number.isFinite(state.contextTooLongCount);
-}
-
-function isStoredCalibrationV1(value: unknown): value is {
-  version: 1;
-  keyHash: string;
-  state: RestoredContextWindowCalibrationState;
-} {
-  if (!value || typeof value !== 'object') return false;
-  const item = value as { version?: unknown; keyHash?: unknown; state?: unknown };
-  const state = item.state as Partial<RestoredContextWindowCalibrationState> | undefined;
-  return item.version === 1 && typeof item.keyHash === 'string' && Boolean(state)
-    && isFinitePositive(state?.declaredWindowTokens)
-    && isFinitePositive(state.learnedEffectiveWindowTokens)
-    && Number.isFinite(state.estimatorScale);
-}
-
-function isFinitePositive(value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0;
+  return item.version === 2 && typeof item.keyHash === 'string' && isCurrentContextWindowCalibrationState(item.state);
 }

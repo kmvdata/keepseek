@@ -2,6 +2,7 @@ import './registerVscodeStub';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import * as vscode from './stubs/vscode';
+import { CURRENT_AGENT_PROTOCOL_VERSION } from '../src/agent/protocol';
 import { AgentRunner } from '../src/agent/runner';
 import { ExecutionCostBudget, LogicalBudgetExceededError } from '../src/agent/executionPolicy';
 import { AgentInterruptedError, checkpointCopy, createRunCheckpoint, normalizeRunCheckpoint, type RunCheckpoint } from '../src/agent/runCheckpoint';
@@ -12,7 +13,7 @@ import type { AgentActivityInput, AgentRequest, ProviderUsageLedgerRecord } from
 
 function input(): AgentRequest {
   return {
-    prompt: 'Inspect the workspace', contextFiles: [], history: [], language: 'en', requestProtocolVersion: 8,
+    prompt: 'Inspect the workspace', contextFiles: [], history: [], language: 'en', requestProtocolVersion: CURRENT_AGENT_PROTOCOL_VERSION,
     model: { id: 'model', label: 'Model', provider: 'openai-compatible', sourceId: 'source', contextWindowTokens: 128_000 },
     settings: { thinkingEnabled: false, reasoningEffort: 'high', compressionThreshold: 'balanced' },
     sourceConfig: { sourceId: 'source', provider: 'openai-compatible', baseUrl: 'https://example.invalid', apiKey: '', supportsBilling: false }
@@ -55,7 +56,7 @@ test('replays the frozen current model round without rerunning completed tool ev
     const history = JSON.stringify(request.history);
     const response = await new AgentRunner(workspace).run(request, {
       onCheckpoint: async (next) => { checkpoint = checkpointCopy(next); },
-      onStatus: (status) => statuses.push(status), onUsageLedgerRecord: (record) => { const next = appendUsageLedgerRecord({ version: 1, records: records, incomplete: false, legacyAggregate: false }, record); records.splice(0, records.length, ...next.records); },
+      onStatus: (status) => statuses.push(status), onUsageLedgerRecord: (record) => { const next = appendUsageLedgerRecord({ version: 1, records: records, incomplete: false }, record); records.splice(0, records.length, ...next.records); },
       onModelRoundStart: () => { roundStarts++; }, onAttemptReset: () => { resets++; }
     });
     assert.equal(response.message, 'final answer');
@@ -148,14 +149,18 @@ test('recovery fails closed if generation parameters changed after interruption'
   } finally { globalThis.fetch = originalFetch; }
 }));
 
-test('checkpoint reconnect migration retains spent allowance and rejects malformed counts or hashes', () => {
+test('current checkpoint recovery retains spent reconnect allowance and rejects malformed counts or hashes', () => {
   const cp = createRunCheckpoint(input(), 0, 'test', []);
+  cp.modelStepAttempts = 4;
   cp.modelStepRetries = 3;
   const normalized = normalizeRunCheckpoint(cp)!;
   assert.equal(normalized.modelStepAttempts, 4);
   assert.equal(normalized.modelStepRetries, 3);
   for (const modelStepAttempts of [-1, 1.5, 7, NaN]) assert.equal(normalizeRunCheckpoint({ ...cp, modelStepAttempts }), undefined);
   assert.equal(normalizeRunCheckpoint({ ...cp, modelStepRequestHash: 'broken' }), undefined);
+  assert.equal(normalizeRunCheckpoint({ ...cp, request: { ...cp.request, requestProtocolVersion: 14 } }), undefined);
+  assert.equal(normalizeRunCheckpoint({ ...cp, request: { ...cp.request, requestProtocolVersion: undefined } }), undefined);
+  assert.equal(normalizeRunCheckpoint({ ...cp, version: 1 }), undefined);
 });
 
 test('parallel cost reservations, unknown attempts and restart cannot spend the same remaining ceiling', () => {
@@ -234,7 +239,7 @@ test('empty or partial usage stays unknown and never refunds token or positive c
   try {
     await new AgentRunner().run(request, {
       onCheckpoint: async (next) => { checkpoint = checkpointCopy(next); },
-      onUsageLedgerRecord: (record) => { const next = appendUsageLedgerRecord({ version: 1, records: records, incomplete: false, legacyAggregate: false }, record); records.splice(0, records.length, ...next.records); }
+      onUsageLedgerRecord: (record) => { const next = appendUsageLedgerRecord({ version: 1, records: records, incomplete: false }, record); records.splice(0, records.length, ...next.records); }
     });
     assert.ok((checkpoint.usedCostByCurrency?.['¥'] ?? 0) > 0);
     assert.ok((checkpoint.runBudget?.upstreamTokens ?? 0) > 10);
@@ -243,7 +248,7 @@ test('empty or partial usage stays unknown and never refunds token or positive c
     assert.equal(records[0].usage, undefined);
     assert.deepEqual(records[0].observedUsage, { promptTokens: 10 });
     assert.equal(records[0].pricingStatus, 'unavailable');
-    const normalized = normalizeUsageLedgerValue({ version: 1, records, legacyAggregate: false, incomplete: false });
+    const normalized = normalizeUsageLedgerValue({ version: 1, records, incomplete: false });
     assert.equal(normalized?.records[0].observedUsage?.completionTokens, undefined);
     assert.deepEqual(normalized?.records[0].observedUsage, { promptTokens: 10 });
   } finally { globalThis.fetch = originalFetch; }

@@ -23,9 +23,9 @@ import type { AgentRequest, ContextUsageEstimate, SubagentHandoffEstimate, Subag
 const toolNames = ['keepseek_delegate_task', 'keepseek_delegate_parallel', 'keepseek_read_subagent_result'];
 const calls = toolNames.map((name, index) => ({
   id: 'tool-' + index, type: 'function' as const,
-  function: { name, arguments: JSON.stringify(index === 0 ? { task: 'Inspect a bounded surface.' }
-    : index === 1 ? { tasks: [{ task: 'Inspect a different surface.' }] }
-      : { subagentId: 'sa_child', offset: 100 }) }
+  function: { name, arguments: JSON.stringify(index === 0 ? { task: 'Inspect a bounded surface.', candidateId: 'single' }
+    : index === 1 ? { tasks: [{ task: 'Inspect a different surface.', candidateId: 'parallel' }] }
+      : { ref: 'sa_child', offsetBytes: 100 }) }
 }));
 
 test('fixed-model resolution failures show the requested model, never an apparent parent-model fallback', async () => {
@@ -166,7 +166,7 @@ test('failed and stopped children retain earlier Provider usage, local estimates
       assert.ok(summaries[0].isolatedIntermediateTokensEstimate > 0);
       const stored = await new SubagentStore(uri, 'test').read('session-one', summaries[0].subagentId);
       assert.equal(stored?.metadata.stats?.usage?.totalTokens, 110);
-      const page = await new SubagentStore(uri, 'test').readResultPage({ parentSessionId: 'session-one', subagentId: summaries[0].subagentId });
+      const page = await new SubagentStore(uri, 'test').readResultPage({ parentSessionId: 'session-one', ref: summaries[0].subagentId });
       assert.equal(page.usage, undefined, 'new statistics must not change the historic tool-result serializer');
       assert.equal(page.stats, undefined);
     } finally {
@@ -249,9 +249,14 @@ async function runParent(callbacks: Parameters<AgentRunner['run']>[1], options: 
       ? sse({ tool_calls: calls.map((call, index) => ({ ...call, index })) }, 'tool_calls')
       : sse({ content: 'Done.' }, 'stop');
   }) as typeof fetch;
-  const execution = { content: options.result ?? JSON.stringify({ ok: true, result: 'Compact result', subagentId: 'sa_child' }) };
+  const body = JSON.parse(options.result ?? JSON.stringify({ ok: true, result: 'Compact result' }));
+  const child = (id: string) => ({ ...body, version: 3, kind: 'subagent_result_manifest', subagentId: id, resultRef: id,
+    resultHash: 'a'.repeat(64), resultStatus: 'complete', formatAccepted: true });
   const adapter: SubagentToolAdapter = {
-    delegateTask: async () => execution, delegateParallel: async () => execution, readResult: async () => execution
+    delegateTask: async () => ({ content: JSON.stringify(child('sa_child')) }),
+    delegateParallel: async () => ({ content: JSON.stringify({ version: 3, ok: true,
+      kind: 'subagent_parallel_manifest', results: [child('sa_parallel')] }) }),
+    readResult: async () => ({ content: JSON.stringify({ ...body, ok: true, ref: 'sa_child' }) })
   };
   try {
     const request = parentRequest();
@@ -268,6 +273,12 @@ async function runParent(callbacks: Parameters<AgentRunner['run']>[1], options: 
     }
     const checkpoint = createRunCheckpoint(request, 0, 'test', []);
     checkpoint.taskId = 'stable-subagent-handoff-task';
+    checkpoint.taskPlan = { id: 'stable-plan', runId: checkpoint.taskId, sessionId: request.sessionId,
+      goal: request.prompt, status: 'running', steps: [], blockers: [], createdAt: '', updatedAt: '',
+      delegation: { version: 1, assessment: { trigger: 'initial', decision: 'delegate',
+        reason: 'Independent bounded investigations.', evidence: [] },
+        candidates: ['single', 'parallel'].map(id => ({ id, goal: `Inspect the ${id} surface`, scope: [`src/${id}`], inputs: [],
+          dependsOn: [], capabilities: ['read'], acceptance: ['Return bounded evidence.'] })), results: [], events: [] } };
     request.checkpoint = checkpoint;
     const response = await new AgentRunner(undefined, undefined, undefined, undefined, undefined, undefined, undefined, adapter).run(request, callbacks);
     return { response, bodies };
@@ -289,19 +300,19 @@ test('a scoped live child read waits for host completion, rechecks the page and 
   host.setProgress(state);
   const context = { parentRequest: parentRequest(), parentRunId: 'root', language: 'en' as const };
   let settled = false;
-  const page = runtime.readResult({ subagentId: 'child' }, context).then(result => { settled = true; return result; });
+  const page = runtime.readResult({ ref: 'child' }, context).then(result => { settled = true; return result; });
   await new Promise<void>(resolve => setImmediate(resolve));
   assert.equal(settled, false); assert.equal(reads, 1, 'host wait does not repeatedly poll storage or Provider');
   completed = true; host.setProgress({ ...state, status: 'completed' });
   assert.equal(JSON.parse((await page).content).content, 'late verified result'); assert.equal(reads, 2);
   completed = false; host.setProgress(state);
   const controller = new AbortController();
-  const pending = runtime.readResult({ subagentId: 'child' }, { ...context, signal: controller.signal });
+  const pending = runtime.readResult({ ref: 'child' }, { ...context, signal: controller.signal });
   await new Promise<void>(resolve => setImmediate(resolve)); controller.abort();
   await assert.rejects(pending, /cancelled/);
   // No active operation in this parent scope: never wait for another session.
   host.setProgress({ ...state, parentSessionId: 'other' });
-  assert.equal(JSON.parse((await runtime.readResult({ subagentId: 'child' }, context)).content).errorType, 'subagent_result_pending');
+  assert.equal(JSON.parse((await runtime.readResult({ ref: 'child' }, context)).content).errorType, 'subagent_result_pending');
 });
 
 function parentRequest(): AgentRequest {
@@ -309,7 +320,7 @@ function parentRequest(): AgentRequest {
     prompt: 'Investigate this bounded question.',
     model: { id: 'model-main', label: 'Main', sourceId: 'account-main', provider: 'openai-compatible', contextWindowTokens: 64_000, maxOutputTokens: 2_000 },
     settings: { thinkingEnabled: false, reasoningEffort: 'high', compressionThreshold: 'balanced' },
-    history: [], contextFiles: [], language: 'en', sessionId: 'session-one', requestProtocolVersion: 5,
+    history: [], contextFiles: [], language: 'en', sessionId: 'session-one', requestProtocolVersion: 15,
     sourceConfig: { sourceId: 'account-main', provider: 'openai-compatible', baseUrl: 'https://provider.invalid/v1', apiKey: 'test-key', supportsBilling: false },
     executionLimits: { maxToolIterations: 2 }
   };

@@ -1,19 +1,18 @@
 import { createHash } from 'node:crypto';
 import { open, unlink } from 'node:fs/promises';
 import * as vscode from 'vscode';
-import { writeBytesAtomic, writeJsonAtomic } from '../shared/atomicStorage';
+import { writeJsonAtomic } from '../shared/atomicStorage';
 import type { ChatMessage, ChatSession } from '../shared/types';
 import { getVisibleMessages } from './chatSessionStore';
 import { freezeTree, isFrozenTree, isPackedPersistenceTree, persistenceMessageBody } from './persistenceSnapshot';
 import { recordLocalPerformance } from '../agent/logging/performanceTrace';
-import { getConfiguredKeepseekLanguage, localize } from '../shared/i18n';
 import { SessionDeletionAuthority } from './sessionDeletionAuthority';
 
 type Encoded = null | string | number | boolean | { ref: string } | { inline: ObjectNode };
 type ObjectNode = { kind: 'array'; values: Encoded[] } | { kind: 'object'; entries: Array<[string, Encoded]> } | { kind: 'text'; text: string }
   | { kind: 'json'; value: unknown };
 interface SessionManifest {
-  version: 3 | 4;
+  version: 4;
   workspaceKey: string;
   sessionId: string;
   revision: number;
@@ -29,7 +28,7 @@ const digest = (text: string) => createHash('sha256').update(text).digest('hex')
 
 /** Per-session immutable graph. Objects are durable BEFORE the manifest switch.
  * No object GC while a session exists: old manifests and recovery references
- * remain valid, including failed writes and legacy rollback copies. */
+ * remain valid, including failed writes. */
 export class SessionObjectStore {
   private readonly frozenRefs = new WeakMap<object, Encoded>();
   private readonly written = new Set<string>();
@@ -44,8 +43,7 @@ export class SessionObjectStore {
   private objectIoMs = 0;
   private measuredIoActive = 0;
   private measuredIoStarted = 0;
-  public constructor(private readonly shard: vscode.Uri, private readonly offlineRecoveryCopy = false,
-    private readonly migrationOptions?: { signal?: AbortSignal; onProgress?: (phase: string, completed: number, total: number) => void }) {}
+  public constructor(private readonly shard: vscode.Uri) {}
   private directory(): vscode.Uri { return vscode.Uri.joinPath(this.shard, '..', `${this.shard.path.split('/').at(-1)}.objects`); }
   private objectUri(hash: string): vscode.Uri {
     if (!HASH.test(hash)) throw new Error('Invalid session object hash');
@@ -159,11 +157,11 @@ export class SessionObjectStore {
     }
     return value;
   }
-  /** Verified field projection for legacy child records. Never decode sibling
+  /** Verified field projection for bounded metadata reads. Never decode sibling
    * transcript/history/checkpoint nodes merely to retrieve a canonical result. */
   public async loadField(manifest: unknown, path: readonly string[]): Promise<unknown> {
     const m = manifest as SessionManifest;
-    if (![3, 4].includes(m?.version) || !Number.isSafeInteger(m.revision) || !Array.isArray(m.messages)
+    if (m?.version !== 4 || !Number.isSafeInteger(m.revision) || !Array.isArray(m.messages)
       || !HASH.test(m.header)) throw new Error('Invalid session manifest');
     const visited = new Set<string>();
     const nodeFor = async (encoded: Encoded): Promise<ObjectNode | undefined> => {
@@ -198,7 +196,7 @@ export class SessionObjectStore {
   }
   public async load(manifest: unknown): Promise<ChatSession> {
     const m = manifest as SessionManifest;
-    if (![3, 4].includes(m?.version) || !Number.isSafeInteger(m.revision) || !Array.isArray(m.messages)) throw new Error('Invalid session manifest');
+    if (m?.version !== 4 || !Number.isSafeInteger(m.revision) || !Array.isArray(m.messages)) throw new Error('Invalid session manifest');
     const cache = new Map<string, unknown>();
     if (m.headerInline && digest(JSON.stringify(m.headerInline)) !== m.header) throw new Error('Session header integrity mismatch');
     const header = (m.headerInline ? await this.decodeNode(m.headerInline, cache, new Set())
@@ -241,46 +239,22 @@ export class SessionObjectStore {
     const started = performance.now(), bytesBefore = this.writeBytes, objectsBefore = this.writeObjects;
     const visitsBefore = this.nodeVisits, hashBefore = this.hashMs, ioBefore = this.objectIoMs;
     return this.withWriterLock(async () => {
-      let previous: unknown, previousBytes: Uint8Array | undefined;
-      try { previousBytes = await vscode.workspace.fs.readFile(this.shard); previous = JSON.parse(new TextDecoder().decode(previousBytes)); }
+      let previous: SessionManifest | undefined;
+      try { previous = JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(this.shard))) as SessionManifest; }
       catch (error) { if (!isMissing(error)) throw error; }
-      let prior: { version: number; revision: number; sessionId?: string; workspaceKey?: string } | undefined;
-      if (previous) {
-        const value = previous as SessionManifest & { session?: ChatSession };
-        if (![2, 3, 4].includes(Number(value.version))) throw new Error('Unsupported session storage version');
-        if (!this.offlineRecoveryCopy && Number(value.version) === 2 && value.session?.messages.some(message => message.runCheckpoint?.status === 'running')) {
-          throw new Error('Legacy session still marked running; migration requires a stopped writer and an offline recovery copy');
-        }
-        prior = { version: value.version, revision: value.revision ?? 0,
-          sessionId: value.sessionId ?? value.session?.id, workspaceKey: value.workspaceKey ?? value.session?.workspaceKey };
-        if (prior.sessionId !== session.id || prior.workspaceKey !== session.workspaceKey) throw new Error('Session writer scope mismatch');
+      if (previous && (previous.version !== 4 || !Number.isSafeInteger(previous.revision) || previous.revision < 1)) {
+        throw new Error('Unsupported session storage version');
       }
-      // Keep the legacy bytes for rollback, not a second 224 MB parsed tree
-      // throughout object encoding and graph verification.
-      previous = undefined;
-      const revision = prior && prior.version >= 3 ? prior.revision : 0;
+      if (previous && (previous.sessionId !== session.id || previous.workspaceKey !== session.workspaceKey)) throw new Error('Session writer scope mismatch');
+      const revision = previous?.revision ?? 0;
       if (revision && this.revision === undefined) throw new Error('Existing session must be loaded before saving');
       if (this.revision !== undefined && revision !== this.revision) throw new Error('Stale session writer; reload before saving');
-      const migrating = prior?.version === 2;
-      const saveGraph = async (progress?: vscode.Progress<{ message?: string }>, token?: vscode.CancellationToken): Promise<number> => {
-      const report = (phase: string, completed: number, total: number) => {
-        if (!migrating) return;
-        this.migrationOptions?.onProgress?.(phase, completed, total);
-        progress?.report({ message: `${phase}: ${completed}/${total}` });
-      };
-      const checkCancelled = () => {
-        if (migrating && (token?.isCancellationRequested || this.migrationOptions?.signal?.aborted)) {
-          throw new Error('Session migration cancelled before commit; original session retained');
-        }
-      };
-      checkCancelled();
       const { messages, ...header } = session;
       const entries: SessionManifest['messages'] = new Array(messages.length);
-      let messageCursor = 0, completedMessages = 0;
+      let messageCursor = 0;
       const workers = await Promise.allSettled(Array.from({ length: Math.min(4, messages.length) }, async () => {
       while (messageCursor < messages.length) {
         const index = messageCursor++, message = messages[index];
-        checkCancelled(); report('encode', completedMessages, messages.length);
         const { runCheckpoint, runCheckpointArchive, ...body } = message;
         delete body.runState;
         if (!runCheckpoint && runCheckpointArchive && !this.written.has(runCheckpointArchive.objectHash)) {
@@ -293,7 +267,6 @@ export class SessionObjectStore {
           checkpoint: runCheckpoint ? await this.object(runCheckpoint) : runCheckpointArchive?.objectHash,
           pendingTool: runCheckpoint ? Boolean(runCheckpoint.state?.pending) : runCheckpointArchive?.pendingTool,
           summary: runCheckpoint ? getVisibleMessages([message])[0].runState : runCheckpointArchive?.summary };
-        completedMessages++;
       }
       }));
       const failure = workers.find(result => result.status === 'rejected');
@@ -304,27 +277,6 @@ export class SessionObjectStore {
         revision: revision + 1, header: 'ref' in encodedHeader ? encodedHeader.ref : digest(JSON.stringify(encodedHeader.inline)),
         ...('inline' in encodedHeader ? { headerInline: encodedHeader.inline } : {}), messages: entries,
         ...(summary ? { summary, summaryHash: digest(JSON.stringify(summary)) } : {}) };
-      // Verify the new graph before replacing a legacy authority. Keep its exact
-      // bytes permanently until explicit session deletion (rollback support).
-      if (previousBytes && prior?.version === 2) {
-        const verificationCache = new Map<string, unknown>();
-        for (const [index, entry] of entries.entries()) {
-          checkCancelled(); report('verify', index, entries.length);
-          await this.decode(entry.body, verificationCache);
-          if (entry.checkpoint) await this.decode(entry.checkpoint, verificationCache);
-        }
-        checkCancelled(); report('backup', 0, 1);
-        await writeBytesAtomic(vscode.Uri.joinPath(this.directory(), 'legacy-v2.json'), previousBytes!, { durable: true });
-        this.writeBytes += previousBytes!.byteLength;
-        // Older writers cannot honor the new lock. Refuse a concurrent legacy
-        // change detected during migration rather than overwriting its authority.
-        const latest = await vscode.workspace.fs.readFile(this.shard);
-        if (Buffer.compare(previousBytes, latest) !== 0) throw new Error('Legacy session changed during migration');
-      }
-      if (previousBytes && prior?.version === 3) {
-        await writeBytesAtomic(vscode.Uri.joinPath(this.directory(), 'legacy-v3.json'), previousBytes, { durable: true });
-      }
-      checkCancelled(); report('commit', 0, 1);
       const encoded = performance.now();
       await writeJsonAtomic(this.shard, manifest, { durable: true });
       this.revision = manifest.revision;
@@ -342,12 +294,6 @@ export class SessionObjectStore {
       recordLocalPerformance({ type: 'checkpoint_encoding', sessionId: session.id, ...scope,
         nodesVisited: this.nodeVisits - visitsBefore, hashMs: this.hashMs - hashBefore, objectIoMs: this.objectIoMs - ioBefore });
       return bytes;
-      };
-      if (migrating && !this.offlineRecoveryCopy && typeof vscode.window.withProgress === 'function') {
-        return vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, cancellable: true,
-          title: localize(getConfiguredKeepseekLanguage(), 'sessionMigrationTitle') }, saveGraph);
-      }
-      return saveGraph();
     });
   }
   /** Scope comes from this session directory, never a caller-provided path. */

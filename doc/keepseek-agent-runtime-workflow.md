@@ -46,13 +46,7 @@ VS Code / Webview
 
 ## 3. 扩展启动与状态装配
 
-激活阶段大致按以下顺序完成：
-
-1. 创建账户、模型、会话、ChangeSet、DraftRun、审批、Skill 和 Usage Ledger 等服务。
-2. 恢复持久化记录；对重启时仍处于中间态的写入、命令和 Agent run 做保守归一化。
-3. 注册 `keepseek.chat` View、工作区命令、右键引用命令与 URI 打开处理。
-4. 建立 Provider 与 Webview，推送配置、账户、会话、变更和运行状态。
-5. 监听配置、工作区、编辑器和会话变化，更新宿主状态。
+激活优先注册 View、命令和事件，并进入全新空白会话。磁盘根统一由 `shared/storageRoot.ts` 解析为原生 `file:` URI；配置只读写 `kmvdata.keepseek.*`。不读取旧扩展、旧配置或历史正文，也不恢复上次会话。用户主动打开历史或提交任务时再加载所需数据；当前协议的副作用与预算恢复仍须跨过相应安全屏障。
 
 Webview 消息的唯一联合类型在 `provider/webviewMessages.ts`。Webview → 扩展的新消息必须同时更新类型、`handleMessage()` 和发送点；扩展主动推送消息不加入该联合类型。
 
@@ -81,7 +75,8 @@ Coordinator 先按模型画像刷新摘要，再由 `buildProviderRequestProject
 - OpenAI Responses；
 - Anthropic Messages。
 
-实际请求、token 估算、工具结果准入和缓存观测共用这一投影。父会话 request protocol/tool schema 和 child runtime 各自版本以 [版本维度](README.md#版本维度) 及对应源码常量为准。V10 引入子代理 UTF-8 byte-offset 分页，V11 增加分工评估与父验收合同，V12 增加插件 Skill 读取入口，V13 更新两模式审批的交付提示，V14 隐藏已暂停的插件读取工具。旧插件任务不可恢复执行，但历史快照与 evidence 保留只读。热旧会话只在受控边界迁移；这些版本不等同于结果合同、存储或审批策略版本，权威来源见 [版本与文档导航](README.md#版本维度)。P1 当时的现场核验限制见 [历史验收记录](keepseek-p1-field-acceptance.md)。
+实际请求、token 估算、工具结果准入和缓存观测共用这一投影。父会话和 child runtime 仅支持当前 request protocol/tool schema **15**；结果合同、handoff、审批交付与存储格式是独立版本维度，见[版本权威表](README.md#版本维度)。旧运行合同不参与恢复，历史报告仅记录当时证据。
+
 
 ### 4.3 来源解析
 
@@ -208,7 +203,7 @@ spawn(executable, args, { shell: false })
 | `ask` | 用户 | 默认；逐项或批量批准 |
 | `delegate`（帮我审批） | 宿主策略、独立审批 reviewer、必要时用户 | 常规操作直批；其余可审查操作自动送审，区分 approve/needs_user/deny/unavailable。必要时绑定当前 runtime 的精确单次人工请求，之后复核并续跑同一任务 |
 
-旧 `model_review` 当前设置迁移为 ask，仅保留历史审计；审批模型位于 `/` → 子代理模型 → 审批模型，配置仅取用户级 `keepseek.autoApprovalReviewer`，与普通子代理 default/角色设置独立。follow-main 跟随执行段的实际主模型。等待用户暂停有效计时，关闭 Webview 不取消等待；重启不恢复旧批准、队列或 permit。详细恢复与验收见 [帮我审批](keepseek-approve-for-me-verification.md)。
+当前仅接受 ask/delegate；审批模型位于 `/` → 子代理模型 → 审批模型，配置仅取用户级 `kmvdata.keepseek.autoApprovalReviewer`，与普通子代理 default/角色设置独立。follow-main 跟随执行段的实际主模型。等待用户暂停有效计时，关闭 Webview 不取消等待；重启不恢复旧批准、队列或 permit。详细恢复与验收见 [帮我审批](keepseek-approve-for-me-verification.md)。
 
 共同规则：
 
@@ -241,20 +236,20 @@ spawn(executable, args, { shell: false })
 
 | 配置 | 默认值 | 语义 |
 | --- | ---: | --- |
-| `keepseek.agent.maxExecutionMs` | `0` | 逻辑任务执行时间上限；0 表示不设显式上限 |
-| `keepseek.agent.maxToolIterations` | `0` | 每个交互式根任务预算段的工具轮额度；0 表示 unlimited |
-| `keepseek.agent.maxToolCalls` | `0` | 每个交互式根任务预算段的工具调用额度；0 表示 unlimited |
-| `keepseek.agent.maxModelRequests` | `0` | 根逻辑任务物理 Provider 请求上限；0 表示 unlimited |
-| `keepseek.agent.maxTreeUpstreamTokens` | `0` | 根任务及 child 合计上游 token 上限；0 表示 unlimited |
-| `keepseek.agent.maxContextEpochRollovers` | `0` | 根逻辑任务 rollover 上限；0 表示 unlimited |
-| `keepseek.agent.maxCost` | `0` | 按来源币种的费用上限；0 表示不设显式上限 |
-| `keepseek.modelRequestTimeoutSeconds` | `3600` | 单次模型请求总超时（秒），覆盖响应头和流式响应；所有账号及模型共用 |
+| `kmvdata.keepseek.agent.maxExecutionMs` | `0` | 逻辑任务执行时间上限；0 表示不设显式上限 |
+| `kmvdata.keepseek.agent.maxToolIterations` | `0` | 每个交互式根任务预算段的工具轮额度；0 表示 unlimited |
+| `kmvdata.keepseek.agent.maxToolCalls` | `0` | 每个交互式根任务预算段的工具调用额度；0 表示 unlimited |
+| `kmvdata.keepseek.agent.maxModelRequests` | `0` | 根逻辑任务物理 Provider 请求上限；0 表示 unlimited |
+| `kmvdata.keepseek.agent.maxTreeUpstreamTokens` | `0` | 根任务及 child 合计上游 token 上限；0 表示 unlimited |
+| `kmvdata.keepseek.agent.maxContextEpochRollovers` | `0` | 根逻辑任务 rollover 上限；0 表示 unlimited |
+| `kmvdata.keepseek.agent.maxCost` | `0` | 按来源币种的费用上限；0 表示不设显式上限 |
+| `kmvdata.keepseek.modelRequestTimeoutSeconds` | `3600` | 单次模型请求总超时（秒），覆盖响应头和流式响应；所有账号及模型共用 |
 
-顶部设置 →「模型请求超时」直接下拉选择 **5 分钟、15 分钟、1 小时、2 小时、8 小时、24 小时**，选择后自动保存为用户级配置，对之后发出的请求生效，默认 1 小时。配置仍以秒存储（300、900、3600、7200、28800、86400）；旧版任意时长或无效值统一按默认 1 小时读取，选择新档位后保存为合法值。主 Agent、子代理、历史摘要、Epoch 摘要和审批模型均使用同一配置，不再从模型档位读取 45～120 秒摘要超时，也不再使用固定的 12/20/30 秒模型请求截止时间。旧 `agent.streamIdleTimeoutMs` 不再参与模型请求策略；已有会话和账号无需迁移。请求超时不会自动重发；取消、任务/子代理总时限仍然优先生效。命令执行、验证工具、模型发现及余额查询保留各自时限。
+顶部设置 →「模型请求超时」直接下拉选择 **5 分钟、15 分钟、1 小时、2 小时、8 小时、24 小时**，选择后自动保存为用户级配置，对之后发出的请求生效，默认 1 小时。配置仍以秒存储（300、900、3600、7200、28800、86400）；无效值按默认 1 小时读取，选择档位后保存为合法值。主 Agent、子代理、历史摘要、Epoch 摘要和审批模型均使用同一配置，不再从模型档位读取 45～120 秒摘要超时，也不再使用固定的 12/20/30 秒模型请求截止时间。请求超时不会自动重发；取消、任务/子代理总时限仍然优先生效。命令执行、验证工具、模型发现及余额查询保留各自时限。
 
 此项控制 KeepSeek 自身的请求截止时间；VS Code/Node 网络栈、代理及上游服务仍可能独立提前断开连接，网络错误会按既有恢复策略处理。运行日志中的 `transport.requestTimeoutMs` 记录本次实际使用值。
 
-旧 `background.maxDurationMs` 仅作兼容输入；与新上限同时存在时取较小的正值。
+显式后台任务仍受 `kmvdata.keepseek.background.maxDurationMs` 及根逻辑任务预算约束。
 
 时间、费用和取消状态属于逻辑任务，不因子代理、Context Epoch 或恢复而重置：
 
@@ -277,7 +272,7 @@ spawn(executable, args, { shell: false })
 4. Provider 若仍返回工具调用，宿主不执行，并为原生协议配对确定性的 blocked tool result；
 5. 将结果记录为 `budget_pause` / `budgetPause.resumable=true`，而不是永久 `blocked`。
 
-用户点击现有“继续任务”按钮才会授予下一工具预算段。同一 `taskId`、累计轮次/调用/请求、时间、费用、Evidence、DraftEdit/DraftRun、validation、epoch、审批 root 和幂等记录全部保留；新段只更新 segment base 并重置该段的收尾状态，已完成工具不会重跑。旧 `tool_budget_exhausted` checkpoint 以不可变迁移方式归一化为可继续边界；malformed 或未知副作用 checkpoint 仍 fail closed。这里的内部 host 消息不是聊天中的伪用户消息，也不会恢复旧 `budget_auto_continue` 自动续跑。
+用户点击现有“继续任务”按钮才会授予下一工具预算段。同一 `taskId`、累计轮次/调用/请求、时间、费用、Evidence、DraftEdit/DraftRun、validation、epoch、审批 root 和幂等记录全部保留；新段只更新 segment base 并重置该段的收尾状态，已完成工具不会重跑。仅恢复当前格式的可继续边界；malformed 或未知副作用 checkpoint 仍 fail closed。这里的内部 host 消息不是聊天中的伪用户消息，也不会恢复旧 `budget_auto_continue` 自动续跑。
 
 ### 10.3 流式与重试
 
@@ -300,7 +295,7 @@ spawn(executable, args, { shell: false })
 
 ### 10.4 Checkpoint 与崩溃恢复
 
-长任务保存使用不可变对象引用与轻量 manifest；工具 intent、完整 evidence、固定 envelope 的屏障仍逐项 await。文件对象在 manifest 切换前同步落盘，失败不推进权威状态。心跳可与后续完整快照合并，但等待者只能在包含该状态或更新状态的提交成功后返回。旧 checkpoint 的历史不在心跳中重新复制或写回；详见 [存储迁移与测量](long-task-performance-rectification.md)。
+长任务保存使用不可变对象引用与轻量 manifest；工具 intent、完整 evidence、固定 envelope 的屏障仍逐项 await。文件对象在 manifest 切换前同步落盘，失败不推进权威状态。心跳可与后续完整快照合并，但等待者只能在包含该状态或更新状态的提交成功后返回。已持久化 checkpoint 的历史不在心跳中重新复制或写回；当前格式见[存储基线](keepseek-storage-baseline.md)，历史测量见[性能记录](long-task-performance-rectification.md)。
 
 `keepseek_read_evidence` 的裁剪保持根 evidence 与推进范围；无可交付正文时返回 `evidence_capacity_blocked`，不制造新的空引用。`bodyDelivery` 与 execution/delivery status 分开：执行成功、证据已保存、正文入 envelope、请求交付是不同事实。已保存结果恢复时重交付，不重跑原工具。活跃 child 的结果读取等待宿主完成事件、取消或既有工具/任务限制，完成后重新检查 scope/hash。
 
@@ -363,7 +358,7 @@ Run Details 用于解释当前上下文来源、工具、Skill、审批、Eviden
 | --- | --- |
 | 新增配置 | `package.json` contributes.configuration、`shared/config.ts`、配置测试 |
 | 来源/模型/余额 | accountStore、accountResolver、modelDiscovery、Runner、Compressor、Provider、balanceStore |
-| system/schema/协议 | protocol、projection、三 Provider replay、缓存观测、协议迁移测试 |
+| system/schema/协议 | protocol、projection、三 Provider replay、缓存观测、当前协议校验测试 |
 | 压缩/容量 | shared types、historyProjection、historyCompressor、contextUsage、toolResultAdmission、Runner |
 | Evidence/Epoch | evidence/*、contextEpoch、runCheckpoint、三协议配对、Run Details |
 | DraftEdit | Patch IR、draftEdit、artifact/blob、ChangeSet、SafeFileEditor、Diff、审批 hash、Webview |

@@ -2,7 +2,7 @@
   "name": "keepseek",
   "displayName": "KeepSeek",
   "description": "AI-powered coding agent for VS Code",
-  "publisher": "keepseek",
+  "publisher": "kmvdata",
   "version": "0.5.2",
   "license": "MIT",
   "icon": "resources/keepseek.png",
@@ -25,6 +25,7 @@
     "onView:keepseek.chat"
   ],
   "main": "./out/extension.js",
+  "extensionKind": ["workspace"],
   "contributes": {
     "commands": [
       { "command": "keepseek.selectProjectScope", "title": "KeepSeek: Select Task Directory / 选择任务目录" },
@@ -73,19 +74,19 @@
     "configuration": {
       "title": "KeepSeek",
       "properties": {
-        "keepseek.selectedSourceId": {
+        "kmvdata.keepseek.selectedSourceId": {
           "type": "string",
           "default": "",
           "scope": "window",
-          "markdownDescription": "Source ID paired with `keepseek.selectedModelId` for the selected model. This is model identity, not a globally active source."
+          "markdownDescription": "Source ID paired with `kmvdata.keepseek.selectedModelId` for the selected model. This is model identity, not a globally active source."
         },
-        "keepseek.selectedModelId": {
+        "kmvdata.keepseek.selectedModelId": {
           "type": "string",
           "default": "",
           "scope": "window",
           "markdownDescription": "Selected model for the current workspace. An empty or unavailable value adopts the global default model, or the first available model when no explicit default is valid."
         },
-        "keepseek.gitReleaseGrants": {
+        "kmvdata.keepseek.gitReleaseGrants": {
           "type": "array",
           "scope": "machine",
           "default": [],
@@ -102,7 +103,7 @@
             }
           }
         },
-        "keepseek.autoApprovalReviewer": {
+        "kmvdata.keepseek.autoApprovalReviewer": {
           "type": "object",
           "default": { "mode": "follow-main" },
           "scope": "application",
@@ -114,13 +115,13 @@
           "additionalProperties": false,
           "markdownDescription": "Independent approval model for Approve for me. Follows the actual main model of the task segment, or uses a fixed sourceId and modelId. User settings only; independent of subagent models. / 帮我审批的独立审批模型。跟随任务执行段的实际主模型，或固定账号 ID 与模型 ID。仅使用用户设置，与普通子代理模型无关。"
         },
-        "keepseek.thinkingEnabled": {
+        "kmvdata.keepseek.thinkingEnabled": {
           "type": "boolean",
           "default": true,
           "scope": "window",
           "markdownDescription": "Enable Thinking mode for the current workspace."
         },
-        "keepseek.reasoningEffort": {
+        "kmvdata.keepseek.reasoningEffort": {
           "type": "string",
           "default": "high",
           "scope": "window",
@@ -130,7 +131,7 @@
           ],
           "markdownDescription": "Thinking effort for the current workspace."
         },
-        "keepseek.compressionThreshold": {
+        "kmvdata.keepseek.compressionThreshold": {
           "type": "string",
           "default": "balanced",
           "scope": "window",
@@ -141,12 +142,7 @@
           ],
           "markdownDescription": "Automatic history compaction threshold for the current workspace: 70% early cleanup, 80% balanced, or 85% cache first."
         },
-        "keepseek.model": {
-          "type": "string",
-          "default": "deepseek-chat",
-          "description": "Model name"
-        },
-        "keepseek.language": {
+        "kmvdata.keepseek.language": {
           "type": "string",
           "default": "auto",
           "enum": [
@@ -156,7 +152,7 @@
           ],
           "description": "UI/Agent language"
         },
-        "keepseek.maxFileBytes": {
+        "kmvdata.keepseek.maxFileBytes": {
           "type": "number",
           "default": 200000,
           "minimum": 1,
@@ -164,133 +160,113 @@
           "scope": "window",
           "markdownDescription": "Maximum bytes KeepSeek reads from one referenced or workspace text file. Binary, media, archive, and otherwise unreadable files are still rejected."
         },
-        "keepseek.patch.maxPayloadBytes": {
+        "kmvdata.keepseek.patch.maxPayloadBytes": {
           "type": "integer", "default": 1048576, "minimum": 1024, "maximum": 16777216, "scope": "window",
-          "markdownDescription": "Maximum encoded size of one patch tool payload. Independent from keepseek.maxFileBytes."
+          "markdownDescription": "Maximum encoded size of one patch tool payload. Independent from kmvdata.keepseek.maxFileBytes."
         },
-        "keepseek.patch.maxHunks": {
+        "kmvdata.keepseek.patch.maxHunks": {
           "type": "integer", "default": 256, "minimum": 1, "maximum": 4096, "scope": "window",
           "markdownDescription": "Maximum number of canonical patch hunks or file operations in one patch request."
         },
-        "keepseek.patch.maxChangedBytes": {
+        "kmvdata.keepseek.patch.maxChangedBytes": {
           "type": "integer", "default": 2097152, "minimum": 1, "maximum": 67108864, "scope": "window",
           "markdownDescription": "Maximum total added plus removed bytes in one text patch. The target file itself may be larger."
         },
-        "keepseek.patch.maxInlineBytes": {
+        "kmvdata.keepseek.patch.maxInlineBytes": {
           "type": "integer", "default": 65536, "minimum": 1024, "maximum": 4194304, "scope": "window",
           "markdownDescription": "Maximum old or new bytes allowed inline in one canonical patch hunk. Larger local changes must be split safely or use an explicitly bounded full replacement."
         },
-        "keepseek.patch.maxProviderBufferBytes": {
+        "kmvdata.keepseek.patch.maxProviderBufferBytes": {
           "type": "integer", "default": 16777216, "minimum": 1024, "maximum": 268435456, "scope": "window",
           "markdownDescription": "Maximum whole-file fallback buffer for non-file VS Code FileSystemProvider patch targets."
         },
-        "keepseek.patch.maxBackupBytes": {
+        "kmvdata.keepseek.patch.maxBackupBytes": {
           "type": "integer", "default": 33554432, "minimum": 1024, "maximum": 536870912, "scope": "window",
           "markdownDescription": "Maximum content-addressed backup size for delete and full-file replacement operations."
         },
-        "keepseek.patch.maxChangeSetArtifactBytes": {
+        "kmvdata.keepseek.patch.maxChangeSetArtifactBytes": {
           "type": "integer", "default": 134217728, "minimum": 1048576, "maximum": 1073741824, "scope": "window",
           "markdownDescription": "Maximum checkpoint and blob bytes retained by one active ChangeSet."
         },
-        "keepseek.patch.blobStoreQuotaBytes": {
+        "kmvdata.keepseek.patch.blobStoreQuotaBytes": {
           "type": "integer", "default": 1073741824, "minimum": 1048576, "maximum": 10737418240, "scope": "window",
           "markdownDescription": "Global quota for raw content-addressed rollback blobs. Safe garbage collection removes only unreferenced blobs."
         },
-        "keepseek.patch.maxDiffBytes": {
+        "kmvdata.keepseek.patch.maxDiffBytes": {
           "type": "integer", "default": 4194304, "minimum": 65536, "maximum": 67108864, "scope": "window",
           "markdownDescription": "Maximum file size for a normal full diff preview; larger patch edits use a hunk-only review document."
         },
-        "keepseek.providerInlineResultMaxChars": {
+        "kmvdata.keepseek.providerInlineResultMaxChars": {
           "type": "integer", "default": 48000, "minimum": 1024, "maximum": 1000000, "scope": "window",
           "markdownDescription": "Maximum characters a newly produced tool result may inline into one Provider request. Dynamic context admission may choose a smaller envelope. This does not limit workspace reads or evidence storage."
         },
-        "keepseek.subagent.handoffPreviewBytes": {
+        "kmvdata.keepseek.subagent.handoffPreviewBytes": {
           "type": "integer", "default": 10240, "minimum": 1024, "maximum": 24576, "scope": "window",
           "markdownDescription": "Maximum UTF-8 bytes previewed in one child-result manifest. The full accepted result remains pageable in isolated storage. / 单个子代理结果清单内联预览的 UTF-8 字节上限；完整结果仍保存在隔离存储中并可分页读取。"
         },
-        "keepseek.subagent.parallelHandoffBytes": {
+        "kmvdata.keepseek.subagent.parallelHandoffBytes": {
           "type": "integer", "default": 20480, "minimum": 16384, "maximum": 65536, "scope": "window",
           "markdownDescription": "Total UTF-8 byte budget shared fairly by all previews in one parallel child handoff. Status and result references are reserved first. / 一次并行子代理 handoff 的 UTF-8 总预算；先保留全部状态和引用，再公平分配预览。"
         },
-        "keepseek.evidenceMaxBytes": {
+        "kmvdata.keepseek.evidenceMaxBytes": {
           "type": "integer", "default": 100000000, "minimum": 1000000, "maximum": 1000000000, "scope": "window",
           "markdownDescription": "Maximum bytes stored for one immutable tool-evidence result. Independent from the workspace read safety limit and Provider inline admission."
         },
-        "keepseek.agent.maxExecutionMs": {
+        "kmvdata.keepseek.agent.maxExecutionMs": {
           "type": "number", "default": 0, "minimum": 0, "scope": "window",
           "markdownDescription": "Explicit maximum active time per root logical Agent task, shared with child agents and recovery. 0 = unlimited. Context Epoch rollover never resets it. / 根逻辑任务、子代理及恢复共享的显式有效执行时长上限；0 不限时，Context Epoch rollover 不会重置该预算。"
         },
-        "keepseek.agent.subagentMaxExecutionMs": {
+        "kmvdata.keepseek.agent.subagentMaxExecutionMs": {
           "type": "number", "default": 300000, "minimum": 0, "scope": "window",
           "markdownDescription": "Maximum time for one child Agent, additionally bounded by its root task. Default 5 minutes. / 单个子代理最长时间，且仍受根任务限制，默认 5 分钟。"
         },
-        "keepseek.agent.maxModelRequests": {
+        "kmvdata.keepseek.agent.maxModelRequests": {
           "type": "integer", "default": 0, "minimum": 0, "maximum": 512, "scope": "window",
           "markdownDescription": "Explicit maximum physical Provider attempts per root logical run, including retries, recovery, continuation, repair, summary and finalization. 0 = unlimited. / 根逻辑任务的显式物理 Provider 请求上限，包含重试、恢复、续写、修复、摘要和收尾；0 不限。"
         },
-        "keepseek.agent.maxToolIterations": {
+        "kmvdata.keepseek.agent.maxToolIterations": {
           "type": "integer", "default": 0, "minimum": 0, "maximum": 512, "scope": "window",
           "markdownDescription": "Explicit tool-round grant for each interactive root-task segment. 0 = unlimited. Reaching a positive limit requests one tool-free finalization and pauses for Continue. This is user execution policy, not a model capability. / 每个交互式根任务预算段的显式工具轮次额度；0 不限。正数额度到达后执行一次无工具收尾并暂停等待继续；这是用户执行策略，不是模型能力。"
         },
-        "keepseek.agent.maxToolCalls": {
+        "kmvdata.keepseek.agent.maxToolCalls": {
           "type": "integer", "default": 0, "minimum": 0, "maximum": 2048, "scope": "window",
           "markdownDescription": "Explicit tool-call grant for each interactive root-task segment. 0 = unlimited. Cumulative audit counters and completed evidence are preserved when Continue grants another segment. / 每个交互式根任务预算段的显式工具调用额度；0 不限。点击继续授予新预算段时保留累计审计计数与已完成证据。"
         },
-        "keepseek.agent.subagentMaxModelRequests": {
+        "kmvdata.keepseek.agent.subagentMaxModelRequests": {
           "type": "integer", "default": 12, "minimum": 1, "maximum": 512, "scope": "window",
           "markdownDescription": "Maximum physical Provider attempts per child Agent. / 单个子代理的物理 Provider 请求上限。"
         },
-        "keepseek.agent.maxContinuations": {
+        "kmvdata.keepseek.agent.maxContinuations": {
           "type": "integer", "default": 1, "minimum": 0, "maximum": 8, "scope": "window",
           "markdownDescription": "Maximum automatic continuations after length or pause_turn stops. / length 或 pause_turn 后自动续写的次数上限。"
         },
-        "keepseek.agent.maxContextEpochRollovers": {
+        "kmvdata.keepseek.agent.maxContextEpochRollovers": {
           "type": "integer", "default": 0, "minimum": 0, "maximum": 32, "scope": "window",
           "markdownDescription": "Explicit maximum Context Epoch rollovers in one root logical run. 0 = unlimited. Epochs maintain context capacity; they do not reset time, cost, evidence or execution budgets. / 单个根逻辑任务的显式 Context Epoch rollover 上限；0 不限。Epoch 只维护上下文容量，不会重置时间、费用、证据或执行预算。"
         },
-        "keepseek.agent.maxTreeUpstreamTokens": {
+        "kmvdata.keepseek.agent.maxTreeUpstreamTokens": {
           "type": "integer", "default": 0, "minimum": 0, "maximum": 100000000, "scope": "window",
           "markdownDescription": "Explicit maximum upstream tokens reserved or reported by a root run and all child agents combined. 0 = unlimited. / 根任务及全部子代理合计的显式上游 token 上限；0 不限。"
         },
-        "keepseek.agent.subagentMaxUpstreamTokens": {
+        "kmvdata.keepseek.agent.subagentMaxUpstreamTokens": {
           "type": "integer", "default": 500000, "minimum": 1000, "maximum": 100000000, "scope": "window",
           "markdownDescription": "Maximum upstream tokens for one child Agent, additionally bounded by the shared tree limit. / 单个子代理的上游 token 上限，且仍受共享树级上限限制。"
         },
-        "keepseek.agent.toolMaxOutputTokens": {
-          "type": "integer", "default": 8192, "minimum": 256, "scope": "window",
-          "markdownDescription": "Deprecated and ignored. Configure maxOutputTokens on each source/model. / 已废弃且不再生效，请在对应来源的模型设置中配置 maxOutputTokens。",
-          "deprecationMessage": "Deprecated and ignored. Configure maxOutputTokens on each source/model. / 已废弃且不再生效，请在对应来源的模型设置中配置 maxOutputTokens。"
-        },
-        "keepseek.agent.finalMaxOutputTokens": {
-          "type": "integer", "default": 16384, "minimum": 256, "scope": "window",
-          "markdownDescription": "Deprecated and ignored. Configure maxOutputTokens on each source/model. / 已废弃且不再生效，请在对应来源的模型设置中配置 maxOutputTokens。",
-          "deprecationMessage": "Deprecated and ignored. Configure maxOutputTokens on each source/model. / 已废弃且不再生效，请在对应来源的模型设置中配置 maxOutputTokens。"
-        },
-        "keepseek.agent.continuationMaxOutputTokens": {
-          "type": "integer", "default": 8192, "minimum": 256, "scope": "window",
-          "markdownDescription": "Deprecated and ignored. Configure maxOutputTokens on each source/model. / 已废弃且不再生效，请在对应来源的模型设置中配置 maxOutputTokens。",
-          "deprecationMessage": "Deprecated and ignored. Configure maxOutputTokens on each source/model. / 已废弃且不再生效，请在对应来源的模型设置中配置 maxOutputTokens。"
-        },
-        "keepseek.agent.repairMaxOutputTokens": {
-          "type": "integer", "default": 4096, "minimum": 256, "scope": "window",
-          "markdownDescription": "Deprecated and ignored. Configure maxOutputTokens on each source/model. / 已废弃且不再生效，请在对应来源的模型设置中配置 maxOutputTokens。",
-          "deprecationMessage": "Deprecated and ignored. Configure maxOutputTokens on each source/model. / 已废弃且不再生效，请在对应来源的模型设置中配置 maxOutputTokens。"
-        },
-        "keepseek.agent.maxCost": {
+        "kmvdata.keepseek.agent.maxCost": {
           "type": "number", "default": 0, "minimum": 0, "scope": "window",
           "markdownDescription": "Maximum accounted Provider cost per logical Agent task and billing currency, shared with child agents and recovery. 0 = unlimited. A positive value fails closed when the selected source cannot provide priced usage. / 每项逻辑任务、每种计费币种的 Provider 费用上限；子代理与恢复共享，0 不限额。来源不能提供可计费用量时正值配置会安全拒绝请求。"
         },
-        "keepseek.modelRequestTimeoutSeconds": {
+        "kmvdata.keepseek.modelRequestTimeoutSeconds": {
           "type": "integer", "default": 3600, "scope": "application",
           "enum": [300, 900, 3600, 7200, 28800, 86400],
           "enumItemLabels": ["5 分钟 / 5 minutes", "15 分钟 / 15 minutes", "1 小时 / 1 hour", "2 小时 / 2 hours", "8 小时 / 8 hours", "24 小时 / 24 hours"],
           "markdownDescription": "Timeout in seconds for each model request, including response headers and streaming. Shared by all accounts and models, including summaries and approval reviewers. Changes apply to new requests. Task execution limits and cancellation still apply. / 每次模型请求的超时时间（秒），包含等待响应头和流式响应。所有账号、模型、摘要及审批模型共用，修改后对新请求生效；任务执行时限及取消仍然有效。"
         },
-        "keepseek.background.maxDurationMs": {
+        "kmvdata.keepseek.background.maxDurationMs": {
           "type": "number", "default": 0, "minimum": 0, "scope": "window",
           "markdownDescription": "Legacy explicit background execution budget. Combined with agent.maxExecutionMs using the smaller positive value; 0 unlimited. / 兼容旧版显式后台时间预算。"
         },
-        "keepseek.draftRun.timeoutMs": {
+        "kmvdata.keepseek.draftRun.timeoutMs": {
           "type": "number",
           "default": 120000,
           "minimum": 1000,
@@ -298,7 +274,7 @@
           "scope": "window",
           "markdownDescription": "Default and maximum time allowed for one explicitly approved DraftRun command. A shorter timeout proposed by the Agent is honored."
         },
-        "keepseek.draftRun.maxTranscriptBytes": {
+        "kmvdata.keepseek.draftRun.maxTranscriptBytes": {
           "type": "number",
           "default": 131072,
           "minimum": 4096,
@@ -306,7 +282,7 @@
           "scope": "window",
           "markdownDescription": "Maximum merged stdout/stderr bytes retained in the DraftRun card and appended to later Agent context. The dedicated DraftRun terminal receives the complete live stream."
         },
-        "keepseek.maxWorkspaceToolFiles": {
+        "kmvdata.keepseek.maxWorkspaceToolFiles": {
           "type": "number",
           "default": 2000,
           "minimum": 1,
@@ -314,13 +290,13 @@
           "scope": "window",
           "markdownDescription": "Maximum candidate files enumerated by read-only workspace list and fallback text-search tools. Search results have a separate per-call result limit."
         },
-        "keepseek.slimToolModeEnabled": {
+        "kmvdata.keepseek.slimToolModeEnabled": {
           "type": "boolean",
           "default": false,
           "scope": "window",
           "markdownDescription": "Expose only a smaller core Agent tool schema, adding tools that match the current prompt. Defaults to off so the exposed tool set stays constant across turns and DeepSeek prompt-cache prefixes stay stable. Core workspace text search is available either way."
         },
-        "keepseek.promptCacheTtlMinutes": {
+        "kmvdata.keepseek.promptCacheTtlMinutes": {
           "type": "number",
           "default": 1440,
           "minimum": 5,
@@ -328,7 +304,7 @@
           "scope": "window",
           "markdownDescription": "Conservative provider prompt-cache TTL. KeepSeek rewrites archived history only after this cold boundary, a provider/model change, or unavoidable context compaction."
         },
-        "keepseek.context.totalBudgetTokens": {
+        "kmvdata.keepseek.context.totalBudgetTokens": {
           "type": "number",
           "default": 32000,
           "minimum": 1000,
@@ -336,11 +312,11 @@
           "scope": "window",
           "markdownDescription": "Shared token budget for project instructions, activated Skills and attached context files before they enter a session."
         },
-        "keepseek.maxContextFiles": {
+        "kmvdata.keepseek.maxContextFiles": {
           "type": "number",
           "default": 10
         },
-        "keepseek.authorizationPolicy": {
+        "kmvdata.keepseek.authorizationPolicy": {
           "type": "string",
           "default": "auto",
           "enum": [
@@ -350,7 +326,7 @@
           ],
           "description": "Tool execution authorization policy"
         },
-        "keepseek.skills.contextBudgetChars": {
+        "kmvdata.keepseek.skills.contextBudgetChars": {
           "type": "number",
           "default": 72000,
           "minimum": 0,
@@ -358,7 +334,7 @@
           "scope": "window",
           "markdownDescription": "Maximum total characters used by activated Codex-compatible Skill instructions in each Agent run. Skill scripts are never executed."
         },
-        "keepseek.skills.maxImplicitActivations": {
+        "kmvdata.keepseek.skills.maxImplicitActivations": {
           "type": "number",
           "default": 3,
           "minimum": 0,
@@ -366,22 +342,22 @@
           "scope": "window",
           "markdownDescription": "Maximum number of Skills eligible under policy.allow_implicit_invocation that deterministic request matching may activate per Agent run."
         },
-        "keepseek.contextCompression": {
+        "kmvdata.keepseek.contextCompression": {
           "type": "boolean",
           "default": true,
           "description": "Enable context compression for long sessions"
         },
-        "keepseek.maxTurns": {
+        "kmvdata.keepseek.maxTurns": {
           "type": "number",
           "default": 75,
           "description": "Max turns before compression"
         },
-        "keepseek.thinking": {
+        "kmvdata.keepseek.thinking": {
           "type": "boolean",
           "default": false,
           "description": "Show model reasoning content in chat UI"
         },
-        "keepseek.enableCache": {
+        "kmvdata.keepseek.enableCache": {
           "type": "boolean",
           "default": true,
           "description": "Enable API caching for reduced latency and cost"
@@ -481,9 +457,10 @@
     "test": "node out-test/test/runTests.js",
     "eval:agent:live": "node scripts/run-agent-behavior-live.js",
     "eval:agent:score": "node scripts/score-agent-behavior.js",
-    "package": "vsce package --dependencies --out keepseek-${npm_package_version}.vsix && node scripts/verify-vsix.js keepseek-${npm_package_version}.vsix",
+    "package": "node scripts/package-market.js",
     "package:market": "node scripts/package-market.js",
-    "reinstall:vsix": "node scripts/reinstall-vsix.js"
+    "reinstall:vsix": "node scripts/reinstall-vsix.js",
+    "reset:data": "node scripts/reset-keepseek-data.cjs"
   },
   "dependencies": {
     "ignore": "^7.0.0",

@@ -86,7 +86,7 @@ test('durable intent and operation commits precede splice; retained bytes and ac
   const session = fixture();
   session.messages[0].providerContent = 'retained provider content\n\n';
   const preserved = structuredClone(session.messages.slice(0, 2));
-  const time = session.executionTime = { version: 1, byTask: { segment1: 900, segment2: 1900 }, incomplete: false };
+  const time = session.executionTime = { version: 2, byTask: { segment1: 900, segment2: 1900 }, incomplete: false };
   const usage = session.usageStats = { requestCount: 7 } as ChatSession['usageStats'];
   const events: string[] = [];
   const plan = createHistoryTruncationPlan(session, 'u2', replacement())!;

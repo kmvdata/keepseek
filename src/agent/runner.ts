@@ -16,7 +16,7 @@ import {
   mergeCostLimits,
   mergeDurations
 } from './executionPolicy';
-import { createRunCheckpoint, checkpointCopy, type RunCheckpoint, AgentInterruptedError, recoveryBlocker, endpointHash, isCostLimitExhausted, migrateLegacyCapacityCheckpoint } from './runCheckpoint';
+import { createRunCheckpoint, checkpointCopy, type RunCheckpoint, AgentInterruptedError, recoveryBlocker, endpointHash, isCostLimitExhausted } from './runCheckpoint';
 import { restorePluginSkillProgress, type PluginSkillProgress } from './runCheckpoint';
 import { assertPluginSkillsCurrent, executePluginSkillRead } from './pluginSkillRuntime';
 import {
@@ -56,8 +56,7 @@ import {
   getConfiguredMaxRepairIterations,
   getConfiguredMaxValidationRuns,
   getConfiguredModelUsagePricing,
-  getConfiguredRequestRetryBaseMs,
-  getConfiguredWorkspaceReadMaxBytes
+  getConfiguredRequestRetryBaseMs
 } from '../shared/config';
 import { MissingModelSourceApiKeyError, resolveModelSourceConfig } from '../accounts/accountResolver';
 import type { ModelSourceProvider } from '../accounts/types';
@@ -112,7 +111,7 @@ import type {
 } from './subagents/types';
 import { searchHistoryArchive } from './historyArchive';
 import { allocateSharedMessageTokens, createAcceptedRootSubagentHandoffEstimate, getSubagentHandoffKind } from './subagentUsageStats';
-import { buildProviderRequestProjection, buildProviderPayloadProjection, getProviderRequestLane, normalizeProviderMessages } from './providerRequestProjection';
+import { CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION, buildProviderRequestProjection, buildProviderPayloadProjection, getProviderRequestLane, normalizeProviderMessages } from './providerRequestProjection';
 import { snapshotCheckpoint } from '../sessions/persistenceSnapshot';
 import { recordLocalPerformance } from './logging/performanceTrace';
 import {
@@ -385,6 +384,10 @@ export class AgentLoop {
   ) {}
 
   public async run(request: AgentRequest, callbacks: AgentRunCallbacks = {}): Promise<AgentResponse> {
+    request = { ...request, requestProtocolVersion: CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION };
+    if (request.checkpoint && request.checkpoint.request.requestProtocolVersion !== CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION) {
+      throw new AgentInterruptedError('waiting_for_user', 'Unsupported persisted request protocol; start a new session. / 不支持旧请求协议，请新建会话。');
+    }
     // A saved plugin activation is historical data, not permission to resume
     // suspended functionality. Check before reconciliation or any dispatch.
     await assertPluginSkillsCurrent(request.currentRunContext?.skills ?? [], []);
@@ -397,7 +400,7 @@ export class AgentLoop {
       }
     }
     if (request.checkpoint) {
-      const requestCheckpoint = migrateLegacyCapacityCheckpoint(request.checkpoint);
+      const requestCheckpoint = request.checkpoint;
       request = { ...request, checkpoint: requestCheckpoint };
       await this.reconcilePersistedEvidence(requestCheckpoint, request.sessionId ?? request.subagentContext?.parentSessionId ?? requestCheckpoint.taskId);
       if (requestCheckpoint.state?.pending?.executing) {
@@ -640,9 +643,7 @@ export class AgentLoop {
       onChange: callbacks.onTaskPlan,
       recordTrace: (event) => trace.record(event)
     });
-    const delegation = (request.requestProtocolVersion ?? 1) >= 11
-      ? new DelegationTracker(checkpoint.taskPlan?.delegation, request.explicitSubagentSelection, (state) => taskPlan.updateDelegation(state))
-      : undefined;
+    const delegation = new DelegationTracker(checkpoint.taskPlan?.delegation, request.explicitSubagentSelection, (state) => taskPlan.updateDelegation(state));
     const repairLoop = new RepairLoopTracker(
       normalizeRepairIterationLimit(request.executionLimits?.maxRepairIterations),
       (event) => trace.record(event),
@@ -681,7 +682,7 @@ export class AgentLoop {
     let providerRunState: ProviderNativeRunState | undefined;
     trace.record({
       type: 'run_start',
-      requestProtocolVersion: request.requestProtocolVersion ?? 1,
+      requestProtocolVersion: CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION,
       model: request.model,
       settings: request.settings,
       language: request.language,
@@ -820,14 +821,12 @@ export class AgentLoop {
                 label: edit.label,
                 action: edit.action,
                 reason: edit.reason,
-                kind: edit.kind ?? 'legacy_full_text_v0',
+                kind: edit.kind,
                 payloadHash: edit.kind === 'text_patch_v1'
                   ? edit.patch.canonicalHash
                   : edit.kind === 'full_text_v1'
                     ? edit.result.sha256
-                    : edit.kind === 'delete_v1' || edit.kind === 'move_v1'
-                      ? edit.base.sha256
-                      : hashText(edit.newText)
+                    : edit.base.sha256
               })),
               draftRuns: responseWithUsage.draftRuns.map((draftRun) => ({
                 id: draftRun.id,
@@ -1069,13 +1068,13 @@ export class AgentLoop {
       type: 'agent_messages_initialized',
       messages: formatMessagesForTrace(messages, trace.includesPayload('request'))
     });
-    let tools = providerProjection.tools;
+    const tools = providerProjection.tools;
     // Runtime authority comes from the exact schema sent to the Provider, not
     // from the runner's wider routing table. This guard is shared by native,
     // Responses, Anthropic, DSML, and checkpoint-replayed tool calls because
     // every lane converges on performToolCall below.
-    let exposedToolNames = new Set(tools.map((tool) => tool.function.name));
-    let schemaHash = hashText(JSON.stringify(tools));
+    const exposedToolNames = new Set(tools.map((tool) => tool.function.name));
+    const schemaHash = hashText(JSON.stringify(tools));
     if (checkpoint.toolSchemaHash && checkpoint.toolSchemaHash !== schemaHash) throw new Error('Tool schema changed; recovery refused / 工具协议变化，不能继续旧任务');
     checkpoint.toolSchemaHash = schemaHash;
     promptCacheDiagnostics = this.createPromptCacheDiagnostics({
@@ -1147,7 +1146,7 @@ export class AgentLoop {
       // new model round may observe edits to this exact source/model's limits.
       if (checkpoint.modelStepRequestHash || (pending && !continuingText) || !this.globalStorageUri) return;
       const source = await new ModelSourceStore(this.globalStorageUri).getSource(runtimeConfig.sourceId);
-      if (!source) return; // Legacy/direct callers may supply a runtime-only source.
+      if (!source) return; // Direct callers may supply a runtime-only source.
       if (source.provider !== runtimeConfig.provider || endpointHash(source.baseUrl) !== endpointHash(runtimeConfig.baseUrl)) {
         throw new AgentInterruptedError('waiting_for_user', 'Model source changed; send a new user message / 模型来源已变化，请发送新用户消息。');
       }
@@ -1347,7 +1346,7 @@ export class AgentLoop {
           plan: taskPlan.getPlan(), evidenceRefs: epoch.evidenceRefs, failures: rolloverFailures
         });
         const epochCheckpointInput = {
-          protocolVersion: request.requestProtocolVersion ?? 1,
+          protocolVersion: CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION,
           priorWork: request.contextCompression?.protectionState?.settledFacts,
           originalTask: request.prompt,
           taskPlan: taskPlan.getPlan(),
@@ -1407,20 +1406,6 @@ export class AgentLoop {
           seed
         };
         await saveStep!();
-      }
-      if (reason === 'protocol_migration' && (request.requestProtocolVersion ?? 1) < 8) {
-        request = { ...request, requestProtocolVersion: 8 };
-        checkpoint.request.requestProtocolVersion = 8;
-        providerProjection = buildCurrentProviderProjection();
-        tools = providerProjection.tools;
-        exposedToolNames = new Set(tools.map((tool) => tool.function.name));
-        schemaHash = hashText(JSON.stringify(tools));
-        checkpoint.toolSchemaHash = schemaHash;
-        await callbacks.onProtocolMigration?.({
-          version: 8,
-          toolSchemaVersion: 8,
-          toolNames: tools.map((tool) => tool.function.name)
-        });
       }
       const currentIndex = epoch.index;
       const reusablePrefixTokensBeforeRollover = Math.min(
@@ -2195,7 +2180,7 @@ export class AgentLoop {
             validationState.recordValidationResult(rawToolResult);
           }
           // A reviewer denial/unavailability is an approval outcome, not a
-          // validation failure. Preserve the legacy repair-loop handling for
+          // validation failure. Preserve the repair-loop handling for
           // other blocked or explicitly user-denied validation calls.
           if (validationExecuted || !authorizationDecision?.approvalReview) {
             const repairOutcome = repairLoop.recordValidationResult(rawToolResult);
@@ -2286,9 +2271,6 @@ export class AgentLoop {
         const visibleFingerprint = visibleProgressFingerprint(toolCall.function.name, preparedEnvelope.content);
         trace.record({ type: 'tool_delivery', toolName: toolCall.function.name, epochIndex: epoch.index,
           bodyDelivered: Boolean(visibleFingerprint), envelopeBytes: visibleFingerprint ? Buffer.byteLength(preparedEnvelope.content) : 0 });
-        if (!preparedEnvelope.completeInline && providerProjection.requestProtocolVersion < 8) {
-          rolloverAfterBatchReason = 'protocol_migration';
-        }
         this.upsertEpochEvidenceRef(epoch, evidenceRecord);
         const shapedToolResult: ShapedToolResult = {
           content: evidenceRecord.providerEnvelope!,
@@ -3676,7 +3658,7 @@ export class AgentLoop {
     let scope: 'workspace_read' | 'validation_compile_lint' | 'validation_test' = 'workspace_read';
     const deny = (reason: string, outcome?: ApprovalReviewOutcome, failureCode?: string): ToolAuthorizationDecision => ({
       allowed: false, toolName, riskLevel: scope === 'workspace_read' ? 'low' : 'medium', scope,
-      source: outcome && ['model_review', 'auto_approval_review'].includes(outcome.record.approvalSource) ? 'model_reviewer' : 'user_denied',
+      source: outcome && ['auto_approval_review'].includes(outcome.record.approvalSource) ? 'model_reviewer' : 'user_denied',
       requiresExplicitConfirmation: mode !== 'delegate', reason, failureCode,
       approvalReview: outcome && toApprovalReviewDisplay(outcome.record),
       approvalCircuitBreakReason: outcome?.circuitBreakReason
@@ -3879,12 +3861,9 @@ ${launch.evidence.content}`;
         }
         case READ_SUBAGENT_RESULT_TOOL_NAME: {
           const content = (await this.subagentTools!.readResult({
-            ref: this.readOptionalString(args, 'ref'),
-            subagentId: this.readOptionalString(args, 'subagentId'),
+            ref: this.readRequiredString(args, 'ref'),
             offsetBytes: this.readOptionalNumber(args, 'offsetBytes'),
-            limitBytes: this.readOptionalNumber(args, 'limitBytes'),
-            offset: this.readOptionalNumber(args, 'offset'),
-            maxChars: this.readOptionalNumber(args, 'maxChars')
+            limitBytes: this.readOptionalNumber(args, 'limitBytes')
           }, this.getSubagentInvocationContext(language, options))).content;
           return options.delegation?.decorateResultPage(content) ?? content;
         }
@@ -4116,12 +4095,6 @@ ${launch.evidence.content}`;
     commandRecoveryBatchId?: string
   ): Promise<string> {
     const rawArgs = args.args;
-    if ((parentRequest?.requestProtocolVersion ?? 1) < 15
-      && (args.prerequisites !== undefined || args.replacesDraftRun !== undefined)) {
-      return JSON.stringify({ ok: false, errorType: 'command_plan_protocol_required', phase: 'capability',
-        started: false, executed: false, requiredProtocolVersion: 15,
-        message: 'Command plan fields require a controlled protocol boundary. Nothing prepared or dispatched; prerequisite gates were not discarded. / 命令计划字段需要在受控边界升级协议。未准备或启动命令，未丢弃前置条件。' });
-    }
     if (!Array.isArray(rawArgs) || !rawArgs.every((value) => typeof value === 'string')) {
       throw new Error('Tool argument "args" must be an array of strings.');
     }
@@ -4146,13 +4119,10 @@ ${launch.evidence.content}`;
       cwd: this.readOptionalString(args, 'cwd'),
       timeoutMs: this.readOptionalNumber(args, 'timeoutMs'),
       env,
-      ...((parentRequest?.requestProtocolVersion ?? 1) >= 15 ? normalizeDraftRunPlan(args) : {})
+      ...normalizeDraftRunPlan(args)
     });
-    // Old frozen schemas cannot express immutable replacement links. Diagnose
-    // before creating a persistent draft there; intent/evidence still retains
-    // the original argv and result. V15 keeps the source draft for linked audit.
-    const persistProposal = !draftRun.capabilityDiagnostic?.blocking || (parentRequest?.requestProtocolVersion ?? 1) >= 15;
-    if (persistProposal) draftRuns.push(draftRun);
+    const persistProposal = true;
+    draftRuns.push(draftRun);
     if (draftRun.capabilityDiagnostic?.blocking) {
       const rootTaskId = parentRequest?.approvalRootTaskId ?? commandRecovery?.taskId ?? 'current-tool-loop';
       const run = { ...draftRun, agentRunId: commandRecovery?.taskId ?? '', status: 'pending',
@@ -4200,21 +4170,13 @@ ${launch.evidence.content}`;
   private async captureDraftBaseline(edit: DraftEdit): Promise<void> {
     if (edit.kind === 'text_patch_v1' || edit.kind === 'delete_v1' || edit.kind === 'move_v1' || edit.action === 'create') return;
     if (edit.kind === 'full_text_v1' && edit.base) return;
-    if (!edit.kind && edit.expectedOriginalTextHash) return;
     const uri = vscode.Uri.parse(edit.uri);
     const stat = await vscode.workspace.fs.stat(uri);
-    const limit = edit.kind === 'full_text_v1'
-      ? getConfiguredPatchSettings().maxBackupBytes
-      : getConfiguredWorkspaceReadMaxBytes();
+    const limit = getConfiguredPatchSettings().maxBackupBytes;
     if (stat.type !== vscode.FileType.File || stat.size > limit) throw new AgentInterruptedError('resource_limit', 'Draft baseline is not a bounded text file / 草案基线不是允许大小内的文本文件');
     const bytes = await vscode.workspace.fs.readFile(uri);
     if (bytes.byteLength > limit) throw new AgentInterruptedError('resource_limit', 'Draft baseline resource limit / 草案基线超出资源上限');
-    if (edit.kind === 'full_text_v1') {
-      edit.base = { sha256: hashBytes(bytes), sizeBytes: bytes.byteLength };
-    } else {
-      edit.expectedOriginalTextHash = hashText(new TextDecoder().decode(bytes));
-      edit.expectedOriginalSize = bytes.byteLength;
-    }
+    edit.base = { sha256: hashBytes(bytes), sizeBytes: bytes.byteLength };
   }
 
   private async createDraftEdit(args: Record<string, unknown>, draftEdits: DraftEdit[], language: KeepseekLanguage): Promise<string> {
@@ -4491,9 +4453,7 @@ ${launch.evidence.content}`;
           ? edit.patch.canonicalHash
           : edit.kind === 'full_text_v1'
             ? edit.result.sha256
-            : edit.kind === 'delete_v1' || edit.kind === 'move_v1'
-              ? edit.base.sha256
-              : hashText(edit.newText)
+            : edit.base.sha256
       }))
     });
   }

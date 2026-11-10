@@ -697,7 +697,6 @@ test('manual title materials ignore failed or cancelled assistant output while p
   const { host, session, inputs } = await fixture(t);
   const lastAnswer = session.messages.at(-1)!;
   lastAnswer.content = 'RAW_ASSISTANT_FAILURE_SECRET';
-  lastAnswer.incompleteForTitle = true;
   lastAnswer.runDetails = { status: 'failed' } as ChatMessage['runDetails'];
   await host.handleMessage({ type: 'regenerateSessionTitle', sessionId: session.id, requestId: 'user-purpose-after-failure' });
   assert.equal(inputs.length, 1);
@@ -925,7 +924,6 @@ test('a real no-progress user supplement has its own title opportunity while ret
     reasoningParts: [], turn: 0, toolCallCount: 0, validationRunCount: 0, toolResultTokens: 0,
     repairLoop: { status: 'idle', iteration: 0, maxIterations: 2, pendingDraftEditIds: [] } };
   previousAssistant.runCheckpoint = cp;
-  previousAssistant.incompleteForTitle = true;
   session.userTaskBudgets![rootTaskId] = taskBudgetFromCheckpoint(cp);
   session.autoTitle = { version: 2, status: 'pending', revision: 1, lastAttemptTaskId: rootTaskId,
     attemptedTaskIds: [rootTaskId], attemptedThrough: { taskId: rootTaskId, originMessageId: previousUser.id }, lastOutcome: 'defer' };

@@ -22,7 +22,6 @@ export interface GlobalBalanceRecord {
   lastRefreshAt: number;
 }
 
-const BALANCE_STORAGE_DIR = 'balance';
 const BALANCE_STORAGE_FILE = 'balance.json';
 const DEFAULT_BALANCE_SOURCE_SCOPE: BalanceSourceScope = {
   provider: 'deepseek',
@@ -55,15 +54,14 @@ function readFiniteNonNegativeTimestamp(value: unknown): number {
 /**
  * Source-scoped global balance store. Records live at
  * `globalStorageUri/accounts/<provider>/<sourceId>/balance.json`. The optional scope on
- * each operation makes model-source selection explicit; callers that omit it retain
- * the legacy DeepSeek/default behavior.
+ * each operation makes model-source selection explicit; omitted scopes use the
+ * current selection.
  */
 export class GlobalBalanceStore {
   private readonly records = new Map<string, GlobalBalanceRecord>();
   private readonly refreshClaimTokens = new Map<string, symbol>();
   private activeScope: BalanceSourceScope;
   private readonly accountsRootUri: vscode.Uri;
-  private readonly legacyFileUri: vscode.Uri;
   private readonly globalStorageKey: string;
   private readonly decoder = new TextDecoder();
 
@@ -72,7 +70,6 @@ export class GlobalBalanceStore {
     initialScope: BalanceSourceScope = DEFAULT_BALANCE_SOURCE_SCOPE
   ) {
     this.accountsRootUri = vscode.Uri.joinPath(globalStorageUri, 'accounts');
-    this.legacyFileUri = vscode.Uri.joinPath(globalStorageUri, BALANCE_STORAGE_DIR, BALANCE_STORAGE_FILE);
     this.globalStorageKey = globalStorageUri.toString();
     this.activeScope = normalizeBalanceSourceScope(initialScope);
   }
@@ -92,8 +89,7 @@ export class GlobalBalanceStore {
     const normalizedScope = this.getScope(scope);
     const scopeKey = getBalanceScopeKey(normalizedScope);
     const fileUri = this.getFileUri(normalizedScope);
-    const record = await this.readRecord(fileUri)
-      ?? await this.readLegacyDefaultRecord(normalizedScope);
+    const record = await this.readRecord(fileUri);
     this.records.set(scopeKey, record ?? { lastRefreshAt: 0 });
   }
 
@@ -211,11 +207,7 @@ export class GlobalBalanceStore {
       this.records.set(getBalanceScopeKey(normalizedScope), { lastRefreshAt: 0 });
       await this.deleteFile(this.getFileUri(normalizedScope));
 
-      // The old shared file belongs to the historical DeepSeek/default source.
-      // Removing it prevents a cleared source from being repopulated by fallback.
-      if (isDefaultBalanceSourceScope(normalizedScope)) {
-        await this.deleteFile(this.legacyFileUri);
-      }
+
     });
   }
 
@@ -227,9 +219,6 @@ export class GlobalBalanceStore {
       activeRefreshClaims.delete(claimKey);
       this.records.set(getBalanceScopeKey(normalizedScope), { lastRefreshAt: 0 });
       await this.deleteFileOrThrow(this.getFileUri(normalizedScope));
-      if (isDefaultBalanceSourceScope(normalizedScope)) {
-        await this.deleteFileOrThrow(this.legacyFileUri);
-      }
     });
   }
 
@@ -247,10 +236,6 @@ export class GlobalBalanceStore {
 
   private getRefreshClaimKey(scope: BalanceSourceScope): string {
     return JSON.stringify([this.globalStorageKey, scope.provider, scope.sourceId]);
-  }
-
-  private async readLegacyDefaultRecord(scope: BalanceSourceScope): Promise<GlobalBalanceRecord | undefined> {
-    return isDefaultBalanceSourceScope(scope) ? this.readRecord(this.legacyFileUri) : undefined;
   }
 
   private async readRecord(fileUri: vscode.Uri): Promise<GlobalBalanceRecord | undefined> {
@@ -317,10 +302,7 @@ function getBalanceScopeKey(scope: BalanceSourceScope): string {
   return `${scope.provider}/${scope.sourceId}`;
 }
 
-function isDefaultBalanceSourceScope(scope: BalanceSourceScope): boolean {
-  return scope.provider === DEFAULT_BALANCE_SOURCE_SCOPE.provider
-    && scope.sourceId === DEFAULT_BALANCE_SOURCE_SCOPE.sourceId;
-}
+
 
 function isFileNotFoundError(error: unknown): boolean {
   return isRecord(error) && (error.code === 'FileNotFound' || error.code === 'ENOENT');

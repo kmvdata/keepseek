@@ -28,7 +28,7 @@ test('header timeout dropdown offers exactly six presets with a one-hour default
     ['5 minutes', '15 minutes', '1 hour', '2 hours', '8 hours', '24 hours']);
   assert.match(template, /<label for="settingsRequestTimeoutValue"/u);
   const manifest = JSON.parse(await readFile(path.resolve(process.cwd(), 'package.json'), 'utf8'));
-  const setting = manifest.contributes.configuration.properties['keepseek.modelRequestTimeoutSeconds'];
+  const setting = manifest.contributes.configuration.properties['kmvdata.keepseek.modelRequestTimeoutSeconds'];
   assert.deepEqual(setting.enum, [300, 900, 3600, 7200, 28800, 86400]);
   assert.equal(setting.default, 3600);
   assert.equal(setting.scope, 'application');
@@ -229,33 +229,33 @@ test('command menu model settings are registered and persisted for the current w
   const properties = packageJson.contributes?.configuration?.properties ?? {};
   const providerSource = await readFile(providerPath, 'utf8');
 
-  assert.deepEqual(properties['keepseek.selectedSourceId'], {
+  assert.deepEqual(properties['kmvdata.keepseek.selectedSourceId'], {
     type: 'string',
     default: '',
     scope: 'window',
-    markdownDescription: 'Source ID paired with `keepseek.selectedModelId` for the selected model. This is model identity, not a globally active source.'
+    markdownDescription: 'Source ID paired with `kmvdata.keepseek.selectedModelId` for the selected model. This is model identity, not a globally active source.'
   });
 
-  assert.deepEqual(properties['keepseek.selectedModelId'], {
+  assert.deepEqual(properties['kmvdata.keepseek.selectedModelId'], {
     type: 'string',
     default: '',
     scope: 'window',
     markdownDescription: 'Selected model for the current workspace. An empty or unavailable value adopts the global default model, or the first available model when no explicit default is valid.'
   });
-  assert.deepEqual(properties['keepseek.thinkingEnabled'], {
+  assert.deepEqual(properties['kmvdata.keepseek.thinkingEnabled'], {
     type: 'boolean',
     default: true,
     scope: 'window',
     markdownDescription: 'Enable Thinking mode for the current workspace.'
   });
-  assert.deepEqual(properties['keepseek.reasoningEffort'], {
+  assert.deepEqual(properties['kmvdata.keepseek.reasoningEffort'], {
     type: 'string',
     default: 'high',
     scope: 'window',
     enum: ['high', 'max'],
     markdownDescription: 'Thinking effort for the current workspace.'
   });
-  assert.deepEqual(properties['keepseek.compressionThreshold'], {
+  assert.deepEqual(properties['kmvdata.keepseek.compressionThreshold'], {
     type: 'string',
     default: 'balanced',
     scope: 'window',
@@ -1071,9 +1071,9 @@ test('retired Project Memory configuration keys are no longer contributed', asyn
   };
   const keys = Object.keys(packageJson.contributes?.configuration?.properties ?? {});
 
-  assert.ok(!keys.some((key) => key.startsWith('keepseek.memory.')));
-  assert.ok(!keys.includes('keepseek.projectInstructions.contextBudgetTokens'));
-  assert.ok(keys.includes('keepseek.skills.maxImplicitActivations'));
+  assert.ok(!keys.some((key) => key.startsWith('kmvdata.keepseek.memory.')));
+  assert.ok(!keys.includes('kmvdata.keepseek.projectInstructions.contextBudgetTokens'));
+  assert.ok(keys.includes('kmvdata.keepseek.skills.maxImplicitActivations'));
 });
 
 test('Legacy Memory migration menu and host messages are removed', () => {

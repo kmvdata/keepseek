@@ -61,7 +61,7 @@ export async function assertManagedStoragePath(root: vscode.Uri, target: vscode.
 }
 
 const associatedOwnerSummaries = new Map<string, { mtime: number; size: number; owners: Set<string> }>();
-/** Some older operation stores are monolithic. Bound their read and cache only
+/** Monolithic operation stores bound their read and cache only
  * ownership IDs, never command output or review text. Oversized/unknown data is
  * unavailable for a blank-history proof, rather than silently called empty. */
 export async function hasAssociatedRecordOwner(uri: vscode.Uri, sessionId: string, keys: readonly string[], versions: readonly number[]): Promise<boolean> {
@@ -71,7 +71,7 @@ export async function hasAssociatedRecordOwner(uri: vscode.Uri, sessionId: strin
   const key = uri.toString();
   let cached = associatedOwnerSummaries.get(key);
   if (!cached || cached.mtime !== stat.mtime || cached.size !== stat.size) {
-    if (stat.type !== vscode.FileType.File || stat.size > 512 * 1024) throw new Error('Legacy operation ownership cannot be determined without a large history read.');
+    if (stat.type !== vscode.FileType.File || stat.size > 512 * 1024) throw new Error('Operation ownership cannot be determined without a large history read.');
     const stored = await readAssociatedJson(uri);
     if (!stored || !versions.includes(stored.version as number)) throw new Error('Operation ownership metadata is damaged.');
     const owners = new Set<string>();

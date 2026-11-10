@@ -24,12 +24,12 @@ test('assistant streaming, failure, cancellation and approval work do not gate a
   const { session, user, submission } = fixture();
   for (const status of ['running', 'failed', 'cancelled', 'waiting', 'blocked'] as const) {
     session.messages.splice(1, session.messages.length, { id: 'assistant-1', role: 'assistant', content: 'partial answer', createdAt: '',
-      userTask: user.userTask, isStreaming: true, incompleteForTitle: true,
+      userTask: user.userTask, isStreaming: true,
       runDetails: { status } as ChatMessage['runDetails'] });
     assert.equal(checkSessionTitleSubmission(session, submission).ready, true);
   }
   session.repairLoop = { status: 'running_validation', iteration: 1, maxIterations: 3, pendingDraftEditIds: [] };
-  session.approvalProcessing = { version: 1, rootTaskId: 'root-1', runId: 'segment-1', mode: 'delegate', status: 'processing', targets: [], updatedAt: '' };
+  session.approvalProcessing = { version: 2, rootTaskId: 'root-1', runId: 'segment-1', mode: 'delegate', status: 'processing', targets: [], updatedAt: '' };
   assert.equal(checkSessionTitleSubmission(session, submission).ready, true);
 });
 

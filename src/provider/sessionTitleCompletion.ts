@@ -50,24 +50,3 @@ export function checkSessionTitleSubmission(
   if (message.isStreaming || !message.content.trim()) return { ready: false, reason: 'incomplete', terminal: true };
   return { ready: true, taskId: submission.taskId, messageId: message.id };
 }
-
-/** Source compatibility for call sites being upgraded with the Host. These
- * aliases preserve the module entry point, never the old answer-based trigger. */
-export type SessionTitleCompletion = SessionTitleSubmission;
-export type SessionTitleCompletionCheck = SessionTitleSubmissionCheck;
-export interface SessionTitleCompletionBlockers {
-  running?: boolean;
-  queuedApproval?: boolean;
-  commandContinuation?: boolean;
-  planContinuation?: boolean;
-  background?: boolean;
-  manualApproval?: boolean;
-  aborted?: boolean;
-}
-export function captureSessionTitleCompletion(sessionId: string, message: ChatMessage, _response?: unknown): SessionTitleSubmission | undefined {
-  return captureSessionTitleSubmission(sessionId, message);
-}
-export function checkSessionTitleCompletion(session: ChatSession, submission: SessionTitleSubmission,
-  _blockers?: SessionTitleCompletionBlockers): SessionTitleSubmissionCheck {
-  return checkSessionTitleSubmission(session, submission);
-}

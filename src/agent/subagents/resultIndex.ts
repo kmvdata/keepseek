@@ -93,7 +93,7 @@ export async function readResultRange(directory: vscode.Uri, canonical: NonNulla
     if (offset < end && next > start) {
       const bytes = await vscode.workspace.fs.readFile(chunkUri(directory, chunk.hash));
       if (bytes.length !== chunk.bytes || digest(bytes) !== chunk.hash) throw new Error('Subagent result object integrity mismatch.');
-      // Fatal decoding also rejects malformed UTF-8 in a forged legacy index.
+      // Fatal decoding also rejects malformed UTF-8 in a forged index.
       new TextDecoder('utf-8', { fatal: true }).decode(bytes);
       parts.push(bytes.slice(Math.max(0, start - offset), Math.min(bytes.length, end - offset)));
     }

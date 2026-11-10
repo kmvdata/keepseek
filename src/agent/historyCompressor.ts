@@ -46,7 +46,7 @@ import {
   getDurableProtectedMessageIds
 } from './historyProjection';
 import { estimateTokenCount } from './tokenEstimate';
-import { buildProviderPayloadProjection, buildProviderRequestProjection } from './providerRequestProjection';
+import { CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION, buildProviderPayloadProjection, buildProviderRequestProjection } from './providerRequestProjection';
 import { createUsageEvent, normalizeDeepSeekUsage } from './usageStats';
 import { createUsageLedgerRecords, createUsagePriceSnapshot } from './usageLedger';
 import { createProviderCacheObservation } from './cacheObservation';
@@ -73,7 +73,7 @@ export interface HistoryCompressionRefreshInput {
   slimToolNames?: string[];
   requestProtocolVersion?: number;
   usageSource?: Extract<UsageSource, 'summary' | 'background'>;
-  /** Per-run credentials shared with AgentRunner; omitted for legacy direct callers. */
+  /** Per-run credentials shared with AgentRunner; optional for direct callers. */
   sourceConfig?: ModelSourceConfigSnapshot;
   calibration?: Parameters<typeof resolveProviderRequestBudget>[0]['calibration'];
 }
@@ -557,7 +557,7 @@ export class HistoryCompressor {
       body,
       taskId: input.sessionId,
       runId: `summary:${input.sessionId ?? requestId}`,
-      requestProtocolVersion: 1,
+      requestProtocolVersion: CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION,
       previous: attemptIndex > 0 ? attemptCacheObservations[0] ?? previousCacheObservation : previousCacheObservation,
       historyCompacted: true
     });

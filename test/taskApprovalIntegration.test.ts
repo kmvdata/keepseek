@@ -1390,7 +1390,7 @@ async function createFixture(root: string, mode: 'ask' | 'delegate') {
   const message: ChatMessage = { id: 'assistant', role: 'assistant', content: '', createdAt: new Date().toISOString(), userTask };
   session.messages.push(message);
   const proposal = await createDraftRunProposal({ executable: 'node', args: ['--version'], reason: 'Check runtime' });
-  const edit: DraftEdit = { id: 'edit', uri: vscode.Uri.file(path.join(workspace, 'result.txt')).toString(), label: 'result.txt', action: 'create', newText: 'result\n', reason: 'Create requested result' };
+  const edit: DraftEdit = createFullTextDraftEdit({ id: 'edit', uri: vscode.Uri.file(path.join(workspace, 'result.txt')).toString(), label: 'result.txt', action: 'create', content: 'result\n', reason: 'Create requested result' });
   const response = { runId: 'physical-trace-id', message: 'Prepared', draftEdits: [edit], draftRuns: [proposal],
     runDetails: new RunDetailsBuilder({ runId: 'physical-trace-id', modelId: 'main', thinkingEnabled: false }).build('succeeded'), toolRounds: [] } as unknown as AgentResponse;
   const request: AgentRequest = { approvalMode: mode, model: { id: 'main', sourceId: 'main', provider: 'openai-compatible', label: 'main', contextWindowTokens: 32768, maxOutputTokens: 4096 },
@@ -1552,7 +1552,7 @@ function astCommand(target: string): string {
   return `import ast, pathlib; p = pathlib.Path('${target}'); ast.parse(p.read_text(encoding='utf-8')); print('syntax ok', p)`;
 }
 
-for (const scenario of ['valid', 'syntax_error', 'changed', 'denied', 'unavailable', 'cancelled', 'configuration_changed', 'mode_changed', 'budget', 'legacy_wait'] as const) {
+for (const scenario of ['valid', 'syntax_error', 'changed', 'denied', 'unavailable', 'cancelled', 'configuration_changed', 'mode_changed', 'budget'] as const) {
   test(`Auto approval AST fallback with real Python: ${scenario}`, { skip: !pythonAvailable }, async () => {
     await fixture('delegate', async f => {
       const target = scenario === 'valid' ? 'sisyphus/common/infra/orm/__init__.py' : '语法 check.py';
@@ -1612,18 +1612,6 @@ for (const scenario of ['valid', 'syntax_error', 'changed', 'denied', 'unavailab
       };
       try {
         await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
-        if (scenario === 'legacy_wait') {
-          f.session.approvalProcessing = { version: 1, runId: f.cp.taskId, rootTaskId: f.message.userTask!.id,
-            mode: 'delegate', status: 'blocked', updatedAt: new Date().toISOString(),
-            targets: [{ id: original.id, kind: 'command', status: 'manual_required', reason: 'Inline code requires separate approval.' }] };
-          f.session.approvalProcessing = normalizeApprovalProcessing(f.session.approvalProcessing);
-          await f.host.resumeApprovalProcessing(undefined, original.id);
-          assert.equal(f.queue.take(f.session.id), undefined);
-          assert.equal(f.session.approvalProcessing?.status, 'stopped');
-          assert.deepEqual(started, []);
-          assert.equal(clicks, 0);
-          return;
-        }
         f.host.queueResponseApprovals(f.session, f.message, f.response);
         await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
         const retired = runs.get(original.id);

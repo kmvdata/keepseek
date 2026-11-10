@@ -25,7 +25,7 @@ import type {
 } from '../../shared/types';
 import type { InteractionTraceLogService } from '../logging/interactionTrace';
 import {
-  APPLY_PATCH_TOOL_NAME,
+  CURRENT_AGENT_PROTOCOL_VERSION,
   DELEGATE_PARALLEL_TOOL_NAME,
   DELEGATE_TASK_TOOL_NAME,
   DELEGATION_CHECKPOINT_TOOL_NAME,
@@ -80,7 +80,7 @@ import type {
   SubagentInvocationContext,
   SubagentProgressState,
   SubagentProfile,
-  SubagentResultManifestV2,
+  SubagentResultManifest,
   SubagentToolAdapter,
   SubagentToolExecution
 } from './types';
@@ -88,7 +88,7 @@ import type { SubagentToolCategory } from './types';
 import { freezeTree } from '../../sessions/persistenceSnapshot';
 import { createSubagentHostContext, resolveInheritedSubagentHostContext, type SubagentHostContextV1 } from './contextCapsule';
 
-const SUBAGENT_PROTOCOL_VERSION = 11;
+const SUBAGENT_PROTOCOL_VERSION = CURRENT_AGENT_PROTOCOL_VERSION;
 const MAX_PARALLEL_TASKS = 8;
 
 interface PreparedSubagentTask {
@@ -225,12 +225,12 @@ export class SubagentRuntime implements SubagentToolAdapter {
       }
     });
     const accepted = conflicts.length === 0 && failedTasks.length === 0;
-    const manifests = executions.map((execution, index): SubagentResultManifestV2 => {
+    const manifests = executions.map((execution, index): SubagentResultManifest => {
       const parsed = safeParseToolResult(execution.content);
       if (isSubagentResultManifest(parsed)) return parsed;
       const preparedTask = prepared[index]!;
       return createSubagentResultManifest({
-        contractVersion: (context.parentRequest.requestProtocolVersion ?? 1) >= 11 ? 2 : undefined,
+        contractVersion: 2,
         metadata: {
           id: preparedTask.id,
           treeId: preparedTask.treeId,
@@ -274,21 +274,18 @@ export class SubagentRuntime implements SubagentToolAdapter {
     if (!parentSessionId) {
       return toolError('parent_session_missing', 'Subagent results can only be read from a persisted parent session.');
     }
-    const resultId = input.ref ?? input.subagentId ?? '';
+    const resultId = input.ref ?? '';
     if (this.unavailableResults.has(resultId)) return terminalDeliveryUnavailable();
     const pageInput = {
       parentSessionId,
       ref: input.ref,
-      subagentId: input.subagentId,
       allowedTreeId: context.parentRequest.subagentContext?.treeId,
       offsetBytes: input.offsetBytes,
-      limitBytes: input.limitBytes,
-      offset: input.offset,
-      maxChars: input.maxChars
+      limitBytes: input.limitBytes
     };
     let result = await this.store.readResultPage(pageInput);
     if (result.errorType === 'subagent_result_pending') {
-      const stored = await this.store.read(parentSessionId, input.ref ?? input.subagentId ?? '');
+      const stored = await this.store.read(parentSessionId, input.ref ?? '');
       const live = stored && this.progress.get(stored.metadata.id);
       if (live?.parentSessionId === parentSessionId && (live.status === 'queued' || live.status === 'running')) {
         // A verified live host operation is a wait, not new evidence or a model
@@ -554,7 +551,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
       });
       const previewBytes = getConfiguredSubagentHandoffPreviewBytes();
       return { content: stableJson(createSubagentResultManifest({
-        contractVersion: (context.parentRequest.requestProtocolVersion ?? 1) >= 11 ? 2 : undefined,
+        contractVersion: 2,
         metadata: failureMetadata,
         result: '',
         status: manifestStatusFromFailure(failureKind, context.signal?.aborted === true),
@@ -716,7 +713,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
       });
       const previewBytes = getConfiguredSubagentHandoffPreviewBytes();
       return { content: stableJson(createSubagentResultManifest({
-        contractVersion: (input.context.parentRequest.requestProtocolVersion ?? 1) >= 11 ? 2 : undefined,
+        contractVersion: 2,
         metadata: failureMetadata,
         result: '',
         status: 'failed',
@@ -749,7 +746,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
           lane: input.profile.lane,
           maxChars: input.profile.resultMaxChars,
           expectedTaskHash: taskHash,
-          contractVersion: SUBAGENT_PROTOCOL_VERSION >= 11 ? 2 : undefined
+          contractVersion: 2
         });
         if (candidate.metadata.hostContextHash !== input.hostContext.hash || candidate.metadata.resultTruncated
           || !verifiedEnvelope.ok || verifiedEnvelope.envelope?.status !== 'complete') continue;
@@ -979,7 +976,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
         draftEdits: artifactCheck.draftEdits,
         draftRuns: artifactCheck.draftRuns,
         expectedTaskHash: taskHash,
-        contractVersion: SUBAGENT_PROTOCOL_VERSION >= 11 ? 2 : undefined
+        contractVersion: 2
       });
       if (!acceptance.ok && canRepairSubagentResult(acceptance.diagnostics)
         && utf8ByteLength(acceptedRaw) <= 2_097_152) {
@@ -1003,7 +1000,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
           draftEdits: artifactCheck.draftEdits,
           draftRuns: artifactCheck.draftRuns,
           expectedTaskHash: taskHash,
-          contractVersion: SUBAGENT_PROTOCOL_VERSION >= 11 ? 2 : undefined
+          contractVersion: 2
         });
       }
       if (acceptance.ok && acceptance.envelope) {
@@ -1079,7 +1076,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
       };
       const previewBytes = getConfiguredSubagentHandoffPreviewBytes();
       const manifest = createSubagentResultManifest({
-        contractVersion: (input.context.parentRequest.requestProtocolVersion ?? 1) >= 11 ? 2 : undefined,
+        contractVersion: 2,
         envelope: deliveredEnvelope,
         metadata: completedMetadata,
         result: fullResult.content,
@@ -1209,7 +1206,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
       const previewBytes = getConfiguredSubagentHandoffPreviewBytes();
       return {
         content: stableJson(createSubagentResultManifest({
-          contractVersion: (input.context.parentRequest.requestProtocolVersion ?? 1) >= 11 ? 2 : undefined,
+          contractVersion: 2,
           envelope: acceptedFailedEnvelope,
           metadata: failureMetadata,
           result: failureResult.content,
@@ -1330,7 +1327,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
     const previewBytes = getConfiguredSubagentHandoffPreviewBytes();
     return {
       content: stableJson(createSubagentResultManifest({
-        contractVersion: (input.input.context.parentRequest.requestProtocolVersion ?? 1) >= 11 ? 2 : undefined,
+        contractVersion: 2,
         envelope: input.envelope,
         metadata,
         result,
@@ -1476,21 +1473,15 @@ export class SubagentRuntime implements SubagentToolAdapter {
   }
 }
 
-export function getChildToolNamesForRuntime(profile: SubagentProfile, depth: number, protocolVersion = 5): string[] {
+export function getChildToolNamesForRuntime(profile: SubagentProfile, depth: number, _protocolVersion = CURRENT_AGENT_PROTOCOL_VERSION): string[] {
   const names = new Set(profile.toolNames);
-  // Preserve the exact legacy child schema for V1-V7. Evidence paging is
-  // infrastructure, not a profile capability, but it enters only at the V8
-  // cache boundary and replaces the child-specific result reader there.
-  if (protocolVersion >= 8) names.add(READ_EVIDENCE_TOOL_NAME);
-  else names.add(READ_SUBAGENT_RESULT_TOOL_NAME);
-  if (protocolVersion >= 10) names.add(READ_SUBAGENT_RESULT_TOOL_NAME);
+  names.add(READ_EVIDENCE_TOOL_NAME);
+  names.add(READ_SUBAGENT_RESULT_TOOL_NAME);
   if (profile.canDelegate && depth < 2 && profile.lane !== 'proposal') {
     names.add(DELEGATE_TASK_TOOL_NAME);
     names.add(DELEGATE_PARALLEL_TOOL_NAME);
-    if (protocolVersion >= 11) names.add(DELEGATION_CHECKPOINT_TOOL_NAME);
+    names.add(DELEGATION_CHECKPOINT_TOOL_NAME);
   }
-  if (protocolVersion >= 8 && protocolVersion < 10) names.delete(READ_SUBAGENT_RESULT_TOOL_NAME);
-  if (protocolVersion < 9) names.delete(APPLY_PATCH_TOOL_NAME);
   return [...names].sort();
 }
 
@@ -1516,20 +1507,19 @@ export function getSubagentSystemPromptForVersion(
   language: import('../../shared/i18n').KeepseekLanguage,
   profile: SubagentProfile,
   depth: number,
-  protocolVersion: number
+  _protocolVersion: number
 ): string {
-  const frozenV5 = getSubagentSystemPromptV5(language, profile, depth);
-  if (protocolVersion <= 5) return frozenV5;
+  const base = getSubagentSystemPrompt(language, profile, depth);
   return [
-    frozenV5,
-    getSubagentResultFormatInstruction(profile.lane, protocolVersion >= 11 ? 2 : 1),
-    ...(protocolVersion >= 11 && profile.canDelegate && depth < 2 && profile.lane !== 'proposal'
+    base,
+    getSubagentResultFormatInstruction(profile.lane, 2),
+    ...(profile.canDelegate && depth < 2 && profile.lane !== 'proposal'
       ? ['Before requesting delegation, use keepseek_delegation_checkpoint assess to register self-contained candidates, dependencies, capabilities and acceptance criteria. After a child returns, inspect its completion, evidence and missing work; record parent acceptance with the same tool. Do not mark incomplete or unverified branches complete.'] : []),
     'The host validates this envelope mechanically. Empty, generic, malformed, off-task, or missing required deliverables are failures. Never include hidden reasoning.'
   ].join('\n');
 }
 
-function getSubagentSystemPromptV5(language: import('../../shared/i18n').KeepseekLanguage, profile: SubagentProfile, depth: number): string {
+function getSubagentSystemPrompt(language: import('../../shared/i18n').KeepseekLanguage, profile: SubagentProfile, depth: number): string {
   if (language === 'en') {
     return [
       'You are an isolated KeepSeek subagent. Complete only the self-contained task in your current child session.',
@@ -1581,23 +1571,13 @@ function formatProjectInstructions(request: AgentRequest): string {
   ].join('\n')).join('\n\n');
 }
 
-function formatChildContext(projectInstructions: string, profile: SubagentProfile): string {
-  return [
-    'KeepSeek isolated subagent context v1',
-    projectInstructions ? `# Project instructions\n\n${projectInstructions}` : '',
-    `# Profile instructions: ${profile.id}\n\n${profile.instructions}`
-  ].filter(Boolean).join('\n\n');
-}
-
 export function formatChildContextForVersion(
   workspaceContext: string,
   projectInstructions: string,
   profile: SubagentProfile,
-  protocolVersion: number
+  _protocolVersion: number
 ): string {
-  return protocolVersion <= 5
-    ? formatChildContext(projectInstructions, profile)
-    : formatChildContextV2(workspaceContext, projectInstructions, profile);
+  return formatChildContextV2(workspaceContext, projectInstructions, profile);
 }
 
 function isContinuationCompatible(metadata: StoredSubagentMetadata, input: {
@@ -1916,10 +1896,10 @@ function safeParseToolResult(value: string): unknown {
   }
 }
 
-function isSubagentResultManifest(value: unknown): value is SubagentResultManifestV2 {
+function isSubagentResultManifest(value: unknown): value is SubagentResultManifest {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const item = value as Partial<SubagentResultManifestV2>;
-  return (item.version === 2 || item.version === 3) && item.kind === 'subagent_result_manifest'
+  const item = value as Partial<SubagentResultManifest>;
+  return item.version === 3 && item.kind === 'subagent_result_manifest'
     && typeof item.subagentId === 'string' && typeof item.resultRef === 'string'
     && typeof item.resultHash === 'string' && typeof item.status === 'string';
 }

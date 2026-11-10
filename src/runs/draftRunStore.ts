@@ -1095,8 +1095,8 @@ function toWebviewDraftRun(draftRun: DraftRun): WebviewDraftRun {
   void _gitCommitPlan;
   void _gitPushAttempt;
   return { ...rest,
-    // Pending legacy drafts keep their immutable spec and stored history. Only
-    // derived presentation advice is refreshed with the current parser.
+    // Immutable specs and history stay fixed while pending presentation advice
+    // is refreshed with the current parser.
     effectAssessment: draftRun.status === 'pending' && !draftRun.spec.restricted ? analyzeDraftRunEffects(draftRun.spec) : rest.effectAssessment,
     output: getDraftRunOutput(draftRun) };
 }

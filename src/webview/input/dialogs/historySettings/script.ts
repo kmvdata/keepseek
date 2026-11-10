@@ -213,17 +213,14 @@ export const historySettingsStateFragment: WebviewFragment = {
         var genericReasons = 0;
         Object.entries(operation.reasonCounts || {}).forEach(function(entry) {
           var reasonKeys = {
-            unverified_legacy_logs: 'historyCleanupReasonLegacyLogs',
+            unverified_logs: 'historyCleanupReasonUnverifiedLogs',
             session_storage_pending: 'historyCleanupReasonSessionStorage',
-            workspace_state_cleanup_failed: 'historyCleanupReasonWorkspaceState',
-            inaccessible_legacy_source: 'historyCleanupReasonLegacySource'
           };
           var count = Number(entry[1]) || 0;
           if (reasonKeys[entry[0]]) text += '\\n' + t(reasonKeys[entry[0]], { count: count });
           else genericReasons += count;
         });
         if (genericReasons) text += '\\n' + t('historyCleanupReasonAssociated', { count: genericReasons });
-        if (operation.inaccessibleLegacy) text += '\\n' + t('historyCleanupLegacyPending', { count: operation.inaccessibleLegacy });
         if (operation.error && operation.status !== 'failed') text += '\\n' + historyCleanupErrorText(operation.error);
         if (historyCleanupSummary) historyCleanupSummary.textContent = text;
         if (!active) historyCleanupCompletedOperationId = operation.operationId || '';

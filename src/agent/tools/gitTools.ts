@@ -1,3 +1,4 @@
+import { KEEPSEEK_CONFIGURATION_NAMESPACE } from '../../shared/identity';
 import { execFile } from 'node:child_process';
 import { realpath } from 'node:fs/promises';
 import * as path from 'node:path';
@@ -22,9 +23,8 @@ interface GitReadContext {
   repositoryRoot: string;
 }
 
-// Keep the legacy fallback result fields for existing consumers. Live Git is
-// the authority even when a VS Code Git repository is available.
-const gitReadSource = { providerAvailable: false, fallback: true, source: 'git_cli' } as const;
+// Read-only Git CLI is the sole authority for repository state.
+const gitReadSource = { source: 'git_cli' } as const;
 
 export interface GitToolAdapter {
   getStatus(input: { workspaceFolder?: string }, language: KeepseekLanguage): Promise<string>;
@@ -136,8 +136,7 @@ export class GitToolService implements GitToolAdapter {
     if (!files.length) {
       return JSON.stringify({
         ok: false,
-        providerAvailable: diff.providerAvailable,
-        fallback: diff.fallback,
+        source: diff.source,
         error: language === 'en' ? 'No staged or unstaged Git changes were found.' : '未发现已暂存或未暂存的 Git 修改。'
       });
     }
@@ -149,8 +148,7 @@ export class GitToolService implements GitToolAdapter {
     const conventional = `${type}${scope ? `(${scope})` : ''}: ${subject}`;
     return JSON.stringify({
       ok: true,
-      providerAvailable: diff.providerAvailable,
-      fallback: diff.fallback,
+      source: diff.source,
       suggestion: conventional,
       alternatives: [
         conventional,
@@ -243,8 +241,7 @@ type GitDiffResult = Record<string, unknown> & {
   truncated?: boolean;
   summary?: DiffSummary;
   staged?: boolean;
-  providerAvailable?: boolean;
-  fallback?: boolean;
+  source?: 'git_cli';
 };
 
 interface GitStatusChange {
@@ -452,7 +449,7 @@ function createError(language: KeepseekLanguage, english: string, chinese: strin
 }
 
 function getGitUnavailableError(language: KeepseekLanguage): string | undefined {
-  if (!vscode.workspace.getConfiguration('keepseek').get<boolean>('useGit', true)) {
+  if (!vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE).get<boolean>('useGit', true)) {
     return createError(language, 'Git integration is disabled in KeepSeek settings.', 'KeepSeek 设置中已禁用 Git 集成。');
   }
   if (!vscode.workspace.isTrusted) {

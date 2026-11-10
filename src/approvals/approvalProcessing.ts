@@ -47,10 +47,10 @@ export interface DraftRunReplanResult {
 }
 
 export interface ApprovalProcessingState {
-  version: 1 | 2;
+  version: 2;
   runId: string;
   rootTaskId: string;
-  mode: 'delegate' | 'model_review';
+  mode: 'delegate';
   status: 'processing' | 'completed' | 'blocked' | 'waiting_user' | 'replanning' | 'stopped';
   targets: Array<{ id: string; kind: 'edit' | 'command'; status: ApprovalTargetStatus; reason?: string; failureCode?: string;
     dependency?: ApprovalDependency; replan?: DraftRunReplanResult }>;
@@ -120,31 +120,26 @@ function approvalReason(value: unknown): string | undefined {
 
 export function normalizeApprovalProcessing(value: unknown): ApprovalProcessingState | undefined {
   const v = value as ApprovalProcessingState | undefined;
-  if ((v?.version !== 1 && v?.version !== 2) || typeof v.runId !== 'string' || typeof v.rootTaskId !== 'string'
-    || !['delegate', 'model_review'].includes(v.mode) || !Array.isArray(v.targets)
+  if (v?.version !== 2 || typeof v.runId !== 'string' || typeof v.rootTaskId !== 'string'
+    || v.mode !== 'delegate' || !Array.isArray(v.targets)
     || !['processing', 'completed', 'blocked', 'waiting_user', 'replanning', 'stopped'].includes(v.status)) return undefined;
   const interrupted = v.status === 'processing' || v.status === 'replanning' || v.status === 'waiting_user';
-  const stoppedDelegate = v.version === 1 && v.mode === 'delegate' && (interrupted || v.status === 'blocked' || v.status === 'stopped'
-    || v.targets.some(target => target && ['manual_required', 'needs_authorization', 'review_unavailable'].includes(target.status)));
   const targets = v.targets.filter(t => t && typeof t.id === 'string' && ['edit', 'command'].includes(t.kind)
     && ['pending', 'executed', 'denied', 'manual_required', 'review_unavailable', 'hard_blocked', 'needs_authorization', 'failed', 'cancelled', 'already_processed', 'identity_mismatch', 'missing', 'needs_replan', 'dependency_blocked', 'external_authorization_required', 'insufficient_launch_evidence'].includes(t.status))
     .map(t => {
       const replan = normalizeDraftRunReplan(t.replan, t.id, v.runId);
-      const status = t.status === 'pending' ? (stoppedDelegate && interrupted ? 'failed' : 'cancelled')
-        : stoppedDelegate && t.status === 'manual_required' ? 'insufficient_launch_evidence'
-        : stoppedDelegate && t.status === 'needs_authorization' ? 'external_authorization_required' : t.status;
+      const status = t.status === 'pending' ? 'cancelled' : t.status;
       return { id: t.id, kind: t.kind, status,
         failureCode: typeof t.failureCode === 'string' && /^[a-z_]{1,64}$/u.test(t.failureCode) ? t.failureCode : undefined,
         reason: approvalReason(t.reason), dependency: normalizeApprovalDependency(t.dependency),
         replan: replan?.rootTaskId === v.rootTaskId ? replan : undefined };
     });
   return { version: v.version, runId: v.runId, rootTaskId: v.rootTaskId, mode: v.mode,
-    status: stoppedDelegate ? 'stopped' : interrupted ? 'blocked' : v.status, targets,
-    canResume: v.mode === 'delegate' && v.version === 2 && (interrupted || v.canResume === true)
+    status: interrupted ? 'blocked' : v.status, targets,
+    canResume: (interrupted || v.canResume === true)
       && !targets.some(target => ['denied', 'hard_blocked', 'identity_mismatch', 'missing', 'failed'].includes(target.status)) || undefined,
     localGitCompletionRetried: v.localGitCompletionRetried === true || undefined,
     replanKeys: Array.isArray(v.replanKeys) ? v.replanKeys.filter(key => typeof key === 'string' && /^[a-f0-9]{64}$/u.test(key)).slice(0, 2) : undefined,
-    reason: stoppedDelegate && interrupted ? 'Approval processing was interrupted. Restored drafts were not replayed. / 审批处理已中断，未重放恢复出的草稿。'
-      : interrupted ? 'Interrupted; explicitly resume processing. / 处理已中断，请明确恢复。' : approvalReason(v.reason),
+    reason: interrupted ? 'Interrupted; explicitly resume processing. / 处理已中断，请明确恢复。' : approvalReason(v.reason),
     updatedAt: typeof v.updatedAt === 'string' ? v.updatedAt : '' };
 }

@@ -339,8 +339,8 @@ test('Diff falls back to a readable review document and resolves blob-backed bef
     encoding: { name: 'utf-8' as const, bom: 'none' as const, eol: 'lf' as const, finalEol: true }
   };
   const checkpoint: ChangeCheckpoint = {
-    version: 2, id: 'full-diff-cp', changeSetId: 'set', editId: edit.id, uri: edit.uri, label: edit.label,
-    action: 'modify', draftKind: 'full_text_v1', state: 'applied', originalExists: true,
+    version: 2, hashMode: 'utf8_bytes', id: 'full-diff-cp', changeSetId: 'set', editId: edit.id, uri: edit.uri, label: edit.label,
+    action: 'modify', draftKind: 'full_text_v1', state: 'applied', operation: 'apply', originalExists: true,
     originalTextHash: edit.base.sha256, originalSizeBytes: before.byteLength, originalBlobHash,
     appliedExists: true, appliedTextHash: edit.result.sha256, appliedSizeBytes: edit.result.sizeBytes,
     createdAt: '2026-09-14T00:00:00.000Z'
@@ -430,7 +430,7 @@ test('restart reconciliation covers prepared, applying-before-replace, written-b
   });
   assert.ok(changeSet);
   const checkpoints = edits.map((edit, index): ChangeCheckpoint => ({
-    version: 2,
+    version: 2, hashMode: 'utf8_bytes',
     id: `crash-checkpoint-${index}`,
     changeSetId: changeSet.id,
     editId: edit.id,
@@ -467,51 +467,20 @@ test('restart reconciliation covers prepared, applying-before-replace, written-b
   assert.equal(await fs.readFile(path.join(root, files[3]), 'utf8'), 'external\n');
 });
 
-test('migrates v3 legacy pending and revertible ChangeSets without reusing patch hashes', async (t) => {
-  const root = await configureWorkspace(t, 'keepseek-patch-v3-');
+test('does not hydrate or execute V3 pending ChangeSets', async (t) => {
+  const root = await configureWorkspace(t, 'keepseek-patch-current-');
   const storage = path.join(root, '.global');
-  const pendingPath = path.join(root, 'pending.ts');
-  const appliedPath = path.join(root, 'applied.ts');
-  await fs.writeFile(pendingPath, 'old pending\n');
-  await fs.writeFile(appliedPath, 'new applied\n');
-  const legacyHash = (value: string) => createHash('sha256').update(value, 'utf8').digest('hex');
-  const pending = createChangeSet({
-    runId: 'v3-pending', sessionId: 'session-1', messageId: 'message-pending', edits: [{
-      id: 'legacy-pending', uri: vscode.Uri.file(pendingPath).toString(), label: 'pending.ts', action: 'modify',
-      newText: 'new pending\n', reason: 'legacy pending', expectedOriginalTextHash: legacyHash('old pending\n'),
-      expectedOriginalSize: Buffer.byteLength('old pending\n')
-    }]
-  });
-  const applied = createChangeSet({
-    runId: 'v3-applied', sessionId: 'session-1', messageId: 'message-applied', edits: [{
-      id: 'legacy-applied', uri: vscode.Uri.file(appliedPath).toString(), label: 'applied.ts', action: 'modify',
-      newText: 'new applied\n', reason: 'legacy applied', expectedOriginalTextHash: legacyHash('old applied\n'),
-      expectedOriginalSize: Buffer.byteLength('old applied\n')
-    }]
-  });
-  assert.ok(pending && applied);
-  const legacyCheckpoint: ChangeCheckpoint = {
-    id: 'legacy-checkpoint', changeSetId: applied.id, editId: 'legacy-applied', uri: vscode.Uri.file(appliedPath).toString(),
-    label: 'applied.ts', action: 'modify', originalExists: true, originalText: 'old applied\n',
-    originalTextHash: legacyHash('old applied\n'), appliedExists: true, appliedTextHash: legacyHash('new applied\n'),
-    createdAt: '2026-09-14T00:00:00.000Z', appliedAt: '2026-09-14T00:00:01.000Z'
-  };
-  applied.files[0].status = 'applied';
-  applied.files[0].checkpointId = legacyCheckpoint.id;
-  applied.status = 'applied';
-  await writeV3Storage(storage, [pending, applied], [legacyCheckpoint]);
-
-  const migrated = createRealStore(storage);
-  await migrated.store.initialize();
-  const migratedState = migrated.store.toWebviewState('session-1');
-  assert.equal(migratedState.find((item) => item.id === pending.id)?.status, 'pending');
-  assert.equal(migratedState.find((item) => item.id === applied.id)?.status, 'applied');
-  assert.deepEqual((await migrated.store.applyEdit('legacy-pending'))?.appliedEditIds, ['legacy-pending']);
-  assert.deepEqual((await migrated.store.revertEdit('legacy-applied'))?.revertedEditIds, ['legacy-applied']);
-  await migrated.store.flush();
-  assert.equal(await fs.readFile(pendingPath, 'utf8'), 'new pending\n');
-  assert.equal(await fs.readFile(appliedPath, 'utf8'), 'old applied\n');
-  assert.equal((JSON.parse(await fs.readFile(path.join(storage, 'change-sets', 'v4', 'index.json'), 'utf8')) as { version: number }).version, 4);
+  const target = path.join(root, 'target.ts');
+  await fs.writeFile(target, 'before');
+  const oldRoot = path.join(storage, 'change-sets', 'v3');
+  await fs.mkdir(oldRoot, { recursive: true });
+  await fs.writeFile(path.join(oldRoot, 'index.json'), JSON.stringify({ version: 3,
+    entries: [{ id: 'old', sessionId: 'session-1', kind: 'runtime', storageFile: 'runtime/old.json', checkpointIds: [], updatedAt: '' }] }));
+  const current = createRealStore(storage);
+  await current.store.initialize();
+  assert.deepEqual(current.store.toWebviewState('session-1'), []);
+  assert.equal(await current.store.applyEdit('old'), undefined);
+  assert.equal(await fs.readFile(target, 'utf8'), 'before');
 });
 
 function patchEdit(target: string, baseText: string, edits: TextPatchEditInput[]): TextPatchDraftEditV1 {
@@ -582,24 +551,6 @@ async function writeV4Storage(storagePath: string, changeSet: ChangeSet, checkpo
       checkpointIds: checkpoints.map((checkpoint) => checkpoint.id), updatedAt: changeSet.updatedAt
     }]
   }));
-}
-
-async function writeV3Storage(storagePath: string, changeSets: ChangeSet[], checkpoints: ChangeCheckpoint[]): Promise<void> {
-  const root = path.join(storagePath, 'change-sets', 'v3');
-  await Promise.all(['runtime', 'history', 'checkpoints'].map((name) => fs.mkdir(path.join(root, name), { recursive: true })));
-  const entries = [];
-  for (const changeSet of changeSets) {
-    const storageFile = `runtime/${storageFileName(changeSet.id)}`;
-    await fs.writeFile(path.join(root, storageFile), JSON.stringify({ version: 3, changeSet }));
-    entries.push({
-      id: changeSet.id, sessionId: changeSet.sessionId, kind: 'runtime', storageFile,
-      checkpointIds: changeSet.files.map((file) => file.checkpointId).filter(Boolean), updatedAt: changeSet.updatedAt
-    });
-  }
-  await Promise.all(checkpoints.map((checkpoint) => fs.writeFile(
-    path.join(root, 'checkpoints', storageFileName(checkpoint.id)), JSON.stringify({ version: 3, checkpoint })
-  )));
-  await fs.writeFile(path.join(root, 'index.json'), JSON.stringify({ version: 3, entries }));
 }
 
 function storageFileName(id: string): string {

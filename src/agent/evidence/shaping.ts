@@ -325,7 +325,7 @@ function canonicalize(value: unknown): unknown {
 }
 
 function isSubagentHandoff(value: unknown): value is Record<string, unknown> {
-  return isRecord(value) && (value.version === 2 || value.version === 3)
+  return isRecord(value) && value.version === 3
     && (value.kind === 'subagent_result_manifest' || value.kind === 'subagent_parallel_manifest');
 }
 
@@ -366,7 +366,7 @@ function shapeSubagentHandoff(
     : [withRefs];
   for (const item of items) {
     item.preview = '';
-    if (value.version === 3) item.hasMore = readNonNegative(item.resultBytes) > 0;
+    item.hasMore = readNonNegative(item.resultBytes) > 0;
   }
   content = stableStringify(withRefs);
   if (fits()) return content;
@@ -385,8 +385,7 @@ function shapeSubagentItem(value: unknown): Record<string, unknown> {
     'resultRef', 'resultHash', 'resultChars', 'resultBytes', 'hasMore', 'resultTruncated',
     'originalResultChars', 'originalResultHash', 'draftEditCount', 'draftRunCount', 'errorType',
     'diagnosticRef', 'reusedFromSubagentId',
-    ...(value.version === 3 || value.resultStatus !== undefined
-      ? ['resultStatus', 'formatAccepted', 'parentAcceptance'] : [])
+    'resultStatus', 'formatAccepted', 'parentAcceptance'
   ]) {
     const field = value[key];
     if (typeof field === 'string') result[key] = field.slice(0, 1_024);
@@ -396,7 +395,7 @@ function shapeSubagentItem(value: unknown): Record<string, unknown> {
   if (isRecord(value.usageSummary)) result.usageSummary = canonicalize(value.usageSummary);
   result.summary = typeof value.summary === 'string' ? value.summary.slice(0, 1_024) : '';
   result.preview = typeof value.preview === 'string' ? value.preview : '';
-  if (value.version === 3 || value.resultStatus !== undefined) {
+  {
     for (const key of ['missing', 'uncertainties', 'keyEvidence']) {
       if (Array.isArray(value[key])) result[key] = canonicalize(value[key]);
     }

@@ -19,16 +19,16 @@ interface SessionToolResolver {
   ): string[];
 }
 
-test('a hot v2 session keeps its frozen schema until a cache-safe migration boundary', () => {
+test('an active current session keeps its frozen schema in the same model lane', () => {
   const now = new Date().toISOString();
   const session: ChatSession = {
-    id: 'session-hot-v2',
-    title: 'Hot v2 lane',
+    id: 'session-current',
+    title: 'Current lane',
     messages: [{ id: 'u1', role: 'user', content: 'first', createdAt: now }],
     requestProtocol: {
-      version: 2,
+      version: CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION,
       serializationStrategy: 'provider-projection-v2',
-      toolSchemaVersion: 2,
+      toolSchemaVersion: CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION,
       toolNames: ['keepseek_run_validation'],
       modelId: 'same-model',
       sourceId: 'source',
@@ -60,8 +60,8 @@ test('a hot v2 session keeps its frozen schema until a cache-safe migration boun
   const resolver = Object.create(KeepseekChatViewProvider.prototype) as SessionToolResolver;
 
   assert.deepEqual(resolver.resolveSessionToolNames(session, 'next', model, sourceConfig), ['keepseek_run_validation']);
-  assert.equal(session.requestProtocol?.version, 2);
-  assert.equal(session.requestProtocol?.toolSchemaVersion, 2);
+  assert.equal(session.requestProtocol?.version, CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION);
+  assert.equal(session.requestProtocol?.toolSchemaVersion, CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION);
 });
 
 test('model changes migrate the cache lane while preserving semantic summaries', () => {
@@ -89,9 +89,9 @@ test('model changes migrate the cache lane while preserving semantic summaries',
       protectedMessageIds: []
     },
     requestProtocol: {
-      version: 1,
-      serializationStrategy: 'legacy-v1',
-      toolSchemaVersion: 1,
+      version: CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION,
+      serializationStrategy: 'provider-projection-v2',
+      toolSchemaVersion: CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION,
       toolNames: ['keepseek_list_workspace_files'],
       modelId: 'old-model',
       sourceId: 'source',

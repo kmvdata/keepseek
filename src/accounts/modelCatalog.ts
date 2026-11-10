@@ -155,14 +155,9 @@ export function findModelBySelection(
 ): KeepseekModel | undefined {
   const sourceId = selection?.sourceId?.trim();
   const modelId = selection?.modelId?.trim();
-  if (sourceId && modelId) {
-    return models.find((model) => model.sourceId === sourceId && model.id === modelId);
-  }
-  if (modelId) {
-    // Backward compatibility for workspaces that persisted only selectedModelId.
-    return models.find((model) => model.id === modelId);
-  }
-  return models[0];
+  return sourceId && modelId
+    ? models.find((model) => model.sourceId === sourceId && model.id === modelId)
+    : undefined;
 }
 
 export function toModelSelection(model: { sourceId: string; id: string }): ModelSelection {
@@ -186,10 +181,6 @@ export function resolveProjectModel(
   projectSelection: Partial<ModelSelection> | undefined,
   defaultSelection?: Partial<ModelSelection>
 ): KeepseekModel | undefined {
-  // Only modelId-only legacy selections may match across accounts. An invalid
-  // complete identity must reach the global default instead of a namesake.
-  const selected = projectSelection?.modelId
-    ? findModelBySelection(models, projectSelection)
-    : undefined;
+  const selected = findModelBySelection(models, projectSelection);
   return selected ?? resolveDefaultModel(models, defaultSelection);
 }

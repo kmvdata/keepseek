@@ -9,9 +9,6 @@
  *（Anthropic Messages 兼容端点）。
  * API 类型决定默认 Base URL、模型发现端点、请求客户端分派与余额能力；
  * 账号本身只保存名称、凭证与已挂载模型。
- *
- * 旧版 keepseek.apiKey / keepseek.baseUrl / DEEPSEEK_API_KEY 环境变量
- * 不再支持，读取时直接舍弃，不做迁移。
  */
 export const MODEL_SOURCE_PROVIDERS = [
   'deepseek',

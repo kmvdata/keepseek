@@ -1,3 +1,4 @@
+import { createFullTextDraftEdit } from '../src/edits/draftEdit';
 import './registerVscodeStub';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -408,8 +409,8 @@ async function createFixture(root: string, mode: 'ask' | 'delegate') {
     await runs.approveAndRun(done.id, new Set());
     if (i < 2) runs.bindResultsToMessage([done.id], users[2].id);
     pendingIds.push(pending.id); doneIds.push(done.id);
-    edits.addDraftEdits({ edits: [{ id: `edit-${i}`, uri: vscode.Uri.file(path.join(workspace, `new-${i}.txt`)).toString(), label: `new-${i}.txt`,
-      action: 'create', newText: 'new\n', reason: 'Requested change' }],
+    edits.addDraftEdits({ edits: [createFullTextDraftEdit({ id: `edit-${i}`, uri: vscode.Uri.file(path.join(workspace, `new-${i}.txt`)).toString(), label: `new-${i}.txt`,
+      action: 'create', content: 'new\n', reason: 'Requested change' })],
     runId: assistants[i].runCheckpoint!.taskId, sessionId: session.id, messageId: assistants[i].id });
   }
   const effectFile = path.join(workspace, 'already-applied.txt'); await writeFile(effectFile, 'already happened\n');

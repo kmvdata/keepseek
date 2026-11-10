@@ -135,6 +135,21 @@ describe('ModelSourceStore', () => {
     assert.equal(stored.baseUrl, 'https://api.openai.com/v1');
   });
 
+  it('preserves the previous account when an atomic replacement fails', async () => {
+    const store = new ModelSourceStore(vscode.Uri.file(storageRoot), { now: () => NOW });
+    await store.createSource({ id: 'stable', provider: 'deepseek', apiKey: 'saved-key' });
+    const originalRename = vscode.workspace.fs.rename;
+    vscode.workspace.fs.rename = async () => {
+      throw Object.assign(new Error('replacement denied'), { code: 'EACCES' });
+    };
+    try {
+      await assert.rejects(store.updateSource('stable', { apiKey: 'unsaved-key' }), /replacement denied/u);
+      assert.equal((await store.getSource('stable'))?.apiKey, 'saved-key');
+    } finally {
+      vscode.workspace.fs.rename = originalRename;
+    }
+  });
+
   it('ignores damaged and path-mismatched JSON while preserving other sources', async () => {
     const deepseekDir = path.join(storageRoot, 'accounts', 'deepseek');
     await mkdir(deepseekDir, { recursive: true });

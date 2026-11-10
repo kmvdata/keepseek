@@ -6,14 +6,15 @@ import * as path from 'node:path';
 import { test } from 'node:test';
 import { DEFAULT_PATCH_MAX_BACKUP_BYTES } from '../src/shared/config';
 import { SafeFileEditor } from '../src/edits/safeFileEditor';
-import type { DraftEdit, LegacyDraftEditV0 } from '../src/shared/types';
+import type { DraftEdit, FullTextDraftEditV1, DeleteDraftEditV1, ChangeCheckpoint } from '../src/shared/types';
+import { createFullTextDraftEdit } from '../src/edits/draftEdit';
 import * as vscode from './stubs/vscode';
 
 test('delegated file application rechecks approval after reading and preserves the file on revocation', async (t) => {
   const root = await configureWorkspace(t, 'keepseek-revoked-edit-');
   const targetPath = path.join(root, 'file.txt');
   await fs.writeFile(targetPath, 'original');
-  const edit = { ...createDeleteEdit(targetPath), action: 'modify' as const, newText: 'changed' };
+  const edit = createModifyEdit(targetPath, 'changed');
   let checks = 0;
   await assert.rejects(new SafeFileEditor().applyDraftEdit(edit, 'set', {
     authorizedUri: edit.uri, isAuthorized: () => ++checks < 2
@@ -27,7 +28,7 @@ test('delegated external edit requires the exact URI and retains a usable revert
   await fs.writeFile(outside, 'original');
   vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file(path.join(root, 'workspace')), name: 'workspace' }];
   const editor = new SafeFileEditor();
-  const edit = { ...createDeleteEdit(outside), action: 'modify' as const, newText: 'changed' };
+  const edit = createModifyEdit(outside, 'changed');
   await assert.rejects(editor.applyDraftEdit(edit), /cannotApplyOutsideWorkspace/u);
   await assert.rejects(editor.applyDraftEdit(edit, 'set', { authorizedUri: 'file:///other', isAuthorized: () => true }), /revoked/u);
   const checkpoint = await editor.applyDraftEdit(edit, 'set', { authorizedUri: edit.uri, isAuthorized: () => true });
@@ -102,16 +103,12 @@ test('write preflight rejects binary baselines and oversized or unreadable outpu
   await fs.writeFile(existingPath, 'before', 'utf8');
   const editor = new SafeFileEditor((key) => key);
 
-  await assert.rejects(editor.preflightDraftEdit({
-    ...createModifyEdit(binaryPath), newText: 'safe replacement'
-  }), /cannotWriteUnreadableFile/u);
-  await assert.rejects(editor.preflightDraftEdit({
-    ...createModifyEdit(existingPath), newText: 'x'.repeat(DEFAULT_PATCH_MAX_BACKUP_BYTES + 1)
-  }), /cannotWriteOversizedFile/u);
-  await assert.rejects(editor.preflightDraftEdit({
+  await assert.rejects(editor.preflightDraftEdit(createModifyEdit(binaryPath, 'safe replacement')), /cannotWriteUnreadableFile/u);
+  await assert.rejects(editor.preflightDraftEdit(createModifyEdit(existingPath, 'x'.repeat(DEFAULT_PATCH_MAX_BACKUP_BYTES + 1))), /cannotWriteOversizedFile/u);
+  await assert.rejects(editor.preflightDraftEdit(createFullTextDraftEdit({
     id: 'create-unreadable', uri: vscode.Uri.file(createPath).toString(), label: 'oversized.ts',
-    action: 'create', newText: 'prefix\0suffix', reason: 'invalid output'
-  }), /cannotWriteUnreadableFile/u);
+    action: 'create', content: 'prefix\0suffix', reason: 'invalid output'
+  })), /cannotWriteUnreadableFile/u);
 
   assert.deepEqual(await fs.readFile(binaryPath), Buffer.from([0, 1, 2, 3]));
   assert.equal(await fs.readFile(existingPath, 'utf8'), 'before');
@@ -123,10 +120,10 @@ test('safe write checks keep valid text formats such as SVG writable', async (t)
   const targetPath = path.join(root, 'image.svg');
   await fs.writeFile(targetPath, '<svg></svg>', 'utf8');
   const editor = new SafeFileEditor((key) => key);
-  await editor.applyDraftEdit({
+  await editor.applyDraftEdit(createFullTextDraftEdit({
     id: 'modify-svg', uri: vscode.Uri.file(targetPath).toString(), label: 'image.svg',
-    action: 'modify', newText: '<svg><path /></svg>', reason: 'Update vector asset'
-  });
+    action: 'modify', content: '<svg><path /></svg>', reason: 'Update vector asset'
+  }));
   assert.equal(await fs.readFile(targetPath, 'utf8'), '<svg><path /></svg>');
 });
 
@@ -216,28 +213,38 @@ test('refreshes the active text tab content after applying', async (t) => {
   assert.equal(await fs.readFile(targetPath, 'utf8'), 'after');
 });
 
-function createModifyEdit(targetPath: string): LegacyDraftEditV0 {
-  return {
-    id: `modify-${path.basename(targetPath)}`,
-    uri: vscode.Uri.file(targetPath).toString(),
-    label: path.basename(targetPath),
-    action: 'modify',
-    newText: 'after',
-    reason: 'Modify file'
-  };
+test('current checkpoint recovery rejects missing identities and older headers before mutation', async t => {
+  const root = await configureWorkspace(t, 'keepseek-current-checkpoint-');
+  const target = path.join(root, 'target.txt');
+  await fs.writeFile(target, 'before');
+  const editor = new SafeFileEditor();
+  const checkpoint = await editor.applyDraftEdit(createModifyEdit(target), 'current-set');
+  assert.equal(await editor.classifyCheckpoint(checkpoint), 'result');
+  for (const changes of [
+    { version: 1 }, { hashMode: undefined }, { draftKind: undefined },
+    { appliedSizeBytes: undefined }, { originalSizeBytes: undefined }
+  ]) {
+    const invalid = { ...checkpoint, ...changes } as unknown as ChangeCheckpoint;
+    assert.equal(await editor.classifyCheckpoint(invalid), 'unknown');
+    await assert.rejects(editor.revertCheckpoint(invalid), /cannotRevertChangedAgentFile/);
+    assert.equal(await fs.readFile(target, 'utf8'), 'after');
+  }
+  const corrupt = { ...checkpoint, originalText: 'tampered' };
+  await assert.rejects(editor.revertCheckpoint(corrupt), /rollback content does not match/);
+  assert.equal(await fs.readFile(target, 'utf8'), 'after');
+});
+
+function createModifyEdit(targetPath: string, content = 'after'): FullTextDraftEditV1 {
+  return createFullTextDraftEdit({ id: `modify-${path.basename(targetPath)}`,
+    uri: vscode.Uri.file(targetPath).toString(), label: path.basename(targetPath), action: 'modify', content, reason: 'Modify file' });
 }
 
-function createDeleteEdit(targetPath: string, expectedText?: string, expectedSize?: number): LegacyDraftEditV0 {
-  return {
-    id: `delete-${path.basename(targetPath)}`,
-    uri: vscode.Uri.file(targetPath).toString(),
-    label: path.basename(targetPath),
-    action: 'delete',
-    newText: '',
-    reason: 'Remove obsolete file',
-    expectedOriginalTextHash: expectedText === undefined ? undefined : hashText(expectedText),
-    expectedOriginalSize: expectedSize
-  };
+function createDeleteEdit(targetPath: string, expectedText?: string, expectedSize?: number): DeleteDraftEditV1 {
+  const text = expectedText ?? '';
+  return { id: `delete-${path.basename(targetPath)}`, uri: vscode.Uri.file(targetPath).toString(),
+    label: path.basename(targetPath), action: 'delete', kind: 'delete_v1', reason: 'Remove obsolete file',
+    base: { sha256: hashText(text), sizeBytes: expectedSize ?? Buffer.byteLength(text) },
+    encoding: { name: 'utf-8', bom: 'none', eol: 'none', finalEol: false } };
 }
 
 async function configureWorkspace(

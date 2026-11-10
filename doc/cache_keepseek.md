@@ -51,18 +51,7 @@ current user / tool continuation
 
 ### 3.1 协议 lane
 
-新建主会话的 request protocol 与 tool schema 当前均为 **14**，分别由 `providerRequestProjection.ts` 的 `CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION` 与 `CURRENT_PROVIDER_TOOL_SCHEMA_VERSION` 定义。它们不代表 child runtime、结果合同或存储格式的版本；各维度见 [版本权威表](README.md#版本维度)。请求协议的演进边界包括：
-
-- V5 引入子代理。
-- V8 引入通用 Evidence 与 Context Epoch。
-- V9 固定加入 `keepseek_apply_patch` 与 canonical Patch IR。
-- V10 将子代理 handoff 改为小型 manifest，并把完整结果读取工具升级为 UTF-8 byte paging。
-- V11 增加分工评估、受控继承与父验收合同。
-- V12 由 `protocol.ts` 的 `PLUGIN_SKILL_REQUEST_PROTOCOL_VERSION` 门控显式 Codex 插件 Skill 读取工具。
-- V13 更新 ask/delegate 审批提示与 DraftRun 工具说明；宿主审批模式不由模型或历史提示切换。
-- V14 隐藏已暂停的插件 Skill 读取工具；V12/V13 保留冻结 schema，旧工具实际调用拒绝，历史字节不改写。
-
-受支持的 V1–V12 热主会话保持各自 system/schema 字节，只有缓存已冷或受控 rollover 才迁移；`subagents/runtime.ts` 的 child 协议仍独立固定为 11。不同来源、endpoint、wire model、协议版本或原生协议不能共用缓存 lane。旧版三审批模式字节属于冻结协议兼容，不是当前设置入口。
+主会话和 child runtime 的 request protocol 与 tool schema 仅支持当前 **15**，共同取 `protocol.ts` 的 `CURRENT_AGENT_PROTOCOL_VERSION`；projection 导出对应的当前常量。不同来源、endpoint、wire model 或原生协议不能共用缓存 lane。当前会话内 system/schema 字节保持冻结；不读取旧热协议、旧插件工具或旧审批提示。结果合同、handoff、capsule 和存储版本独立管理，见[版本权威表](README.md#版本维度)。
 
 ## 4. 字节冻结规则
 
@@ -102,7 +91,7 @@ current user / tool continuation
 - schema 的集合、字段和顺序按会话协议版本冻结。
 - 用户显式的有限工具预算耗尽时，先向内部 projection 追加 host finalization nudge，再使用 `tool_choice: none`；不临时删除 `tools`，nudge 不进入 `session.messages`。
 - no-tools reviewer/format-repair 通过独立的 `toolsEnabled=false` / 空工具集合建模；数值预算的 `0` 始终表示 unlimited，不再兼任“禁用工具”。
-- slim mode 默认关闭。新增或改名工具必须升级协议版本并覆盖热会话迁移测试。
+- slim mode 默认关闭。新增或改名工具必须明确协议边界，并覆盖当前会话字节稳定与协议校验测试。
 - Skill 与能力只影响上下文和运行策略，不得悄悄改写已冻结的 system/schema。
 
 ### 4.5 工具结果
@@ -137,7 +126,7 @@ current user / tool continuation
 ### 5.2 摘要约束
 
 - 摘要只保存目标、决策、错误、路径/符号线索、完成项和待办，不复制文件正文、长日志或代码块。
-- 独立历史摘要使用当前来源和模型，关闭 thinking、禁用 tools；按实际模型的有效输出配置和 `resolveProviderRequestBudget()` 准入，不使用阶段专用固定输出上限。模型请求超时统一取用户级 `keepseek.modelRequestTimeoutSeconds`。正费用上限下，缺少共享任务预留的独立摘要跳过，由运行时按任务账本压缩。
+- 独立历史摘要使用当前来源和模型，关闭 thinking、禁用 tools；按实际模型的有效输出配置和 `resolveProviderRequestBudget()` 准入，不使用阶段专用固定输出上限。模型请求超时统一取用户级 `kmvdata.keepseek.modelRequestTimeoutSeconds`。正费用上限下，缺少共享任务预留的独立摘要跳过，由运行时按任务账本压缩。
 - 已成功摘要持久化后逐字节复用；不要假定同一输入重新请求一定得到相同文本。
 - 摘要失败只记录原因，不阻塞用户请求。
 - 无可用摘要且投影超过强制阈值时，才退化为保留受保护消息和最近历史。

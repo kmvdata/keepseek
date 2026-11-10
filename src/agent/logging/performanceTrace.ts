@@ -26,7 +26,7 @@ export async function withOwnedTraceWrite<T>(base: vscode.Uri, runId: string, ow
     if (!stored) {
       // Commit the session-owned index before either the sidecar or trace bytes.
       // A later target in a batch reads this index afresh, so an owner created
-      // after the batch's legacy sidecar scan cannot evade physical recycling.
+      // after the batch's sidecar scan cannot evade physical recycling.
       const relativeFile = base.path.slice(owner.root.path.replace(/\/$/u, '').length + 1);
       if (!/^interaction-logs\/\d{4}-\d{2}-\d{2}\/run-[^/]+\.jsonl$/u.test(relativeFile)) throw new Error('Trace path is outside its managed log root.');
       const indexUri = traceOwnerIndexUri(owner.root, owner.sessionId);

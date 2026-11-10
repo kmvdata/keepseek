@@ -45,7 +45,6 @@ export interface UsageLedgerSummary {
   cacheDataRequestCount: number;
   cacheDataMissingRequestCount: number;
   costByCurrency: Record<string, number>;
-  legacyAggregate: boolean;
   incomplete: boolean;
   cacheDiagnostics: CacheDiagnosticsMetrics;
 }
@@ -169,14 +168,12 @@ export function createUsageLedgerRecords(input: {
 
 export function appendUsageLedgerRecord(
   current: ProviderUsageLedger | undefined,
-  record: ProviderUsageLedgerRecord,
-  legacyAggregate = false
+  record: ProviderUsageLedgerRecord
 ): ProviderUsageLedger {
   const base = normalizeUsageLedgerValue(current) ?? {
     version: USAGE_LEDGER_SCHEMA_VERSION,
     records: [],
-    legacyAggregate,
-    incomplete: legacyAggregate
+    incomplete: false
   };
   const normalized = normalizeUsageLedgerRecord(record);
   if (!normalized) return base;
@@ -212,12 +209,12 @@ export function mergePendingUsageLedger(durable: ProviderUsageLedger, pending: P
     const key = `${record.requestId}\u0000${record.attemptIndex}`;
     records.set(key, preferUsageLedgerRecord(records.get(key), record));
   }
-  return { version: 1, records: [...records.values()], legacyAggregate: Boolean(durable.legacyAggregate || pending?.legacyAggregate),
+  return { version: 1, records: [...records.values()],
     incomplete: Boolean(durable.incomplete || pending?.incomplete) };
 }
 
 export function normalizeUsageLedgerValue(value: unknown): ProviderUsageLedger | undefined {
-  if (!isRecord(value)) return undefined;
+  if (!isRecord(value) || value.version !== USAGE_LEDGER_SCHEMA_VERSION) return undefined;
   const rawRecords = Array.isArray(value.records) ? value.records : [];
   const normalizedRecords = Array.isArray(value.records)
     ? rawRecords.map(normalizeUsageLedgerRecord).filter((item): item is ProviderUsageLedgerRecord => Boolean(item))
@@ -228,13 +225,11 @@ export function normalizeUsageLedgerValue(value: unknown): ProviderUsageLedger |
     seen.set(key, preferUsageLedgerRecord(seen.get(key), record));
   }
   const records = [...seen.values()];
-  if (value.version !== USAGE_LEDGER_SCHEMA_VERSION && !records.length) return undefined;
   const damagedRecords = !Array.isArray(value.records) || normalizedRecords.length !== rawRecords.length;
   return {
     version: USAGE_LEDGER_SCHEMA_VERSION,
     records,
-    legacyAggregate: value.legacyAggregate === true || value.version !== USAGE_LEDGER_SCHEMA_VERSION,
-    incomplete: value.incomplete === true || value.version !== USAGE_LEDGER_SCHEMA_VERSION || damagedRecords
+    incomplete: value.incomplete === true || damagedRecords
   };
 }
 
@@ -255,7 +250,6 @@ export function summarizeUsageLedger(ledger: ProviderUsageLedger | undefined): U
     cacheDataRequestCount: 0,
     cacheDataMissingRequestCount: 0,
     costByCurrency: {},
-    legacyAggregate: normalized?.legacyAggregate ?? false,
     incomplete: normalized?.incomplete ?? false,
     cacheDiagnostics: summarizeCacheDiagnostics(normalized?.records ?? [], normalized?.incomplete ?? false)
   };
@@ -304,7 +298,6 @@ export function repriceUsageLedger(
   const normalized = normalizeUsageLedgerValue(ledger) ?? {
     version: USAGE_LEDGER_SCHEMA_VERSION,
     records: [],
-    legacyAggregate: true,
     incomplete: true
   };
   return {
@@ -542,7 +535,7 @@ function normalizeCacheObservation(
   requestId: string,
   attemptIndex: number
 ): ProviderCacheObservation | undefined {
-  if (!isRecord(value) || (value.version !== 1 && value.version !== 2) || value.requestId !== requestId
+  if (!isRecord(value) || value.version !== 2 || value.requestId !== requestId
     || value.attemptIndex !== attemptIndex || typeof value.laneKey !== 'string'
     || typeof value.endpointLaneIdentity !== 'string' || typeof value.originalModelId !== 'string'
     || typeof value.canonicalModelIdentity !== 'string' || typeof value.sourceId !== 'string'

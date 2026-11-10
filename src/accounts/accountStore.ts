@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { DEFAULT_DEEPSEEK_BASE_URL } from '../shared/config';
 import { isRecord } from '../shared/errors';
+import { writeJsonAtomic } from '../shared/atomicStorage';
 import {
   MAX_MODEL_CONTEXT_WINDOW_TOKENS,
   MAX_MODEL_OUTPUT_TOKENS
@@ -48,7 +49,6 @@ export interface NormalizeModelSourceOptions {
 
 export class ModelSourceStore {
   private readonly accountsRootUri: vscode.Uri;
-  private readonly encoder = new TextEncoder();
   private readonly decoder = new TextDecoder();
   private readonly now: () => number;
   private readonly createId: () => string;
@@ -235,8 +235,7 @@ export class ModelSourceStore {
         now: this.now()
       });
     } catch {
-      // A single damaged source must not hide other usable sources or block
-      // KeepSeek's legacy configuration fallback.
+      // A single damaged source must not hide other usable sources.
       return undefined;
     }
   }
@@ -244,10 +243,7 @@ export class ModelSourceStore {
   private async writeSource(source: ModelSource): Promise<void> {
     const providerUri = this.getProviderDirectoryUri(source.provider);
     await vscode.workspace.fs.createDirectory(providerUri);
-    await vscode.workspace.fs.writeFile(
-      this.getSourceFileUri(source.provider, source.id),
-      this.encoder.encode(`${JSON.stringify(source, null, 2)}\n`)
-    );
+    await writeJsonAtomic(this.getSourceFileUri(source.provider, source.id), source);
   }
 
 }
@@ -281,7 +277,7 @@ export function normalizeModelSource(
     provider,
     apiKey: typeof value.apiKey === 'string' ? value.apiKey.trim() : '',
     baseUrl: readNonEmptyString(value.baseUrl) || getDefaultModelSourceBaseUrl(provider),
-    models: normalizePersistedSourceModels(value),
+    models: normalizeSourceModels(value.models),
     disabledModelIds: normalizeModelIds(value.disabledModelIds),
     modelCache: normalizeModelDiscoveryCache(value.modelCache),
     enabled: value.enabled !== false,
@@ -383,11 +379,6 @@ export function normalizeModelIds(value: unknown): string[] {
     modelIds.push(id);
   }
   return modelIds;
-}
-
-function normalizePersistedSourceModels(value: Record<string, unknown>): ModelSourceModel[] {
-  // 只认新 schema 的 models 字段；旧账号文件的兼容转换已废弃，直接舍弃。
-  return Array.isArray(value.models) ? normalizeSourceModels(value.models) : [];
 }
 
 export function normalizeModelSourceProvider(value: unknown): ModelSourceProvider | undefined {

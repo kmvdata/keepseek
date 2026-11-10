@@ -88,9 +88,7 @@ export class ChangeSetStore {
   private readonly changeSets = new Map<string, ChangeSet>();
   private readonly historicalChangeSets = new Map<string, WebviewChangeSet>();
   private readonly checkpoints = new Map<string, ChangeCheckpoint>();
-  private readonly storageUri: vscode.Uri;
   private readonly shardedRootUri: vscode.Uri;
-  private readonly legacyV3RootUri: vscode.Uri;
   private readonly indexUri: vscode.Uri;
   private readonly runtimeUri: vscode.Uri;
   private readonly historyUri: vscode.Uri;
@@ -115,9 +113,7 @@ export class ChangeSetStore {
     private readonly t: Translator,
     private readonly onTraceEvent?: ChangeSetTraceHandler
   ) {
-    this.storageUri = vscode.Uri.joinPath(globalStorageUri, 'change-sets.json');
     this.shardedRootUri = vscode.Uri.joinPath(globalStorageUri, 'change-sets', 'v4');
-    this.legacyV3RootUri = vscode.Uri.joinPath(globalStorageUri, 'change-sets', 'v3');
     this.indexUri = vscode.Uri.joinPath(this.shardedRootUri, 'index.json');
     this.runtimeUri = vscode.Uri.joinPath(this.shardedRootUri, 'runtime');
     this.historyUri = vscode.Uri.joinPath(this.shardedRootUri, 'history');
@@ -140,82 +136,7 @@ export class ChangeSetStore {
       this.scheduleArtifactGarbageCollection();
       return;
     }
-    if (await this.migrateLegacyV3Storage()) {
-      await this.reconcileInterruptedFiles();
-      this.supersedeStaleDrafts();
-      this.scheduleArtifactGarbageCollection();
-      return;
-    }
-    try {
-      const content = new TextDecoder('utf-8', { fatal: false }).decode(
-        await vscode.workspace.fs.readFile(this.storageUri)
-      );
-      const parsed = JSON.parse(content) as {
-        version?: number;
-        changeSets?: ChangeSet[];
-        history?: WebviewChangeSet[];
-        checkpoints?: ChangeCheckpoint[];
-      };
-      console.debug('KeepSeek startup: legacy-change-set-storage-read', {
-        bytesRead: Buffer.byteLength(content, 'utf8'),
-        entries: (parsed.changeSets?.length ?? 0) + (parsed.history?.length ?? 0),
-        checkpoints: parsed.checkpoints?.length ?? 0
-      });
-      if (parsed.version !== 1 && parsed.version !== 2) {
-        return;
-      }
-      let consolidatedStoredChangeSets = false;
-      const mergedChangeSetIds = new Map<string, string>();
-      const storedChangeSets = (parsed.changeSets ?? [])
-        .filter(isStoredChangeSet)
-        .map(normalizeStoredChangeSet)
-        .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
-      for (const changeSet of storedChangeSets) {
-        if (changeSet.sessionId && await new SessionDeletionAuthority(this.globalStorageUri).isSessionIdDeleted(changeSet.sessionId)) continue;
-        const existing = this.findActiveChangeSetForRun(changeSet);
-        if (!existing) {
-          this.changeSets.set(changeSet.id, changeSet);
-          continue;
-        }
-        this.mergeIntoActiveChangeSet(existing, changeSet);
-        mergedChangeSetIds.set(changeSet.id, existing.id);
-        // Even an identical cumulative snapshot must be persisted away: it was
-        // a second stored ChangeSet for the same logical Agent run.
-        consolidatedStoredChangeSets = true;
-      }
-      for (const changeSet of parsed.history ?? []) {
-        if (isStoredHistoricalChangeSet(changeSet) && (!changeSet.sessionId || !await new SessionDeletionAuthority(this.globalStorageUri).isSessionIdDeleted(changeSet.sessionId))) {
-          this.historicalChangeSets.set(changeSet.id, cloneWebviewChangeSet(changeSet));
-        }
-      }
-      for (const checkpoint of parsed.checkpoints ?? []) {
-        if (isStoredCheckpoint(checkpoint)) {
-          this.checkpoints.set(checkpoint.id, {
-            ...checkpoint,
-            changeSetId: mergedChangeSetIds.get(checkpoint.changeSetId) ?? checkpoint.changeSetId
-          });
-        }
-      }
-      if (consolidatedStoredChangeSets) {
-        // The migration below persists the consolidated shape.
-      }
-      for (const changeSet of [...this.changeSets.values(), ...this.historicalChangeSets.values()]) {
-        if (changeSet.sessionId) this.loadedSessionIds.add(changeSet.sessionId);
-      }
-      await this.persistShardedNow();
-      await this.reconcileInterruptedFiles();
-      this.supersedeStaleDrafts();
-      // The V4 index is the atomic commit marker. Delete the monolith only
-      // after that commit; any migration failure above leaves it untouched.
-      try {
-        await vscode.workspace.fs.delete(this.storageUri, { recursive: false, useTrash: false });
-      } catch {
-        // Keeping a redundant legacy copy is safe; V4 remains authoritative.
-      }
-      this.scheduleArtifactGarbageCollection();
-    } catch {
-      // Missing or malformed checkpoint storage must not block the chat view.
-    }
+    this.scheduleArtifactGarbageCollection();
   }
 
   public async flush(): Promise<void> {
@@ -1394,34 +1315,6 @@ export class ChangeSetStore {
     return index;
   }
 
-  private async migrateLegacyV3Storage(): Promise<boolean> {
-    const value = await readJsonFile(vscode.Uri.joinPath(this.legacyV3RootUri, 'index.json'));
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-    const record = value as Record<string, unknown>;
-    if (record.version !== 3 || !Array.isArray(record.entries)) return false;
-    const entries = record.entries.map(normalizeIndexEntry).filter((entry): entry is ChangeSetIndexEntry => Boolean(entry));
-    for (const entry of entries) {
-      if (await new SessionDeletionAuthority(this.globalStorageUri).isSessionIdDeleted(entry.sessionId)) continue;
-      const stored = await readJsonFile(vscode.Uri.joinPath(this.legacyV3RootUri, entry.storageFile));
-      if (!isRecordWithChangeSet(stored)) continue;
-      if (entry.kind === 'runtime' && isStoredChangeSet(stored.changeSet)) {
-        const changeSet = normalizeStoredChangeSet(stored.changeSet);
-        this.changeSets.set(changeSet.id, changeSet);
-        for (const checkpointId of entry.checkpointIds) {
-          const checkpointValue = await readJsonFile(vscode.Uri.joinPath(this.legacyV3RootUri, 'checkpoints', fileNameForId(checkpointId)));
-          if (isRecordWithCheckpoint(checkpointValue) && isStoredCheckpoint(checkpointValue.checkpoint)) {
-            this.checkpoints.set(checkpointId, { ...checkpointValue.checkpoint });
-          }
-        }
-      } else if (entry.kind === 'history' && isStoredHistoricalChangeSet(stored.changeSet)) {
-        this.historicalChangeSets.set(entry.id, cloneWebviewChangeSet(stored.changeSet));
-      }
-      if (entry.sessionId) this.loadedSessionIds.add(entry.sessionId);
-    }
-    await this.persistShardedNow();
-    return true;
-  }
-
   private async reconcileInterruptedFiles(sessionId?: string): Promise<void> {
     let changed = false;
     for (const changeSet of this.changeSets.values()) {
@@ -1667,12 +1560,8 @@ function refreshStoredDraftEdit(target: ChangeSetFile, incoming: ChangeSetFile):
   );
   const next = payload(incoming);
   const changed = JSON.stringify(payload(target)) !== JSON.stringify(next);
-  if (changed && (target.kind !== undefined || incoming.kind !== undefined)) {
-    throw new Error(`Versioned DraftEdit payload changed for stable id ${target.id}. Create a new DraftEdit id and approval actionHash.`);
-  }
   if (changed) {
-    for (const key of Object.keys(target)) if (!runtimeKeys.has(key)) delete (target as unknown as Record<string, unknown>)[key];
-    Object.assign(target, structuredClone(next));
+    throw new Error(`Versioned DraftEdit payload changed for stable id ${target.id}. Create a new DraftEdit id and approval actionHash.`);
   }
   return changed;
 }
@@ -1776,7 +1665,8 @@ function isStoredChangeSet(value: unknown): value is ChangeSet {
   return typeof record.id === 'string'
     && typeof record.runId === 'string'
     && typeof record.sessionId === 'string'
-    && Array.isArray(record.files);
+    && Array.isArray(record.files) && record.files.every(file => !!file && typeof file === 'object'
+      && ['full_text_v1', 'text_patch_v1', 'delete_v1', 'move_v1'].includes(String(file.kind)));
 }
 
 function isStoredCheckpoint(value: unknown): value is ChangeCheckpoint {
@@ -1784,7 +1674,11 @@ function isStoredCheckpoint(value: unknown): value is ChangeCheckpoint {
     return false;
   }
   const record = value as Record<string, unknown>;
-  return typeof record.id === 'string'
+  return record.version === 2 && record.hashMode === 'utf8_bytes'
+    && ['full_text_v1', 'text_patch_v1', 'delete_v1', 'move_v1'].includes(String(record.draftKind))
+    && ['prepared', 'applying', 'applied', 'uncertain', 'interrupted', 'reverted'].includes(String(record.state))
+    && ['apply', 'revert'].includes(String(record.operation))
+    && typeof record.id === 'string'
     && typeof record.changeSetId === 'string'
     && typeof record.editId === 'string'
     && typeof record.uri === 'string';
@@ -1798,86 +1692,69 @@ function isStoredHistoricalChangeSet(value: unknown): value is WebviewChangeSet 
   return typeof record.id === 'string'
     && typeof record.runId === 'string'
     && typeof record.sessionId === 'string'
-    && Array.isArray(record.files);
+    && Array.isArray(record.files) && record.files.every(file => !!file && typeof file === 'object'
+      && ['full_text_v1', 'text_patch_v1', 'delete_v1', 'move_v1'].includes(String(file.kind)));
 }
 
 /** Reclaim unloaded session records too. Shared content-addressed blobs are
  * deliberately left to ChangeArtifactStore's whole-reference, age-gated GC. */
 export async function deleteStoredChangeSetsForSession(root: vscode.Uri, sessionId: string): Promise<void> {
   await withAssociatedStoreGate(root, 'change-sets', async () => {
-    for (const version of [4, 3]) {
-      const directory = vscode.Uri.joinPath(root, 'change-sets', `v${version}`);
-      const indexUri = vscode.Uri.joinPath(directory, 'index.json');
-      await assertManagedStoragePath(root, indexUri);
-      await assertManagedStoragePath(root, vscode.Uri.joinPath(directory, 'checkpoints'));
-      const value = await readAssociatedJson(indexUri);
-      if (value && (value.version !== version || !Array.isArray(value.entries))) throw new Error('ChangeSet index is damaged.');
-      const rawEntries = value?.entries as unknown[] ?? [];
-      const entries = rawEntries.map(normalizeIndexEntry).filter((entry): entry is ChangeSetIndexEntry => !!entry);
-      if (entries.length !== rawEntries.length) throw new Error('ChangeSet index ownership is damaged.');
-      const owned = new Map(entries.filter(entry => entry.sessionId === sessionId).map(entry => [entry.id, entry]));
-      // An interrupted save may leave a shard absent from the index. Verify the
-      // embedded owner before removing that exact generated filename.
-      for (const kind of ['runtime', 'history'] as const) {
-        await assertManagedStoragePath(root, vscode.Uri.joinPath(directory, kind));
-        for (const name of await listCleanupJsonFiles(vscode.Uri.joinPath(directory, kind))) {
-          const uri = vscode.Uri.joinPath(directory, kind, name);
-          const stored = await readAssociatedJson(uri);
-          const record = stored?.changeSet;
-          if (!record || typeof record !== 'object') continue;
-          const changeSet = record as ChangeSet;
-          if (changeSet.sessionId !== sessionId || typeof changeSet.id !== 'string' || name !== fileNameForId(changeSet.id)) continue;
-          owned.set(changeSet.id, { id: changeSet.id, sessionId, kind,
-            storageFile: `${kind}/${name}`, updatedAt: changeSet.updatedAt,
-            checkpointIds: Array.isArray(changeSet.files) ? changeSet.files.flatMap(file => file.checkpointId ? [file.checkpointId] : []) : [] });
-        }
-      }
-      const retained = entries.filter(entry => entry.sessionId !== sessionId);
-      const retainedCheckpoints = new Set(retained.flatMap(entry => entry.checkpointIds));
-      // An index link alone cannot prove that a corrupt collision names the
-      // target's shard. Verify every existing generated shard before unlinking.
-      for (const entry of owned.values()) {
-        const stored = await readAssociatedJson(vscode.Uri.joinPath(directory, entry.kind, fileNameForId(entry.id)));
+    const directory = vscode.Uri.joinPath(root, 'change-sets', 'v4');
+    const indexUri = vscode.Uri.joinPath(directory, 'index.json');
+    await assertManagedStoragePath(root, indexUri);
+    await assertManagedStoragePath(root, vscode.Uri.joinPath(directory, 'checkpoints'));
+    const value = await readAssociatedJson(indexUri);
+    if (value && (value.version !== 4 || !Array.isArray(value.entries))) throw new Error('ChangeSet index is damaged.');
+    const rawEntries = value?.entries as unknown[] ?? [];
+    const entries = rawEntries.map(normalizeIndexEntry).filter((entry): entry is ChangeSetIndexEntry => !!entry);
+    if (entries.length !== rawEntries.length) throw new Error('ChangeSet index ownership is damaged.');
+    const owned = new Map(entries.filter(entry => entry.sessionId === sessionId).map(entry => [entry.id, entry]));
+    // An interrupted save may leave a shard absent from the index. Verify the
+    // embedded owner before removing that exact generated filename.
+    for (const kind of ['runtime', 'history'] as const) {
+      await assertManagedStoragePath(root, vscode.Uri.joinPath(directory, kind));
+      for (const name of await listCleanupJsonFiles(vscode.Uri.joinPath(directory, kind))) {
+        const uri = vscode.Uri.joinPath(directory, kind, name);
+        const stored = await readAssociatedJson(uri);
         const record = stored?.changeSet;
-        if (stored && (!record || typeof record !== 'object' || (record as ChangeSet).id !== entry.id
-          || (record as ChangeSet).sessionId !== sessionId)) throw new Error('ChangeSet owner identity changed.');
-        for (const checkpointId of entry.checkpointIds) if (!retainedCheckpoints.has(checkpointId)) {
-          const checkpoint = await readAssociatedJson(vscode.Uri.joinPath(directory, 'checkpoints', fileNameForId(checkpointId)));
-          const record = checkpoint?.checkpoint;
-          if (checkpoint && (!record || typeof record !== 'object' || (record as ChangeCheckpoint).id !== checkpointId
-            || (record as ChangeCheckpoint).changeSetId !== entry.id)) throw new Error('Checkpoint owner identity changed.');
-        }
-      }
-      if (value) await writeJsonAtomic(indexUri, { ...value, entries: rawEntries.filter(raw => normalizeIndexEntry(raw)!.sessionId !== sessionId) });
-      for (const entry of owned.values()) {
-        await deleteAssociatedUri(vscode.Uri.joinPath(directory, entry.kind, fileNameForId(entry.id)));
-        for (const checkpointId of entry.checkpointIds) if (!retainedCheckpoints.has(checkpointId)) {
-          await deleteAssociatedUri(vscode.Uri.joinPath(directory, 'checkpoints', fileNameForId(checkpointId)));
-        }
+        if (!record || typeof record !== 'object') continue;
+        const changeSet = record as ChangeSet;
+        if (changeSet.sessionId !== sessionId || typeof changeSet.id !== 'string' || name !== fileNameForId(changeSet.id)) continue;
+        owned.set(changeSet.id, { id: changeSet.id, sessionId, kind,
+          storageFile: `${kind}/${name}`, updatedAt: changeSet.updatedAt,
+          checkpointIds: Array.isArray(changeSet.files) ? changeSet.files.flatMap(file => file.checkpointId ? [file.checkpointId] : []) : [] });
       }
     }
-    const legacyUri = vscode.Uri.joinPath(root, 'change-sets.json');
-    await assertManagedStoragePath(root, legacyUri);
-    const legacy = await readAssociatedJson(legacyUri);
-    if (legacy) {
-      if (![1, 2].includes(Number(legacy.version)) || !Array.isArray(legacy.changeSets)) throw new Error('Legacy ChangeSet history is damaged.');
-      const owner = (record: unknown) => !!record && typeof record === 'object' && (record as ChangeSet).sessionId === sessionId;
-      const ownedIds = new Set([...legacy.changeSets, ...(Array.isArray(legacy.history) ? legacy.history : [])]
-        .filter(owner).map(record => (record as ChangeSet).id));
-      await writeJsonAtomic(legacyUri, { ...legacy,
-        changeSets: legacy.changeSets.filter(record => !owner(record)),
-        history: Array.isArray(legacy.history) ? legacy.history.filter(record => !owner(record)) : [],
-        checkpoints: Array.isArray(legacy.checkpoints) ? legacy.checkpoints.filter(record => !record || typeof record !== 'object'
-          || !ownedIds.has((record as ChangeCheckpoint).changeSetId)) : [] });
+    const retained = entries.filter(entry => entry.sessionId !== sessionId);
+    const retainedCheckpoints = new Set(retained.flatMap(entry => entry.checkpointIds));
+    // An index link alone cannot prove that a corrupt collision names the
+    // target's shard. Verify every existing generated shard before unlinking.
+    for (const entry of owned.values()) {
+      const stored = await readAssociatedJson(vscode.Uri.joinPath(directory, entry.kind, fileNameForId(entry.id)));
+      const record = stored?.changeSet;
+      if (stored && (!record || typeof record !== 'object' || (record as ChangeSet).id !== entry.id
+        || (record as ChangeSet).sessionId !== sessionId)) throw new Error('ChangeSet owner identity changed.');
+      for (const checkpointId of entry.checkpointIds) if (!retainedCheckpoints.has(checkpointId)) {
+        const checkpoint = await readAssociatedJson(vscode.Uri.joinPath(directory, 'checkpoints', fileNameForId(checkpointId)));
+        const record = checkpoint?.checkpoint;
+        if (checkpoint && (!record || typeof record !== 'object' || (record as ChangeCheckpoint).id !== checkpointId
+          || (record as ChangeCheckpoint).changeSetId !== entry.id)) throw new Error('Checkpoint owner identity changed.');
+      }
     }
+    if (value) await writeJsonAtomic(indexUri, { ...value, entries: rawEntries.filter(raw => normalizeIndexEntry(raw)!.sessionId !== sessionId) });
+    for (const entry of owned.values()) {
+      await deleteAssociatedUri(vscode.Uri.joinPath(directory, entry.kind, fileNameForId(entry.id)));
+      for (const checkpointId of entry.checkpointIds) if (!retainedCheckpoints.has(checkpointId)) {
+        await deleteAssociatedUri(vscode.Uri.joinPath(directory, 'checkpoints', fileNameForId(checkpointId)));
+      }
+    }
+
   });
 }
 
 export async function hasStoredChangeSetsForSession(root: vscode.Uri, sessionId: string): Promise<boolean> {
-  for (const version of [4, 3]) if (await hasAssociatedRecordOwner(vscode.Uri.joinPath(root, 'change-sets', `v${version}`, 'index.json'), sessionId, ['entries'], [version])) return true;
-  try { await vscode.workspace.fs.stat(vscode.Uri.joinPath(root, 'change-sets.json')); }
-  catch (error) { if (isMissingAssociatedFile(error)) return false; throw error; }
-  throw new Error('Legacy ChangeSet ownership requires checkpoint hydration and is unavailable for a blank-history proof.');
+  return hasAssociatedRecordOwner(vscode.Uri.joinPath(root, 'change-sets', 'v4', 'index.json'), sessionId, ['entries'], [4]);
 }
 
 async function listCleanupJsonFiles(uri: vscode.Uri): Promise<string[]> {

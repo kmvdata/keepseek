@@ -33,8 +33,7 @@ import {
 import { normalizeExecutionMode, normalizePlanWorkflowRecords } from '../agent/executionMode';
 import {
   CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION,
-  CURRENT_PROVIDER_TOOL_SCHEMA_VERSION,
-  PROVIDER_PROJECTION_REQUEST_PROTOCOL_VERSION
+  CURRENT_PROVIDER_TOOL_SCHEMA_VERSION
 } from '../agent/providerRequestProjection';
 import { getConfiguredKeepseekLanguage, localize, type KeepseekLanguage } from '../shared/i18n';
 import { isRecord } from '../shared/errors';
@@ -51,21 +50,12 @@ import { normalizeUsageLedgerValue } from '../agent/usageLedger';
 import { cloneSessionTitleMetadata, lockSessionTitleMetadata, normalizeSessionTitle, recordSessionTitleAttempt, sessionTitleTaskWasAttempted, sessionTitleTaskBasisMatches,
   type SessionTitleBasis, type SessionTitleMetadata } from './sessionTitle';
 
-export const SESSION_STORAGE_KEY = 'keepseek.chatSessions';
-export const SESSION_STORAGE_VERSION = 2;
 export const HISTORY_SESSION_LOAD_TIMEOUT_MS = 15_000;
 const MAX_STORED_SESSIONS = 50;
 export type BoundedSessionSelection =
   | { status: 'selected'; session: ChatSession }
   | { status: 'missing' }
   | { status: 'timeout' };
-export interface StoredSessionState {
-  version: number;
-  activeSessionId: string;
-  activeSessionIdsByWorkspace?: Record<string, string>;
-  sessions: ChatSession[];
-}
-
 export interface StoredWorkspaceSessionState {
   activeSessionId: string;
   approvalMode?: ApprovalMode;
@@ -80,7 +70,7 @@ export interface ChatSessionStorageAdapter {
   assertSessionWritable?(workspaceKey: string, sessionId: string): Promise<void>;
   acquireSessionUse?(workspaceKey: string, sessionId: string): Promise<{ release(): Promise<void> }>;
   loadMessageCheckpoint?(workspaceKey: string, sessionId: string, messageId: string): Promise<unknown>;
-  loadWorkspace(workspaceScope: WorkspaceSessionScope): Promise<StoredWorkspaceSessionState>;
+  loadWorkspace(workspaceScope: WorkspaceSessionScope, options?: { fresh?: boolean }): Promise<StoredWorkspaceSessionState>;
   saveWorkspace(workspaceScope: WorkspaceSessionScope, state: StoredWorkspaceSessionState): Promise<void>;
   listAllWorkspaceSummaries(): Promise<WorkspaceSummary[]>;
   loadWorkspaceSessions(workspaceKey: string): Promise<ChatSession[]>;
@@ -314,8 +304,8 @@ export class ChatSessionStore {
     private workspaceScope: WorkspaceSessionScope = getCurrentWorkspaceSessionScope()
   ) {}
 
-  public async initialize(): Promise<void> {
-    await this.load();
+  public async initialize(options: { fresh?: boolean } = {}): Promise<void> {
+    await this.load(options);
   }
 
   public get activeSessionId(): string {
@@ -342,13 +332,13 @@ export class ChatSessionStore {
     this.language = language;
   }
 
-  public async setWorkspaceScope(workspaceScope: WorkspaceSessionScope): Promise<boolean> {
+  public async setWorkspaceScope(workspaceScope: WorkspaceSessionScope, options: { fresh?: boolean } = {}): Promise<boolean> {
     if (workspaceScope.key === this.workspaceScope.key) {
       return false;
     }
 
     this.workspaceScope = workspaceScope;
-    await this.load();
+    await this.load(options);
     return true;
   }
 
@@ -641,7 +631,16 @@ export class ChatSessionStore {
       force
     });
     if (changed) {
-      await this.load();
+      const scope = this.workspaceScope;
+      const stored = await this.sessionStorage.loadWorkspace(scope, { fresh: true });
+      if (scope.key !== this.workspaceScope.key) return changed;
+      // Automatic retention refreshes only the history list. A fresh, unsaved
+      // blank and any user selection made during the read keep their identity.
+      this.sessionSummaries = new Map((stored.sessionSummaries ?? [])
+        .filter(summary => summary.workspaceKey === scope.key).map(summary => [summary.id, summary]));
+      this.sessions = this.sessions.filter(session => session.id === this.activeSessionIdValue
+        || !this.isInCurrentWorkspace(session) || this.sessionSummaries.has(session.id));
+      this.compact();
     }
     return changed;
   }
@@ -893,25 +892,21 @@ export class ChatSessionStore {
     await this.sessionStorage.deleteEntireWorkspace(normalizedWorkspaceKey);
   }
 
-  public trimActiveHistory(_maxMessages?: number): void {
-    // Compatibility no-op: model context is trimmed by historyProjection, not by deleting
-    // persisted active-session messages.
-  }
-
-  private async load(): Promise<void> {
-    const stored = await this.sessionStorage.loadWorkspace(this.workspaceScope);
-    const sessions = normalizeStoredSessions({ sessions: stored.sessions }, this.workspaceScope);
+  private async load(options: { fresh?: boolean } = {}): Promise<void> {
+    const stored = await this.sessionStorage.loadWorkspace(this.workspaceScope, options);
+    // Production activation explicitly starts blank. Adapters may return bodies
+    // for deliberate restore callers, but they cannot select them in fresh mode.
+    const sessions = options.fresh ? [] : normalizeStoredSessions({ sessions: stored.sessions }, this.workspaceScope);
 
     this.sessions = sessions.filter((session) => this.isInCurrentWorkspace(session));
     this.sessionSummaries = new Map((stored.sessionSummaries ?? this.sessions.map((session) => toSessionSummary(session, this.language)))
       .filter((summary) => summary.workspaceKey === this.workspaceScope.key)
       .map((summary) => [summary.id, summary]));
-    this.activeSessionIdValue = typeof stored.activeSessionId === 'string' ? stored.activeSessionId : '';
+    this.activeSessionIdValue = !options.fresh && typeof stored.activeSessionId === 'string' ? stored.activeSessionId : '';
     const storedActiveSession = this.sessions.find((session) => session.id === this.activeSessionIdValue)
       ?? this.getCurrentWorkspaceSessions()[0];
     this.approvalModeValue = normalizeStoredApprovalMode(stored.approvalMode ?? storedActiveSession?.approvalMode);
     this.ensureActiveSession();
-    if ((stored.approvalMode as unknown) === 'model_review') this.getActiveSession().approvalModeMigrated = true;
     this.compact();
   }
 
@@ -1029,7 +1024,7 @@ export function createEmptySession(
     title: localize(language, 'defaultSessionTitle'),
     autoTitle: normalizeSessionTitle(undefined, undefined),
     messages: [],
-    executionTime: { version: 1, byTask: {}, incomplete: false },
+    executionTime: { version: 2, byTask: {}, incomplete: false },
     approvalMode,
     executionMode: normalizeExecutionMode(executionMode),
     planWorkflows: [],
@@ -1152,8 +1147,7 @@ export function getCurrentWorkspaceSessionScope(): WorkspaceSessionScope {
   };
 }
 
-export function normalizeStoredSessions(value: unknown, workspaceScope: WorkspaceSessionScope,
-  options: { confirmedLegacyTitleCompletion?: boolean } = {}): ChatSession[] {
+export function normalizeStoredSessions(value: unknown, workspaceScope: WorkspaceSessionScope): ChatSession[] {
   if (!isRecord(value) || !Array.isArray(value.sessions)) {
     return [];
   }
@@ -1189,8 +1183,7 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
     const workspaceFolders = Array.isArray(item.workspaceFolders)
       ? item.workspaceFolders.filter((folder): folder is string => typeof folder === 'string' && Boolean(folder))
       : workspaceScope.folderUris;
-    const autoTitle = normalizeSessionTitle(item.autoTitle, customTitle, { messages,
-      confirmedLegacyCompletion: options.confirmedLegacyTitleCompletion });
+    const autoTitle = normalizeSessionTitle(item.autoTitle, customTitle, { messages });
 
     sessions.push({
       id: item.id,
@@ -1198,7 +1191,6 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
       autoTitle,
       messages,
       approvalMode: normalizeStoredApprovalMode(item.approvalMode),
-      approvalModeMigrated: item.approvalMode === 'model_review' || item.approvalModeMigrated === true || undefined,
       pendingApproval: normalizeManualApproval(item.pendingApproval),
       pendingHistoryTruncation: normalizePendingHistoryTruncation(item.pendingHistoryTruncation, item.id, normalizeStoredMessage),
       executionMode: normalizeExecutionMode(item.executionMode),
@@ -1246,24 +1238,10 @@ function normalizeUsageLedgerRef(value: unknown, sessionId: string): ChatSession
   return {
     version: 2,
     sessionId,
-    ...(value.migratedInlineVersion === 1 ? { migratedInlineVersion: 1 } : {}),
-    legacyAggregate: value.legacyAggregate === true,
     incomplete: value.incomplete === true,
     ...(Number.isSafeInteger(value.damagedBucketCount) && Number(value.damagedBucketCount) > 0
       ? { damagedBucketCount: Number(value.damagedBucketCount) } : {})
   };
-}
-
-export function normalizeStoredActiveSessionIds(value: unknown, sessions: ChatSession[]): Record<string, string> {
-  const activeSessionIdsByWorkspace: Record<string, string> = {};
-  if (isRecord(value) && isRecord(value.activeSessionIdsByWorkspace)) {
-    for (const [workspaceKey, sessionId] of Object.entries(value.activeSessionIdsByWorkspace)) {
-      if (typeof sessionId === 'string' && sessions.some((session) => session.id === sessionId)) {
-        activeSessionIdsByWorkspace[workspaceKey] = sessionId;
-      }
-    }
-  }
-  return activeSessionIdsByWorkspace;
 }
 
 function normalizeStoredMessage(value: unknown): ChatMessage | undefined {
@@ -1281,7 +1259,6 @@ function normalizeStoredMessage(value: unknown): ChatMessage | undefined {
   return {
     id: value.id,
     userTask: normalizeUserTask(value.userTask),
-    ...(value.incompleteForTitle === true || value.isStreaming === true ? { incompleteForTitle: true as const } : {}),
     role,
     content: value.content,
     expandedContent: typeof value.expandedContent === 'string' ? value.expandedContent : undefined,
@@ -1329,18 +1306,13 @@ function createNewSessionRequestProtocol(now: string): SessionRequestProtocol {
 }
 
 function normalizeSessionRequestProtocol(value: unknown): SessionRequestProtocol | undefined {
-  if (!isRecord(value)) {
-    // Missing means a pre-v2 session. Leaving it absent is deliberate: request
-    // construction falls back to v1 until a cache-safe migration boundary.
-    return undefined;
-  }
-  const version = normalizePositiveInteger(value.version, 1);
+  if (!isRecord(value) || value.version !== CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION
+    || value.toolSchemaVersion !== CURRENT_PROVIDER_TOOL_SCHEMA_VERSION
+    || value.serializationStrategy !== 'provider-projection-v2') return undefined;
   return {
-    version,
-    serializationStrategy: version >= PROVIDER_PROJECTION_REQUEST_PROTOCOL_VERSION
-      ? 'provider-projection-v2'
-      : 'legacy-v1',
-    toolSchemaVersion: normalizePositiveInteger(value.toolSchemaVersion, 1),
+    version: CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION,
+    serializationStrategy: 'provider-projection-v2',
+    toolSchemaVersion: CURRENT_PROVIDER_TOOL_SCHEMA_VERSION,
     toolNames: normalizeStringArray(value.toolNames),
     modelId: typeof value.modelId === 'string' && value.modelId.trim() ? value.modelId.trim() : undefined,
     sourceId: typeof value.sourceId === 'string' && value.sourceId.trim() ? value.sourceId.trim() : undefined,
@@ -1511,7 +1483,7 @@ function normalizeRunDetails(value: unknown): ChatMessage['runDetails'] {
           targetId: typeof review.targetId === 'string' ? review.targetId : '',
           actionKind: review.actionKind as import('../approvals/approvalReviewTypes').ApprovalActionKind,
           policyVersion: normalizeNonNegativeInteger(review.policyVersion),
-          approvalMode: (review.approvalMode === 'delegate' || review.approvalMode === 'model_review' ? review.approvalMode : undefined) as import('../approvals/approvalReviewTypes').ApprovalReviewDisplay['approvalMode'],
+          approvalMode: (review.approvalMode === 'delegate' ? review.approvalMode : undefined) as import('../approvals/approvalReviewTypes').ApprovalReviewDisplay['approvalMode'],
           osIsolation: review.osIsolation === 'none' ? 'none' as const : undefined,
           approvalSource: review.approvalSource as import('../approvals/approvalReviewTypes').ApprovalReviewSource,
           reviewerSourceId: typeof review.reviewerSourceId === 'string' ? review.reviewerSourceId : '',
@@ -1563,9 +1535,9 @@ function normalizeRunDetails(value: unknown): ChatMessage['runDetails'] {
         }))
       : [],
     contextSources: Array.isArray(value.contextSources)
-      ? value.contextSources.filter(isRecord).slice(0, 40).map((source, index) => ({
+      ? value.contextSources.filter(isRecord).filter(source => source.kind === 'project-instructions' || source.kind === 'skill').slice(0, 40).map((source, index) => ({
           id: typeof source.id === 'string' ? source.id : `context-${index + 1}`,
-          kind: source.kind === 'project-instructions' || source.kind === 'skill' || source.kind === 'legacy-memory'
+          kind: source.kind === 'project-instructions' || source.kind === 'skill'
             ? source.kind
             : 'skill',
           label: typeof source.label === 'string' ? source.label.slice(0, 160) : 'Context source',
@@ -1586,9 +1558,9 @@ function normalizeRunDetails(value: unknown): ChatMessage['runDetails'] {
         }))
       : [],
     contextDiscarded: Array.isArray(value.contextDiscarded)
-      ? value.contextDiscarded.filter(isRecord).slice(0, 80).map((source, index) => ({
+      ? value.contextDiscarded.filter(isRecord).filter(source => source.kind === 'project-instructions' || source.kind === 'skill').slice(0, 80).map((source, index) => ({
           id: typeof source.id === 'string' ? source.id : `discarded-context-${index + 1}`,
-          kind: source.kind === 'project-instructions' || source.kind === 'skill' || source.kind === 'legacy-memory'
+          kind: source.kind === 'project-instructions' || source.kind === 'skill'
             ? source.kind
             : 'skill',
           uri: typeof source.uri === 'string' ? source.uri : undefined,

@@ -103,7 +103,6 @@ src/webview/template.ts
 | `src/provider/interactionState.ts` 的 `InteractionCoordinator` / `deriveInteractionState` / `deriveSessionTitleCapability` | AGENTS.md 指定的唯一派生权威；拆分会产生第二套判定源 |
 | `src/provider/webviewMessages.ts`、`modelSelection.ts`、`requestTimeoutSettings.ts` | Webview→Host 消息联合类型与选择/配置契约，不是呈现 |
 | `src/webview/richTextShortcuts.ts` | 已在 `src/webview/` 之下，满足归属目标；不移动可避免改动 AGENTS.md §3.5 原文与 29KB 正文搬运的字节风险 |
-| `src/keybindings.ts` | 见 4.4 决策记录 |
 | `src/agent/protocol.ts:518-519` 对 markdown 辅助函数的调用语义 | 请求字节一部分，可 re-export 但不得改输出 |
 
 ### 4.3 已知的受控重复
@@ -112,12 +111,11 @@ src/webview/template.ts
 字符串，无法 `import` 宿主模块，也不允许为它新增 `window.*` 全局，因此两份实现是必需的。约束：两份输出必须
 完全一致（`B` / `KB` / `MB`，一位小数），由测试对同一批取样值断言相等。
 
-### 4.4 决策记录：`src/keybindings.ts` 保留
+### 4.4 决策记录：快捷键只由清单贡献
 
-该文件把 `when` 子句与快捷键写进用户目录的 `keybindings.json`，是**持久化迁移例程**而非纯呈现适配器。
-移入 `src/webview/host/` 会把「写用户家目录」的能力搬进 UI 层，与 `host/` 只做无状态文案组装的定位冲突，
-风险高于收益。保留在原位并登记在此 allowlist。若后续确需归位，应先拆出纯文案部分（`when` 子句常量与
-```cmd+shift+l`` / `ctrl+shift+l` 标签）再迁移写盘逻辑，作为独立改动单独评审。
+0.5.2 是全新数据基线。`src/keybindings.ts` 及激活时写用户 `keybindings.json` 的旧迁移已删除；
+当前默认快捷键仅取 `package.json` 的 `contributes.keybindings`。离线重置脚本只移除 KeepSeek 历史快捷键，
+不在启动时扫描或改写用户快捷键文件。
 
 ### 4.5 明确不做
 

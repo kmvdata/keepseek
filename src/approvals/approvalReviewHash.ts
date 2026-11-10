@@ -13,7 +13,7 @@ export function hashApprovalText(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
-export function hashDraftEditAction(edit: DraftEdit, originalTextHash = ''): string {
+export function hashDraftEditAction(edit: DraftEdit): string {
   if (edit.kind === 'text_patch_v1') {
     return hashApprovalValue({
       payloadVersion: edit.kind,
@@ -46,14 +46,7 @@ export function hashDraftEditAction(edit: DraftEdit, originalTextHash = ''): str
       base: edit.base, result: edit.base
     });
   }
-  return hashApprovalValue({
-    action: edit.action,
-    uri: edit.uri,
-    newText: edit.newText,
-    reason: edit.reason,
-    expectedOriginalTextHash: originalTextHash || edit.expectedOriginalTextHash || '',
-    expectedOriginalSize: edit.expectedOriginalSize ?? null
-  });
+  throw new Error('Unsupported KeepSeek draft edit payload.');
 }
 
 export function hashDraftRunAction(draftRun: Pick<DraftRun, 'specHash'>): string {

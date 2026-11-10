@@ -1,10 +1,11 @@
 import * as vscode from 'vscode';
 import { isRecord } from '../shared/errors';
+import { writeJsonAtomic } from '../shared/atomicStorage';
 import type { SubagentModelSetting } from '../agent/subagents/types';
 import { getWorkspaceHash } from '../sessions/globalSessionStorage';
 
 const SUBAGENT_SETTINGS_DIRECTORY = 'subagent-settings';
-const SUBAGENT_SETTINGS_VERSION_DIRECTORY = 'v1';
+const SUBAGENT_SETTINGS_VERSION_DIRECTORY = 'v2';
 
 export interface SubagentModelSettingsSnapshot {
   version: 2;
@@ -16,7 +17,6 @@ export class SubagentSettingsStore {
   private persistenceQueue: Promise<void> = Promise.resolve();
   private readonly directoryUri: vscode.Uri;
   private readonly uri: vscode.Uri;
-  private readonly encoder = new TextEncoder();
   private readonly decoder = new TextDecoder();
 
   public constructor(globalStorageUri: vscode.Uri, workspaceKey: string) {
@@ -62,7 +62,7 @@ export class SubagentSettingsStore {
         ? { ...snapshot, profiles: { ...snapshot.profiles, [profile]: setting } }
         : { ...snapshot, default: setting };
       await vscode.workspace.fs.createDirectory(this.directoryUri);
-      await vscode.workspace.fs.writeFile(this.uri, this.encoder.encode(`${JSON.stringify(next, null, 2)}\n`));
+      await writeJsonAtomic(this.uri, next);
     });
     this.persistenceQueue = write;
     await write;
@@ -103,7 +103,7 @@ export function normalizeSubagentModelSetting(value: unknown): SubagentModelSett
 
 export function normalizeSubagentModelSettingsSnapshot(value: unknown): SubagentModelSettingsSnapshot {
   if (!isRecord(value) || value.version !== 2 || !isRecord(value.profiles)) {
-    return { version: 2, default: normalizeSubagentModelSetting(value), profiles: {} };
+    return createDefaultSubagentModelSettingsSnapshot();
   }
   const profiles: Record<string, SubagentModelSetting> = {};
   for (const [id, setting] of Object.entries(value.profiles)) {
