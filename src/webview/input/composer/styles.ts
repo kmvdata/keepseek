@@ -19,7 +19,8 @@ export const composerBaseStylesFragment: WebviewFragment = {
       display: flex;
       flex-direction: column;
       min-width: 0;
-      min-height: 116px;
+      /* Let the editor, toolbar and optional status/Skills rows set the height. */
+      min-height: 0;
       border: 1px solid var(--vscode-chat-requestBorder, var(--vscode-input-border, transparent));
       border-radius: 6px;
       overflow: visible;
@@ -38,7 +39,7 @@ export const composerControlsStylesFragment: WebviewFragment = {
   source: `
     .composer-input-inner .rich-input {
       flex: 0 0 auto;
-      min-height: 74px;
+      min-height: 44px;
       padding: var(--keepseek-input-padding, 4px 4px 2px);
       background: transparent;
     }
@@ -55,7 +56,7 @@ export const composerControlsStylesFragment: WebviewFragment = {
       align-items: center;
       justify-content: space-between;
       gap: 8px;
-      min-height: 30px;
+      min-height: var(--keepseek-composer-toolbar-height, 30px);
       padding: var(--keepseek-toolbar-padding, 0 4px 4px);
     }
 

@@ -5,7 +5,7 @@ export const conversationsStylesFragment: WebviewFragment = {
   source: `
     .session-menu {
       position: absolute;
-      top: 36px;
+      top: calc(var(--keepseek-header-height) + var(--keepseek-vertical-inset));
       left: var(--keepseek-edge-padding);
       z-index: 40;
       width: min(380px, calc(100% - var(--keepseek-edge-padding-double)));

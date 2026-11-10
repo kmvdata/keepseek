@@ -8,7 +8,7 @@ export const commandMenuReadonlyStylesFragment: WebviewFragment = {
       /* The containing composer-input-wrap already sits inside the page gutter. */
       left: 0;
       right: 0;
-      bottom: 34px;
+      bottom: calc(var(--keepseek-composer-toolbar-height, 30px) + var(--keepseek-region-gap, 4px));
       z-index: 30;
       max-height: min(420px, calc(100vh - 96px));
       overflow-y: auto;

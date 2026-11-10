@@ -149,6 +149,113 @@ function client(hostDefaults) {
     }
     return { gutter, composer, assistant, code, table, scrollbar: scrollbar / scale };
   }
+  function assertToolbarClear(label) {
+    const input = rect('#promptInput');
+    const toolbar = rect('.composer-toolbar');
+    const composer = rect('.composer-input-inner');
+    close(toolbar.height, 30, label + ': toolbar retains 30px');
+    check(input.bottom <= toolbar.top + 0.5, label + ': text does not overlap toolbar');
+    for (const selector of ['#referenceMenuButton', '#commandMenuButton', '#executionModeButton', '#sendButton']) {
+      const button = rect(selector);
+      check(button.top >= input.bottom - 0.5 && button.bottom <= composer.bottom - 0.5,
+        label + ': ' + selector + ' stays below text and inside input border');
+      check(button.height >= 24 && button.width >= 24, label + ': ' + selector + ' retains click target');
+    }
+  }
+  function assertCommandMenuAnchor(label) {
+    const menu = rect('#commandMenu');
+    const toolbar = rect('.composer-toolbar');
+    const gap = toolbar.top - menu.bottom;
+    check(menu.top >= 2 && menu.bottom <= doc().documentElement.clientHeight - 2,
+      label + ': command menu stays inside vertical viewport');
+    check(gap >= 0 && gap <= 8, label + ': command menu clears toolbar with a small gap: ' + gap);
+    for (const selector of ['#referenceMenuButton', '#commandMenuButton', '#executionModeButton', '#sendButton']) {
+      check(menu.bottom <= rect(selector).top, label + ': command menu does not cover ' + selector);
+    }
+    return gap;
+  }
+  function inputEvent() {
+    element('#promptInput').dispatchEvent(new frame.contentWindow.InputEvent('input', {
+      bubbles: true, inputType: 'insertText'
+    }));
+  }
+  async function enterPrompt(text) {
+    // Exercise the production contenteditable input listener, including sanitizing,
+    // autogrow, scroll restoration and send-button state; never submit to the Host.
+    element('#promptInput').textContent = text;
+    inputEvent();
+    await paint();
+  }
+  async function verticalMeasurements() {
+    const viewportHeight = doc().documentElement.clientHeight;
+    const shell = rect('.shell');
+    const header = rect('.header');
+    close(shell.top, 0, 'shell touches Webview top');
+    close(shell.bottom, viewportHeight, 'shell fills Webview height');
+    close(header.top, 0, 'header touches Webview top');
+    close(header.height, 30, 'header is 30px including border and padding');
+    close(shell.bottom - rect('.composer-input-inner').bottom, 2, 'composer single bottom inset');
+    const transcript = element('.transcript');
+    transcript.scrollTop = 0;
+    const topInset = rect('.message').top - rect('.transcript').top;
+    close(topInset, 2, 'first message starts 2px inside transcript');
+    const messages = [...doc().querySelectorAll('.message')];
+    check(messages.length >= 2, 'fixture has adjacent messages');
+    const messageGaps = messages.slice(1).map((message, index) => {
+      const gap = message.getBoundingClientRect().top - messages[index].getBoundingClientRect().bottom;
+      close(gap, 8, 'adjacent messages have 8px spacing');
+      return gap;
+    });
+    transcript.scrollTop = transcript.scrollHeight;
+    const bottomInset = rect('.transcript').bottom - messages.at(-1).getBoundingClientRect().bottom;
+    close(bottomInset, 4, 'last message ends 4px inside transcript');
+
+    await enterPrompt('');
+    const emptyInput = rect('#promptInput').height;
+    const emptyComposer = rect('.composer-input-inner').height;
+    close(emptyInput, 44, 'empty editor keeps two-line 44px minimum');
+    close(emptyComposer, 76, 'empty composer has no extra parent minimum height');
+    check(element('#sendButton').disabled, 'empty prompt cannot submit');
+    assertToolbarClear('empty prompt');
+    await enterPrompt('A short prompt');
+    close(rect('#promptInput').height, emptyInput, 'short prompt retains compact editor');
+    close(rect('.composer-input-inner').height, emptyComposer, 'short prompt retains compact composer');
+    check(!element('#sendButton').disabled, 'nonempty ready prompt can submit');
+
+    await enterPrompt('Autogrow line\n'.repeat(80));
+    const prompt = element('#promptInput');
+    const longInput = rect('#promptInput').height;
+    const longComposer = rect('.composer-input-inner').height;
+    close(longInput, 200, 'long prompt grows to the existing 200px limit');
+    close(longComposer, 232, 'long composer grows naturally around editor and toolbar');
+    check(prompt.scrollHeight > prompt.clientHeight + 100, 'long prompt has local vertical scrolling');
+    check(frame.contentWindow.getComputedStyle(prompt).overflowY === 'auto', 'editor owns vertical scrolling');
+    close(shell.bottom - rect('.composer-input-inner').bottom, 2, 'long input preserves bottom inset');
+    assertToolbarClear('long prompt');
+    prompt.scrollTop = prompt.scrollHeight - prompt.clientHeight;
+    const previousScrollTop = prompt.scrollTop;
+    prompt.append(doc().createTextNode('Continued typing'));
+    inputEvent();
+    await paint();
+    check(prompt.scrollTop >= previousScrollTop - 1.5, 'typing at the end preserves editor scroll position');
+    close(rect('#promptInput').height, 200, 'continued typing preserves maximum editor height');
+    element('#commandMenuButton').click();
+    await paint();
+    const longMenuGap = assertCommandMenuAnchor('long prompt');
+    element('#commandMenuButton').click();
+
+    await enterPrompt('');
+    close(rect('#promptInput').height, 44, 'clearing text shrinks editor to 44px');
+    close(rect('.composer-input-inner').height, 76, 'clearing text shrinks composer to 76px');
+    close(prompt.scrollTop, 0, 'cleared editor has no stale scroll offset');
+    check(element('#sendButton').disabled, 'cleared prompt disables submit again');
+    check(prompt.getAttribute('contenteditable') === 'true', 'editor remains editable after autogrow and shrink');
+    assertToolbarClear('cleared prompt');
+    check(!(frame.contentWindow.fixtureMessages || []).some(message => message.type === 'sendPrompt'),
+      'layout fixture never submits prompts');
+    return { headerHeight: header.height, topInset, bottomInset, messageGaps,
+      emptyInput, emptyComposer, longInput, longComposer, longMenuGap };
+  }
   async function interactionMeasurements(width, scale) {
     const results = {};
     element('#commandMenuButton').click();
@@ -158,6 +265,7 @@ function client(hostDefaults) {
     const menu = rect('#commandMenu');
     close(menu.left, input.left, 'command menu has no second gutter');
     close(menu.right, input.right, 'command menu aligns input right');
+    results.commandMenuToolbarGap = assertCommandMenuAnchor('compact prompt');
     element('#commandMenuButton').click();
     element('#referenceMenuButton').click();
     await paint();
@@ -165,6 +273,10 @@ function client(hostDefaults) {
     const reference = rect('#referenceMenu');
     close(reference.left, input.left, 'reference menu has no second gutter');
     close(reference.right, input.right, 'reference menu aligns input right');
+    const referenceGap = input.top - reference.bottom;
+    check(referenceGap >= 2 && referenceGap <= 8, 'reference menu clears complete input with a small gap: ' + referenceGap);
+    check(reference.top >= 2, 'reference menu stays inside vertical viewport');
+    results.referenceMenuInputGap = referenceGap;
     element('#referenceMenuButton').click();
     element('#executionModeButton').click();
     await paint();
@@ -173,10 +285,12 @@ function client(hostDefaults) {
     element('#settingsTab').click();
     await paint();
     results.settingsMenu = inside('#settingsMenu', width, scale);
+    close(rect('#settingsMenu').top - rect('.header').bottom, 2, 'settings menu follows header with 2px inset');
     element('#settingsTab').click();
     element('#historyTab').click();
     await paint();
     results.historyMenu = inside('#sessionMenu', width, scale);
+    close(rect('#sessionMenu').top - rect('.header').bottom, 2, 'history menu follows header with 2px inset');
     element('#historyTab').click();
     receive({ type: 'showSettingsDialog', sources: [{ id: 'fixture', name: 'Layout fixture', provider: 'openai-compatible',
       apiKey: '', baseUrl: 'https://example.invalid/v1', models: [{ id: 'fixture-model', name: 'Fixture model' }] }], selectedSourceId: 'fixture' });
@@ -207,8 +321,9 @@ function client(hostDefaults) {
         await show(width, language, scale, themeName);
         const viewportWidth = doc().documentElement.clientWidth;
         const layout = measure(viewportWidth, 1);
+        const vertical = await verticalMeasurements();
         const interactions = await interactionMeasurements(viewportWidth, 1);
-        results.push({ ...current, viewportWidth, layout, interactions });
+        results.push({ ...current, viewportWidth, layout, vertical, interactions });
         summary.textContent = 'Running… ' + results.length + '/72';
       }
       window.keepseekLayoutResult = { passed: true, layouts: results.length, userAgent: navigator.userAgent,

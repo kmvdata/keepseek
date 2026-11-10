@@ -60,9 +60,13 @@ export function getStyles(): string {
       --keepseek-edge-padding: 6px;
       --keepseek-edge-padding-double: calc(2 * var(--keepseek-edge-padding));
       --keepseek-overlay-inset-double: 12px;
+      --keepseek-vertical-inset: 2px;
+      --keepseek-region-gap: 4px;
+      --keepseek-header-height: 30px;
+      --keepseek-composer-toolbar-height: 30px;
 
       /* ---- input 区域边距变量（修改这些值即可调整间距） ---- */
-      --keepseek-composer-padding: 0 var(--keepseek-edge-padding) var(--keepseek-edge-padding);
+      --keepseek-composer-padding: 0 var(--keepseek-edge-padding) var(--keepseek-vertical-inset);
       --keepseek-input-padding: 4px 4px 2px;
       --keepseek-toolbar-padding: 0 4px 4px;
     }
@@ -289,9 +293,9 @@ export function getStyles(): string {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 8px var(--keepseek-edge-padding);
+      padding: var(--keepseek-vertical-inset) var(--keepseek-edge-padding);
       border-bottom: 1px solid var(--vscode-sideBarSectionHeader-border, var(--vscode-panel-border));
-      min-height: 36px;
+      min-height: var(--keepseek-header-height);
     }
 
     .header-title {
@@ -346,7 +350,7 @@ export function getStyles(): string {
 
     .settings-menu {
       position: absolute;
-      top: 36px;
+      top: calc(var(--keepseek-header-height) + var(--keepseek-vertical-inset));
       right: var(--keepseek-edge-padding);
       z-index: 45;
       width: min(300px, calc(100% - var(--keepseek-edge-padding-double)));
@@ -1222,7 +1226,7 @@ ${conversationsStylesFragment.source}
       min-width: 0;
       min-height: 0;
       overflow-y: auto;
-      padding: 8px var(--keepseek-edge-padding) 12px;
+      padding: var(--keepseek-vertical-inset) var(--keepseek-edge-padding) var(--keepseek-region-gap);
       background: transparent;
     }
 
@@ -1261,7 +1265,7 @@ ${conversationsStylesFragment.source}
       display: flex;
       flex-direction: column;
       align-items: flex-start;
-      margin-bottom: 18px;
+      margin-bottom: 8px;
     }
 
     .message.user {
@@ -1272,7 +1276,8 @@ ${conversationsStylesFragment.source}
       align-items: flex-start;
     }
 
-    .message:last-child {
+    .message:last-child,
+    .message:has(+ #unlinkedChangeSetRegion.hidden:last-child) {
       margin-bottom: 0;
     }
 
