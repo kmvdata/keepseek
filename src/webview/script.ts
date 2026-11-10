@@ -130,7 +130,7 @@ export function getScript(): string {
       extensionInfo: {
         displayName: 'KeepSeek',
         version: '',
-        publisher: 'kmvdata',
+        publisher: 'keepseek',
         author: 'kmvdata',
         repositoryUrl: 'https://github.com/kmvdata/keepseek',
         license: 'MIT'
@@ -493,7 +493,7 @@ export function getScript(): string {
       return {
         displayName: readNonEmptyString(info.displayName, 'KeepSeek'),
         version: readNonEmptyString(info.version, ''),
-        publisher: readNonEmptyString(info.publisher, 'kmvdata'),
+        publisher: readNonEmptyString(info.publisher, 'keepseek'),
         author: readNonEmptyString(info.author, 'kmvdata'),
         repositoryUrl: readNonEmptyString(info.repositoryUrl, 'https://github.com/kmvdata/keepseek'),
         license: readNonEmptyString(info.license, 'MIT')

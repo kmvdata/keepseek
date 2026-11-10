@@ -10,7 +10,7 @@
 
 # KeepSeek
 
-0.5.2 是全新初始版本：扩展身份与配置统一为 `kmvdata.keepseek`，旧数据与设置不导入。账号备份、数据位置与重置入口见[存储基线](doc/keepseek-storage-baseline.md)。
+0.5.2 是全新初始版本：扩展身份为 `keepseek.keepseek`，设置命名空间为 `kmvdata.keepseek`，旧数据与设置不导入。账号备份、数据位置与重置入口见[存储基线](doc/keepseek-storage-baseline.md)。
 
 ## 一、把你选择的模型，变成真正能干活的编程 Agent
 

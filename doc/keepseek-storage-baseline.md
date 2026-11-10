@@ -4,7 +4,7 @@
 
 ## 唯一身份和存储位置
 
-扩展清单身份为 `kmvdata.keepseek`，磁盘命名空间为 `com.kmvdata.keepseek`，设置统一使用 `kmvdata.keepseek.*`。命令及视图继续使用 `keepseek.*`，这是当前产品 API 名称。
+扩展清单身份为 `keepseek.keepseek`（发布者 `keepseek`），磁盘命名空间为 `com.kmvdata.keepseek`，设置统一使用 `kmvdata.keepseek.*`。命令及视图继续使用 `keepseek.*`，这是当前产品 API 名称。
 
 | 宿主平台 | 当前磁盘根 |
 | --- | --- |
@@ -58,7 +58,7 @@ bun run reset:data --apply
 ## 验收
 
 1. 打开新版时进入全新空白会话；不扫描或加载旧 shard。
-2. 诊断显示扩展 ID 为 `kmvdata.keepseek`、存储 scheme 为 `file`。
+2. 诊断显示扩展 ID 为 `keepseek.keepseek`、存储 scheme 为 `file`。
 3. 重新配置账号并发送指令，重启后能手动加载当前会话。
 4. 在“设置 → 历史会话”预览并确认清理，空闲历史被删除，使用中的会话受保护。
 5. 另一窗口的迟到保存及重启恢复都不能复活已删除会话。

@@ -31,7 +31,7 @@ function main() {
 
   // Publisher changes create a distinct VS Code extension. An explicit reinstall
   // must remove the retired identity to avoid two providers registering one view.
-  const retiredExtensionId = 'keepseek.keepseek';
+  const retiredExtensionId = 'kmvdata.keepseek';
   const retiredVersion = getInstalledExtensionVersion(retiredExtensionId);
   if (retiredVersion && retiredExtensionId !== extensionId) {
     step(`Uninstalling retired ${retiredExtensionId}@${retiredVersion} from VS Code...`);

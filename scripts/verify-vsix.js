@@ -37,9 +37,9 @@ const forbiddenEntries = [
 
 const entries = readZipEntries(vsixPath);
 const packagedManifest = JSON.parse(readZipEntry(vsixPath, 'extension/package.json'));
-if (`${packagedManifest.publisher}.${packagedManifest.name}` !== 'kmvdata.keepseek'
+if (`${packagedManifest.publisher}.${packagedManifest.name}` !== 'keepseek.keepseek'
   || packagedManifest.publisher !== packageJson.publisher || packagedManifest.version !== packageJson.version) {
-  throw new Error('VSIX identity or version does not match the kmvdata.keepseek baseline.');
+  throw new Error('VSIX identity or version does not match the keepseek.keepseek baseline.');
 }
 const missing = [...requiredEntries].filter((entry) => !entries.has(entry));
 const stale = forbiddenEntries.filter((entry) => entries.has(entry));

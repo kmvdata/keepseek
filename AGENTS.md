@@ -26,7 +26,7 @@ bun run package:market
 
 ## 存储初始基线
 
-0.5.2 视为初始版本。扩展身份为 `kmvdata.keepseek`，磁盘根为宿主原生应用数据目录下的 `com.kmvdata.keepseek`，所有 Store 必须共用同一 `file:` URI。不读取、不迁移旧扩展、旧账号、旧配置或旧协议数据；不要新增 fallback、双写或迁移桥。只支持当前格式，保留当前原子提交、跨进程锁、损坏校验、删除墓碑和中断恢复。格式版本号与发布版本独立，详见 `doc/keepseek-storage-baseline.md`。
+0.5.2 视为初始版本。扩展身份为 `keepseek.keepseek`（发布者 `keepseek`），磁盘根为宿主原生应用数据目录下的 `com.kmvdata.keepseek`，所有 Store 必须共用同一 `file:` URI。不读取、不迁移旧扩展、旧账号、旧配置或旧协议数据；不要新增 fallback、双写或迁移桥。只支持当前格式，保留当前原子提交、跨进程锁、损坏校验、删除墓碑和中断恢复。格式版本号与发布版本独立，详见 `doc/keepseek-storage-baseline.md`。
 
 ## 2. 当前代码分层
 

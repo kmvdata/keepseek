@@ -136,7 +136,7 @@ ask 由用户逐项/批量批准；delegate 对符合宿主规则的常规操作
 
 标题的 Host 候选由真实用户指令跨过提交保存屏障后制造，与主请求并行 drain，不等待助手回答或前台 owner 释放；启动/历史/诊断只读不补发。自动仅取本条 user.content，手动只惰性加载目标并冻结最近最多两条 user.content，不携带 assistant、全历史、摘要或展开内容。新 user_inputs_v3 basis 只绑定所选 user ID/hash，助手变化不使其过期；不接受旧 recent_turns_v2/whole-history basis。首次合格标题及 stopped 跨 shard/index staged commit 后永久停止，普通追加/切换不取消有效 attempt，截断/归档不解锁已提交标题；当前 canonical commit 必须核验，shard-only 不算成功。请求固定无工具、一次 set/defer，目的导向，标题专属 512 输出/30 秒上限；`prepareAgentTaskBudget()` 在用户提交后、预运行压缩前准备实际 root 的同一 run/cost 活对象并注入 Runner；无有限费用/token 上限且至少有两次请求余量时可先开放标题，否则等主请求首次预占耐久的短预算门，不能等整个标题响应；真实用户 recovery 补充的命名消息身份与原执行预算 root 分离、已花额度不重置；手动仍用独立窄预算，reviewer 合同不变。实现边界与原生请求计数验收见[会话标题](keepseek-session-title-verification.md)。
 
-所有 Store 共用 `shared/storageRoot.ts` 解析的宿主原生 `file:` 根（`com.kmvdata.keepseek`）。扩展身份为 `kmvdata.keepseek`，不读取旧扩展数据或执行跨版迁移。来源/子代理设置、当前会话索引与 V4 shard、evidence/child、用量账本、ChangeSet、DraftRun 和审批文件各由所属 Store 管理。JSON 优先 `writeJsonAtomic()`；未知副作用不自动重试。身份、格式矩阵和重置方式见[存储基线](keepseek-storage-baseline.md)。
+所有 Store 共用 `shared/storageRoot.ts` 解析的宿主原生 `file:` 根（`com.kmvdata.keepseek`）。扩展身份为 `keepseek.keepseek`，不读取旧扩展数据或执行跨版迁移。来源/子代理设置、当前会话索引与 V4 shard、evidence/child、用量账本、ChangeSet、DraftRun 和审批文件各由所属 Store 管理。JSON 优先 `writeJsonAtomic()`；未知副作用不自动重试。身份、格式矩阵和重置方式见[存储基线](keepseek-storage-baseline.md)。
 
 ## 8. 改动与测试路由
 

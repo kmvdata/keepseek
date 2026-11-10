@@ -1,6 +1,6 @@
 # 手动清理历史会话
 
-本页是本功能的行为、存储与验收入口；显示设置和自动保留规则仍由原有配置及 `sessionRetention.ts` 负责。当前以 0.5.2 为初始版本，使用 `kmvdata.keepseek` 身份和宿主原生应用数据目录下的 `com.kmvdata.keepseek`，所有 Store 共用同一 `file:` 根。旧扩展、Memento、旧协议和旧目录均不读取、不导入、不迁移；格式版本与发布版本独立，见[存储初始基线](keepseek-storage-baseline.md)。本功能不调用模型，不操作项目目录、Git、账号、模型设置、Skills 或 AGENTS。
+本页是本功能的行为、存储与验收入口；显示设置和自动保留规则仍由原有配置及 `sessionRetention.ts` 负责。当前以 0.5.2 为初始版本，使用 `keepseek.keepseek` 身份和宿主原生应用数据目录下的 `com.kmvdata.keepseek`，所有 Store 共用同一 `file:` 根。旧扩展、Memento、旧协议和旧目录均不读取、不导入、不迁移；格式版本与发布版本独立，见[存储初始基线](keepseek-storage-baseline.md)。本功能不调用模型，不操作项目目录、Git、账号、模型设置、Skills 或 AGENTS。
 
 ## 用户行为
 

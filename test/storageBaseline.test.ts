@@ -11,7 +11,7 @@ import { saveModelRequestTimeout } from '../src/provider/requestTimeoutSettings'
 
 test('0.5.2 starts a distinct native data domain on each host platform', () => {
   assert.equal(KEEPSEEK_BASELINE_VERSION, '0.5.2');
-  assert.equal(KEEPSEEK_EXTENSION_ID, 'kmvdata.keepseek');
+  assert.equal(KEEPSEEK_EXTENSION_ID, 'keepseek.keepseek');
   assert.equal(KEEPSEEK_STORAGE_NAMESPACE, 'com.kmvdata.keepseek');
   assert.equal(getNativeStoragePath({ platform: 'darwin', home: '/Users/example', env: {} }),
     '/Users/example/Library/Application Support/com.kmvdata.keepseek');
