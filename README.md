@@ -1,3 +1,7 @@
+> **⚠️ 升级 0.5.2 前请先备份账号信息**
+>
+> 0.5.2 对文件配置与存储结构做了全新优化，**不再兼容旧版本的历史记录和账号配置**。升级后需要重新配置账号，之前的历史记录不再保存。这是为后续多 Agent 异步支持所做的取舍，烦请谅解。
+
 > **English: [README.en.md](./README.en.md) | 中文：本文档**
 
 <p align="center">
@@ -6,7 +10,7 @@
 
 # KeepSeek
 
-0.5.2 是全新初始版本：扩展身份与配置统一为 `kmvdata.keepseek`，请重新配置账号；旧数据和设置不导入。数据位置与重置入口见[存储基线](doc/keepseek-storage-baseline.md)。
+0.5.2 是全新初始版本：扩展身份与配置统一为 `kmvdata.keepseek`，旧数据与设置不导入。账号备份、数据位置与重置入口见[存储基线](doc/keepseek-storage-baseline.md)。
 
 ## 一、把你选择的模型，变成真正能干活的编程 Agent
 
