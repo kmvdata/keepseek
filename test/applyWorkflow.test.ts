@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
 import { WEBVIEW_TRANSLATIONS } from '../src/shared/i18n';
 import { getScript } from '../src/webview/script';
+import { sessionUseFixture } from './sessionUseFixture';
 
 class ActionElement {
   public dataset: Record<string, string> = {};
@@ -80,7 +81,7 @@ test('Provider returns terminal feedback for busy, missing, and exceptional Appl
     isBusy: true,
     runContextRefreshInFlight: false,
     activeChangeActions: new Set<string>(),
-    sessionStore: { activeSessionId: 's', getActiveSession: () => ({ id: 's', approvalMode: 'ask', messages: [] }), persist: async () => {} },
+    sessionStore: { ...sessionUseFixture(), activeSessionId: 's', getActiveSession: () => ({ id: 's', approvalMode: 'ask', messages: [] }), persist: async () => {} },
     postToWebview: (message: Record<string, unknown>) => messages.push(message),
     postState: () => undefined,
     t: (key: string) => key

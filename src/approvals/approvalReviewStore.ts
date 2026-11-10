@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { writeJsonAtomic } from '../shared/atomicStorage';
+import { SessionDeletionAuthority } from '../sessions/sessionDeletionAuthority';
+import { hasAssociatedRecordOwner, assertManagedStoragePath, readAssociatedJson, withAssociatedStoreGate, withoutDeletedSessions } from '../sessions/sessionAssociatedPersistence';
 import type { HistoryTruncationScope } from '../sessions/historyTruncation';
 import {
   policyVersionFor,
@@ -17,10 +19,11 @@ export class ApprovalReviewStore {
   public readonly runtimeId = randomUUID();
   private readonly storageUri: vscode.Uri;
   private readonly records = new Map<string, ApprovalReviewRecord>();
+  private readonly knownRecordIds = new Set<string>();
   private persistenceQueue: Promise<void> = Promise.resolve();
   private initialized = false;
 
-  public constructor(globalStorageUri: vscode.Uri) {
+  public constructor(private readonly globalStorageUri: vscode.Uri) {
     this.storageUri = vscode.Uri.joinPath(globalStorageUri, 'approval-reviews.json');
   }
 
@@ -37,7 +40,10 @@ export class ApprovalReviewStore {
       if (parsed.version !== 1) return;
       for (const value of parsed.records ?? []) {
         const record = normalizeRecord(value);
-        if (record) this.records.set(record.reviewId, record);
+        if (record && !await new SessionDeletionAuthority(this.globalStorageUri).isSessionIdDeleted(record.sessionId)) {
+          this.records.set(record.reviewId, record);
+          this.knownRecordIds.add(record.reviewId);
+        }
       }
     } catch {
       // Missing or malformed review history never authorizes an operation.
@@ -45,6 +51,7 @@ export class ApprovalReviewStore {
   }
 
   public async add(input: Omit<ApprovalReviewRecord, 'reviewId' | 'runtimeId' | 'createdAt'>): Promise<ApprovalReviewRecord> {
+    await new SessionDeletionAuthority(this.globalStorageUri).assertSessionIdWritable(input.sessionId);
     const record: ApprovalReviewRecord = {
       ...input,
       reviewId: randomUUID(),
@@ -52,6 +59,7 @@ export class ApprovalReviewStore {
       createdAt: new Date().toISOString()
     };
     this.records.set(record.reviewId, record);
+    this.knownRecordIds.add(record.reviewId);
     this.compact();
     await this.persist();
     return structuredClone(record);
@@ -118,6 +126,7 @@ export class ApprovalReviewStore {
   }
 
   public async consumeMatchingApproval(input: ApprovalRecordMatch): Promise<ApprovalReviewRecord> {
+    await new SessionDeletionAuthority(this.globalStorageUri).assertSessionIdWritable(input.sessionId);
     if (!input.workspaceTrusted) throw new Error('Approval record cannot be consumed in an untrusted workspace.');
     const record = this.records.get(input.reviewId);
     if (!record || record.historyInvalidatedBy || record.runtimeId !== this.runtimeId || record.consumedAt
@@ -158,10 +167,39 @@ export class ApprovalReviewStore {
     remove.forEach((record) => this.records.delete(record.reviewId));
   }
 
+  public async hasSessionHistory(sessionId: string): Promise<boolean> {
+    return hasAssociatedRecordOwner(this.storageUri, sessionId, ['records'], [1]);
+  }
+
+  public async deleteSession(sessionId: string): Promise<void> {
+    for (const [id, record] of this.records) if (record.sessionId === sessionId) this.records.delete(id);
+    await this.flush();
+    await withAssociatedStoreGate(this.globalStorageUri, 'approval-reviews', async () => {
+      await assertManagedStoragePath(this.globalStorageUri, this.storageUri);
+      const stored = await readAssociatedJson(this.storageUri);
+      if (!stored) return;
+      if (stored.version !== 1 || !Array.isArray(stored.records)) throw new Error('Approval history storage is damaged.');
+      await writeJsonAtomic(this.storageUri, { ...stored,
+        records: stored.records.filter(record => !record || typeof record !== 'object' || (record as ApprovalReviewRecord).sessionId !== sessionId) });
+    });
+  }
+
   private async persist(): Promise<void> {
-    const write = async () => await writeJsonAtomic(this.storageUri, {
-      version: 1,
-      records: [...this.records.values()]
+    const write = async () => await withAssociatedStoreGate(this.globalStorageUri, 'approval-reviews', async () => {
+      const stored = await readAssociatedJson(this.storageUri);
+      if (stored && (stored.version !== 1 || !Array.isArray(stored.records))) throw new Error('Approval history storage is damaged.');
+      const merged = new Map<string, ApprovalReviewRecord>();
+      for (const value of stored?.records as unknown[] ?? []) {
+        if (value && typeof value === 'object' && typeof (value as ApprovalReviewRecord).reviewId === 'string') {
+          const record = value as ApprovalReviewRecord;
+          if (!this.knownRecordIds.has(record.reviewId) || this.records.has(record.reviewId)) merged.set(record.reviewId, record);
+        }
+      }
+      for (const record of this.records.values()) merged.set(record.reviewId, record);
+      const records = await withoutDeletedSessions(this.globalStorageUri, [...merged.values()]);
+      await writeJsonAtomic(this.storageUri, { version: 1, records });
+      const retained = new Set(records.map(record => record.reviewId));
+      for (const id of this.records.keys()) if (!retained.has(id)) this.records.delete(id);
     });
     this.persistenceQueue = this.persistenceQueue.then(write, write);
     await this.persistenceQueue;

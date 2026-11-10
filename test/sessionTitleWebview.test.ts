@@ -26,6 +26,7 @@ test('background title events patch known session labels without rerendering edi
     const menu = { querySelectorAll: () => rows };
     const originalMessages = state.messages;
     const env = { state, currentSessionTitle: title, sessionMenu: menu, t: () => 'New session',
+      historyCleanupDeletedSessionIds: new Set<string>(),
       getActiveVisibleSessions: () => state.sessionSummaries, getSessionMenuRenderKey: () => 'patched' };
     const api = new Function(...Object.keys(env), `
       var sessionMenuOpen = true;

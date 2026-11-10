@@ -1,0 +1,60 @@
+{
+  "measuredAt": "2026-11-10T07:48:07.699Z",
+  "platform": "darwin",
+  "node": "v24.15.0",
+  "results": [
+    {
+      "operation": "readonlyPreview",
+      "summaries": 1000,
+      "candidates": 1000,
+      "durationMs": 1397.13,
+      "sessionShardReads": 0,
+      "modelRequests": 0,
+      "maxConcurrency": 1
+    },
+    {
+      "operation": "readonlyPreview",
+      "summaries": 10000,
+      "candidates": 10000,
+      "durationMs": 10805.77,
+      "sessionShardReads": 0,
+      "modelRequests": 0,
+      "maxConcurrency": 1
+    },
+    {
+      "operation": "storageReclaim",
+      "targets": 25,
+      "durationMs": 3068.06,
+      "sessionShardReads": 25,
+      "modelRequests": 0,
+      "maxConcurrency": 1,
+      "outcomes": {
+        "removedPendingCleanup": 25
+      },
+      "note": "associated store and Memento cleanup intentionally not counted as fullyDeleted"
+    }
+  ],
+  "durableJournalFinalRun": {
+    "targets": 1000,
+    "bytesWritten": 1168717,
+    "writes": 5010,
+    "durationMs": 132064.17,
+    "modelRequests": 0,
+    "note": "temporary disk, immutable plan plus per-target durable deltas; no speed improvement claim"
+  },
+  "validation": {
+    "compile": "passed",
+    "lint": "passed",
+    "buildTest": "passed",
+    "test": {
+      "tests": 1471,
+      "passed": 1470,
+      "failed": 0,
+      "skipped": 1,
+      "durationMs": 903555.523058,
+      "skipReason": "sandbox disallows binding the existing local network fault server"
+    },
+    "nativeVSCode": "not_exercised",
+    "otherPlatforms": "not_exercised"
+  }
+}

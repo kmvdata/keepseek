@@ -69,6 +69,10 @@ export interface StoredWorkspaceSessionState {
 }
 
 export interface ChatSessionStorageAdapter {
+  /** Cleanup and every execution admission share the persistent deletion authority. */
+  isSessionDeleted?(workspaceKey: string, sessionId: string): Promise<boolean>;
+  assertSessionWritable?(workspaceKey: string, sessionId: string): Promise<void>;
+  acquireSessionUse?(workspaceKey: string, sessionId: string): Promise<{ release(): Promise<void> }>;
   loadMessageCheckpoint?(workspaceKey: string, sessionId: string, messageId: string): Promise<unknown>;
   loadWorkspace(workspaceScope: WorkspaceSessionScope): Promise<StoredWorkspaceSessionState>;
   saveWorkspace(workspaceScope: WorkspaceSessionScope, state: StoredWorkspaceSessionState): Promise<void>;
@@ -113,10 +117,46 @@ export class ChatSessionStore {
   private approvalModeValue: ApprovalMode = 'ask';
   private readonly stagedTitles = new Map<string, StagedSessionTitle>();
   private readonly titleSessionPins = new Map<string, number>();
+  private readonly deletedSessionKeys = new Set<string>();
 
   /** Loaded sessions only: background naming must never load an entire old history. */
   public getSessionById(sessionId: string): ChatSession | undefined {
+    if (this.deletedSessionKeys.has(this.sessionIdentity(sessionId))) return undefined;
     return this.sessions.find(session => session.id === sessionId && this.isInCurrentWorkspace(session));
+  }
+
+  /** Call at a user action boundary; a stale idle window must not reuse deleted
+   * proposals, approvals or a conversation removed by another process. */
+  public async assertSessionWritable(sessionId = this.activeSessionIdValue): Promise<void> {
+    const workspaceKey = this.workspaceScope.key;
+    if (this.deletedSessionKeys.has(this.sessionIdentity(sessionId))) throw new Error('session_deleted');
+    if (this.sessionStorage.assertSessionWritable) {
+      await this.sessionStorage.assertSessionWritable(workspaceKey, sessionId);
+    } else if (await this.sessionStorage.isSessionDeleted?.(workspaceKey, sessionId)) {
+      throw new Error('session_deleted');
+    }
+    if (workspaceKey !== this.workspaceScope.key) throw new Error('session_workspace_changed');
+  }
+
+  /** Acquisition checks deletion and registers use under the same storage gate.
+   * The caller keeps the handle until queued work and its final save settle. */
+  public async acquireSessionUse(sessionId = this.activeSessionIdValue): Promise<{ release(): Promise<void> }> {
+    const workspaceKey = this.workspaceScope.key;
+    if (this.deletedSessionKeys.has(this.sessionIdentity(sessionId))) throw new Error('session_deleted');
+    if (this.sessionStorage.acquireSessionUse) {
+      const use = await this.sessionStorage.acquireSessionUse(workspaceKey, sessionId);
+      if (workspaceKey !== this.workspaceScope.key) {
+        await use.release();
+        throw new Error('session_workspace_changed');
+      }
+      return use;
+    }
+    await this.assertSessionWritable(sessionId);
+    return { release: async () => {} };
+  }
+
+  private sessionIdentity(sessionId: string): string {
+    return JSON.stringify([this.workspaceScope.key, sessionId]);
   }
 
   /** Keep only sessions with observed title work resident; never hydrate here. */
@@ -208,6 +248,8 @@ export class ChatSessionStore {
   public async finishSessionTitleResult(sessionId: string, token: string, result: {
     title?: string; outcome: SessionTitleMetadata['lastOutcome'];
   }): Promise<'committed' | 'recorded' | 'stale' | 'save_failed'> {
+    if (this.deletedSessionKeys.has(this.sessionIdentity(sessionId))
+      || await this.sessionStorage.isSessionDeleted?.(this.workspaceScope.key, sessionId)) return 'stale';
     const session = this.getSessionById(sessionId);
     const manual = session?.autoTitle?.manualAttempt?.token === token;
     const attempt = manual ? session?.autoTitle?.manualAttempt : session?.autoTitle?.attempt;
@@ -498,6 +540,65 @@ export class ChatSessionStore {
     };
   }
 
+  /** Retire cancellable title work only after Host confirmation. This does not
+   * delete, hydrate or save a session; an in-flight save is allowed to settle
+   * before the cleanup service performs its final version check. */
+  public async settleHistoryCleanup(sessionIds: readonly string[]): Promise<void> {
+    for (const id of new Set(sessionIds)) {
+      this.stagedTitles.delete(id);
+      const session = this.getSessionById(id);
+      if (!session) continue;
+      const state = normalizeSessionTitle(session.autoTitle, session.customTitle, { preserveRunning: true });
+      if (state.status === 'running' || state.manualAttempt) session.autoTitle = {
+        ...state, status: state.status === 'running' ? 'pending' : state.status,
+        revision: state.revision + 1, attempt: undefined, manualAttempt: undefined, lastOutcome: 'stale'
+      };
+    }
+    while (this.persistenceDrain || this.pendingPersistence) {
+      this.startPersistenceDrain();
+      await this.persistenceDrain;
+    }
+  }
+
+  /** Forget only IDs already committed to the durable deletion authority. Disk
+   * reclamation belongs to the cleanup service. Never select another history or
+   * prepare context when replacing the deleted active session. */
+  public async forgetHistoryCleanup(sessionIds: readonly string[]): Promise<DeleteSessionsResult> {
+    const ids = new Set(sessionIds.filter(id => typeof id === 'string' && !!id.trim()));
+    if (!ids.size) return { deletedCount: 0, activeSessionChanged: false };
+    const workspaceKey = this.workspaceScope.key;
+    if (this.sessionStorage.isSessionDeleted) {
+      for (const id of ids) if (!await this.sessionStorage.isSessionDeleted(workspaceKey, id)) {
+        throw new Error('history_cleanup_not_committed');
+      }
+    }
+    if (workspaceKey !== this.workspaceScope.key) throw new Error('session_workspace_changed');
+    const previousActive = this.activeSessionIdValue;
+    const deletedCount = [...ids].filter(id => this.sessionSummaries.has(id)
+      || this.sessions.some(session => this.isInCurrentWorkspace(session) && session.id === id)).length;
+    for (const id of ids) {
+      this.deletedSessionKeys.add(this.sessionIdentity(id));
+      this.sessionSummaries.delete(id);
+      this.stagedTitles.delete(id);
+      this.titleSessionPins.delete(this.sessionIdentity(id));
+    }
+    this.sessions = this.sessions.filter(session => !this.isInCurrentWorkspace(session) || !ids.has(session.id));
+    const pending = this.pendingPersistence;
+    if (pending?.scope.key === this.workspaceScope.key) {
+      pending.snapshot.sessions = pending.snapshot.sessions.filter(session => !ids.has(session.id));
+      pending.snapshot.sessionSummaries = pending.snapshot.sessionSummaries?.filter(session => !ids.has(session.id));
+    }
+    if (ids.has(previousActive)) {
+      const blank = createEmptySession(this.language, this.workspaceScope, this.approvalModeValue, 'normal');
+      this.sessions.unshift(blank);
+      this.setActiveSessionId(blank.id);
+    }
+    // The store transaction already removed non-active targets from disk. Avoid
+    // rewriting every survivor for each item in a large cleanup batch.
+    if (previousActive !== this.activeSessionIdValue) await this.persist('history_cleanup_selection');
+    return { deletedCount, activeSessionChanged: previousActive !== this.activeSessionIdValue };
+  }
+
   public async cleanupExpiredSessions(
     now = Date.now(),
     protectedSessionIds: readonly string[] = [],
@@ -626,6 +727,10 @@ export class ChatSessionStore {
             && saved.autoTitle.revision === staged.metadata.revision
             && saved.autoTitle.completed?.taskId === staged.metadata.completed?.taskId
             && this.matchesTitleAttempt(saved.id, staged.token, staged.revision)) {
+            if (await this.sessionStorage.isSessionDeleted?.(next.scope.key, saved.id)) {
+              this.stagedTitles.delete(saved.id);
+              continue;
+            }
             const live = this.getSessionById(saved.id)!;
             live.title = staged.title;
             if (staged.clearCustomTitle) live.customTitle = undefined;
@@ -847,6 +952,10 @@ export class ChatSessionStore {
   }
 
   private async loadSessionById(sessionId: string): Promise<ChatSession | undefined> {
+    const workspaceKey = this.workspaceScope.key;
+    if (this.deletedSessionKeys.has(this.sessionIdentity(sessionId))
+      || await this.sessionStorage.isSessionDeleted?.(workspaceKey, sessionId)) return undefined;
+    if (workspaceKey !== this.workspaceScope.key) return undefined;
     const loaded = this.sessions.find((item) => item.id === sessionId && this.isInCurrentWorkspace(item));
     if (loaded) {
       return loaded;
@@ -854,7 +963,6 @@ export class ChatSessionStore {
     if (!this.sessionSummaries.has(sessionId) || !this.sessionStorage.loadSession) {
       return undefined;
     }
-    const workspaceKey = this.workspaceScope.key;
     const session = await this.sessionStorage.loadSession(workspaceKey, sessionId);
     if (!session || session.id !== sessionId || workspaceKey !== this.workspaceScope.key
       || !this.sessionSummaries.has(sessionId) || !this.isInCurrentWorkspace(session)) {

@@ -34,7 +34,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.globalState,
     createExtensionInfo(context),
     sessionInitialization,
-    startupTrace
+    startupTrace,
+    context.workspaceState
   );
   const webviewProvider = vscode.window.registerWebviewViewProvider(KeepseekChatViewProvider.viewType, provider, {
     webviewOptions: {

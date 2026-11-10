@@ -180,6 +180,27 @@ export const dialogFieldStylesFragment: WebviewFragment = {
 export const dialogFooterStylesFragment: WebviewFragment = {
   id: 'styles.dialogs.footer',
   source: `
+    .history-cleanup-summary {
+      margin: 10px 0;
+      white-space: pre-line;
+      overflow-wrap: anywhere;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .history-cleanup-actions {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .history-cleanup-section button:focus-visible {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: 2px;
+    }
+
     .settings-dialog-footer {
       display: flex;
       flex-wrap: wrap;

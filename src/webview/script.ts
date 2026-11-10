@@ -149,6 +149,9 @@ export function getScript(): string {
     var pendingSubmission = null;
     var submissionSequence = 0;
     var sessionPromptDrafts = new Map();
+    var historyCleanupDeletedSessionIds = new Set();
+    var historyCleanupDeletedSessionKeys = new Set();
+    var historyCleanupPendingDrafts = new Map();
 
     function currentInteraction() {
       return state.interaction && state.interaction.sessionId === state.activeSessionId ? state.interaction : null;
@@ -204,12 +207,15 @@ export function getScript(): string {
     function changeVisibleSession(previousSessionId, nextSessionId) {
       if (previousSessionId === nextSessionId) return;
       var startupDraft = !previousSessionId && promptInput ? promptInput.innerHTML : '';
-      if (previousSessionId && promptInput) sessionPromptDrafts.set(previousSessionId, promptInput.innerHTML);
+      if (previousSessionId && promptInput && !historyCleanupDeletedSessionIds.has(previousSessionId)) sessionPromptDrafts.set(previousSessionId, promptInput.innerHTML);
       stopAgentStatusRotation(); agentStatusRotationKey = ''; reconnectStatusActive = false;
       operationStatus = ''; operationStatusKey = '';
       if (transientStatusScope !== 'global') setTransientStatus('');
       clearPromptDraft();
-      var draft = sessionPromptDrafts.get(nextSessionId) || startupDraft || '';
+      var cleanupTransfer = previousSessionId && historyCleanupDeletedSessionIds.has(previousSessionId)
+        ? historyCleanupPendingDrafts.get(previousSessionId) : undefined;
+      var draft = sessionPromptDrafts.get(nextSessionId) || cleanupTransfer || startupDraft || '';
+      if (cleanupTransfer !== undefined) sessionPromptDrafts.set(nextSessionId, draft);
       if (window.keepseekInputControls?.restoreDraft) window.keepseekInputControls.restoreDraft(draft);
       else if (promptInput) promptInput.innerHTML = draft;
       if (window.keepseekInputControls) window.keepseekInputControls.render();
@@ -1204,15 +1210,72 @@ ${conversationsMenuDismissFragment.source}
 
     function handleKeepseekHostMessage(event) {
       var message = event.data;
+      if (message.type === 'historyCleanupSessionReplacement') {
+        var previousCleanupSessionId = String(message.previousSessionId || '');
+        var nextCleanupSessionId = String(message.sessionId || '');
+        if (!previousCleanupSessionId || !nextCleanupSessionId || previousCleanupSessionId === nextCleanupSessionId) return;
+        var cleanupDraft = historyCleanupPendingDrafts.has(previousCleanupSessionId)
+          ? historyCleanupPendingDrafts.get(previousCleanupSessionId)
+          : previousCleanupSessionId === state.activeSessionId && promptInput
+            ? promptInput.innerHTML : sessionPromptDrafts.get(previousCleanupSessionId) || '';
+        historyCleanupPendingDrafts.delete(previousCleanupSessionId);
+        if (state.activeSessionId === nextCleanupSessionId && promptInput) {
+          var editedBlankDraft = promptInput.innerHTML;
+          if (sessionPromptDrafts.has(nextCleanupSessionId)) cleanupDraft = editedBlankDraft;
+          else if (editedBlankDraft && editedBlankDraft !== cleanupDraft) cleanupDraft = cleanupDraft
+            ? cleanupDraft + '<br>' + editedBlankDraft : editedBlankDraft;
+        }
+        sessionPromptDrafts.set(nextCleanupSessionId, cleanupDraft);
+        sessionPromptDrafts.delete(previousCleanupSessionId);
+        historyCleanupDeletedSessionIds.add(previousCleanupSessionId);
+        if (state.activeSessionId === nextCleanupSessionId && window.keepseekInputControls?.restoreDraft) {
+          window.keepseekInputControls.restoreDraft(cleanupDraft);
+        }
+        if (previousCleanupSessionId === state.activeSessionId) {
+          pendingChangeActions.clear(); pendingDraftRunApprovals.clear(); pendingDraftRunActions.clear();
+          pendingDraftRunBatchSnapshot = '';
+          if (pendingSubmission?.sessionId === previousCleanupSessionId) pendingSubmission = null;
+        }
+        return;
+      }
+      if (message.type === 'historyCleanupDeleted') {
+        var cleanupIds = new Set(Array.isArray(message.sessionIds) ? message.sessionIds : []);
+        var cleanupWorkspace = String(message.workspaceKey || '');
+        cleanupIds.forEach(function(id) {
+          historyCleanupDeletedSessionKeys.add(JSON.stringify([cleanupWorkspace, id]));
+          var unsent = id === state.activeSessionId && promptInput ? promptInput.innerHTML : sessionPromptDrafts.get(id);
+          if (unsent !== undefined) historyCleanupPendingDrafts.set(id, unsent);
+        });
+        (Array.isArray(state.sessionSummaries) ? state.sessionSummaries : []).forEach(function(summary) {
+          if (cleanupIds.has(summary.id) && (!summary.workspaceKey || summary.workspaceKey === cleanupWorkspace)) {
+            historyCleanupDeletedSessionIds.add(summary.id);
+            sessionPromptDrafts.delete(summary.id);
+            selectedSessionIds.delete(summary.id);
+            delete state.sessionTitleRegenerations?.[summary.id];
+            delete state.sessionTitleRegenerationResults?.[summary.id];
+            if (editingSessionTitleId === summary.id) editingSessionTitleId = '';
+          }
+        });
+        state.sessionSummaries = (Array.isArray(state.sessionSummaries) ? state.sessionSummaries : []).filter(function(summary) {
+          return !cleanupIds.has(summary.id) || (summary.workspaceKey && summary.workspaceKey !== cleanupWorkspace);
+        });
+        if (otherWorkspaceSessions[cleanupWorkspace]) otherWorkspaceSessions[cleanupWorkspace] = otherWorkspaceSessions[cleanupWorkspace].filter(function(summary) { return !cleanupIds.has(summary.id); });
+        if (activeWorkspaceTab === cleanupWorkspace) cleanupIds.forEach(function(id) { selectedSessionIds.delete(id); });
+        sessionMenuRenderKey = '';
+        renderSessionMenu();
+        return;
+      }
       if (message.type === 'submissionResult') {
         applySubmissionResult(message);
         return;
       }
       if (message.type === 'sessionTitleRegeneration') {
+        if (historyCleanupDeletedSessionIds.has(message.sessionId)) return;
         applySessionTitleRegeneration(message);
         return;
       }
       if (message.type === 'sessionTitleUpdated') {
+        if (historyCleanupDeletedSessionIds.has(message.sessionId)) return;
         applySessionTitleUpdate(message);
         return;
       }
@@ -1249,6 +1312,10 @@ ${conversationsMenuDismissFragment.source}
           state.agentActivity = { base: 'idle', phase: 'idle' };
         }
         Object.assign(state, message.state);
+        if (Array.isArray(state.sessionSummaries)) state.sessionSummaries = state.sessionSummaries.filter(function(summary) {
+          return !historyCleanupDeletedSessionKeys.has(JSON.stringify([summary.workspaceKey || '', summary.id]))
+            && !historyCleanupDeletedSessionIds.has(summary.id);
+        });
         changeVisibleSession(previousActiveSessionId, state.activeSessionId);
         if (message.type === 'statePatch' && message.scope === 'startupSettings') {
           rememberTerminalAgentActivity(state.agentActivity);
@@ -1353,6 +1420,14 @@ ${conversationsMenuDismissFragment.source}
         if (window.keepseekInputControls && window.keepseekInputControls.showHistorySettingsDialog) {
           window.keepseekInputControls.showHistorySettingsDialog(message);
         }
+      } else if (message.type === 'historySettingsSaved') {
+        if (window.keepseekInputControls && window.keepseekInputControls.onHistorySettingsSaved) {
+          window.keepseekInputControls.onHistorySettingsSaved(message);
+        }
+      } else if (message.type === 'historyCleanupPreview' || message.type === 'historyCleanupState') {
+        if (window.keepseekInputControls && window.keepseekInputControls.onHistoryCleanupMessage) {
+          window.keepseekInputControls.onHistoryCleanupMessage(message);
+        }
       } else if (message.type === 'skillDraftCreated') {
         if (window.keepseekInputControls && window.keepseekInputControls.onSkillDraftCreated) {
           window.keepseekInputControls.onSkillDraftCreated(message);
@@ -1376,7 +1451,9 @@ ${conversationsMenuDismissFragment.source}
             otherWorkspaceSessionErrors[workspaceKey] = message.error;
             otherWorkspaceSessions[workspaceKey] = [];
           } else {
-            otherWorkspaceSessions[workspaceKey] = Array.isArray(message.sessions) ? message.sessions : [];
+            otherWorkspaceSessions[workspaceKey] = (Array.isArray(message.sessions) ? message.sessions : []).filter(function(summary) {
+              return !historyCleanupDeletedSessionKeys.has(JSON.stringify([workspaceKey, summary.id]));
+            });
             delete otherWorkspaceSessionErrors[workspaceKey];
           }
         }

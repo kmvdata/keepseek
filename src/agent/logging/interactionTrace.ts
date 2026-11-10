@@ -4,7 +4,9 @@ import { appendFile, mkdir, readdir, rm, stat } from 'node:fs/promises';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { formatLocalTimestamp } from '../../shared/format';
-import { withPerformanceTrace } from './performanceTrace';
+import { withPerformanceTrace, withOwnedTraceWrite, traceOwnerIndexUri, type TraceOwnership } from './performanceTrace';
+import { SessionDeletionAuthority } from '../../sessions/sessionDeletionAuthority';
+import { assertManagedStoragePath, readAssociatedJson, deleteAssociatedUri, isMissingAssociatedFile } from '../../sessions/sessionAssociatedPersistence';
 import { getRuntimeIdentity } from '../../shared/runtimeIdentity';
 import {
   getConfiguredInteractionTraceSettings,
@@ -43,6 +45,7 @@ export type InteractionTraceEventSink = (event: InteractionTraceEvent, timestamp
 
 export class InteractionTraceLogService {
   private lastRunTraceLogUri: string | undefined;
+  private readonly scopedRuns = new Map<string, TraceOwnership | undefined>();
 
   public constructor(private readonly globalStorageUri: vscode.Uri) {}
 
@@ -59,16 +62,19 @@ export class InteractionTraceLogService {
     const fileName = `run-${formatTimestampForFile(now)}-${runId}.jsonl`;
     const fileUri = vscode.Uri.joinPath(this.globalStorageUri, TRACE_ROOT_DIR, day, fileName);
     void this.cleanupExpiredLogs(settings);
+    const owner = scope?.sessionId ? { root: this.globalStorageUri, sessionId: scope.sessionId } : undefined;
+    this.scopedRuns.set(runId, owner);
+    if (this.scopedRuns.size > 1000) this.scopedRuns.delete(this.scopedRuns.keys().next().value!);
 
     if (fileUri.scheme === 'file') {
-      const trace = new JsonlInteractionTrace(runId, fileUri.fsPath, settings, eventSink);
+      const trace = new JsonlInteractionTrace(runId, fileUri.fsPath, settings, eventSink, owner);
       this.lastRunTraceLogUri = trace.logUri;
-      return this.attachRuntimeIdentity(withPerformanceTrace(trace, fileUri, scope));
+      return this.attachRuntimeIdentity(withPerformanceTrace(trace, fileUri, scope, owner));
     }
 
-    const trace = new WorkspaceFsJsonlInteractionTrace(runId, fileUri, settings, eventSink);
+    const trace = new WorkspaceFsJsonlInteractionTrace(runId, fileUri, settings, eventSink, owner);
     this.lastRunTraceLogUri = trace.logUri;
-    return this.attachRuntimeIdentity(withPerformanceTrace(trace, fileUri, scope));
+    return this.attachRuntimeIdentity(withPerformanceTrace(trace, fileUri, scope, owner));
   }
 
   private attachRuntimeIdentity(trace: AgentInteractionTrace): AgentInteractionTrace {
@@ -101,6 +107,13 @@ export class InteractionTraceLogService {
     const bytes = Buffer.byteLength(line, 'utf8');
     try {
       const uri = vscode.Uri.parse(traceLog.uri);
+      const knownRun = this.scopedRuns.has(traceLog.runId);
+      const storedOwner = knownRun ? undefined : await readAssociatedJson(vscode.Uri.parse(`${uri.toString()}.owner.json`));
+      const owner = knownRun ? this.scopedRuns.get(traceLog.runId) : storedOwner?.version === 1
+        && typeof storedOwner.sessionId === 'string' && storedOwner.runId === traceLog.runId
+        ? { root: this.globalStorageUri, sessionId: storedOwner.sessionId } : undefined;
+      if (storedOwner && !owner) return;
+      await withOwnedTraceWrite(uri, traceLog.runId, owner, async () => {
       const stat = await vscode.workspace.fs.stat(uri);
       if (stat.size + bytes > settings.maxFileBytes) {
         return;
@@ -114,6 +127,7 @@ export class InteractionTraceLogService {
       next.set(previous, 0);
       next.set(new TextEncoder().encode(line), previous.byteLength);
       await vscode.workspace.fs.writeFile(uri, next);
+      });
     } catch {
       // Post-run trace updates are best-effort and must never block apply or revert actions.
     }
@@ -197,6 +211,81 @@ export class InteractionTraceLogService {
   }
 }
 
+/** Only explicit sidecar ownership permits removal; legacy log bodies are never
+ * read to infer ownership. One recycler instance shares its bounded metadata scan
+ * across a batch rather than rescanning all logs for every target. */
+export class InteractionTraceCleanup {
+  private catalog?: Promise<{ bySession: Map<string, vscode.Uri[]>; unverifiedLegacySources: number }>;
+  public constructor(private readonly root: vscode.Uri) {}
+  private async readCatalog(): Promise<{ bySession: Map<string, vscode.Uri[]>; unverifiedLegacySources: number }> {
+    const result = { bySession: new Map<string, vscode.Uri[]>(), unverifiedLegacySources: 0 };
+    const logs = vscode.Uri.joinPath(this.root, TRACE_ROOT_DIR);
+    await assertManagedStoragePath(this.root, logs);
+    let entries: [string, vscode.FileType][];
+    try { entries = await vscode.workspace.fs.readDirectory(logs); }
+    catch (error) { if (isMissingAssociatedFile(error)) return result; throw error; }
+    const directories = [logs];
+    for (const [name, type] of entries) if (type === vscode.FileType.Directory && /^\d{4}-\d{2}-\d{2}$/u.test(name)) directories.push(vscode.Uri.joinPath(logs, name));
+    for (const directory of directories) {
+      await assertManagedStoragePath(this.root, directory);
+      let files: [string, vscode.FileType][];
+      try { files = await vscode.workspace.fs.readDirectory(directory); }
+      catch (error) { if (isMissingAssociatedFile(error)) continue; throw error; }
+      const ownedBases = new Set(files.filter(([name, type]) => type === vscode.FileType.File && /^run-.*\.jsonl\.owner\.json$/u.test(name)).map(([name]) => name.slice(0, -'.owner.json'.length)));
+      for (const [name, type] of files) if (type === vscode.FileType.File && /^run-.*\.jsonl$/u.test(name)
+        && !/\.perf-[0-3]\.jsonl$/u.test(name) && !ownedBases.has(name)) result.unverifiedLegacySources++;
+      for (const baseName of ownedBases) {
+        const base = vscode.Uri.joinPath(directory, baseName), ownerUri = vscode.Uri.parse(`${base.toString()}.owner.json`);
+        await assertManagedStoragePath(this.root, ownerUri);
+        const owner = await readAssociatedJson(ownerUri);
+        if (owner?.version !== 1 || typeof owner.sessionId !== 'string' || typeof owner.runId !== 'string'
+          || !baseName.endsWith(`-${owner.runId}.jsonl`)) { result.unverifiedLegacySources++; continue; }
+        const list = result.bySession.get(owner.sessionId) ?? [];
+        list.push(base); result.bySession.set(owner.sessionId, list);
+      }
+    }
+    return result;
+  }
+  private async indexedBases(sessionId: string): Promise<vscode.Uri[]> {
+    const uri = traceOwnerIndexUri(this.root, sessionId);
+    await assertManagedStoragePath(this.root, uri);
+    const index = await readAssociatedJson(uri);
+    if (!index) return [];
+    if (index.version !== 1 || index.sessionId !== sessionId || !Array.isArray(index.runs)) throw new Error('Trace owner index is damaged.');
+    return index.runs.map(value => {
+      const run = value as { runId?: unknown; relativeFile?: unknown };
+      if (typeof run.runId !== 'string' || typeof run.relativeFile !== 'string'
+        || !/^interaction-logs\/\d{4}-\d{2}-\d{2}\/run-[^/]+\.jsonl$/u.test(run.relativeFile)
+        || !run.relativeFile.endsWith(`-${run.runId}.jsonl`)) throw new Error('Trace owner identity is damaged.');
+      return vscode.Uri.joinPath(this.root, run.relativeFile);
+    });
+  }
+  public async hasSessionHistory(sessionId: string): Promise<boolean> {
+    return (await this.indexedBases(sessionId)).length > 0;
+  }
+  public async cleanup(sessionId: string): Promise<{ unverifiedLegacySources: number }> {
+    const authority = new SessionDeletionAuthority(this.root);
+    return authority.withSessionIdGate(sessionId, async () => {
+      const catalog = await (this.catalog ??= this.readCatalog());
+      const bases = new Map([...(catalog.bySession.get(sessionId) ?? []), ...await this.indexedBases(sessionId)].map(uri => [uri.toString(), uri]));
+      for (const base of bases.values()) {
+        for (const suffix of ['', '.perf-index.json', '.perf-0.jsonl', '.perf-1.jsonl', '.perf-2.jsonl', '.perf-3.jsonl']) {
+          const uri = vscode.Uri.parse(`${base.toString()}${suffix}`);
+          await assertManagedStoragePath(this.root, uri);
+          await deleteAssociatedUri(uri);
+        }
+        // Retain the content-free owner marker: external post-run callbacks have
+        // only runId/URI and still need to discover the deleted parent session.
+      }
+      return { unverifiedLegacySources: catalog.unverifiedLegacySources };
+    });
+  }
+}
+
+export async function deleteSessionInteractionTraces(root: vscode.Uri, sessionId: string): Promise<{ unverifiedLegacySources: number }> {
+  return new InteractionTraceCleanup(root).cleanup(sessionId);
+}
+
 class JsonlInteractionTrace implements AgentInteractionTrace {
   public readonly enabled = true;
   public readonly level: InteractionTraceLevel;
@@ -211,7 +300,8 @@ class JsonlInteractionTrace implements AgentInteractionTrace {
     public readonly runId: string,
     private readonly filePath: string,
     private readonly settings: InteractionTraceSettings,
-    private readonly eventSink?: InteractionTraceEventSink
+    private readonly eventSink?: InteractionTraceEventSink,
+    private readonly owner?: TraceOwnership
   ) {
     this.logUri = vscode.Uri.file(filePath).toString();
     this.level = settings.level;
@@ -243,7 +333,7 @@ class JsonlInteractionTrace implements AgentInteractionTrace {
     const line = `${safeJsonStringify(envelope)}\n`;
     const lineBytes = Buffer.byteLength(line, 'utf8');
     this.writeQueue = this.writeQueue
-      .then(() => this.writeLine(line, lineBytes))
+      .then(() => withOwnedTraceWrite(vscode.Uri.file(this.filePath), this.runId, this.owner, () => this.writeLine(line, lineBytes)))
       .catch(() => {
         this.stopped = true;
       });
@@ -302,7 +392,8 @@ class WorkspaceFsJsonlInteractionTrace implements AgentInteractionTrace {
     public readonly runId: string,
     private readonly fileUri: vscode.Uri,
     private readonly settings: InteractionTraceSettings,
-    private readonly eventSink?: InteractionTraceEventSink
+    private readonly eventSink?: InteractionTraceEventSink,
+    private readonly owner?: TraceOwnership
   ) {
     this.logUri = fileUri.toString();
     this.level = settings.level;
@@ -370,10 +461,10 @@ class WorkspaceFsJsonlInteractionTrace implements AgentInteractionTrace {
     this.content += lines.join('');
     const content = this.content;
     this.writeQueue = this.writeQueue
-      .then(async () => {
+      .then(() => withOwnedTraceWrite(this.fileUri, this.runId, this.owner, async () => {
         await vscode.workspace.fs.createDirectory(this.parentUri(this.fileUri));
         await vscode.workspace.fs.writeFile(this.fileUri, this.encoder.encode(content));
-      })
+      }))
       .catch(() => {
         this.stopped = true;
       });

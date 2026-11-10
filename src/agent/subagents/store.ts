@@ -2,9 +2,12 @@ import { writeJsonAtomic } from '../../shared/atomicStorage';
 import { normalizeRunCheckpoint } from '../runCheckpoint';
 import { createHash, randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
+import { hasAssociatedDirectoryEntries } from '../../sessions/sessionAssociatedPersistence';
 import { isRecord } from '../../shared/errors';
 import { normalizeSubagentRunUsageSummaryValue } from '../subagentUsageStats';
 import { SessionObjectStore } from '../../sessions/sessionObjectStore';
+import { SessionDeletionAuthority } from '../../sessions/sessionDeletionAuthority';
+import { assertManagedStoragePath } from '../../sessions/sessionAssociatedPersistence';
 import { copyPersistenceValue, snapshotCheckpoint, packPersistenceInput } from '../../sessions/persistenceSnapshot';
 import { withStorageCoordinator } from '../../shared/atomicStorage';
 import { recordLocalPerformance } from '../logging/performanceTrace';
@@ -37,9 +40,12 @@ export class SubagentStore {
   private readonly rootUri: vscode.Uri;
   private readonly encoder = new TextEncoder();
   private readonly decoder = new TextDecoder();
+  private readonly deletionAuthority: SessionDeletionAuthority;
+  private readonly deletedSessions = new Set<string>();
 
-  public constructor(globalStorageUri: vscode.Uri, private readonly workspaceKey: string,
+  public constructor(private readonly globalStorageUri: vscode.Uri, private readonly workspaceKey: string,
     private readonly onActivity?: (activity: SubagentActivity) => void) {
+    this.deletionAuthority = new SessionDeletionAuthority(globalStorageUri);
     const workspaceHash = createHash('sha256').update(workspaceKey, 'utf8').digest('hex').slice(0, 24);
     this.rootUri = vscode.Uri.joinPath(
       globalStorageUri,
@@ -72,7 +78,7 @@ export class SubagentStore {
     const depth = (this.queueDepths.get(key) ?? 0) + 1;
     this.queueDepths.set(key, depth);
     try {
-      await writer.save(() => withStorageCoordinator(key + ':child', async () => {
+      await writer.save(() => this.withSessionUse(summary.parentSessionId, () => withStorageCoordinator(key + ':child', async () => {
         const processing = performance.now();
         let store = this.objectStores.get(key);
         if (!store) {
@@ -90,7 +96,7 @@ export class SubagentStore {
           taskId: checkpoint?.taskId, childId: metadata.id, snapshotMs: copied - started,
           queueMs: processing - copied, processingMs: performance.now() - processing,
           durationMs: performance.now() - started, queueDepth: depth });
-      }));
+      })));
     } finally {
       const remaining = (this.queueDepths.get(key) ?? 1) - 1;
       if (remaining) this.queueDepths.set(key, remaining); else this.queueDepths.delete(key);
@@ -100,15 +106,18 @@ export class SubagentStore {
   public async saveActivity(activity: SubagentActivity): Promise<void> {
     if (!validActivity(activity, activity.parentSessionId, activity.id) || !isSafeId(activity.id)) throw new Error('Invalid subagent activity scope');
     activity = copyActivity(activity);
-    await writeJsonAtomic(vscode.Uri.joinPath(this.getParentDirectory(activity.parentSessionId), `${activity.id}.activity.json`),
-      { version: 1, activity }, { durable: true });
-    this.onActivity?.(activity);
+    await this.withWritable(activity.parentSessionId, async () => {
+      await writeJsonAtomic(vscode.Uri.joinPath(this.getParentDirectory(activity.parentSessionId), `${activity.id}.activity.json`),
+        { version: 1, activity }, { durable: true });
+      this.onActivity?.(activity);
+    });
   }
 
   /** One bounded manifest per child; V4 never decodes private transcript objects. */
   public async readSummaries(parentSessionId: string): Promise<{ activities: SubagentActivity[];
     summaries: import('../../shared/types').SubagentRunUsageSummary[]; incomplete: boolean }> {
     const result = { activities: [] as SubagentActivity[], summaries: [] as import('../../shared/types').SubagentRunUsageSummary[], incomplete: false };
+    if (await this.isDeleted(parentSessionId)) return result;
     let files: [string, vscode.FileType][];
     try { files = await vscode.workspace.fs.readDirectory(this.getParentDirectory(parentSessionId)); }
     catch (error) { result.incomplete = !isMissing(error); return result; }
@@ -142,7 +151,7 @@ export class SubagentStore {
     metadata: StoredSubagentMetadata;
     transcript: StoredSubagentTranscript;
   } | undefined> {
-    if (!isSafeId(parentSessionId) || !isSafeId(subagentId)) {
+    if (!isSafeId(parentSessionId) || !isSafeId(subagentId) || await this.isDeleted(parentSessionId)) {
       return undefined;
     }
     try {
@@ -275,7 +284,7 @@ export class SubagentStore {
 
   /** Bounded result-only projection; no private messages/checkpoint decoding. */
   private async resultSource(parentSessionId: string, id: string): Promise<ResultSource | undefined> {
-    if (!isSafeId(parentSessionId) || !isSafeId(id)) return undefined;
+    if (!isSafeId(parentSessionId) || !isSafeId(id) || await this.isDeleted(parentSessionId)) return undefined;
     const directory = this.getParentDirectory(parentSessionId), uri = vscode.Uri.joinPath(directory, `${id}.state.json`);
     try {
       const manifest = JSON.parse(this.decoder.decode(await vscode.workspace.fs.readFile(uri)));
@@ -387,7 +396,7 @@ export class SubagentStore {
     parentSessionId: string,
     initial: { metadata: StoredSubagentMetadata; transcript: StoredSubagentTranscript }
   ): Promise<string | undefined> {
-    if (initial.metadata.parentSessionId !== parentSessionId || initial.transcript.metadataId !== initial.metadata.id) return undefined;
+    if (initial.metadata.parentSessionId !== parentSessionId || initial.transcript.metadataId !== initial.metadata.id || await this.isDeleted(parentSessionId)) return undefined;
     try {
       const canonical = await this.resolveResultSource(parentSessionId, { metadata: resultMetadata(initial.metadata),
         result: initial.transcript.result, resultRef: initial.transcript.resultRef });
@@ -411,7 +420,7 @@ export class SubagentStore {
     authorizationContextHash: string;
     workspaceContextHash: string;
   }): Promise<Array<{ metadata: StoredSubagentMetadata; transcript: StoredSubagentTranscript }>> {
-    if (!isSafeId(input.parentSessionId)) return [];
+    if (!isSafeId(input.parentSessionId) || await this.isDeleted(input.parentSessionId)) return [];
     let entries: [string, vscode.FileType][];
     try {
       entries = await vscode.workspace.fs.readDirectory(this.getParentDirectory(input.parentSessionId));
@@ -478,8 +487,10 @@ export class SubagentStore {
     const sizeBytes = this.encoder.encode(serialized).byteLength;
     if (sizeBytes > MAX_DIAGNOSTIC_BYTES) throw new Error('Subagent diagnostic exceeded its storage limit.');
     const directory = this.getParentDirectory(input.parentSessionId);
-    await vscode.workspace.fs.createDirectory(directory);
-    await writeJsonAtomic(vscode.Uri.joinPath(directory, `${input.subagentId}.${id}.diagnostic.json`), payload);
+    await this.withWritable(input.parentSessionId, async () => {
+      await vscode.workspace.fs.createDirectory(directory);
+      await writeJsonAtomic(vscode.Uri.joinPath(directory, `${input.subagentId}.${id}.diagnostic.json`), payload);
+    });
     return { id, kind: input.kind, sizeBytes, expiresAt };
   }
 
@@ -488,7 +499,7 @@ export class SubagentStore {
     subagentId: string;
     diagnosticId: string;
   }): Promise<Record<string, unknown> | undefined> {
-    if (!isSafeId(input.parentSessionId) || !isSafeId(input.subagentId) || !isSafeId(input.diagnosticId)) return undefined;
+    if (!isSafeId(input.parentSessionId) || !isSafeId(input.subagentId) || !isSafeId(input.diagnosticId) || await this.isDeleted(input.parentSessionId)) return undefined;
     try {
       const uri = vscode.Uri.joinPath(this.getParentDirectory(input.parentSessionId), `${input.subagentId}.${input.diagnosticId}.diagnostic.json`);
       const value: unknown = JSON.parse(this.decoder.decode(await vscode.workspace.fs.readFile(uri)));
@@ -502,6 +513,48 @@ export class SubagentStore {
     } catch {
       return undefined;
     }
+  }
+
+  /** Called only for a confirmed logical deletion; the parent gate excludes
+   * child commits, result chunks, activity and diagnostic writers. */
+  public async hasSessionHistory(parentSessionId: string): Promise<boolean> {
+    return hasAssociatedDirectoryEntries(this.getParentDirectory(parentSessionId));
+  }
+
+  public async deleteSession(parentSessionId: string): Promise<void> {
+    if (!isSafeId(parentSessionId)) throw new Error('Invalid parent session id for deletion.');
+    this.deletedSessions.add(parentSessionId);
+    await this.deletionAuthority.withSessionIdGate(parentSessionId, async () => {
+      const prefix = this.getParentDirectory(parentSessionId).toString() + '/';
+      for (const key of this.objectStores.keys()) if (key.startsWith(prefix)) this.objectStores.delete(key);
+      for (const key of this.writers.keys()) if (key.startsWith(prefix)) this.writers.delete(key);
+      for (const key of this.legacyResults.keys()) if (key.startsWith(parentSessionId + '/')) this.legacyResults.delete(key);
+      const directory = this.getParentDirectory(parentSessionId);
+      await assertManagedStoragePath(this.globalStorageUri, directory);
+      try { await vscode.workspace.fs.delete(directory, { recursive: true, useTrash: false }); }
+      catch (error) { if (!isMissing(error)) throw error; }
+    });
+  }
+
+  private async isDeleted(sessionId: string): Promise<boolean> {
+    return this.deletedSessions.has(sessionId) || await this.deletionAuthority.isSessionIdDeleted(sessionId);
+  }
+
+  /** A save lease protects the parent without holding its short deletion gate
+   * across child graph encoding or a blocked child writer. Siblings retain
+   * independent queues and can commit while this child is waiting. */
+  private async withSessionUse<T>(sessionId: string, work: () => Promise<T>): Promise<T> {
+    if (this.deletedSessions.has(sessionId)) throw new Error('Session history has been deleted.');
+    const use = await this.deletionAuthority.acquireUse(this.workspaceKey, sessionId);
+    try { return await work(); } finally { await use.release(); }
+  }
+
+  private async withWritable<T>(sessionId: string, work: () => Promise<T>): Promise<T> {
+    return this.deletionAuthority.withSessionIdGate(sessionId, async () => {
+      if (this.deletedSessions.has(sessionId)) throw new Error('Session history has been deleted.');
+      await this.deletionAuthority.assertSessionIdWritable(sessionId);
+      return work();
+    });
   }
 
   private getParentDirectory(parentSessionId: string): vscode.Uri {

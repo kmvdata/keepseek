@@ -4,6 +4,8 @@ import { normalizeDraftRunPlan } from './draftRunProposal';
 import { inspectDraftRunDependencies, inspectDraftRunDependencyFacts, inspectGitAncestorPrerequisite } from './draftRunDependencies';
 import { isSuccessfulDraftRunOutcome, normalizeGitQueryResult } from './gitQueryResult';
 import { writeJsonAtomic } from '../shared/atomicStorage';
+import { SessionDeletionAuthority } from '../sessions/sessionDeletionAuthority';
+import { hasAssociatedRecordOwner, assertManagedStoragePath, readAssociatedJson, withAssociatedStoreGate, withoutDeletedSessions } from '../sessions/sessionAssociatedPersistence';
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { getConfiguredDraftRunMaxTranscriptBytes } from '../shared/config';
@@ -71,6 +73,8 @@ export interface DraftRunAutoContinuationClaim {
 
 export class DraftRunStore {
   private readonly draftRuns = new Map<string, DraftRun>();
+  private readonly knownDraftRunIds = new Set<string>();
+  private readonly knownDisplayIds = new Set<string>();
   private readonly batchDisplays = new Map<string, DraftRunBatchDisplay>();
   private readonly cancelRequests = new Set<string>();
   private readonly abortControllers = new Map<string, AbortController>();
@@ -83,7 +87,7 @@ export class DraftRunStore {
   private readonly historyInvalidations = new Map<string, HistoryTruncationScope>();
 
   public constructor(
-    globalStorageUri: vscode.Uri,
+    private readonly globalStorageUri: vscode.Uri,
     private readonly executor: DraftRunExecutorAdapter = new SpawnDraftRunExecutor(),
     private readonly authorization = new DraftRunAuthorizationService(),
     private readonly onEvent?: (event: DraftRunStoreEvent) => void
@@ -112,7 +116,7 @@ export class DraftRunStore {
       let gitReconciliations = 0;
       for (const value of Array.isArray(parsed.draftRuns) ? parsed.draftRuns : []) {
         const draftRun = normalizeStoredDraftRun(value);
-        if (!draftRun) {
+        if (!draftRun || (draftRun.sessionId && await new SessionDeletionAuthority(this.globalStorageUri).isSessionIdDeleted(draftRun.sessionId))) {
           continue;
         }
         if (draftRun.status === 'approved' || draftRun.status === 'running' || (draftRun.status === 'pending' && draftRun.spec.restricted)) {
@@ -133,14 +137,17 @@ export class DraftRunStore {
           }
         }
         this.draftRuns.set(draftRun.id, draftRun);
+        this.knownDraftRunIds.add(draftRun.id);
       }
       const displays = Array.isArray(parsed.batchDisplays) ? parsed.batchDisplays : [];
+      for (const display of displays) if (display && typeof display === 'object' && typeof (display as DraftRunBatchDisplay).operationId === 'string') this.knownDisplayIds.add((display as DraftRunBatchDisplay).operationId);
       const repeatedOperationIds = repeatedDisplayIds(displays, 'operationId');
       const repeatedSnapshotIds = repeatedDisplayIds(displays, 'snapshotId');
       for (const value of displays.slice(-MAX_DRAFT_RUN_HISTORY)) {
         const display = normalizeBatchDisplay(value, this.draftRuns, true);
         if (!display || repeatedOperationIds.has(display.operationId) || repeatedSnapshotIds.has(display.snapshotId)) continue;
         this.batchDisplays.set(display.operationId, display);
+        this.knownDisplayIds.add(display.operationId);
         if (!TERMINAL_BATCH_DISPLAY_PHASES.has((value as DraftRunBatchDisplay).phase)
           || display.phase !== (value as DraftRunBatchDisplay).phase) repairedInterruptedRun = true;
       }
@@ -191,6 +198,7 @@ export class DraftRunStore {
         else { draftRun.status = 'failed'; draftRun.error = 'Replacement identity or prerequisites changed. / 替代来源身份或前置条件已变化。'; }
       }
       this.draftRuns.set(draftRun.id, draftRun);
+      this.knownDraftRunIds.add(draftRun.id);
       this.emitState(draftRun);
     }
     this.schedulePersist();
@@ -214,6 +222,7 @@ export class DraftRunStore {
     if (Array.from(this.batchDisplays.values()).some((record) => record.operationId !== display.operationId
       && record.snapshotId === display.snapshotId)) return;
     this.batchDisplays.set(display.operationId, display);
+    this.knownDisplayIds.add(display.operationId);
     while (this.batchDisplays.size > MAX_DRAFT_RUN_HISTORY) this.batchDisplays.delete(this.batchDisplays.keys().next().value!);
     this.schedulePersist();
   }
@@ -476,6 +485,8 @@ export class DraftRunStore {
   }
 
   public async preflightApproval(id: string, authorizedExternalReferenceUris: ReadonlySet<string>, rootTaskRunIds?: ReadonlySet<string>): Promise<DraftRun> {
+    const owner = this.draftRuns.get(id)?.sessionId;
+    if (owner) await new SessionDeletionAuthority(this.globalStorageUri).assertSessionIdWritable(owner);
     const draftRun = this.draftRuns.get(id);
     if (!draftRun || isHistoryInactive(draftRun) || draftRun.status !== 'pending' || draftRun.dependency) throw new Error('Pending executable DraftRun was not found.');
     await this.assertDependencyFacts(draftRun, authorizedExternalReferenceUris, rootTaskRunIds);
@@ -520,147 +531,151 @@ export class DraftRunStore {
     }
     this.approving.add(id);
     let executionStarted = false;
-    draftRun.autoContinueRequested = options.autoContinue === true || undefined;
-    const assertAuthorized = () => {
-      if (options.signal?.aborted || (options.delegatedApproval && !options.delegatedApproval())
-        || (options.userApproval && !options.userApproval())) {
-        throw new Error('DraftRun approval was cancelled or revoked.');
-      }
-      if (isHistoryInactive(draftRun) || this.draftRuns.get(id) !== draftRun || !['pending', 'approved', 'running'].includes(draftRun.status)) {
-        throw new Error('DraftRun state changed during approval.');
-      }
-      checkDraftRunApprovalBoundary(draftRun, authorizedExternalReferenceUris, options.expectedSpecHash);
-      this.assertDependencies(draftRun, options.rootTaskRunIds);
-    };
+    let sessionUse: { release(): Promise<void> } | undefined;
     try {
-      assertAuthorized();
-      const restricted = draftRun.spec.restricted;
-      const original = restricted && this.draftRuns.get(restricted.originalDraftRunId);
-      if (restricted && (!original || !options.delegatedApproval || options.approvalRecord?.expectedSource !== 'auto_approval_review'
-        || options.approvalRecord.scopeFingerprint !== restricted.boundaryFingerprint
-        || !options.verifyScope)) throw new Error('Restricted validation requires its own automatic approval.');
-      await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris);
-      const scope = restricted ? undefined : await inspectDraftRunScope(draftRun);
-      const verifyScope = async () => {
-        await this.assertDependencyFacts(draftRun, authorizedExternalReferenceUris, options.rootTaskRunIds);
-        if (restricted && original) {
-          await options.verifyScope?.();
-          return { restrictedLaunch: await verifyRestrictedPythonSyntax(draftRun, original) };
+      draftRun.autoContinueRequested = options.autoContinue === true || undefined;
+      const assertAuthorized = () => {
+        if (options.signal?.aborted || (options.delegatedApproval && !options.delegatedApproval())
+          || (options.userApproval && !options.userApproval())) {
+          throw new Error('DraftRun approval was cancelled or revoked.');
         }
-        const current = await inspectDraftRunScope(draftRun);
-        if (current.fingerprint !== scope?.fingerprint || !hasExactCommandScope(current, draftRun.spec.cwdUri, authorizedExternalReferenceUris)) {
-          throw new Error('Exact external operation scope is missing or changed. / 缺少精确范围授权或范围已变化。');
+        if (isHistoryInactive(draftRun) || this.draftRuns.get(id) !== draftRun || !['pending', 'approved', 'running'].includes(draftRun.status)) {
+          throw new Error('DraftRun state changed during approval.');
         }
-        return { scope: current, verifiedRemoteLaunch: await options.verifyScope?.() };
+        checkDraftRunApprovalBoundary(draftRun, authorizedExternalReferenceUris, options.expectedSpecHash);
+        this.assertDependencies(draftRun, options.rootTaskRunIds);
       };
-      await verifyScope();
-      assertAuthorized();
-      draftRun.status = 'approved';
-      draftRun.authorizationSource = options.delegatedApproval && options.approvalRecord?.expectedSource !== 'user_click'
-        ? 'delegated_approver' : 'user_click';
-      draftRun.approvedAt = new Date().toISOString();
-      draftRun.updatedAt = draftRun.approvedAt;
+      try {
+        if (draftRun.sessionId) sessionUse = await new SessionDeletionAuthority(this.globalStorageUri).acquireUse('associated-runs', draftRun.sessionId);
+        assertAuthorized();
+        const restricted = draftRun.spec.restricted;
+        const original = restricted && this.draftRuns.get(restricted.originalDraftRunId);
+        if (restricted && (!original || !options.delegatedApproval || options.approvalRecord?.expectedSource !== 'auto_approval_review'
+          || options.approvalRecord.scopeFingerprint !== restricted.boundaryFingerprint
+          || !options.verifyScope)) throw new Error('Restricted validation requires its own automatic approval.');
+        await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris);
+        const scope = restricted ? undefined : await inspectDraftRunScope(draftRun);
+        const verifyScope = async () => {
+          await this.assertDependencyFacts(draftRun, authorizedExternalReferenceUris, options.rootTaskRunIds);
+          if (restricted && original) {
+            await options.verifyScope?.();
+            return { restrictedLaunch: await verifyRestrictedPythonSyntax(draftRun, original) };
+          }
+          const current = await inspectDraftRunScope(draftRun);
+          if (current.fingerprint !== scope?.fingerprint || !hasExactCommandScope(current, draftRun.spec.cwdUri, authorizedExternalReferenceUris)) {
+            throw new Error('Exact external operation scope is missing or changed. / 缺少精确范围授权或范围已变化。');
+          }
+          return { scope: current, verifiedRemoteLaunch: await options.verifyScope?.() };
+        };
+        await verifyScope();
+        assertAuthorized();
+        draftRun.status = 'approved';
+        draftRun.authorizationSource = options.delegatedApproval && options.approvalRecord?.expectedSource !== 'user_click'
+          ? 'delegated_approver' : 'user_click';
+        draftRun.approvedAt = new Date().toISOString();
+        draftRun.updatedAt = draftRun.approvedAt;
+        this.emitState(draftRun);
+        await this.persistNow();
+
+        assertAuthorized();
+        draftRun.status = 'running';
+        // Persist uncertainty before crossing the adapter boundary. A restart in
+        // the dispatch/result gap must never revive the old not-dispatched fact.
+        draftRun.executionStarted = undefined;
+        draftRun.executionPhase = 'result_unknown';
+        draftRun.startedAt = new Date().toISOString();
+        draftRun.updatedAt = draftRun.startedAt;
+        this.emitState(draftRun);
+        await this.persistNow();
+
+        await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris);
+        await verifyScope();
+        assertAuthorized();
+        const permit = options.delegatedApproval
+          ? await this.authorization.createDelegatedPermit(draftRun, options.delegatedApproval, options.approvalRecord)
+          : this.authorization.createUserClickPermit(draftRun);
+        // Approval-record consumption is asynchronous: recheck scope after it too.
+        await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris);
+        const { scope: verifiedScope, restrictedLaunch, verifiedRemoteLaunch } = await verifyScope();
+        assertAuthorized();
+        const abortController = new AbortController();
+        this.abortControllers.set(draftRun.id, abortController);
+        const abort = () => abortController.abort();
+        options.signal?.addEventListener('abort', abort, { once: true });
+        if (this.cancelRequests.delete(draftRun.id)) {
+          abortController.abort();
+        }
+        executionStarted = true;
+        draftRun.executionStarted = undefined;
+        draftRun.executionPhase = 'result_unknown';
+        const execution = this.executor.execute({
+          draftRun: cloneDraftRun(draftRun),
+          permit,
+          restrictedLaunch,
+          verifiedLaunch: options.approvalRecord?.approvalMode === 'delegate' && verifiedScope?.boundLauncher
+            ? verifiedRemoteLaunch ?? { executable: verifiedScope.boundLauncher, cwd: vscode.Uri.parse(verifiedScope.cwd).fsPath, env: verifiedScope.environment }
+            : verifiedScope?.executable && !verifiedScope.externalUris.length
+            && (verifiedScope.trustedProjectScript || (!verifiedScope.uncertain && verifiedScope.paths.some(target => target.role === 'repository')))
+            ? { executable: verifiedScope.projectScriptLaunchPath ?? verifiedScope.executable,
+                cwd: vscode.Uri.parse(verifiedScope.cwd).fsPath } : undefined,
+          signal: abortController.signal,
+          onOutput: (chunk) => this.recordOutput(draftRun, chunk)
+        });
+        if (abortController.signal.aborted) {
+          this.executor.cancel(draftRun.id);
+        }
+        const outcome = await execution.finally(() => options.signal?.removeEventListener('abort', abort));
+        if (outcome.started === false) draftRun.startedAt = undefined;
+        draftRun.executionStarted = outcome.started;
+        draftRun.executionPhase = outcome.phase ?? (outcome.started === false ? 'not_dispatched' : 'result_unknown');
+        draftRun.gitQueryResult = normalizeGitQueryResult(outcome.queryResult
+          ? { ...outcome.queryResult, scopeFingerprint: verifiedScope?.fingerprint } : undefined);
+        const successful = isSuccessfulDraftRunOutcome(outcome);
+        draftRun.exitCode = outcome.exitCode;
+        draftRun.signal = outcome.signal;
+        draftRun.timedOut = outcome.timedOut;
+        draftRun.error = outcome.error
+          ?? (!outcome.cancelled && outcome.timedOut ? 'DraftRun reached its timeout and was stopped.' : undefined)
+          ?? (outcome.queryResult?.errorCode ? `Git query: ${outcome.queryResult.errorCode}.` : undefined)
+          ?? (!outcome.cancelled && !successful
+            ? `DraftRun exited with code ${outcome.exitCode ?? 'unknown'}.`
+            : undefined);
+        draftRun.status = outcome.cancelled
+          ? 'cancelled'
+          : !successful
+            ? 'failed'
+            : 'done';
+      } catch (error) {
+        draftRun.executionStarted = executionStarted ? undefined : false;
+        draftRun.executionPhase = executionStarted ? 'result_unknown' : 'not_dispatched';
+        if (error instanceof CommandCapabilityError && !executionStarted) {
+          draftRun.status = 'needs_replan';
+          draftRun.capabilityDiagnostic = error.diagnostic;
+          draftRun.error = error.message;
+          draftRun.startedAt = undefined;
+        } else if (options.userApproval && options.signal?.aborted && !executionStarted) {
+          // A revoked batch click does not turn a never-started command into a
+          // failure or rejection. A future click must authorize it anew.
+          draftRun.status = 'pending';
+          draftRun.authorizationSource = undefined;
+          draftRun.approvedAt = undefined;
+          draftRun.startedAt = undefined;
+          draftRun.error = undefined;
+        } else {
+          draftRun.status = options.signal?.aborted && !executionStarted && draftRun.spec.restricted ? 'cancelled' : 'failed';
+          if (!executionStarted) draftRun.startedAt = undefined;
+          draftRun.error = error instanceof Error ? error.message : String(error);
+        }
+      }
+      this.approving.delete(id);
+      this.abortControllers.delete(draftRun.id);
+      this.cancelRequests.delete(draftRun.id);
+      draftRun.finishedAt = draftRun.status === 'pending' ? undefined : new Date().toISOString();
+      draftRun.updatedAt = new Date().toISOString();
       this.emitState(draftRun);
       await this.persistNow();
-
-      assertAuthorized();
-      draftRun.status = 'running';
-      // Persist uncertainty before crossing the adapter boundary. A restart in
-      // the dispatch/result gap must never revive the old not-dispatched fact.
-      draftRun.executionStarted = undefined;
-      draftRun.executionPhase = 'result_unknown';
-      draftRun.startedAt = new Date().toISOString();
-      draftRun.updatedAt = draftRun.startedAt;
-      this.emitState(draftRun);
-      await this.persistNow();
-
-      await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris);
-      await verifyScope();
-      assertAuthorized();
-      const permit = options.delegatedApproval
-        ? await this.authorization.createDelegatedPermit(draftRun, options.delegatedApproval, options.approvalRecord)
-        : this.authorization.createUserClickPermit(draftRun);
-      // Approval-record consumption is asynchronous: recheck scope after it too.
-      await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris);
-      const { scope: verifiedScope, restrictedLaunch, verifiedRemoteLaunch } = await verifyScope();
-      assertAuthorized();
-      const abortController = new AbortController();
-      this.abortControllers.set(draftRun.id, abortController);
-      const abort = () => abortController.abort();
-      options.signal?.addEventListener('abort', abort, { once: true });
-      if (this.cancelRequests.delete(draftRun.id)) {
-        abortController.abort();
-      }
-      executionStarted = true;
-      draftRun.executionStarted = undefined;
-      draftRun.executionPhase = 'result_unknown';
-      const execution = this.executor.execute({
-        draftRun: cloneDraftRun(draftRun),
-        permit,
-        restrictedLaunch,
-        verifiedLaunch: options.approvalRecord?.approvalMode === 'delegate' && verifiedScope?.boundLauncher
-          ? verifiedRemoteLaunch ?? { executable: verifiedScope.boundLauncher, cwd: vscode.Uri.parse(verifiedScope.cwd).fsPath, env: verifiedScope.environment }
-          : verifiedScope?.executable && !verifiedScope.externalUris.length
-          && (verifiedScope.trustedProjectScript || (!verifiedScope.uncertain && verifiedScope.paths.some(target => target.role === 'repository')))
-          ? { executable: verifiedScope.projectScriptLaunchPath ?? verifiedScope.executable,
-              cwd: vscode.Uri.parse(verifiedScope.cwd).fsPath } : undefined,
-        signal: abortController.signal,
-        onOutput: (chunk) => this.recordOutput(draftRun, chunk)
-      });
-      if (abortController.signal.aborted) {
-        this.executor.cancel(draftRun.id);
-      }
-      const outcome = await execution.finally(() => options.signal?.removeEventListener('abort', abort));
-      if (outcome.started === false) draftRun.startedAt = undefined;
-      draftRun.executionStarted = outcome.started;
-      draftRun.executionPhase = outcome.phase ?? (outcome.started === false ? 'not_dispatched' : 'result_unknown');
-      draftRun.gitQueryResult = normalizeGitQueryResult(outcome.queryResult
-        ? { ...outcome.queryResult, scopeFingerprint: verifiedScope?.fingerprint } : undefined);
-      const successful = isSuccessfulDraftRunOutcome(outcome);
-      draftRun.exitCode = outcome.exitCode;
-      draftRun.signal = outcome.signal;
-      draftRun.timedOut = outcome.timedOut;
-      draftRun.error = outcome.error
-        ?? (!outcome.cancelled && outcome.timedOut ? 'DraftRun reached its timeout and was stopped.' : undefined)
-        ?? (outcome.queryResult?.errorCode ? `Git query: ${outcome.queryResult.errorCode}.` : undefined)
-        ?? (!outcome.cancelled && !successful
-          ? `DraftRun exited with code ${outcome.exitCode ?? 'unknown'}.`
-          : undefined);
-      draftRun.status = outcome.cancelled
-        ? 'cancelled'
-        : !successful
-          ? 'failed'
-          : 'done';
-    } catch (error) {
-      draftRun.executionStarted = executionStarted ? undefined : false;
-      draftRun.executionPhase = executionStarted ? 'result_unknown' : 'not_dispatched';
-      if (error instanceof CommandCapabilityError && !executionStarted) {
-        draftRun.status = 'needs_replan';
-        draftRun.capabilityDiagnostic = error.diagnostic;
-        draftRun.error = error.message;
-        draftRun.startedAt = undefined;
-      } else if (options.userApproval && options.signal?.aborted && !executionStarted) {
-        // A revoked batch click does not turn a never-started command into a
-        // failure or rejection. A future click must authorize it anew.
-        draftRun.status = 'pending';
-        draftRun.authorizationSource = undefined;
-        draftRun.approvedAt = undefined;
-        draftRun.startedAt = undefined;
-        draftRun.error = undefined;
-      } else {
-        draftRun.status = options.signal?.aborted && !executionStarted && draftRun.spec.restricted ? 'cancelled' : 'failed';
-        if (!executionStarted) draftRun.startedAt = undefined;
-        draftRun.error = error instanceof Error ? error.message : String(error);
-      }
-    }
-    this.approving.delete(id);
-    this.abortControllers.delete(draftRun.id);
-    this.cancelRequests.delete(draftRun.id);
-    draftRun.finishedAt = draftRun.status === 'pending' ? undefined : new Date().toISOString();
-    draftRun.updatedAt = new Date().toISOString();
-    this.emitState(draftRun);
-    await this.persistNow();
-    return cloneDraftRun(draftRun);
+      return cloneDraftRun(draftRun);
+    } finally { await sessionUse?.release(); }
   }
 
   public reject(id: string): boolean {
@@ -722,6 +737,7 @@ export class DraftRunStore {
       updatedAt: now
     };
     this.draftRuns.set(clone.id, clone);
+    this.knownDraftRunIds.add(clone.id);
     this.emitState(clone);
     this.schedulePersist();
     return cloneDraftRun(clone);
@@ -895,6 +911,27 @@ export class DraftRunStore {
     }
   }
 
+  public async hasSessionHistory(sessionId: string): Promise<boolean> {
+    return hasAssociatedRecordOwner(this.storageUri, sessionId, ['draftRuns', 'batchDisplays'], [1]);
+  }
+
+  public async deleteSession(sessionId: string): Promise<void> {
+    if ([...this.draftRuns.values()].some(run => run.sessionId === sessionId && (run.status === 'running' || this.approving.has(run.id)))) {
+      throw new Error('Session command execution is still in use.');
+    }
+    this.clearSession(sessionId);
+    await this.flush();
+    await withAssociatedStoreGate(this.globalStorageUri, 'draft-runs', async () => {
+      await assertManagedStoragePath(this.globalStorageUri, this.storageUri);
+      const stored = await readAssociatedJson(this.storageUri);
+      if (!stored) return;
+      if (stored.version !== 1 || !Array.isArray(stored.draftRuns)) throw new Error('Command history storage is damaged.');
+      await writeJsonAtomic(this.storageUri, { ...stored,
+        draftRuns: stored.draftRuns.filter(run => !run || typeof run !== 'object' || (run as DraftRun).sessionId !== sessionId),
+        batchDisplays: Array.isArray(stored.batchDisplays) ? stored.batchDisplays.filter(display => !display || typeof display !== 'object' || (display as DraftRunBatchDisplay).sessionId !== sessionId) : [] });
+    });
+  }
+
   public clearSession(sessionId: string): void {
     for (const [id, draftRun] of this.draftRuns) {
       if (draftRun.sessionId !== sessionId || draftRun.status === 'running') {
@@ -960,7 +997,29 @@ export class DraftRunStore {
     const batchDisplays = Array.from(this.batchDisplays.values())
       .map((record) => normalizeBatchDisplay(record, this.draftRuns, false))
       .filter((record): record is DraftRunBatchDisplay => record !== undefined);
-    const write = this.persistenceQueue.catch(() => undefined).then(() => writeJsonAtomic(this.storageUri, { version: 1, draftRuns, batchDisplays }));
+    const knownRuns = new Set(this.knownDraftRunIds);
+    const knownDisplays = new Set(this.knownDisplayIds);
+    const retainedDisplayIds = new Set(batchDisplays.map(display => display.operationId));
+    const write = this.persistenceQueue.catch(() => undefined).then(() => withAssociatedStoreGate(this.globalStorageUri, 'draft-runs', async () => {
+      const stored = await readAssociatedJson(this.storageUri);
+      if (stored && (stored.version !== 1 || !Array.isArray(stored.draftRuns))) throw new Error('Command history storage is damaged.');
+      const mergedRuns = new Map<string, DraftRun>();
+      for (const value of stored?.draftRuns as unknown[] ?? []) {
+        if (value && typeof value === 'object' && typeof (value as DraftRun).id === 'string') {
+          const run = value as DraftRun;
+          if (!knownRuns.has(run.id) || retainedIds.has(run.id)) mergedRuns.set(run.id, run);
+        }
+      }
+      for (const run of draftRuns) mergedRuns.set(run.id, run);
+      const retainedRuns = await withoutDeletedSessions(this.globalStorageUri, [...mergedRuns.values()]);
+      const mergedDisplays = new Map<string, DraftRunBatchDisplay>();
+      for (const value of (Array.isArray(stored?.batchDisplays) ? stored.batchDisplays : []) as DraftRunBatchDisplay[]) {
+        if (value && typeof value.operationId === 'string' && (!knownDisplays.has(value.operationId) || retainedDisplayIds.has(value.operationId))) mergedDisplays.set(value.operationId, value);
+      }
+      for (const display of batchDisplays) mergedDisplays.set(display.operationId, display);
+      const retainedDisplays = await withoutDeletedSessions(this.globalStorageUri, [...mergedDisplays.values()]);
+      await writeJsonAtomic(this.storageUri, { version: 1, draftRuns: retainedRuns, batchDisplays: retainedDisplays });
+    }));
     this.persistenceQueue = write;
     await write; // In particular, approval persistence failure must prevent spawn.
 

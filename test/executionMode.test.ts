@@ -1,5 +1,6 @@
 import './registerVscodeStub';
 import assert from 'node:assert/strict';
+import { sessionUseFixture } from './sessionUseFixture';
 import { readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { test } from 'node:test';
@@ -323,6 +324,7 @@ test('only the host plan-decision message starts a fresh protected implementatio
     selectedModelId: 'model',
     agentSettings: SETTINGS,
     sessionStore: {
+      ...sessionUseFixture(),
       activeSessionId: session.id,
       getActiveSession: () => session,
       persist: async () => {}
@@ -367,6 +369,7 @@ test('only the host plan-decision message starts a fresh protected implementatio
   });
   Object.assign((provider as unknown as { sessionStore: unknown }), {
     sessionStore: {
+      ...sessionUseFixture(),
       activeSessionId: revisionSession.id,
       getActiveSession: () => revisionSession,
       persist: async () => {}

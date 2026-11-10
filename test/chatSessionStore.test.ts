@@ -357,6 +357,125 @@ test('copying another workspace session refuses a pending or malformed history j
   assert.equal(storage.saved?.sessions.find(session => session.id === copied.id)?.pendingHistoryTruncation, undefined);
 });
 
+test('cleanup replaces a deleted active session with a blank normal session without loading another body', async () => {
+  const scope = { key: 'workspace:cleanup-current', name: 'Cleanup', folderUris: [] };
+  const active = createSession('cleanup-current', [createMessage(0)], scope);
+  const other = createSession('cleanup-preserved', [createMessage(1)], scope);
+  active.executionMode = 'plan';
+  other.contextInstructions = ' stable\n instructions ';
+  other.messages[0].expandedContent = ' expanded\n bytes ';
+  const storage = new MemorySessionStorage({ activeSessionId: active.id, sessions: [active, other], approvalMode: 'delegate' });
+  const adapter: ChatSessionStorageAdapter = storage;
+  adapter.isSessionDeleted = async (_workspaceKey, id) => id === active.id;
+  let bodyReads = 0;
+  adapter.loadSession = async () => { bodyReads += 1; throw new Error('cleanup must not hydrate'); };
+  const store = new ChatSessionStore(adapter, 'en', scope);
+  await store.initialize();
+  const retained = store.getSessionById(other.id)!;
+  const before = JSON.stringify([retained.messages, retained.contextInstructions, retained.requestProtocol]);
+  const result = await store.forgetHistoryCleanup([active.id]);
+  assert.deepEqual(result, { deletedCount: 1, activeSessionChanged: true });
+  assert.notEqual(store.activeSessionId, active.id);
+  assert.notEqual(store.activeSessionId, other.id);
+  assert.equal(store.messages.length, 0);
+  assert.equal(store.getActiveSession().executionMode, 'normal');
+  assert.equal(store.getActiveSession().approvalMode, 'delegate');
+  assert.equal(bodyReads, 0);
+  assert.equal(JSON.stringify([retained.messages, retained.contextInstructions, retained.requestProtocol]), before);
+  assert.equal(storage.saved?.activeSessionId, store.activeSessionId);
+  assert.ok(!storage.saved?.sessions.some(session => session.id === active.id));
+});
+
+test('cleanup of another session preserves the viewed session identity and requires a committed deletion', async () => {
+  const scope = { key: 'workspace:cleanup-other', name: 'Cleanup', folderUris: [] };
+  const active = createSession('cleanup-viewed', [createMessage(0)], scope);
+  const other = createSession('cleanup-other', [createMessage(1)], scope);
+  const storage = new MemorySessionStorage({ activeSessionId: active.id, sessions: [active, other] });
+  const adapter: ChatSessionStorageAdapter = storage;
+  const deleted = new Set<string>();
+  adapter.isSessionDeleted = async (_workspaceKey, id) => deleted.has(id);
+  const store = new ChatSessionStore(adapter, 'en', scope);
+  await store.initialize();
+  await assert.rejects(store.forgetHistoryCleanup([other.id]), /history_cleanup_not_committed/);
+  assert.ok(store.getSessionById(other.id));
+  deleted.add(other.id);
+  const viewed = store.getActiveSession();
+  assert.deepEqual(await store.forgetHistoryCleanup([other.id]), { deletedCount: 1, activeSessionChanged: false });
+  assert.equal(store.getActiveSession(), viewed);
+  assert.equal(await store.selectSession(other.id), undefined);
+  assert.equal(storage.saved, undefined, 'removing an unrelated ID must not rewrite survivor bodies');
+});
+
+test('confirmed cleanup settles an in-flight save before final target validation and does not start a new save', async () => {
+  const scope = { key: 'workspace:cleanup-drain', name: 'Cleanup', folderUris: [] };
+  const active = createSession('cleanup-drain', [createMessage(0)], scope);
+  const storage = new MemorySessionStorage({ activeSessionId: active.id, sessions: [active] });
+  let release!: () => void;
+  let started!: () => void;
+  const barrier = new Promise<void>(resolve => { release = resolve; });
+  const entered = new Promise<void>(resolve => { started = resolve; });
+  const original = storage.saveWorkspace.bind(storage);
+  let saves = 0;
+  storage.saveWorkspace = async (workspace, state) => { saves += 1; started(); await barrier; await original(workspace, state); };
+  const store = new ChatSessionStore(storage, 'en', scope);
+  await store.initialize();
+  const save = store.persist();
+  await entered;
+  let settled = false;
+  const settling = store.settleHistoryCleanup([active.id]).then(() => { settled = true; });
+  await Promise.resolve();
+  assert.equal(settled, false);
+  release();
+  await Promise.all([save, settling]);
+  assert.equal(saves, 1);
+});
+
+test('a large cleanup batch forgets non-active summaries without repeatedly saving survivor object graphs', async () => {
+  const scope = { key: 'workspace:cleanup-batch', name: 'Cleanup', folderUris: [] };
+  const active = createSession('cleanup-batch-viewed', [createMessage(0)], scope);
+  const others = Array.from({ length: 120 }, (_, index) => createSession(`cleanup-batch-${index}`, [createMessage(index + 1)], scope));
+  const storage = new MemorySessionStorage({ activeSessionId: active.id, sessions: [active, ...others] });
+  const adapter: ChatSessionStorageAdapter = storage;
+  adapter.isSessionDeleted = async (_workspaceKey, id) => id !== active.id;
+  storage.saveWorkspace = async () => { throw new Error('unrelated survivors must not be rewritten'); };
+  const store = new ChatSessionStore(adapter, 'en', scope);
+  await store.initialize();
+  const viewed = store.getActiveSession();
+  for (const other of others) {
+    assert.deepEqual(await store.forgetHistoryCleanup([other.id]), { deletedCount: 1, activeSessionChanged: false });
+  }
+  assert.equal(store.getActiveSession(), viewed);
+  assert.deepEqual(store.getSessionSummaries().map(summary => summary.id), [active.id]);
+});
+
+test('execution admission refuses a deleted idle session and delegates use acquisition to the authority', async () => {
+  const scope = { key: 'workspace:cleanup-admission', name: 'Cleanup', folderUris: [] };
+  const active = createSession('cleanup-admission', [createMessage(0)], scope);
+  const storage = new MemorySessionStorage({ activeSessionId: active.id, sessions: [active] });
+  const adapter: ChatSessionStorageAdapter = storage;
+  let deleted = true;
+  adapter.assertSessionWritable = async (workspace, id) => {
+    assert.equal(workspace, scope.key); assert.equal(id, active.id);
+    if (deleted) throw new Error('session_deleted');
+  };
+  let acquired = 0;
+  let released = 0;
+  adapter.acquireSessionUse = async (workspace, id) => {
+    await adapter.assertSessionWritable!(workspace, id);
+    acquired += 1;
+    return { release: async () => { released += 1; } };
+  };
+  const store = new ChatSessionStore(adapter, 'en', scope);
+  await store.initialize();
+  await assert.rejects(store.assertSessionWritable(), /session_deleted/);
+  await assert.rejects(store.acquireSessionUse(), /session_deleted/);
+  deleted = false;
+  const use = await store.acquireSessionUse();
+  assert.equal(acquired, 1);
+  await use.release();
+  assert.equal(released, 1);
+});
+
 test('loading a corrupt history truncation journal fails closed instead of dropping its pending recovery boundary', () => {
   const scope = { key: 'workspace:corrupt-truncation', name: 'Corrupt', folderUris: [] };
   const source = createSession('corrupt-source', [createMessage(0)], scope);

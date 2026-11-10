@@ -7,6 +7,7 @@ import { getVisibleMessages } from './chatSessionStore';
 import { freezeTree, isFrozenTree, isPackedPersistenceTree, persistenceMessageBody } from './persistenceSnapshot';
 import { recordLocalPerformance } from '../agent/logging/performanceTrace';
 import { getConfiguredKeepseekLanguage, localize } from '../shared/i18n';
+import { SessionDeletionAuthority } from './sessionDeletionAuthority';
 
 type Encoded = null | string | number | boolean | { ref: string } | { inline: ObjectNode };
 type ObjectNode = { kind: 'array'; values: Encoded[] } | { kind: 'object'; entries: Array<[string, Encoded]> } | { kind: 'text'; text: string }
@@ -224,6 +225,19 @@ export class SessionObjectStore {
     return { ...structuredClone(header), messages };
   }
   public async save(session: ChatSession, summary?: unknown, scope?: { sessionId: string; taskId?: string; childId?: string }): Promise<number> {
+    // Child stores have their own parent gate. Only canonical main shards infer
+    // the global deletion domain from their fixed Store-owned location.
+    const canonical = /\/chat-sessions\/v2\/workspaces\/[a-f0-9]{32}\/sessions\/[a-f0-9]{32}\.json$/u.test(this.shard.path);
+    if (canonical && this.shard.scheme === 'file') {
+      const authority = new SessionDeletionAuthority(vscode.Uri.joinPath(this.shard, '..', '..', '..', '..', '..', '..'));
+      return authority.withSessionGate(session.workspaceKey, session.id, async () => {
+        await authority.assertWritable(session.workspaceKey, session.id);
+        return this.saveUnderWriter(session, summary, scope);
+      });
+    }
+    return this.saveUnderWriter(session, summary, scope);
+  }
+  private async saveUnderWriter(session: ChatSession, summary?: unknown, scope?: { sessionId: string; taskId?: string; childId?: string }): Promise<number> {
     const started = performance.now(), bytesBefore = this.writeBytes, objectsBefore = this.writeObjects;
     const visitsBefore = this.nodeVisits, hashBefore = this.hashMs, ioBefore = this.objectIoMs;
     return this.withWriterLock(async () => {

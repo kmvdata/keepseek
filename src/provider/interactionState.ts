@@ -3,6 +3,16 @@ import { createHash, randomUUID } from 'node:crypto';
 export type InteractionPhase = 'idle' | 'loading_session' | 'preparing_context' | 'preparing_task'
   | 'running' | 'saving' | 'action' | 'failed';
 export type InteractionOperationKind = 'navigation' | 'task' | 'continuation' | 'recovery';
+
+/** Local history work has no model, Skills or account dependency. Target gates
+ * supply the execution authority; preview never owns the composer. */
+export function deriveHistoryCleanupCapability(facts: { sessionReady: boolean; disposed?: boolean; operationPending?: boolean }):
+  { available: boolean; reason?: 'loading_sessions' | 'busy' | 'unavailable' } {
+  if (facts.disposed) return { available: false, reason: 'unavailable' };
+  if (!facts.sessionReady) return { available: false, reason: 'loading_sessions' };
+  if (facts.operationPending) return { available: false, reason: 'busy' };
+  return { available: true };
+}
 export type InteractionWaitingReason = 'model' | 'session' | 'recovery' | 'context' | 'saving';
 
 export type SessionTitleCapabilityReason = 'loading_sessions' | 'recovering' | 'model_unavailable'

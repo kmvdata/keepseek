@@ -451,9 +451,11 @@ test('reconciles already-persisted sibling drafts as superseded on startup', asy
   assert.equal(fixture.store.hasPendingForSession('session-1'), false);
 });
 
-test('journal Apply I/O stays constant with large history and does not run GC before mutation', async () => {
+test('journal Apply I/O stays constant with large history and does not run GC before mutation', async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'keepseek-change-journal-hot-path-'));
   let writeCount = 0;
+  let coordinationWriteCount = 0;
+  let coordinationWritesBeforeMutation = 0;
   let historyWriteCount = 0;
   let directoryScanCount = 0;
   let writesBeforeMutation = 0;
@@ -491,6 +493,7 @@ test('journal Apply I/O stays constant with large history and does not run GC be
       )) as { checkpoint?: ChangeCheckpoint };
       assert.equal(durableApplying.checkpoint?.state, 'applying');
       writesBeforeMutation = writeCount;
+      coordinationWritesBeforeMutation = coordinationWriteCount;
       scansBeforeMutation = directoryScanCount;
       checkpoint.state = 'applied';
       checkpoint.appliedAt = now;
@@ -525,7 +528,10 @@ test('journal Apply I/O stays constant with large history and does not run GC be
   const inStore = (file: string) => file === root || file.startsWith(root + path.sep);
   vscode.workspace.fs.writeFile = async (uri, content) => {
     if (inStore(uri.fsPath)) {
-      writeCount += 1;
+      // New deletion-safety leases/gates are metadata I/O. Keep the existing
+      // payload-journal bound unchanged and measure coordination separately.
+      if (uri.fsPath.includes(`${path.sep}session-deletions${path.sep}`)) coordinationWriteCount += 1;
+      else writeCount += 1;
       if (uri.fsPath.includes(`${path.sep}history${path.sep}`)) historyWriteCount += 1;
     }
     await originalWriteFile(uri, content);
@@ -541,6 +547,8 @@ test('journal Apply I/O stays constant with large history and does not run GC be
     vscode.workspace.fs.readDirectory = originalReadDirectory;
   }
   assert.ok(writesBeforeMutation > 0 && writesBeforeMutation <= 5, `expected bounded prepared/applying writes, saw ${writesBeforeMutation}`);
+  assert.ok(coordinationWritesBeforeMutation > 0 && coordinationWritesBeforeMutation <= 12, `coordination must remain bounded, saw ${coordinationWritesBeforeMutation}`);
+  t.diagnostic(`before workspace mutation: journal writes=${writesBeforeMutation}, coordination metadata writes=${coordinationWritesBeforeMutation}`);
   assert.equal(historyWriteCount, 0, 'journal stages must not rewrite history shards');
   assert.equal(scansBeforeMutation, 0, 'artifact GC must not scan directories before workspace mutation');
 });

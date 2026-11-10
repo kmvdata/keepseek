@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import * as vscode from 'vscode';
 import { writeJsonAtomic } from '../shared/atomicStorage';
+import { SessionDeletionAuthority } from '../sessions/sessionDeletionAuthority';
+import { assertManagedStoragePath, hasAssociatedDirectoryEntries } from '../sessions/sessionAssociatedPersistence';
 import type { ChatSession, ProviderUsageLedger, ProviderUsageLedgerRecord } from '../shared/types';
 import { normalizeUsageLedgerRecord, normalizeUsageLedgerValue, summarizeUsageLedger, preferUsageLedgerRecord,
   summarizeCacheDiagnostics } from './usageLedger';
@@ -62,8 +64,8 @@ export class UsageLedgerStore {
     records: readonly ProviderUsageLedgerRecord[]
   ): Promise<{ appended: number; duplicates: number }> {
     if (!this.globalStorageUri || !sessionId.trim() || !records.length || this.deletedSessions.has(sessionId)) return { appended: 0, duplicates: 0 };
-    return await this.enqueue(sessionId, async () => {
-      if (this.deletedSessions.has(sessionId)) return { appended: 0, duplicates: 0 };
+    return await this.enqueue(sessionId, () => new SessionDeletionAuthority(this.globalStorageUri!).withSessionIdGate(sessionId, async () => {
+      if (this.deletedSessions.has(sessionId) || await new SessionDeletionAuthority(this.globalStorageUri!).isSessionIdDeleted(sessionId)) return { appended: 0, duplicates: 0 };
       const normalized = records.map(normalizeUsageLedgerRecord).filter(
         (record): record is ProviderUsageLedgerRecord => Boolean(record)
       );
@@ -106,7 +108,7 @@ export class UsageLedgerStore {
         appended += unique.length;
       }
       return { appended, duplicates };
-    });
+    }));
   }
 
   public async readPage(
@@ -185,7 +187,7 @@ export class UsageLedgerStore {
   public async current(sessionId: string) {
     const empty = () => ({ ledger: { version: 1 as const, records: [] as ProviderUsageLedgerRecord[], legacyAggregate: false, incomplete: false },
       stats: undefined as ChatSession['usageStats'], damagedBucketCount: 0 });
-    if (this.deletedSessions.has(sessionId)) return empty();
+    if (this.deletedSessions.has(sessionId) || (this.globalStorageUri && await new SessionDeletionAuthority(this.globalStorageUri).isSessionIdDeleted(sessionId))) return empty();
     if (!this.indexes.has(sessionId)) await this.rebuild(sessionId);
     return this.enqueue(sessionId, async () => {
       if (this.deletedSessions.has(sessionId)) return empty();
@@ -202,17 +204,24 @@ export class UsageLedgerStore {
     updateUsageLedgerStatsIndex(index, record, index.damagedBucketCount > 0);
   }
 
+  public async hasSessionHistory(sessionId: string): Promise<boolean> {
+    return !!this.globalStorageUri && hasAssociatedDirectoryEntries(this.sessionUri(hashText(sessionId)));
+  }
+
   public async deleteSession(sessionId: string): Promise<void> {
     if (!sessionId.trim()) return;
     this.deletedSessions.add(sessionId);
     this.indexes.delete(sessionId);
     await this.enqueue(sessionId, async () => {
       if (!this.globalStorageUri) return;
+      await new SessionDeletionAuthority(this.globalStorageUri).withSessionIdGate(sessionId, async () => {
       try {
+        await assertManagedStoragePath(this.globalStorageUri!, this.sessionUri(hashText(sessionId)));
         await vscode.workspace.fs.delete(this.sessionUri(hashText(sessionId)), { recursive: true, useTrash: false });
-      } catch {
-        // Missing or partially removed ledger directories are already clean.
+      } catch (error) {
+        if (!isMissingFileError(error)) throw error;
       }
+      });
     });
   }
 
@@ -242,7 +251,7 @@ export class UsageLedgerStore {
     damagedBucketCount: number;
   }> {
     const records: ProviderUsageLedgerRecord[] = [];
-    if (this.deletedSessions.has(sessionId)) return { records, damagedBucketCount: 0 };
+    if (this.deletedSessions.has(sessionId) || (this.globalStorageUri && await new SessionDeletionAuthority(this.globalStorageUri).isSessionIdDeleted(sessionId))) return { records, damagedBucketCount: 0 };
     let damagedBucketCount = 0;
     for (let bucket = 0; bucket < USAGE_LEDGER_STORE_BUCKET_COUNT; bucket += 1) {
       const stored = await this.readBucket(sessionId, bucket);

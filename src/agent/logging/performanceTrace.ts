@@ -1,7 +1,47 @@
 import { monitorEventLoopDelay } from 'node:perf_hooks';
+import { createHash } from 'node:crypto';
 import * as vscode from 'vscode';
 import { writeJsonAtomic } from '../../shared/atomicStorage';
+import { SessionDeletionAuthority } from '../../sessions/sessionDeletionAuthority';
+import { assertManagedStoragePath, readAssociatedJson } from '../../sessions/sessionAssociatedPersistence';
 import type { AgentInteractionTrace, InteractionTraceEvent } from './interactionTrace';
+
+export interface TraceOwnership { root: vscode.Uri; sessionId: string; }
+export function traceOwnerIndexUri(root: vscode.Uri, sessionId: string): vscode.Uri {
+  return vscode.Uri.joinPath(root, 'interaction-logs', 'owners', `${createHash('sha256').update(sessionId).digest('hex')}.json`);
+}
+
+
+/** Ownership is committed before any trace bytes. Both writers and cleanup
+ * share the parent session gate, including delayed performance flushes. */
+export async function withOwnedTraceWrite<T>(base: vscode.Uri, runId: string, owner: TraceOwnership | undefined, work: () => Promise<T>): Promise<T> {
+  if (!owner) return work();
+  const authority = new SessionDeletionAuthority(owner.root);
+  const write = async () => {
+    await authority.assertSessionIdWritable(owner.sessionId);
+    if (owner.root.scheme === 'file') await assertManagedStoragePath(owner.root, base);
+    const uri = vscode.Uri.parse(`${base.toString()}.owner.json`);
+    const stored = await readAssociatedJson(uri);
+    if (stored && (stored.version !== 1 || stored.sessionId !== owner.sessionId || stored.runId !== runId)) throw new Error('Trace ownership is damaged.');
+    if (!stored) {
+      // Commit the session-owned index before either the sidecar or trace bytes.
+      // A later target in a batch reads this index afresh, so an owner created
+      // after the batch's legacy sidecar scan cannot evade physical recycling.
+      const relativeFile = base.path.slice(owner.root.path.replace(/\/$/u, '').length + 1);
+      if (!/^interaction-logs\/\d{4}-\d{2}-\d{2}\/run-[^/]+\.jsonl$/u.test(relativeFile)) throw new Error('Trace path is outside its managed log root.');
+      const indexUri = traceOwnerIndexUri(owner.root, owner.sessionId);
+      if (owner.root.scheme === 'file') await assertManagedStoragePath(owner.root, indexUri);
+      const index = await readAssociatedJson(indexUri);
+      if (index && (index.version !== 1 || index.sessionId !== owner.sessionId || !Array.isArray(index.runs))) throw new Error('Trace owner index is damaged.');
+      const runs = (index?.runs as Array<{ runId: string; relativeFile: string }> ?? []).filter(run => run.runId !== runId);
+      runs.push({ runId, relativeFile });
+      await writeJsonAtomic(indexUri, { version: 1, sessionId: owner.sessionId, runs }, { durable: true });
+      await writeJsonAtomic(uri, { version: 1, sessionId: owner.sessionId, runId }, { durable: true });
+    }
+    return work();
+  };
+  return owner.root.scheme === 'file' ? authority.withSessionIdGate(owner.sessionId, write) : write();
+}
 
 const listeners = new Set<(event: InteractionTraceEvent) => void>();
 export function recordLocalPerformance(event: InteractionTraceEvent): void {
@@ -35,7 +75,7 @@ export class PerformanceTrace {
   private writeFailures = 0;
   private inFlightRemaining = 0;
   public constructor(private readonly base: vscode.Uri, private readonly runId: string,
-    private readonly segmentBytes = 256 * 1024, private readonly maxQueuedBytes = 256 * 1024) {}
+    private readonly segmentBytes = 256 * 1024, private readonly maxQueuedBytes = 256 * 1024, private readonly owner?: TraceOwnership) {}
   public record(event: InteractionTraceEvent): void {
     if (!/^(run_|upstream_(attempt|http|retry|model)|provider_first|context_|request_output|tool_(call|result|delivery)|checkpoint_|progress_|projection_|event_loop)/u.test(event.type)) return;
     const scalars: Record<string, unknown> = {};
@@ -55,7 +95,7 @@ export class PerformanceTrace {
     if (performance.now() < this.retryAfter) return;
     // One bounded in-flight batch plus one bounded queue. Slow storage must not
     // create an unbounded chain of promises retaining already drained batches.
-    this.drain = this.drainQueue().catch(() => {
+    this.drain = withOwnedTraceWrite(this.base, this.runId, this.owner, () => this.drainQueue()).catch(() => {
       this.writeFailures++;
       this.dropped += this.inFlightRemaining; this.totalDropped += this.inFlightRemaining; this.inFlightRemaining = 0;
       // Bounded best-effort recovery: no timer retries during an outage. A later
@@ -92,8 +132,8 @@ export class PerformanceTrace {
   }
 }
 
-export function withPerformanceTrace(trace: AgentInteractionTrace, base: vscode.Uri, scope?: { sessionId?: string; taskId?: string }): AgentInteractionTrace {
-  const perf = new PerformanceTrace(base, trace.runId);
+export function withPerformanceTrace(trace: AgentInteractionTrace, base: vscode.Uri, scope?: { sessionId?: string; taskId?: string }, owner?: TraceOwnership): AgentInteractionTrace {
+  const perf = new PerformanceTrace(base, trace.runId, undefined, undefined, owner);
   const loop = monitorEventLoopDelay({ resolution: 20 }); loop.enable();
   const record = (event: InteractionTraceEvent) => perf.record({ ...scope, ...event });
   const listener = (event: InteractionTraceEvent) => {

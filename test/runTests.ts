@@ -106,3 +106,19 @@ import './sessionTitleWebview.test';
 import './sessionTitleIntegration.test';
 import './sessionTitleBudgetConcurrency.test';
 import './sessionTitleRegeneration.test';
+
+import './sessionHistoryCleanup.test';
+
+import './historyCleanupWebview.test';
+
+import './sessionAssociatedEvidenceCleanup.test';
+
+import './sessionDeletionAuthority.test';
+
+import './historyCleanupHost.test';
+
+import './sessionAssociatedCleanup.test';
+
+import './sessionUseLifetime.test';
+
+import './historyCleanupController.test';

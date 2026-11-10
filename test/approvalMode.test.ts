@@ -1,5 +1,6 @@
 import './registerVscodeStub';
 import assert from 'node:assert/strict';
+import { sessionUseFixture } from './sessionUseFixture';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -739,7 +740,7 @@ function workflowFixture(options: {
     enterTaskWork: () => undefined,
     loadTaskBudget: async () => undefined,
     authorizedExternalReferenceUris: new Set(), authorizedExternalExecutionUris: new Set(), selectedSourceId: 'source', selectedModelId: 'model',
-    sessionStore: { activeSessionId: 's', getActiveSession: () => session, persist: async () => {} },
+    sessionStore: { ...sessionUseFixture(), activeSessionId: 's', getActiveSession: () => session, persist: async () => {} },
     changeSets: {
       flush: async () => {},
       toWebviewState: () => [{ runId: 'r', files: ['e1', 'e2'].map((id) => ({ id, uri: 'file:///workspace/' + id, label: id, status: 'pending' })) }],

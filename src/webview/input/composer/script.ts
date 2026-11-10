@@ -154,6 +154,8 @@ export const composerPublicApiFragment: WebviewFragment = {
         renderUsage: renderContextProgress,
         showSettingsDialog: showSettingsDialog,
         showHistorySettingsDialog: showHistorySettingsDialog,
+        onHistoryCleanupMessage: onHistoryCleanupMessage,
+        onHistorySettingsSaved: onHistorySettingsSaved,
         showAboutDialog: showAboutDialog,
         onSkillDraftCreated: onSkillDraftCreated,
         showStatus: setComposerStatus,

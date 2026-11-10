@@ -1,4 +1,5 @@
 import * as assert from 'node:assert/strict';
+import { sessionUseFixture } from './sessionUseFixture';
 import { realpath, mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -419,7 +420,7 @@ function hostFixture(f: Awaited<ReturnType<typeof createFixture>>) {
     fileContext: { clear: () => {} },
     changeSets: { hasPendingForSession: () => states.pendingEdits },
     hasActiveBackgroundRun: () => states.background,
-    sessionStore: { activeSessionId: 's', getActiveSession: () => session, persist: async () => {} },
+    sessionStore: { ...sessionUseFixture(), activeSessionId: 's', getActiveSession: () => session, persist: async () => {} },
     t: (key: string) => key,
     postState: () => {}, postToWebview: () => {}, setAgentActivity: () => {},
     sendPromptImpl: async () => { states.sends++; return {} as AgentResponse; }

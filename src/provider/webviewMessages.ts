@@ -61,6 +61,10 @@ export type WebviewMessage =
   | { type: 'stopBackgroundRun' }
   | { type: 'openApiSettings' }
   | { type: 'openHistorySettings' }
+  | { type: 'previewHistoryCleanup'; requestId: string; scope: 'current' | 'all'; mode: 'olderThan' | 'all'; days?: number }
+  | { type: 'requestHistoryCleanup'; requestId: string; previewToken: string }
+  | { type: 'dismissHistoryCleanupPreview'; requestId: string }
+  | { type: 'getHistoryCleanupState'; requestId: string }
   | { type: 'setModelRequestTimeout'; seconds: number }
   | {
       type: 'addModel';

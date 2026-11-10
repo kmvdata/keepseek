@@ -1,5 +1,6 @@
 import './registerVscodeStub';
 import assert from 'node:assert/strict';
+import { sessionUseFixture } from './sessionUseFixture';
 import { test } from 'node:test';
 import * as vscode from './stubs/vscode';
 import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
@@ -61,7 +62,7 @@ function fixture() {
   const calls: Array<{ sessionId: string; taskId: string; request: (input: SessionTitleRequest) => Promise<string> }> = [];
   const parent: Parent = { model: { id: 'main-a', label: 'Main A', sourceId: 'source-a', provider: 'deepseek' },
     sourceConfig: { sourceId: 'source-a', provider: 'deepseek', apiKey: 'test-key', baseUrl: 'https://a.invalid', supportsBilling: false } };
-  const store = { activeSessionId: a.id, workspaceKey: 'workspace', getSessionById: (id: string) => sessions.get(id),
+  const store = { ...sessionUseFixture(), activeSessionId: a.id, workspaceKey: 'workspace', getSessionById: (id: string) => sessions.get(id),
     getActiveSession: () => active, persist: async () => {} };
   const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
     sessionStore: store, sessionTitleCandidates: new Map(), titleLifecycleDisposed: false,

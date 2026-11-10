@@ -3,7 +3,10 @@ import { visibleProgressFingerprint } from '../contextEpoch';
 import { open } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import * as vscode from 'vscode';
+import { hasAssociatedDirectoryEntries } from '../../sessions/sessionAssociatedPersistence';
 import { writeBytesAtomic, writeJsonAtomic } from '../../shared/atomicStorage';
+import { SessionDeletionAuthority } from '../../sessions/sessionDeletionAuthority';
+import { assertManagedStoragePath } from '../../sessions/sessionAssociatedPersistence';
 import { estimateTokenCount } from '../tokenEstimate';
 import type {
   EvidenceIntentInput,
@@ -33,11 +36,13 @@ export class ToolEvidenceStore {
   private readonly memoryBlobs = new Map<string, string>();
   private queue: Promise<void> = Promise.resolve();
   private readonly verifiedBlobs = new Map<string, string>();
+  private readonly deletedSessions = new Set<string>();
+  private readonly deletionAuthority?: SessionDeletionAuthority;
 
   public constructor(
     private readonly globalStorageUri?: vscode.Uri,
     private readonly maxEvidenceBytes = 100_000_000
-  ) {}
+  ) { this.deletionAuthority = globalStorageUri ? new SessionDeletionAuthority(globalStorageUri) : undefined; }
 
   public createEvidenceId(input: Pick<EvidenceIntentInput, 'sessionId' | 'taskId' | 'toolCallId' | 'epochIndex'>): string {
     return `ev_${createHash('sha256').update(`${input.sessionId}\0${input.taskId}\0${input.epochIndex ?? 0}\0${input.toolCallId}`, 'utf8').digest('hex').slice(0, 40)}`;
@@ -159,6 +164,7 @@ export class ToolEvidenceStore {
   }
 
   public async readContent(record: ToolEvidence): Promise<string> {
+    await this.assertWritable(record.sessionId);
     if (record.executionStatus !== 'completed' || !record.blobName) throw new Error('Tool evidence content is unavailable.');
     const memory = this.memoryBlobs.get(this.blobKey(record.sessionId, record.taskId, record.blobName));
     if (memory !== undefined) return memory;
@@ -199,7 +205,7 @@ export class ToolEvidenceStore {
     const name = `epoch-${index}.json`;
     if (!this.globalStorageUri) return name;
     try {
-      await writeJsonAtomic(vscode.Uri.joinPath(this.getTaskDirectory(sessionId, taskId), name), snapshot);
+      await this.withWritable(sessionId, () => writeJsonAtomic(vscode.Uri.joinPath(this.getTaskDirectory(sessionId, taskId), name), snapshot));
     } catch (error) {
       throw new ToolEvidencePersistenceError('storage_failure', 'Context Epoch evidence snapshot could not be persisted.', { cause: error });
     }
@@ -209,18 +215,30 @@ export class ToolEvidenceStore {
   /** Session retention owns evidence retention. Call only after the session has
    * been selected for deletion; active/checkpoint-protected sessions must never
    * reach this method. */
+  public async hasSessionHistory(sessionId: string): Promise<boolean> {
+    return !!this.globalStorageUri && hasAssociatedDirectoryEntries(vscode.Uri.joinPath(this.getRootUri(), safeHash(sessionId)));
+  }
+
   public async deleteSessionEvidence(sessionId: string): Promise<void> {
     if (!sessionId.trim()) return;
-    for (const key of [...this.records.keys()]) if (key.startsWith(`${sessionId}\0`)) this.records.delete(key);
-    for (const key of [...this.memoryBlobs.keys()]) if (key.startsWith(`${sessionId}\0`)) this.memoryBlobs.delete(key);
-    if (!this.globalStorageUri) return;
-    await Promise.resolve(vscode.workspace.fs.delete(
-      vscode.Uri.joinPath(this.getRootUri(), safeHash(sessionId)),
-      { recursive: true, useTrash: false }
-    )).catch((error) => {
-      const code = (error as { code?: string }).code;
-      if (code !== 'FileNotFound' && code !== 'ENOENT') throw error;
-    });
+    this.deletedSessions.add(sessionId);
+    const remove = async () => {
+      for (const key of [...this.records.keys()]) if (key.startsWith(`${sessionId}\0`)) this.records.delete(key);
+      for (const key of [...this.memoryBlobs.keys()]) if (key.startsWith(`${sessionId}\0`)) this.memoryBlobs.delete(key);
+      this.verifiedBlobs.clear();
+      if (!this.globalStorageUri) return;
+      const directory = vscode.Uri.joinPath(this.getRootUri(), safeHash(sessionId));
+      await assertManagedStoragePath(this.globalStorageUri, directory);
+      await Promise.resolve(vscode.workspace.fs.delete(
+        directory, { recursive: true, useTrash: false }
+      )).catch((error) => {
+        const code = (error as { code?: string }).code;
+        if (code !== 'FileNotFound' && code !== 'ENOENT') throw error;
+      });
+    };
+    await this.queue.catch(() => undefined);
+    if (this.deletionAuthority) await this.deletionAuthority.withSessionIdGate(sessionId, remove);
+    else await remove();
   }
 
   private async resolveRef(ref: string, sessionId: string, taskId: string): Promise<ToolEvidence | undefined> {
@@ -400,11 +418,11 @@ export class ToolEvidenceStore {
   private async writeRecord(record: ToolEvidence): Promise<void> {
     const snapshot = structuredClone(record);
     const key = this.recordKey(record.sessionId, record.taskId, record.id);
-    if (!this.globalStorageUri) { this.records.set(key, snapshot); return; }
-    const write = this.queue.catch(() => undefined).then(async () => {
+    if (!this.globalStorageUri) { await this.assertWritable(record.sessionId); this.records.set(key, snapshot); return; }
+    const write = this.queue.catch(() => undefined).then(() => this.withWritable(record.sessionId, async () => {
       await writeJsonAtomic(this.getRecordUri(record.sessionId, record.taskId, record.id), snapshot, { durable: true });
       this.records.set(key, snapshot);
-    });
+    }));
     this.queue = write;
     try {
       await write;
@@ -414,6 +432,7 @@ export class ToolEvidenceStore {
   }
 
   private async readRecord(sessionId: string, taskId: string, id: string): Promise<ToolEvidence | undefined> {
+    if (await this.isDeleted(sessionId)) return undefined;
     const key = this.recordKey(sessionId, taskId, id);
     const cached = this.records.get(key);
     if (cached) return structuredClone(cached);
@@ -434,6 +453,10 @@ export class ToolEvidenceStore {
   }
 
   private async writeBlob(sessionId: string, taskId: string, blobName: string, bytes: Uint8Array): Promise<void> {
+    await this.withWritable(sessionId, () => this.writeBlobUnderGate(sessionId, taskId, blobName, bytes));
+  }
+
+  private async writeBlobUnderGate(sessionId: string, taskId: string, blobName: string, bytes: Uint8Array): Promise<void> {
     const key = this.blobKey(sessionId, taskId, blobName);
     if (!this.globalStorageUri) {
       if (!this.memoryBlobs.has(key)) this.memoryBlobs.set(key, this.decoder.decode(bytes));
@@ -449,6 +472,19 @@ export class ToolEvidenceStore {
     }
     try { await writeBytesAtomic(uri, bytes, { durable: true }); }
     catch (error) { throw new ToolEvidencePersistenceError('storage_failure', 'Tool evidence blob could not be persisted.', { cause: error }); }
+  }
+
+  private async isDeleted(sessionId: string): Promise<boolean> {
+    return this.deletedSessions.has(sessionId) || !!await this.deletionAuthority?.isSessionIdDeleted(sessionId);
+  }
+
+  private async assertWritable(sessionId: string): Promise<void> {
+    if (await this.isDeleted(sessionId)) throw new Error('Session history has been deleted.');
+  }
+
+  private async withWritable<T>(sessionId: string, work: () => Promise<T>): Promise<T> {
+    const run = async () => { await this.assertWritable(sessionId); return work(); };
+    return this.deletionAuthority ? this.deletionAuthority.withSessionIdGate(sessionId, run) : run();
   }
 
   private getRootUri(): vscode.Uri {
