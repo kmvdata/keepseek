@@ -14,7 +14,7 @@ export const dialogChromeStylesFragment: WebviewFragment = {
     }
 
     .settings-dialog {
-      width: min(420px, calc(100vw - var(--keepseek-edge-padding-double, 8px)));
+      width: min(420px, calc(100vw - var(--keepseek-overlay-inset-double, 12px)));
       max-height: min(720px, calc(100vh - 24px));
       display: flex;
       flex-direction: column;
@@ -26,7 +26,7 @@ export const dialogChromeStylesFragment: WebviewFragment = {
     }
 
     .settings-account-dialog {
-      width: min(720px, calc(100vw - var(--keepseek-edge-padding-double, 8px)));
+      width: min(720px, calc(100vw - var(--keepseek-overlay-inset-double, 12px)));
     }
 
     .settings-dialog-header {

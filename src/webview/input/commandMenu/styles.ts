@@ -5,8 +5,9 @@ export const commandMenuReadonlyStylesFragment: WebviewFragment = {
   source: `
     .command-menu {
       position: absolute;
-      left: var(--keepseek-edge-padding, 4px);
-      right: var(--keepseek-edge-padding, 4px);
+      /* The containing composer-input-wrap already sits inside the page gutter. */
+      left: 0;
+      right: 0;
       bottom: 34px;
       z-index: 30;
       max-height: min(420px, calc(100vh - 96px));

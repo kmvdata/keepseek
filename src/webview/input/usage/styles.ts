@@ -126,7 +126,7 @@ export const usageIndicatorStylesFragment: WebviewFragment = {
       z-index: 45;
       display: block;
       width: max-content;
-      max-width: min(320px, calc(100vw - var(--keepseek-edge-padding-double, 8px)));
+      max-width: min(320px, calc(100vw - var(--keepseek-overlay-inset-double, 12px)));
       padding: 7px 9px;
       border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
       border-radius: 6px;
@@ -214,8 +214,8 @@ export const usageDialogStylesFragment: WebviewFragment = {
   source: `
     .usage-details-dialog {
       position: relative;
-      width: min(540px, calc(100vw - 12px));
-      max-width: calc(100vw - 12px);
+      width: min(540px, calc(100vw - var(--keepseek-overlay-inset-double, 12px)));
+      max-width: calc(100vw - var(--keepseek-overlay-inset-double, 12px));
       max-height: calc(100vh - 16px);
       padding: 0;
       border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));

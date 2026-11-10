@@ -156,7 +156,7 @@ quadrantChart
 
 ### 本地开发
 
-项目要求 VS Code `^1.98.0`，常用开发命令统一通过 Bun 运行：
+项目要求 VS Code `^1.106.0`，KeepSeek 默认位于右侧 Secondary Side Bar。常用开发命令统一通过 Bun 运行：
 
 ```bash
 bun install

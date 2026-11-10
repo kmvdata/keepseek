@@ -80,8 +80,8 @@ export const referenceMenuStylesFragment: WebviewFragment = {
   source: `
     .reference-menu {
       position: absolute;
-      left: var(--keepseek-edge-padding, 4px);
-      right: var(--keepseek-edge-padding, 4px);
+      left: 0;
+      right: 0;
       bottom: calc(100% + 6px);
       z-index: 35;
       display: flex;

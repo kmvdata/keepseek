@@ -15,7 +15,7 @@
     "url": "https://github.com/kmvdata/keepseek/issues"
   },
   "engines": {
-    "vscode": "^1.98.0"
+    "vscode": "^1.106.0"
   },
   "categories": [
     "Chat",
@@ -454,7 +454,7 @@
       ]
     },
     "viewsContainers": {
-      "activitybar": [
+      "secondarySidebar": [
         {
           "id": "keepseek-sidebar",
           "title": "KeepSeek",

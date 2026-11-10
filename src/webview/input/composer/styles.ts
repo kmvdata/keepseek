@@ -6,16 +6,19 @@ export const composerBaseStylesFragment: WebviewFragment = {
     .composer {
       background: var(--vscode-sideBar-background);
       padding: var(--keepseek-composer-padding, 0);
+      min-width: 0;
     }
 
     .composer-input-wrap {
       position: relative;
+      min-width: 0;
       padding: 0;
     }
 
     .composer-input-inner {
       display: flex;
       flex-direction: column;
+      min-width: 0;
       min-height: 116px;
       border: 1px solid var(--vscode-chat-requestBorder, var(--vscode-input-border, transparent));
       border-radius: 6px;

@@ -35,6 +35,8 @@ flowchart TD
 
 Webview 是字符串生成的页面，不是独立前端应用。`input/composer/` 管编辑/序列化，`references/` 管引用与拖拽，`commandMenu/` 管菜单，`usage/` 管用量详情，`dialogs/` 管各设置对话框。样式、模板、行为保持各自 fragment 所有权。
 
+容器默认贡献到 `viewsContainers.secondarySidebar`（最低 VS Code 1.106），沿用 `keepseek-sidebar` / `keepseek.chat` 身份与集中 `focusView()`。横向布局显式清除宿主注入的 body padding，再由各顶层区域各自消费一次统一 gutter；composer 内的菜单不重复消费。规则、宿主样式回归及旧用户位置边界见 [Webview 布局](keepseek-webview-layout.md)。
+
 首次 `ready` 先获得轻量状态；会话与副作用恢复未就绪时拒绝相关写操作。消息 type、DOM id、引用格式、CSP/转义和公开控制接口都是行为契约。
 
 轻量状态、完整状态和 patch 共用宿主派生的 `interaction`：编辑、提交、导航和取消分别表达；导航/准备/保存不等于模型运行。状态与提交反馈绑定会话和 revision/requestId，持续提示跟随有效操作而不依赖通知计时器。`isStartingRun` 只读派生互斥；旧 `isBusy` 兼容字段不能重新成为输入框权威。标题刷新单独消费 Host 的 `titleRegenerationCapability`，不把当前上下文等待等同于命名不可用；所有状态补丁定点同步历史行按钮。首次导航只跨 session/安全初始化屏障，余额磁盘展示在模型目录关键路径之外。具体拥有者、接受屏障和后台工作规则见 [交互生命周期](keepseek-interaction-lifecycle.md)。

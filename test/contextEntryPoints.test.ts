@@ -14,6 +14,8 @@ import { composerSerializationFragment } from '../src/webview/input/composer/ser
 import { referenceMenuImplementationFragment } from '../src/webview/input/references/menu';
 import { skillsImplementationFragment } from '../src/webview/input/skills/script';
 import { createWebviewDomHarness } from './webviewDomHarness';
+import { focusView } from '../src/provider/focusView';
+import { clearCommandHandlers, setCommandHandler } from './stubs/vscode';
 
 test('header timeout dropdown offers exactly six presets with a one-hour default in both languages', async () => {
   const template = getTemplate();
@@ -147,18 +149,51 @@ test('contributes concise English editor, Explorer, and Windows-friendly termina
   assert.equal(windowsTerminalTitleAction?.when, 'view == terminal && isWindows && terminalTextSelected');
 });
 
-test('provider focuses the contributed KeepSeek view container before inserting references', async () => {
+test('KeepSeek contributes one secondary sidebar view and preserves its existing focus identities', async () => {
   const packagePath = path.resolve(process.cwd(), 'package.json');
   const providerPath = path.resolve(process.cwd(), 'src/provider/KeepseekChatViewProvider.ts');
   const packageJson = JSON.parse(await readFile(packagePath, 'utf8')) as {
-    contributes?: { viewsContainers?: { activitybar?: Array<{ id?: string }> } };
+    engines?: { vscode?: string };
+    contributes?: {
+      viewsContainers?: Record<string, Array<{ id?: string }>>;
+      views?: Record<string, Array<{ id?: string; type?: string }>>;
+    };
   };
   const providerSource = await readFile(providerPath, 'utf8');
-  const containerIds = packageJson.contributes?.viewsContainers?.activitybar?.map((container) => container.id) ?? [];
-  const match = /const CHAT_CONTAINER_ID = '([^']+)'/u.exec(providerSource);
+  const containers = packageJson.contributes?.viewsContainers ?? {};
+  const containerId = /const CHAT_CONTAINER_ID = '([^']+)'/u.exec(providerSource)?.[1];
+  const viewId = /const CHAT_VIEW_TYPE = '([^']+)'/u.exec(providerSource)?.[1];
 
-  assert.ok(match);
-  assert.ok(match?.[1] && containerIds.includes(match[1]));
+  assert.equal(packageJson.engines?.vscode, '^1.106.0');
+  assert.equal(containerId, 'keepseek-sidebar');
+  assert.equal(viewId, 'keepseek.chat');
+  assert.deepEqual(Object.keys(containers), ['secondarySidebar']);
+  assert.deepEqual(containers.secondarySidebar?.map(container => container.id), [containerId]);
+  assert.deepEqual(Object.keys(packageJson.contributes?.views ?? {}), [containerId]);
+  assert.deepEqual(packageJson.contributes?.views?.[containerId]?.map(view => ({ id: view.id, type: view.type })),
+    [{ id: viewId, type: 'webview' }]);
+});
+
+test('opening the KeepSeek view waits for its container before focusing the chat', async () => {
+  const events: string[] = [];
+  let completeContainerOpen!: () => void;
+  const containerOpened = new Promise<void>(resolve => { completeContainerOpen = resolve; });
+  setCommandHandler('workbench.view.extension.keepseek-sidebar', async () => {
+    events.push('open-container');
+    await containerOpened;
+    events.push('container-opened');
+  });
+  setCommandHandler('keepseek.chat.focus', () => { events.push('focus-chat'); });
+  try {
+    const opening = focusView('keepseek-sidebar', 'keepseek.chat');
+    assert.deepEqual(events, ['open-container']);
+    completeContainerOpen();
+    await opening;
+    assert.deepEqual(events, ['open-container', 'container-opened', 'focus-chat']);
+  } finally {
+    completeContainerOpen();
+    clearCommandHandlers();
+  }
 });
 
 test('DraftRun interactions settle visibly with clone and continuation feedback', async () => {

@@ -6,7 +6,7 @@ export const subagentProgressStylesFragment: WebviewFragment = {
     .subagent-progress-panel {
       display: grid;
       gap: 6px;
-      margin: 8px var(--keepseek-edge-padding, 0px);
+      margin: 8px 0;
       padding: 8px;
       border: 1px solid var(--vscode-panel-border, transparent);
       border-radius: 6px;

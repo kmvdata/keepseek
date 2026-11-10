@@ -56,11 +56,13 @@ export function getStyles(): string {
     :root {
       color-scheme: light dark;
 
-      --keepseek-edge-padding: 0px;
-      --keepseek-edge-padding-double: 0px;
+      /* Each top-level region owns its gutter; nested content must not add it again. */
+      --keepseek-edge-padding: 6px;
+      --keepseek-edge-padding-double: calc(2 * var(--keepseek-edge-padding));
+      --keepseek-overlay-inset-double: 12px;
 
       /* ---- input 区域边距变量（修改这些值即可调整间距） ---- */
-      --keepseek-composer-padding: 0;
+      --keepseek-composer-padding: 0 var(--keepseek-edge-padding) var(--keepseek-edge-padding);
       --keepseek-input-padding: 4px 4px 2px;
       --keepseek-toolbar-padding: 0 4px 4px;
     }
@@ -69,13 +71,26 @@ export function getStyles(): string {
       box-sizing: border-box;
     }
 
+    html {
+      margin: 0;
+      padding: 0;
+      min-width: 0;
+    }
+
     body {
       margin: 0;
+      /* VS Code injects body padding: 0 20px; margin alone does not reset it. */
+      padding: 0;
+      min-width: 0;
       color: var(--vscode-foreground);
       background: var(--vscode-sideBar-background);
       font-family: var(--vscode-chat-font-family, var(--vscode-font-family));
       font-size: var(--vscode-chat-font-size, 13px);
       line-height: 1.5;
+    }
+
+    @media (max-width: 360px) {
+      :root { --keepseek-edge-padding: 4px; }
     }
 
     button,
@@ -262,7 +277,9 @@ export function getStyles(): string {
       position: relative;
       display: flex;
       flex-direction: column;
+      width: 100%;
       height: 100vh;
+      min-width: 0;
       min-height: 0;
     }
 
@@ -1202,6 +1219,7 @@ ${conversationsStylesFragment.source}
 
     .transcript {
       flex: 1;
+      min-width: 0;
       min-height: 0;
       overflow-y: auto;
       padding: 8px var(--keepseek-edge-padding) 12px;
@@ -1288,6 +1306,21 @@ ${conversationsStylesFragment.source}
 
     .message.is-editing .message-body {
       width: min(88%, 680px);
+    }
+
+    @media (max-width: 600px) {
+      .message.user .message-body {
+        max-width: 100%;
+      }
+
+      .message.is-editing .message-body {
+        width: 100%;
+        max-width: 100%;
+      }
+
+      .message.is-editing .message-edit-form {
+        width: 100%;
+      }
     }
 
     .message-role {
