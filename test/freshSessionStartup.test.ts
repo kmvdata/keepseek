@@ -100,6 +100,10 @@ test('fresh session initialization remains blank until explicit history selectio
     const blank = store.getActiveSession();
     assert.equal(blank.messages.length, 0);
     assert.ok(!saved.sessions.some(session => session.id === blank.id));
+    const summaries = store.getSessionSummaries();
+    for (let click = 0; click < 5; click++) assert.equal(await store.createNewSession(), blank);
+    assert.equal(store.activeSessionId, blank.id);
+    assert.deepEqual(store.getSessionSummaries(), summaries, 'repeated New clicks add no empty history rows');
     for (const session of saved.sessions) {
       assert.equal(store.getSessionById(session.id), undefined, 'historical bodies remain cold');
       assert.ok(store.getSessionSummaries().some(summary => summary.id === session.id));

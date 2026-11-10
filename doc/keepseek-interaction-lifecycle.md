@@ -67,6 +67,8 @@ Webview → Host 消息唯一入口仍是 `provider/webviewMessages.ts`；Host �
 
 生产启动及工作区切换使用 `fresh: true`：仅摘要索引进入内存，新空白不恢复旧 active、对象图、计划或上下文。新建空白、历史超时替换及清理后的空白均将上下文标记为 `deferred`，在会话/安全/模型条件就绪时可提交。第一条任务在首个 await 前占有 task owner，然后真实加载缺失或已变更的项目指令与 Skills，加载失败不得进入模型派发。自动保留刷新只读摘要并保留当前 resident active，不能恢复磁盘旧选择。
 
+新建入口在初始化屏障后检查当前会话是否已有 `role: user` 消息。没有用户指令时复用当前对象和 ID，不触发保存、历史新增、`sessionChanged` 或上下文重置；草稿、引用、Skills、模式和就绪状态保留。Store 同样执行此检查，避免直接调用或重复点击生成空历史。已有用户指令即视为已使用，即使尚无模型回复或请求失败，也保留该会话并按正常屏障新建空白；随后再次新建仍复用这个空白。此规则不自动删除之前生成的空历史。
+
 导航不等待整个 `startupInitializationPromise`。会话及必要安全存储跨过初始化屏障后，即使旧活动会话项目上下文、模型目录或展示工作仍在加载，也可开始目标会话事务。create/select/copy 的目标正文、安全选择保存、操作记录恢复及截断失效 flush 完成后，同步释放导航 owner。对于非空历史，项目上下文继续按目标 session/generation 准备，此时 canEdit=true、canNavigate=true、canSubmit=false；上下文和其它执行必要条件满足后在同次状态更新开放提交。导航方法返回的 Promise 仍可等待上下文完成供调用方收口，但 UI 导航能力不依赖这个 Promise 结算。会话/上下文 generation 变化使旧启动或导航上下文工作的 ready、error 和 finally 失效，A→B→A 也不能把第一次进入 A 的结果赋给第二次 A；旧 finally 不释放新 owner、不重复发布 sessionChanged 抬高新入口 revision 下界。不可取消的读取可继续完成缓存，但不能回写新会话状态。
 
 历史正文选择在 store 内有 15 秒读取上限（`HISTORY_SESSION_LOAD_TIMEOUT_MS`），覆盖 `isSessionDeleted` 检查和正文读取。该读取向存储适配器传递 `readOnly`，不触发迁移或索引修复，防止迟到的旧索引覆盖新选择。超时只放弃尚未提交的选择，不缓存迟到正文、不改 active、不调用保存回调或 persist；Host 只释放该次 owner，随后复用当前非目标的空会话或按新建流程打开空会话，以非阻塞信息提示告知用户。新建会话仍通过正常保存屏障；超时读取本身不写入。开始 active 切换和 persist 后不再计时反转，因为内存已切换时放弃提交会制造不确定态。操作记录、历史截断恢复与项目上下文/Skills 仍 fail-closed，超时不能把这些依赖降级为 ready；真实 I/O 错误保留失败和重试语义。

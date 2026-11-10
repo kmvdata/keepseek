@@ -2673,6 +2673,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     try {
       await this.ensureSessionNavigationReady();
       if (this.isBusy || this.hasActiveBackgroundRun()) return;
+      // Check after initialization, before clearing references or publishing a
+      // navigation: an unused session remains the same composer and context.
+      if (!this.sessionStore.hasUserMessages) return this.sessionStore.getActiveSession();
       this.clearSessionTransientState();
       const session = await this.sessionStore.createNewSession(this.language, sessionId => {
         this.interactions.update(operation, 'saving', sessionId);

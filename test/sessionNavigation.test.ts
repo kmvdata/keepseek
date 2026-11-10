@@ -794,6 +794,104 @@ test('repeated new-session clicks create one persisted session while navigation 
   assert.equal(posts.at(-1)?.state?.isBusy, false);
 });
 
+test('new-session clicks reuse a fresh blank without saving, publishing an entry or preparing context', async t => {
+  const { host, store, storage, posts, errors, publish } = await fixture(t, { fresh: true });
+  const blank = store.getActiveSession();
+  const entryRevision = host.activeSessionEntryRevision;
+  const changedCount = posts.filter(post => post.type === 'sessionChanged').length;
+  const summaries = store.getSessionSummaries();
+  let saves = 0, contextReads = 0, skillReads = 0;
+  const save = storage.saveWorkspace.bind(storage);
+  storage.saveWorkspace = async (...args) => { saves++; return save(...args); };
+  const refresh = host.sharedProjectSources.refresh.bind(host.sharedProjectSources);
+  host.sharedProjectSources.refresh = async (...args) => { contextReads++; return refresh(...args); };
+  const resolveSkills = host.skillStore.resolveAndLoadSkills.bind(host.skillStore);
+  host.skillStore.resolveAndLoadSkills = async input => { skillReads++; return resolveSkills(input); };
+
+  await host.handleMessage({ type: 'newSession' });
+  await host.handleMessage({ type: 'newSession' });
+  await Promise.all(Array.from({ length: 3 }, () => host.handleMessage({ type: 'newSession' })));
+  publish();
+
+  assert.equal(store.getActiveSession(), blank);
+  assert.equal(store.activeSessionId, blank.id);
+  assert.deepEqual(store.getSessionSummaries(), summaries, 'unused clicks cannot add historical rows or change their timestamps');
+  assert.equal(saves, 0);
+  assert.equal(contextReads, 0);
+  assert.equal(skillReads, 0);
+  assert.equal(host.activeSessionEntryRevision, entryRevision);
+  assert.equal(posts.filter(post => post.type === 'sessionChanged').length, changedCount);
+  assert.equal(host.sessionRecoveryReady, true);
+  assert.equal(lastState(posts).interaction?.canSubmit, true);
+  assert.equal(lastState(posts).interaction?.canNavigate, true);
+  assert.equal(lastState(posts).isBusy, false);
+  assert.deepEqual(errors, []);
+});
+
+test('reusing an unused session preserves its selected execution mode, Skills and prepared context', async t => {
+  const { host, store, storage, posts, publish } = await fixture(t, { fresh: true });
+  await host.handleMessage({ type: 'setExecutionMode', mode: 'plan' });
+  const blank = store.getActiveSession();
+  blank.activeSkillIds = ['selected-skill'];
+  blank.contextInstructions = 'Prepared context bytes\n';
+  const skills = blank.activeSkillIds;
+  const protocol = blank.requestProtocol;
+  const entryRevision = host.activeSessionEntryRevision;
+  const changedCount = posts.filter(post => post.type === 'sessionChanged').length;
+  let saves = 0;
+  const save = storage.saveWorkspace.bind(storage);
+  storage.saveWorkspace = async (...args) => { saves++; return save(...args); };
+
+  await host.handleMessage({ type: 'newSession' });
+  publish();
+
+  assert.equal(store.getActiveSession(), blank);
+  assert.equal(store.executionMode, 'plan');
+  assert.equal(blank.activeSkillIds, skills);
+  assert.deepEqual(blank.activeSkillIds, ['selected-skill']);
+  assert.equal(blank.contextInstructions, 'Prepared context bytes\n');
+  assert.equal(blank.requestProtocol, protocol);
+  assert.equal(saves, 0, 'reusing a configured blank does not create another persistence barrier');
+  assert.equal(host.activeSessionEntryRevision, entryRevision);
+  assert.equal(posts.filter(post => post.type === 'sessionChanged').length, changedCount);
+  assert.equal(lastState(posts).interaction?.canSubmit, true);
+});
+
+test('a submitted user instruction without an answer is retained when a new session is opened, then its blank is reused', async t => {
+  const { host, store, storage, scope, posts, publish } = await fixture(t, { fresh: true });
+  const submitted = store.getActiveSession();
+  submitted.messages.push({ id: 'submitted-user', role: 'user', content: 'Preserve this submitted task', createdAt: submitted.createdAt });
+  await store.persist();
+  let saves = 0;
+  const save = storage.saveWorkspace.bind(storage);
+  storage.saveWorkspace = async (...args) => { saves++; return save(...args); };
+
+  await host.handleMessage({ type: 'newSession' });
+  const blank = store.getActiveSession();
+  assert.notEqual(blank.id, submitted.id, 'a reply is not required for a user instruction to count as submitted');
+  assert.equal(blank.messages.length, 0);
+  assert.equal(saves, 1);
+  const retained = await storage.loadSession(scope.key, submitted.id);
+  assert.equal(retained?.messages.length, 1);
+  assert.equal(retained?.messages[0].id, 'submitted-user');
+  assert.equal(retained?.messages[0].role, 'user');
+  assert.equal(retained?.messages[0].content, 'Preserve this submitted task');
+  const entryRevision = host.activeSessionEntryRevision;
+  const changedCount = posts.filter(post => post.type === 'sessionChanged').length;
+  const summaries = store.getSessionSummaries();
+
+  await host.handleMessage({ type: 'newSession' });
+  await host.handleMessage({ type: 'newSession' });
+  publish();
+
+  assert.equal(store.getActiveSession(), blank);
+  assert.equal(saves, 1, 'subsequent unused clicks cannot save more empty sessions');
+  assert.deepEqual(store.getSessionSummaries(), summaries);
+  assert.equal(host.activeSessionEntryRevision, entryRevision);
+  assert.equal(posts.filter(post => post.type === 'sessionChanged').length, changedCount);
+  assert.equal(lastState(posts).interaction?.canSubmit, true);
+});
+
 for (const type of ['newSession', 'selectSession'] as const) {
   test(`persisted ${type} is published and unlocked when its context refresh fails`, async t => {
     const { host, store, first, second, posts, errors, publish } = await fixture(t);

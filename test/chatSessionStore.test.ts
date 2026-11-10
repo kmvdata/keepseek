@@ -21,6 +21,58 @@ import { createHistoryTruncationPlan } from '../src/sessions/historyTruncation';
 import type { ChatMessage, ChatSession, WorkspaceSummary } from '../src/shared/types';
 import * as vscode from './stubs/vscode';
 
+for (const messages of [[], [{ ...createMessage(1), content: 'Local notice before any user submission' }]]) {
+  test(`new session reuses an unused conversation with ${messages.length} local messages without saving`, async () => {
+    const scope = { key: 'workspace:unused', name: 'Unused', folderUris: [] };
+    const storage = new MemorySessionStorage({ activeSessionId: 'unused', sessions: [createSession('unused', messages, scope)] });
+    const store = new ChatSessionStore(storage, 'en', scope);
+    await store.initialize();
+    const active = store.getActiveSession();
+    active.executionMode = 'plan';
+    active.activeSkillIds = ['selected-skill'];
+    active.contextInstructions = 'Prepared context bytes\n';
+    active.customTitle = active.title = 'Prepared task';
+    // An unused session may already be on disk after a settings change. New
+    // must not create another identity or write that session into history again.
+    await store.persist();
+    const before = JSON.stringify(active);
+    const summaries = store.getSessionSummaries();
+    storage.saveWorkspace = async () => { throw new Error('unexpected unused-session save'); };
+    const onSaving = () => assert.fail('unused session must not start a save');
+
+    assert.equal(store.hasUserMessages, false);
+    const simultaneous = await Promise.all([store.createNewSession('en', onSaving), store.createNewSession('en', onSaving)]);
+    for (const result of simultaneous) assert.equal(result, active);
+    for (let click = 0; click < 3; click++) assert.equal(await store.createNewSession('en', onSaving), active);
+
+    assert.equal(store.activeSessionId, active.id);
+    assert.equal(JSON.stringify(active), before, 'reuse preserves title, modes, Skills, context and timestamps');
+    assert.deepEqual(store.getSessionSummaries(), summaries);
+  });
+}
+
+test('a submitted user instruction without a model reply is retained when creating one new blank', async () => {
+  const scope = { key: 'workspace:submitted', name: 'Submitted', folderUris: [] };
+  const user = { ...createMessage(0), content: '  Keep original user bytes\n', expandedContent: '  Expanded bytes\n' };
+  const storage = new MemorySessionStorage({ activeSessionId: 'submitted', sessions: [createSession('submitted', [user], scope)] });
+  const store = new ChatSessionStore(storage, 'en', scope);
+  await store.initialize();
+  const submitted = store.getActiveSession();
+  const originalMessages = structuredClone(submitted.messages);
+  assert.equal(store.hasUserMessages, true);
+  let saves = 0;
+  const blank = await store.createNewSession('en', () => { saves++; });
+  assert.notEqual(blank.id, submitted.id);
+  assert.deepEqual(blank.messages, []);
+  assert.deepEqual(storage.saved?.sessions.find(session => session.id === submitted.id)?.messages, originalMessages);
+  assert.equal(submitted.messages[0].content, user.content);
+  assert.equal(submitted.messages[0].expandedContent, user.expandedContent);
+  const saved = storage.saved;
+  assert.equal(await store.createNewSession('en', () => { saves++; }), blank);
+  assert.equal(saves, 1);
+  assert.equal(storage.saved, saved, 'the next click on the unused blank performs no additional save');
+});
+
 test('stored replay normalization clones protocol data without changing visible history or frozen protocol metadata', () => {
   const scope = { key: 'workspace:replay', name: 'Replay', folderUris: [] };
   const responses = {

@@ -328,6 +328,11 @@ export class ChatSessionStore {
     return this.getActiveSession().messages;
   }
 
+  /** A submitted user message counts even when no model reply has arrived. */
+  public get hasUserMessages(): boolean {
+    return this.messages.some(message => message.role === 'user');
+  }
+
   public setLanguage(language: KeepseekLanguage): void {
     this.language = language;
   }
@@ -348,6 +353,9 @@ export class ChatSessionStore {
 
   public async createNewSession(language: KeepseekLanguage = this.language, onSaving?: (sessionId: string) => void): Promise<ChatSession> {
     this.language = language;
+    // Keep the unused conversation (and its settings) in place. In particular,
+    // do not persist it as a history entry just because New was clicked again.
+    if (!this.hasUserMessages) return this.getActiveSession();
     const session = createEmptySession(language, this.workspaceScope, this.approvalModeValue, 'normal');
     this.sessions.unshift(session);
     this.setActiveSessionId(session.id);
