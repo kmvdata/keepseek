@@ -129,3 +129,4 @@ import './historyCleanupErrors.test';
 import './historyCleanupCatalog.test';
 
 import './storageBaseline.test';
+import './atomicStorage.test';

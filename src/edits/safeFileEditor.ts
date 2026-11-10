@@ -504,7 +504,9 @@ export class SafeFileEditor {
     if (source.scheme === 'file' && target.scheme === 'file') {
       await fs.mkdir(path.dirname(target.fsPath), { recursive: true });
       await fs.copyFile(source.fsPath, target.fsPath, fsConstants.COPYFILE_EXCL);
-      const targetHandle = await fs.open(target.fsPath, 'r');
+      // Windows fsync needs write access; POSIX permits a read-only handle and
+      // must still support moving files whose copied mode is read-only.
+      const targetHandle = await fs.open(target.fsPath, process.platform === 'win32' ? 'r+' : 'r');
       try { await targetHandle.sync(); } finally { await targetHandle.close(); }
       await fs.unlink(source.fsPath);
       await Promise.all([fsyncDirectory(path.dirname(source.fsPath)), fsyncDirectory(path.dirname(target.fsPath))]);

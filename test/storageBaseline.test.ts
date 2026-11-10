@@ -8,6 +8,8 @@ import * as vscode from './stubs/vscode';
 import { getConfiguredAgentMaxExecutionMs, getConfiguredMaxFileBytes, getConfiguredModelRequestTimeoutMs, getSavedModelSelection } from '../src/shared/config';
 import { getConfiguredKeepseekLanguage } from '../src/shared/i18n';
 import { saveModelRequestTimeout } from '../src/provider/requestTimeoutSettings';
+import { getConfigurationRegistrationDiagnostics, withConfigurationRegistrationHelp } from '../src/shared/configurationRegistration';
+import { resolve } from 'node:path';
 
 test('0.5.2 starts a distinct native data domain on each host platform', () => {
   assert.equal(KEEPSEEK_BASELINE_VERSION, '0.5.2');
@@ -83,4 +85,43 @@ test('current settings ignore the old namespace in every workspace and save only
     assert.ok(reads.every(section => section === KEEPSEEK_CONFIGURATION_NAMESPACE));
     assert.equal(oldSettings.modelRequestTimeoutSeconds, 300, 'old configuration is neither imported nor rewritten');
   } finally { vscode.workspace.getConfiguration = original; }
+});
+
+test('registration diagnostics distinguish the installed manifest from VS Code defaults without exposing settings', () => {
+  const manifest = JSON.parse(readFileSync('package.json', 'utf8'));
+  const original = vscode.workspace.getConfiguration;
+  let registered = false;
+  vscode.workspace.getConfiguration = () => ({
+    ...original(),
+    inspect: () => registered ? { defaultValue: '', globalValue: undefined, workspaceValue: 'secret-source-fixture' } : undefined
+  });
+  try {
+    const missing = getConfigurationRegistrationDiagnostics(manifest);
+    assert.deepEqual(missing.declaredSelectionKeys, ['selectedSourceId', 'selectedModelId']);
+    assert.deepEqual(missing.missingSelectionDefaults, ['selectedSourceId', 'selectedModelId']);
+    registered = true;
+    const ready = getConfigurationRegistrationDiagnostics(manifest);
+    assert.deepEqual(ready.missingSelectionDefaults, []);
+    assert.equal(ready.inspectionAvailable, true);
+    assert.doesNotMatch(JSON.stringify(ready), /secret-source-fixture/u);
+    assert.deepEqual(getConfigurationRegistrationDiagnostics({}).declaredSelectionKeys, []);
+    const diskError = new Error('EPERM: operation not permitted');
+    assert.equal(withConfigurationRegistrationHelp(diskError, 'en'), diskError);
+    const registrationError = new Error('kmvdata.keepseek.selectedSourceId is not a registered configuration');
+    assert.match(String(withConfigurationRegistrationHelp(registrationError, 'zh-CN')), /重新加载窗口/u);
+  } finally { vscode.workspace.getConfiguration = original; }
+});
+
+test('VSIX verification rejects a stale manifest or a runtime using a different settings namespace', () => {
+  const { assertPackagedConfiguration } = require(resolve('scripts/verify-configuration.cjs')) as {
+    assertPackagedConfiguration(packaged: unknown, source: unknown, runtime: string): void;
+  };
+  const manifest = JSON.parse(readFileSync('package.json', 'utf8'));
+  const runtime = `exports.KEEPSEEK_CONFIGURATION_NAMESPACE = '${KEEPSEEK_CONFIGURATION_NAMESPACE}';`;
+  assert.doesNotThrow(() => assertPackagedConfiguration(manifest, manifest, runtime));
+  const staleManifest = structuredClone(manifest);
+  delete staleManifest.contributes.configuration.properties['kmvdata.keepseek.selectedSourceId'];
+  assert.throws(() => assertPackagedConfiguration(staleManifest, manifest, runtime), /registration does not match/u);
+  assert.throws(() => assertPackagedConfiguration(manifest, manifest,
+    "exports.KEEPSEEK_CONFIGURATION_NAMESPACE = 'keepseek';"), /does not register the runtime setting/u);
 });

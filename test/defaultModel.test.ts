@@ -277,6 +277,45 @@ test('Provider exposes the resolved startup model before new-project workspace w
   }
 });
 
+test('an unregistered workspace setting preserves model selection and can be retried after registration', async () => {
+  const originalConfig = vscode.workspace.getConfiguration;
+  const workspaceValues: Record<string, string> = { selectedSourceId: 'a', selectedModelId: 'shared' };
+  const registrationError = new Error('Unable to write to Workspace Settings because kmvdata.keepseek.selectedSourceId is not a registered configuration.');
+  let registered = false;
+  let writes = 0;
+  vscode.workspace.getConfiguration = (section?: string) => {
+    assert.equal(section, 'kmvdata.keepseek');
+    return {
+      ...originalConfig(),
+      async update(key: string, value: string, target: unknown) {
+        assert.equal(target, vscode.ConfigurationTarget.Workspace);
+        writes++;
+        if (!registered) throw registrationError;
+        workspaceValues[key] = value;
+      }
+    } as unknown as ReturnType<typeof originalConfig>;
+  };
+  try {
+    const host = providerHost(memory(b));
+    host.selectedSourceId = 'a';
+    Object.assign(host, { selectedModelId: 'shared' });
+    await assert.rejects(host.persistModelSelection('b', 'shared'), error => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.cause, registrationError);
+      assert.match(error.message, /Developer: Reload Window/u);
+      assert.match(error.message, /reinstall the current KeepSeek VSIX/u);
+      return true;
+    });
+    assert.equal(host.selectedSourceId, 'a');
+    assert.deepEqual(workspaceValues, { selectedSourceId: 'a', selectedModelId: 'shared' });
+    assert.equal(writes, 2, 'failed write and existing rollback are bounded; no automatic fallback or retry');
+    registered = true;
+    await host.persistModelSelection('b', 'shared');
+    assert.equal(host.selectedSourceId, 'b');
+    assert.deepEqual(workspaceValues, { selectedSourceId: 'b', selectedModelId: 'shared' });
+  } finally { vscode.workspace.getConfiguration = originalConfig; }
+});
+
 function providerHost(state: Pick<Vscode.Memento, 'get' | 'update'>) {
   return Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
     language: 'en', selectedSourceId: '', selectedModelId: '', modelSources: [], availableModels: [],

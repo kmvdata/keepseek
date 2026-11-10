@@ -8,6 +8,7 @@ import type { KeepseekExtensionInfo } from './shared/types';
 import { StartupPerformanceTrace } from './shared/startupPerformance';
 import { getRuntimeIdentity, initializeRuntimeIdentity } from './shared/runtimeIdentity';
 import { getNativeStorageUri } from './shared/storageRoot';
+import { getConfigurationRegistrationDiagnostics } from './shared/configurationRegistration';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const startupTrace = new StartupPerformanceTrace();
@@ -50,7 +51,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     webviewProvider,
     vscode.commands.registerCommand('keepseek.showRuntimeDiagnostics', async () => {
       const document = await vscode.workspace.openTextDocument({ language: 'json', content: JSON.stringify({
-        ...getRuntimeIdentity(), sessionTitle: provider.getSessionTitleDiagnostics(), historyCleanup: provider.getHistoryCleanupDiagnostics()
+        ...getRuntimeIdentity(), configuration: getConfigurationRegistrationDiagnostics(context.extension.packageJSON),
+        sessionTitle: provider.getSessionTitleDiagnostics(), historyCleanup: provider.getHistoryCleanupDiagnostics()
       }, null, 2) });
       await vscode.window.showTextDocument(document, { preview: true });
     }),

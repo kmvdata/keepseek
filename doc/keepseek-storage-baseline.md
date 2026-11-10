@@ -66,6 +66,17 @@ bun run reset:data --apply
 
 自动化验证必须覆盖当前协议的真实性能与故障行为；不得仅删除失败断言来假装当前格式已验证。原生 VS Code UI、真实模型和其他操作系统仍需分别记录现场证据。
 
+## Windows 账号配置与检查点写入
+
+2026-11-11 排查的两个错误属于不同边界：
+
+- `kmvdata.keepseek.selectedSourceId is not a registered configuration`：当前源码清单及排查时已有 VSIX 均注册了该项与 `selectedModelId`。此错误表示正在运行的 VS Code 配置注册表未接受目标配置，不能据此认定账号文件写入失败。仅凭当前仓库无法确认 Windows 现场加载的是哪个清单，更新后须完整重载窗口；仍失败时重装本次构建的 VSIX，再重载。不要为此添加旧键 fallback 或迁移数据。
+- `EPERM: operation not permitted, fsync`：`atomicStorage.ts` 曾以 `r` 重新打开临时文件，再执行刷盘。Windows 的 [FlushFileBuffers](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers) 要求可写句柄；现使用不截断文件的 `r+`。`SafeFileEditor.moveUri()` 在 Windows 对复制目标的刷盘也使用 `r+`，POSIX 保留 `r` 以支持复制后仍为只读权限的文件。文件仍在原子替换前完成刷盘，POSIX 保留替换后的父目录刷盘，Windows 不执行目录刷盘。真正的文件刷盘失败继续向上传播，不能当成保存成功或继续调度。
+
+`test/atomicStorage.test.ts` 使用真实临时文件并注入 Windows 的文件句柄访问限制，验证替换顺序与正文不截断、检查点对象图重载、原始用户字节与预算保持、真实刷盘故障的旧记录保留/临时文件回收/后续重试，以及文件移动与回滚。此测试模拟访问规则，不等同于 Windows 实机验收。
+
+Windows 11 现场验收：安装本次构建包并完整重载窗口，配置账号和选择模型，确认工作区保存两个 `kmvdata.keepseek.selected*` 配置；发送任务并等待多次检查点，停止任务后重启并手动打开该会话，核对正文和任务状态；在临时测试项目内移动文件并回滚，核对原始字节。开发机自动化通过不能替代这些现场结果。
+
 ## 本次交付验证
 
 2026-11-10，开发起点 `00a60049d20a85adfa6cb14e66719d662bb37f17`，验收时源码 HEAD 为 `a8431d70be23120926d090fd11266f337b53a825`，macOS / Node v24.15.0。本会话未执行 Git 提交或推送。产品源码在完整回归期间保持冻结，打包源码指纹与测试基线一致。

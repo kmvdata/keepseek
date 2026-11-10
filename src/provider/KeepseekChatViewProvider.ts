@@ -1,4 +1,5 @@
 import { KEEPSEEK_CONFIGURATION_NAMESPACE } from '../shared/identity';
+import { withConfigurationRegistrationHelp } from '../shared/configurationRegistration';
 import type { AgentRequest, AgentTaskBudgetAuthority } from '../shared/types';
 import { createHistoryCleanupController } from './historyCleanupController';
 import { SessionUseLifetime } from './sessionUseLifetime';
@@ -4245,7 +4246,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
       this.selectedSourceId = previousSourceId;
       this.selectedModelId = previousModelId;
-      throw error;
+      throw withConfigurationRegistrationHelp(error, this.language);
     } finally {
       this.modelSelectionPersistenceDepth = Math.max(0, this.modelSelectionPersistenceDepth - 1);
     }

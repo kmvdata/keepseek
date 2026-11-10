@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { inflateRawSync } = require('node:zlib');
+const { assertPackagedConfiguration } = require('./verify-configuration.cjs');
 
 const root = path.resolve(__dirname, '..');
 const packageJson = require(path.join(root, 'package.json'));
@@ -37,6 +38,7 @@ const forbiddenEntries = [
 
 const entries = readZipEntries(vsixPath);
 const packagedManifest = JSON.parse(readZipEntry(vsixPath, 'extension/package.json'));
+assertPackagedConfiguration(packagedManifest, packageJson, readZipEntry(vsixPath, 'extension/out/shared/identity.js'));
 if (`${packagedManifest.publisher}.${packagedManifest.name}` !== 'keepseek.keepseek'
   || packagedManifest.publisher !== packageJson.publisher || packagedManifest.version !== packageJson.version) {
   throw new Error('VSIX identity or version does not match the keepseek.keepseek baseline.');

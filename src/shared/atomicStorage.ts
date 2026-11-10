@@ -34,12 +34,14 @@ export async function writeBytesAtomic(uri: vscode.Uri, bytes: Uint8Array, optio
     await vscode.workspace.fs.createDirectory(parent);
     try {
       await vscode.workspace.fs.writeFile(temporary, bytes);
-      if (options?.durable && uri.scheme === 'file') await syncLocal(temporary);
+      // Windows FlushFileBuffers requires write access, even after the
+      // provider has finished writing. r+ reopens without truncating bytes.
+      if (options?.durable && uri.scheme === 'file') await syncLocal(temporary, 'r+');
       let lastError: unknown;
       for (let attempt = 0; attempt < MAX_RENAME_ATTEMPTS; attempt += 1) {
         try {
           await vscode.workspace.fs.rename(temporary, uri, { overwrite: true });
-          if (options?.durable && uri.scheme === 'file' && process.platform !== 'win32') await syncLocal(parent);
+          if (options?.durable && uri.scheme === 'file' && process.platform !== 'win32') await syncLocal(parent, 'r');
           return;
         } catch (error) {
           lastError = error;
@@ -61,8 +63,8 @@ export async function writeBytesAtomic(uri: vscode.Uri, bytes: Uint8Array, optio
   });
 }
 
-async function syncLocal(uri: vscode.Uri): Promise<void> {
-  const handle = await open(uri.fsPath, 'r');
+async function syncLocal(uri: vscode.Uri, flags: 'r' | 'r+'): Promise<void> {
+  const handle = await open(uri.fsPath, flags);
   try { await handle.sync(); } finally { await handle.close(); }
 }
 
