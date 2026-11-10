@@ -534,7 +534,7 @@ export class ChatSessionStore {
     }
 
     const previousActiveSessionId = this.activeSessionIdValue;
-    const deletedSummaryIds = new Set(Array.from(ids).filter((id) => this.sessionSummaries.has(id)));
+    const deletedSummaryIds = new Set(Array.from(ids).filter((id) => this.sessionSummaries.has(id) || this.getSessionById(id)));
     const deletedActiveSession = deletedSummaryIds.has(previousActiveSessionId);
     const deletedCount = deletedSummaryIds.size;
     this.sessions = this.sessions.filter((session) => {
@@ -678,7 +678,9 @@ export class ChatSessionStore {
     const snapshot: StoredWorkspaceSessionState = {
       activeSessionId: this.activeSessionIdValue,
       approvalMode: this.approvalModeValue,
-      sessions: this.sessions.map(snapshotSession),
+      // A usable composer is not yet a historical conversation. Settings and
+      // navigation still save their metadata without serializing blank shards.
+      sessions: this.sessions.filter(session => session.messages.length > 0).map(snapshotSession),
       sessionSummaries: this.getSessionSummaries()
     };
     const checkpointSources = new Map(this.sessions.flatMap(session => session.messages.map(message => [message.id, message.runCheckpoint] as const)));
@@ -846,7 +848,8 @@ export class ChatSessionStore {
 
   public getSessionSummaries(): ChatSessionSummary[] {
     for (const session of this.getCurrentWorkspaceSessions()) {
-      this.sessionSummaries.set(session.id, toSessionSummary(session, this.language));
+      if (session.messages.length) this.sessionSummaries.set(session.id, toSessionSummary(session, this.language));
+      else this.sessionSummaries.delete(session.id);
     }
     return Array.from(this.sessionSummaries.values())
       .filter((summary) => summary.workspaceKey === this.workspaceScope.key)
@@ -867,7 +870,7 @@ export class ChatSessionStore {
       return await this.sessionStorage.listWorkspaceSessionSummaries(normalizedWorkspaceKey);
     }
     const sessions = await this.sessionStorage.loadWorkspaceSessions(normalizedWorkspaceKey);
-    return sessions.map((session) => toSessionSummary(session, this.language));
+    return sessions.filter(session => session.messages.length > 0).map((session) => toSessionSummary(session, this.language));
   }
 
   public async deleteOtherWorkspaceSessions(workspaceKey: string, sessionIds: string[]): Promise<number> {
@@ -950,6 +953,7 @@ export class ChatSessionStore {
 
       const isActive = session.id === activeSession.id;
       if (!isActive && !session.messages.length) {
+        this.sessionSummaries.delete(session.id);
         continue;
       }
 
@@ -978,7 +982,8 @@ export class ChatSessionStore {
 
     this.sessions = sortSessionsByUpdatedAt(compacted);
     for (const session of this.sessions) {
-      this.sessionSummaries.set(session.id, toSessionSummary(session, this.language));
+      if (session.messages.length) this.sessionSummaries.set(session.id, toSessionSummary(session, this.language));
+      else this.sessionSummaries.delete(session.id);
     }
     this.setActiveSessionId(activeSession.id);
   }

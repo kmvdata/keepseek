@@ -9,6 +9,7 @@ VS Code Webview 的宿主默认样式包含 `body { margin: 0; padding: 0 20px; 
 - `--keepseek-edge-padding` 默认 6px，视口不超过 360px 时为 4px；double 值从该变量派生。
 - header、transcript、context bar、background region 和 composer 各自只消费一次 gutter。transcript 内的卡片不再叠加横向 margin。
 - composer 的 `.composer-input-wrap` 已经位于 gutter 内，command/reference menu 相对此节点左右定位为 0。
+- 历史菜单相对 `.shell` 使用同一左右 gutter，不设固定宽度上限；随面板铺满可用宽度，并与输入卡片左右边缘对齐。
 - 视口不超过 600px 时，长 user 消息与编辑重发框可使用完整正文列；短消息仍右对齐。助手消息始终可使用完整正文列。
 - modal 的视口安全边界独立使用 `--keepseek-overlay-inset-double: 12px`，不会随窄屏正文 gutter 变化。
 - 按钮点击尺寸、内部可读性留白、键盘焦点和 DOM/消息契约保持原有语义。长代码、表格在自身容器内滚动。

@@ -291,6 +291,8 @@ function client(hostDefaults) {
     await paint();
     results.historyMenu = inside('#sessionMenu', width, scale);
     close(rect('#sessionMenu').top - rect('.header').bottom, 2, 'history menu follows header with 2px inset');
+    close(rect('#sessionMenu').left, input.left, 'history menu fills available width from the input left edge');
+    close(rect('#sessionMenu').right, input.right, 'history menu fills available width to the input right edge');
     element('#historyTab').click();
     receive({ type: 'showSettingsDialog', sources: [{ id: 'fixture', name: 'Layout fixture', provider: 'openai-compatible',
       apiKey: '', baseUrl: 'https://example.invalid/v1', models: [{ id: 'fixture-model', name: 'Fixture model' }] }], selectedSourceId: 'fixture' });

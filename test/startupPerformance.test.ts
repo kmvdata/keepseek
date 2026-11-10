@@ -140,7 +140,8 @@ test('cold storage starts with one usable empty session without creating a monol
   const store = new ChatSessionStore(new GlobalSessionStorage(vscode.Uri.file(root) as never), 'en', scope);
   await store.initialize();
   assert.equal(store.messages.length, 0);
-  assert.equal(store.getSessionSummaries().length, 1);
+  assert.ok(store.activeSessionId, 'cold startup still supplies an editable conversation');
+  assert.equal(store.getSessionSummaries().length, 0, 'an unused composer is not a historical conversation');
   await assert.rejects(stat(path.join(root, 'chat-sessions', 'v1', 'workspaces', `${getWorkspaceHash(scope.key)}.json`)));
 });
 

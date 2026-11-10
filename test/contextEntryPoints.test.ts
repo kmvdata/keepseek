@@ -17,6 +17,16 @@ import { createWebviewDomHarness } from './webviewDomHarness';
 import { focusView } from '../src/provider/focusView';
 import { clearCommandHandlers, setCommandHandler } from './stubs/vscode';
 
+test('history fills the shared horizontal gutter and wraps controls in narrow views', () => {
+  const styles = getStyles();
+  const menu = styles.match(/\.session-menu\s*\{([^}]+)\}/u)?.[1] ?? '';
+  assert.match(menu, /left:\s*var\(--keepseek-edge-padding\)/u);
+  assert.match(menu, /right:\s*var\(--keepseek-edge-padding\)/u);
+  assert.match(menu, /width:\s*auto/u);
+  assert.doesNotMatch(menu, /380px|100vw/u);
+  assert.match(styles, /\.session-menu-controls\s*\{[^}]*flex-wrap:\s*wrap/u);
+});
+
 test('header timeout dropdown offers exactly six presets with a one-hour default in both languages', async () => {
   const template = getTemplate();
   const select = template.match(/<select id="settingsRequestTimeoutValue"[^>]*>([\s\S]*?)<\/select>/u)?.[1] ?? '';

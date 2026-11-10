@@ -831,7 +831,9 @@ for (const committed of [true, false]) {
 test('an archived committed stop survives clone without retaining attempt tokens or old identities', async () => {
   const { store, storage, session, coordinator } = await fixture();
   assert.equal(await coordinator.complete(session.id, 'turn-1', async () => set), true);
-  session.messages = [];
+  // The original title basis is gone, but this remains a real conversation.
+  // A completely blank composer now deliberately has no persisted history.
+  session.messages = pair('after-archive');
   await store.persist();
   const restarted = new ChatSessionStore(storage, 'en', scope);
   await restarted.initialize();

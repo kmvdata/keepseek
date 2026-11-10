@@ -7,8 +7,10 @@ export const conversationsStylesFragment: WebviewFragment = {
       position: absolute;
       top: calc(var(--keepseek-header-height) + var(--keepseek-vertical-inset));
       left: var(--keepseek-edge-padding);
+      right: var(--keepseek-edge-padding);
       z-index: 40;
-      width: min(380px, calc(100% - var(--keepseek-edge-padding-double)));
+      width: auto;
+      min-width: 0;
       max-height: min(520px, calc(100vh - 72px));
       overflow-y: auto;
       padding: 4px;
@@ -36,7 +38,7 @@ export const conversationsStylesFragment: WebviewFragment = {
 
     .session-menu-controls {
       align-items: center;
-      flex-wrap: nowrap;
+      flex-wrap: wrap;
     }
 
     .session-menu-bulk {

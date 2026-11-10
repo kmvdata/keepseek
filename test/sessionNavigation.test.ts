@@ -300,14 +300,28 @@ test('target operation recovery failure is retried before submission becomes ava
 });
 
 test('deleting the active history row restores the replacement session recovery readiness', async t => {
-  const { host, store, first, publish, posts } = await fixture(t);
+  const { host, store, storage, scope, first, second, publish, posts } = await fixture(t);
   const previousWarning = vscode.window.showWarningMessage;
   vscode.window.showWarningMessage = async (_message, ...items) => items.find(item => typeof item === 'string') as never;
   t.after(() => { vscode.window.showWarningMessage = previousWarning; });
   await host.handleMessage({ type: 'deleteSessions', sessionIds: [first.id] });
   publish();
   assert.notEqual(store.activeSessionId, first.id);
+  const blank = store.getActiveSession();
+  assert.equal(blank.messages.length, 0);
+  assert.deepEqual(store.getSessionSummaries().map(session => session.id), [second.id]);
+  assert.deepEqual((await storage.listWorkspaceSessionSummaries(scope.key)).map(session => session.id), [second.id]);
+  assert.equal(await storage.loadSession(scope.key, blank.id, { readOnly: true }), undefined);
   assert.equal(host.sessionRecoveryReady, true);
+  assert.equal(lastState(posts).interaction?.canSubmit, true);
+
+  await host.handleMessage({ type: 'newSession' });
+  assert.equal(store.getActiveSession(), blank);
+  await host.handleMessage({ type: 'deleteSessions', sessionIds: [second.id] });
+  publish();
+  assert.equal(store.getActiveSession(), blank, 'deleting the remaining historical row preserves the transient composer');
+  assert.deepEqual(store.getSessionSummaries(), []);
+  assert.deepEqual(await storage.listWorkspaceSessionSummaries(scope.key), []);
   assert.equal(lastState(posts).interaction?.canSubmit, true);
 });
 
@@ -764,7 +778,7 @@ test('failed initial session loading leaves navigation unlocked without saving a
   assert.equal(errors.length, 1);
 });
 
-test('repeated new-session clicks create one persisted session while navigation is pending', async t => {
+test('repeated new-session clicks persist retained history once while opening one transient composer', async t => {
   const { host, store, storage, first, second, publish, posts } = await fixture(t);
   const saveStarted = deferred();
   const releaseSave = deferred();
@@ -787,6 +801,9 @@ test('repeated new-session clicks create one persisted session while navigation 
   assert.equal(new Set(states.map(state => state.activeSessionId)).size, 1);
   assert.notEqual(store.activeSessionId, first.id);
   assert.notEqual(store.activeSessionId, second.id);
+  assert.ok(states.every(state => state.sessions.every(session => session.messages.length > 0 && session.id !== state.activeSessionId)),
+    'the save barrier retains real history without serializing its blank replacement');
+  assert.ok(!store.getSessionSummaries().some(session => session.id === store.activeSessionId));
   assert.equal(host.isStartingRun, false);
   assert.equal(host.currentRunContextsBySession.has(store.activeSessionId), false, 'blank navigation defers project and Skill reads until a task is submitted');
   assert.equal(host.sharedProjectSources.dirty, true);
@@ -871,6 +888,8 @@ test('a submitted user instruction without an answer is retained when a new sess
   assert.notEqual(blank.id, submitted.id, 'a reply is not required for a user instruction to count as submitted');
   assert.equal(blank.messages.length, 0);
   assert.equal(saves, 1);
+  assert.ok(!store.getSessionSummaries().some(session => session.id === blank.id));
+  assert.equal(await storage.loadSession(scope.key, blank.id, { readOnly: true }), undefined);
   const retained = await storage.loadSession(scope.key, submitted.id);
   assert.equal(retained?.messages.length, 1);
   assert.equal(retained?.messages[0].id, 'submitted-user');

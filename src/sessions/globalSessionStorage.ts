@@ -134,7 +134,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     let index = await this.readWorkspaceIndex(hash, workspaceScope);
     if (!index) return { activeSessionId: '', sessions: [], sessionSummaries: [] };
     if (options.fresh) return { activeSessionId: '', approvalMode: index.approvalMode,
-      sessions: [], sessionSummaries: index.sessions.map(toPublicSummary) };
+      sessions: [], sessionSummaries: (await this.getHistoryEntries(index)).map(toPublicSummary) };
 
     index = await this.reconcileWorkspaceIndex(index);
     const activeSession = index.activeSessionId
@@ -144,7 +144,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
       activeSessionId: activeSession?.id ?? '',
       approvalMode: index.approvalMode,
       sessions: activeSession ? [activeSession] : [],
-      sessionSummaries: index.sessions.map(toPublicSummary)
+      sessionSummaries: (await this.getHistoryEntries(index)).map(toPublicSummary)
     };
   }
 
@@ -153,7 +153,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     try {
       if (this.globalStorageUri.scheme === 'file') {
         for (const session of state.sessions) {
-          if (session.workspaceKey === workspaceScope.key && !await this.isSessionDeleted(session.workspaceKey, session.id)) {
+          if (session.messages.length && session.workspaceKey === workspaceScope.key && !await this.isSessionDeleted(session.workspaceKey, session.id)) {
             leases.push(await this.acquireSessionUse(session.workspaceKey, session.id));
           }
         }
@@ -183,7 +183,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     const existing = await this.readWorkspaceIndex(workspaceHash, workspaceScope);
     const entries = new Map((existing?.sessions ?? []).map((entry) => [entry.id, entry]));
     for (const summary of state.sessionSummaries ?? []) {
-      if (summary.workspaceKey !== workspaceScope.key || await this.isSessionDeleted(summary.workspaceKey, summary.id)) continue;
+      if (!summary.messageCount || summary.workspaceKey !== workspaceScope.key || await this.isSessionDeleted(summary.workspaceKey, summary.id)) continue;
       const previous = entries.get(summary.id);
       entries.set(summary.id, {
         ...summary,
@@ -194,7 +194,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     }
 
     const sessions: ChatSession[] = [];
-    for (const session of state.sessions) if (session.workspaceKey === workspaceScope.key
+    for (const session of state.sessions) if (session.messages.length && session.workspaceKey === workspaceScope.key
       && !await this.isSessionDeleted(session.workspaceKey, session.id)) sessions.push(session);
     await Promise.all(sessions.map(async (session) => {
       const byteLength = await this.objects(this.getSessionUri(workspaceHash, session.id)).save(session, toSessionSummary(session));
@@ -252,25 +252,46 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
 
   public async listWorkspaceSessionSummaries(workspaceKey: string): Promise<ChatSessionSummary[]> {
     const index = await this.loadIndexByWorkspaceKey(workspaceKey.trim());
-    return index ? index.sessions.map(toPublicSummary) : [];
+    return index ? (await this.getHistoryEntries(index)).map(toPublicSummary) : [];
+  }
+
+  /** Old current-format placeholders may still exist. Verify only their small
+   * manifest: a zero index count can lag a committed first user message. Never
+   * decode a transcript on fresh startup, or hide an unreadable/unknown shard.
+   * Keep raw entries for cross-process writers and cleanup ownership checks. */
+  private async getHistoryEntries(index: WorkspaceSessionIndex): Promise<SessionIndexEntry[]> {
+    const entries = await Promise.all(index.sessions.map(async entry => {
+      if (entry.messageCount > 0) return entry;
+      try {
+        const manifest = await this.readJsonFile(this.getSessionUri(getWorkspaceHash(index.workspaceKey), entry.id), 'empty session manifest');
+        if (!isRecord(manifest) || manifest.version !== 4 || manifest.workspaceKey !== index.workspaceKey
+          || manifest.sessionId !== entry.id || !Number.isSafeInteger(manifest.revision) || (manifest.revision as number) < 1
+          || typeof manifest.header !== 'string' || !/^[a-f0-9]{64}$/u.test(manifest.header) || !Array.isArray(manifest.messages)) return entry;
+        if (manifest.headerInline && createHash('sha256').update(JSON.stringify(manifest.headerInline)).digest('hex') !== manifest.header) return entry;
+        return manifest.messages.length ? { ...entry, messageCount: manifest.messages.length } : undefined;
+      } catch { return entry; }
+    }));
+    return entries.filter((entry): entry is SessionIndexEntry => Boolean(entry));
   }
 
   public async listAllWorkspaceSummaries(): Promise<WorkspaceSummary[]> {
     const manifest = await this.readManifestWithoutRebuild();
     let repaired = false;
+    const historyCounts = new Map<string, number>();
     for (const hash of await this.listWorkspaceIndexHashes()) {
       const index = await this.readWorkspaceIndex(hash);
       if (!index) continue;
+      historyCounts.set(index.workspaceKey, (await this.getHistoryEntries(index)).length);
       const previous = JSON.stringify(manifest.workspaces[hash]);
       this.setManifestWorkspace(manifest, index);
       if (JSON.stringify(manifest.workspaces[hash]) !== previous) repaired = true;
     }
     if (repaired) await this.writeManifestBestEffort(manifest, 'workspace listing repair');
-    return Object.values(manifest.workspaces).map((entry) => ({
+    return Object.values(manifest.workspaces).map(entry => ({
       workspaceKey: entry.workspaceKey,
       workspaceName: entry.workspaceName,
       workspaceFolders: entry.workspaceFolders,
-      sessionCount: entry.sessionCount,
+      sessionCount: historyCounts.get(entry.workspaceKey) ?? entry.sessionCount,
       updatedAt: entry.updatedAt
     })).sort((left, right) => getIsoTimestamp(right.updatedAt) - getIsoTimestamp(left.updatedAt));
   }
@@ -278,7 +299,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
   public async loadWorkspaceSessions(workspaceKey: string): Promise<ChatSession[]> {
     const index = await this.loadIndexByWorkspaceKey(workspaceKey.trim());
     if (!index) return [];
-    const sessions = await Promise.all(index.sessions.map((entry) => this.readSession(index.workspaceKey, entry.id, index)));
+    const sessions = await Promise.all((await this.getHistoryEntries(index)).map((entry) => this.readSession(index.workspaceKey, entry.id, index)));
     return sortSessionsByUpdatedAt(sessions.filter((session): session is ChatSession => Boolean(session)));
   }
 

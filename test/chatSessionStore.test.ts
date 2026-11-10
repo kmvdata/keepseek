@@ -32,11 +32,13 @@ for (const messages of [[], [{ ...createMessage(1), content: 'Local notice befor
     active.activeSkillIds = ['selected-skill'];
     active.contextInstructions = 'Prepared context bytes\n';
     active.customTitle = active.title = 'Prepared task';
-    // An unused session may already be on disk after a settings change. New
-    // must not create another identity or write that session into history again.
+    // Saving settings must not promote a blank composer into history. A local
+    // notice remains auditable, and neither case needs another save on New.
     await store.persist();
     const before = JSON.stringify(active);
     const summaries = store.getSessionSummaries();
+    assert.equal(summaries.length, messages.length ? 1 : 0);
+    assert.equal(storage.saved?.sessions.length, messages.length ? 1 : 0);
     storage.saveWorkspace = async () => { throw new Error('unexpected unused-session save'); };
     const onSaving = () => assert.fail('unused session must not start a save');
 
@@ -64,6 +66,8 @@ test('a submitted user instruction without a model reply is retained when creati
   const blank = await store.createNewSession('en', () => { saves++; });
   assert.notEqual(blank.id, submitted.id);
   assert.deepEqual(blank.messages, []);
+  assert.deepEqual(store.getSessionSummaries().map(summary => summary.id), [submitted.id]);
+  assert.equal(storage.saved?.sessions.some(session => session.id === blank.id), false);
   assert.deepEqual(storage.saved?.sessions.find(session => session.id === submitted.id)?.messages, originalMessages);
   assert.equal(submitted.messages[0].content, user.content);
   assert.equal(submitted.messages[0].expandedContent, user.expandedContent);
@@ -360,6 +364,8 @@ test('global storage isolates project approval modes and copied sessions use the
   await first.initialize();
   await first.setApprovalMode('delegate');
   await first.setExecutionMode('plan');
+  first.messages.push({ ...createMessage(0), content: 'An actual submitted task to copy across workspaces' });
+  await first.persist();
   const firstSessionId = first.activeSessionId;
 
   const second = new ChatSessionStore(storage, 'en', secondScope);
@@ -396,7 +402,7 @@ test('copying another workspace session refuses a pending or malformed history j
     source.pendingHistoryTruncation = pending as ChatSession['pendingHistoryTruncation'];
     await assert.rejects(store.copyOtherWorkspaceSession(sourceScope.key, source.id), /original workspace.*history recovery/);
     assert.equal(store.activeSessionId, target.id);
-    assert.equal(store.getSessionSummaries().length, 1);
+    assert.equal(store.getSessionSummaries().length, 0, 'an unused target composer is not a history row');
     assert.equal(storage.saved, undefined);
   }
   delete source.pendingHistoryTruncation;
@@ -435,6 +441,35 @@ test('cleanup replaces a deleted active session with a blank normal session with
   assert.equal(JSON.stringify([retained.messages, retained.contextInstructions, retained.requestProtocol]), before);
   assert.equal(storage.saved?.activeSessionId, store.activeSessionId);
   assert.ok(!storage.saved?.sessions.some(session => session.id === active.id));
+  assert.ok(!storage.saved?.sessions.some(session => session.id === store.activeSessionId));
+  assert.deepEqual(store.getSessionSummaries().map(summary => summary.id), [other.id]);
+});
+
+test('deleting a current conversation replaces it with a transient blank and never adds empty history', async () => {
+  const scope = { key: 'workspace:delete-current', name: 'Delete Current', folderUris: [] };
+  const active = createSession('delete-current', [createMessage(0)], scope);
+  const retained = createSession('delete-retained', [createMessage(2)], scope);
+  const storage = new MemorySessionStorage({ activeSessionId: active.id, sessions: [active, retained] });
+  const store = new ChatSessionStore(storage, 'en', scope);
+  await store.initialize();
+
+  assert.deepEqual(await store.deleteSessions([active.id]), { deletedCount: 1, activeSessionChanged: true });
+  const blank = store.getActiveSession();
+  assert.notEqual(blank.id, active.id);
+  assert.notEqual(blank.id, retained.id);
+  assert.equal(blank.messages.length, 0);
+  assert.deepEqual(store.getSessionSummaries().map(summary => summary.id), [retained.id]);
+  assert.deepEqual(storage.saved?.sessions.map(session => session.id), [retained.id]);
+  assert.equal(await store.createNewSession(), blank);
+
+  // A direct deletion can target the resident blank even though it has no
+  // history row. Replacing it must not silently select the retained history.
+  assert.deepEqual(await store.deleteSessions([blank.id]), { deletedCount: 1, activeSessionChanged: true });
+  assert.notEqual(store.activeSessionId, blank.id);
+  assert.notEqual(store.activeSessionId, retained.id);
+  assert.equal(store.messages.length, 0);
+  assert.deepEqual(store.getSessionSummaries().map(summary => summary.id), [retained.id]);
+  assert.deepEqual(storage.saved?.sessions.map(session => session.id), [retained.id]);
 });
 
 test('cleanup of another session preserves the viewed session identity and requires a committed deletion', async () => {

@@ -9,6 +9,7 @@ import { test, type TestContext } from 'node:test';
 import * as vscode from './stubs/vscode';
 import { ChatSessionStore, createEmptySession, type WorkspaceSessionScope } from '../src/sessions/chatSessionStore';
 import { GlobalSessionStorage, getWorkspaceHash, type WorkspaceSessionIndex } from '../src/sessions/globalSessionStorage';
+import { SessionObjectStore } from '../src/sessions/sessionObjectStore';
 
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 
@@ -187,10 +188,109 @@ test('fresh initialization of an unused workspace creates only an in-memory blan
   try {
     await store.initialize({ fresh: true });
     assert.equal(store.messages.length, 0);
-    assert.equal(store.getSessionSummaries().length, 1);
+    assert.equal(store.getSessionSummaries().length, 0, 'the usable blank composer is not a history entry');
     assertSummaryOnly(io);
   } finally { io.restore(); }
   assert.deepEqual(await readdir(root), []);
+});
+
+test('creating, configuring and deleting sessions never persists blank replacement shards', async t => {
+  const { root, storage } = await fixture(t);
+  const scope = { key: 'workspace:empty-history', name: 'Empty history', folderUris: [] };
+  const store = new ChatSessionStore(storage, 'en', scope);
+  await store.initialize({ fresh: true });
+  const first = store.getActiveSession();
+  await store.setExecutionMode('plan');
+  await store.setApprovalMode('delegate');
+  assert.equal(store.getActiveSession(), first);
+  assert.deepEqual(store.getSessionSummaries(), []);
+  assert.deepEqual((await storage.loadWorkspace(scope, { fresh: true })).sessionSummaries, []);
+
+  const directory = join(root, 'chat-sessions', 'v2', 'workspaces', getWorkspaceHash(scope.key));
+  const shardPath = (id: string) => join(directory, 'sessions', `${digest(id).slice(0, 32)}.json`);
+  await assert.rejects(readFile(shardPath(first.id)), { code: 'ENOENT' });
+  first.messages.push({ id: 'first-user', role: 'user', content: '  First submitted bytes\n', createdAt: first.createdAt });
+  await store.persist();
+  assert.deepEqual(store.getSessionSummaries().map(item => item.id), [first.id]);
+  assert.equal((await storage.loadSession(scope.key, first.id))?.messages[0].content, '  First submitted bytes\n');
+
+  const second = await store.createNewSession();
+  assert.notEqual(second.id, first.id);
+  await store.setExecutionMode('plan');
+  assert.deepEqual(store.getSessionSummaries().map(item => item.id), [first.id]);
+  await assert.rejects(readFile(shardPath(second.id)), { code: 'ENOENT' });
+  await store.selectSession(first.id);
+  assert.deepEqual(store.getSessionSummaries().map(item => item.id), [first.id], 'abandoned blanks leave no stale summaries');
+  await store.deleteSessions([first.id]);
+  const replacement = store.getActiveSession();
+  assert.equal(replacement.messages.length, 0);
+  assert.deepEqual(store.getSessionSummaries(), []);
+  assert.deepEqual((await storage.loadWorkspace(scope, { fresh: true })).sessionSummaries, []);
+  await assert.rejects(readFile(shardPath(replacement.id)), { code: 'ENOENT' });
+
+  replacement.messages.push({ id: 'replacement-user', role: 'user', content: 'Next task', createdAt: replacement.createdAt });
+  await store.persist();
+  const restored = new ChatSessionStore(new GlobalSessionStorage(vscode.Uri.file(root) as never), 'en', scope);
+  await restored.initialize({ fresh: true });
+  assert.deepEqual(restored.getSessionSummaries().map(item => item.id), [replacement.id]);
+  assert.equal(restored.messages.length, 0, 'fresh startup still opens an unused composer without restoring history');
+});
+
+test('current-format empty shards are excluded without losing delayed first messages or cleanup ownership', async t => {
+  const { root, storage } = await fixture(t);
+  const saved = await writeWorkspace(root, 'workspace:existing-empty');
+  const directory = join(root, 'chat-sessions', 'v2', 'workspaces', getWorkspaceHash(saved.scope.key));
+  const index = JSON.parse(await readFile(saved.indexPath, 'utf8')) as WorkspaceSessionIndex;
+  // Seed the exact current-format data written by the old bug, bypassing the
+  // corrected adapter's refusal to create a new empty historical shard.
+  const empty = createEmptySession('en', saved.scope);
+  const storageFile = `sessions/${digest(empty.id).slice(0, 32)}.json`;
+  const emptyObjects = new SessionObjectStore(vscode.Uri.file(join(directory, storageFile)) as never);
+  await emptyObjects.save(empty);
+  const emptyOrphan = createEmptySession('en', saved.scope);
+  await new SessionObjectStore(vscode.Uri.file(join(directory, 'sessions', `${digest(emptyOrphan.id).slice(0, 32)}.json`)) as never).save(emptyOrphan);
+  index.sessions.push({ id: empty.id, title: empty.title, workspaceKey: saved.scope.key, workspaceName: saved.scope.name,
+    createdAt: empty.createdAt, updatedAt: empty.updatedAt, messageCount: 0, isFavorite: false, storageFile });
+  const delayed = index.sessions[0];
+  delayed.messageCount = 0; // The body commit succeeded before its summary did.
+  await writeFile(saved.indexPath, JSON.stringify(index));
+  const io = observeStorageIo();
+  try {
+    const fresh = await storage.loadWorkspace(saved.scope, { fresh: true });
+    assert.deepEqual(fresh.sessionSummaries?.map(item => item.id).sort(), saved.sessions.map(item => item.id).sort());
+    assert.equal(fresh.sessionSummaries?.find(item => item.id === delayed.id)?.messageCount, 1);
+    assert.deepEqual(io.reads.filter(path => path.includes('.objects')), [], 'zero-count validation reads manifests, never user bodies');
+    assert.deepEqual(io.writes, []);
+  } finally { io.restore(); }
+  assert.ok(!(await storage.listWorkspaceSessionSummaries(saved.scope.key)).some(item => item.id === empty.id));
+  assert.ok(!(await storage.listWorkspaceSessionSummaries(saved.scope.key)).some(item => item.id === emptyOrphan.id));
+  assert.ok(!(await storage.loadWorkspaceSessions(saved.scope.key)).some(item => item.id === empty.id));
+  assert.equal((await storage.listAllWorkspaceSummaries()).find(item => item.workspaceKey === saved.scope.key)?.sessionCount, 3,
+    'the recovered non-empty orphan counts as history, while the empty shard does not');
+  const catalog = await storage.readHistoryCleanupCatalog(saved.scope.key);
+  assert.equal(catalog.ownershipComplete, true, 'the old empty shard keeps its raw ownership record');
+  assert.equal(catalog.entries.find(item => item.id === empty.id)?.hasHistory, false);
+  assert.equal(catalog.entries.find(item => item.id === emptyOrphan.id)?.hasHistory, false,
+    'repair registers an empty orphan as ownership metadata without making it public history');
+  // A stale empty snapshot must neither erase nor hide the committed body.
+  await storage.saveWorkspace(saved.scope, { activeSessionId: empty.id, sessions: [empty],
+    sessionSummaries: [{ ...delayed, messageCount: 0 }, { ...index.sessions[1], messageCount: 0 }] });
+  const committed = JSON.parse(await readFile(saved.indexPath, 'utf8')) as WorkspaceSessionIndex;
+  assert.equal(committed.sessions.find(item => item.id === index.sessions[1].id)?.messageCount, 1,
+    'a stale zero-count summary cannot overwrite a positive history record');
+  assert.equal((await storage.loadSession(saved.scope.key, delayed.id))?.messages[0].content, saved.sessions[0].messages[0].content);
+  assert.ok(!(await storage.listWorkspaceSessionSummaries(saved.scope.key)).some(item => item.id === empty.id));
+});
+
+test('an unverified zero-count shard remains visible rather than being discarded as empty', async t => {
+  const { root, storage } = await fixture(t);
+  const saved = await writeWorkspace(root, 'workspace:unknown-empty');
+  const index = JSON.parse(await readFile(saved.indexPath, 'utf8')) as WorkspaceSessionIndex;
+  index.sessions[0].messageCount = 0;
+  await writeFile(saved.indexPath, JSON.stringify(index));
+  await writeFile(join(root, 'chat-sessions', 'v2', 'workspaces', getWorkspaceHash(saved.scope.key), index.sessions[0].storageFile), '{}');
+  const fresh = await storage.loadWorkspace(saved.scope, { fresh: true });
+  assert.ok(fresh.sessionSummaries?.some(item => item.id === index.sessions[0].id));
 });
 
 test('production activation explicitly requests fresh initialization with the shared native storage root', () => {

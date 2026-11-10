@@ -53,7 +53,10 @@ test('bounded disk loading skips index repairs and its late read cannot overwrit
   const replacement = await store.createNewSession();
   await storage.flush();
   const before = await diskSnapshot(root);
-  assert.equal(JSON.parse(await readFile(indexPath, 'utf8')).activeSessionId, replacement.id);
+  const saved = JSON.parse(await readFile(indexPath, 'utf8')) as WorkspaceSessionIndex;
+  assert.equal(saved.activeSessionId, active.id, 'the new blank is transient; disk keeps its last real history selection');
+  assert.ok(!saved.sessions.some(session => session.id === replacement.id));
+  assert.ok(!store.getSessionSummaries().some(session => session.id === replacement.id));
 
   release.resolve(); await completed.promise;
   await new Promise<void>(resolve => setImmediate(resolve));
@@ -62,14 +65,15 @@ test('bounded disk loading skips index repairs and its late read cannot overwrit
   assert.equal(store.getSessionById(target.id), undefined);
   assert.equal(repairs, 0);
   assert.deepEqual(await diskSnapshot(root), before, 'late loading performs no shard, index or manifest write');
-  assert.equal(JSON.parse(await readFile(indexPath, 'utf8')).activeSessionId, replacement.id);
+  assert.equal(JSON.parse(await readFile(indexPath, 'utf8')).activeSessionId, active.id);
 
   internals.readSession = read;
   assert.equal((await storage.loadSession(scope.key, target.id))?.id, target.id);
   assert.equal(repairs, 1, 'ordinary readers retain their existing reconciliation behavior');
   const repaired = JSON.parse(await readFile(indexPath, 'utf8')) as WorkspaceSessionIndex;
   assert.ok(repaired.sessions.some(session => session.id === orphan.id));
-  assert.equal(repaired.activeSessionId, replacement.id);
+  assert.equal(repaired.activeSessionId, active.id);
+  assert.ok(!repaired.sessions.some(session => session.id === replacement.id), 'ordinary repair must not invent a shard for the transient composer');
 });
 
 test('read-only loading never imports obsolete monoliths or writes a current index', async t => {
