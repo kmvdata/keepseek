@@ -520,13 +520,18 @@ test('journal Apply I/O stays constant with large history and does not run GC be
   });
   assert.ok(target);
   await store.flush();
+  // Other fixtures' deferred artifact GC can use the shared VS Code stub
+  // during this Apply. Attribute I/O to this store's temporary directory.
+  const inStore = (file: string) => file === root || file.startsWith(root + path.sep);
   vscode.workspace.fs.writeFile = async (uri, content) => {
-    writeCount += 1;
-    if (uri.fsPath.includes(`${path.sep}history${path.sep}`)) historyWriteCount += 1;
+    if (inStore(uri.fsPath)) {
+      writeCount += 1;
+      if (uri.fsPath.includes(`${path.sep}history${path.sep}`)) historyWriteCount += 1;
+    }
     await originalWriteFile(uri, content);
   };
   vscode.workspace.fs.readDirectory = async (uri) => {
-    directoryScanCount += 1;
+    if (inStore(uri.fsPath)) directoryScanCount += 1;
     return await originalReadDirectory(uri);
   };
   try {
@@ -535,7 +540,7 @@ test('journal Apply I/O stays constant with large history and does not run GC be
     vscode.workspace.fs.writeFile = originalWriteFile;
     vscode.workspace.fs.readDirectory = originalReadDirectory;
   }
-  assert.ok(writesBeforeMutation <= 5, `expected bounded prepared/applying writes, saw ${writesBeforeMutation}`);
+  assert.ok(writesBeforeMutation > 0 && writesBeforeMutation <= 5, `expected bounded prepared/applying writes, saw ${writesBeforeMutation}`);
   assert.equal(historyWriteCount, 0, 'journal stages must not rewrite history shards');
   assert.equal(scansBeforeMutation, 0, 'artifact GC must not scan directories before workspace mutation');
 });

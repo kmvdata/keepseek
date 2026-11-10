@@ -134,6 +134,12 @@ const SESSION_TITLE_REFRESH_TRANSLATIONS: Record<KeepseekLanguage, TranslationCa
     titleRefreshOutcome_timeout: '标题生成超时，请重试。',
     titleRefreshOutcome_failed: '标题生成失败，请重试。',
     titleRefreshOutcome_save_failed: '标题保存失败，已保留旧标题。',
+    titleRefreshOutcome_output_truncated: '标题输出被截断，已保留旧标题。',
+    titleRefreshOutcome_budget_missing: '缺少本次操作预算，未请求标题模型。',
+    titleRefreshOutcome_budget_exhausted: '本次操作预算已用尽，已保留旧标题。',
+    titleRefreshOutcome_unpriced_cost: '无法核实标题模型费用，未发出请求。',
+    titleRefreshOutcome_source_identity_missing: '无法核实原模型来源，请检查来源设置。',
+    titleRefreshOutcome_model_unavailable: '标题模型不可用，请检查来源和凭据。',
   },
   en: {
     titleRefreshEditing: 'Finish editing this title first.',
@@ -156,6 +162,12 @@ const SESSION_TITLE_REFRESH_TRANSLATIONS: Record<KeepseekLanguage, TranslationCa
     titleRefreshOutcome_timeout: 'Title generation timed out. Try again.',
     titleRefreshOutcome_failed: 'Title generation failed. Try again.',
     titleRefreshOutcome_save_failed: 'The title could not be saved. The previous title was kept.',
+    titleRefreshOutcome_output_truncated: 'The title output was truncated. The previous title was kept.',
+    titleRefreshOutcome_budget_missing: 'The operation budget is missing. No title request was sent.',
+    titleRefreshOutcome_budget_exhausted: 'The operation budget is exhausted. The previous title was kept.',
+    titleRefreshOutcome_unpriced_cost: 'Title model pricing could not be verified. No request was sent.',
+    titleRefreshOutcome_source_identity_missing: 'The original model source could not be verified. Check source settings.',
+    titleRefreshOutcome_model_unavailable: 'The title model is unavailable. Check its source and credentials.',
   }
 };
 

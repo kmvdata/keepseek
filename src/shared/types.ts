@@ -747,6 +747,8 @@ export interface ChatMessage {
   /** Host-only proof of a dynamic context tail appended to this message; never provider-visible itself. */
   dynamicContextHash?: string;
   isStreaming?: boolean;
+  /** Host-only marker for partial, failed or internal replies after reload. */
+  incompleteForTitle?: true;
   contextMeta?: ChatMessageContextMeta;
   usedSkills?: ChatMessageSkill[];
   runDetails?: RunDetailsSummary;

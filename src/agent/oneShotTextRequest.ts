@@ -1,6 +1,6 @@
 import type * as vscode from 'vscode';
 import type { AgentRequest } from '../shared/types';
-import { ExecutionCostBudget } from './executionPolicy';
+import { ExecutionCostBudget, LogicalBudgetExceededError } from './executionPolicy';
 import { getConfiguredAgentMaxCost, getConfiguredModelUsagePricing } from '../shared/config';
 import { applyProviderRequestBudget, loadProviderRequestBudget } from './requestBudget';
 import { getAgentRuntimeProfile } from '../shared/modelProfiles';
@@ -100,7 +100,9 @@ export interface OneShotTextRequestInput {
 }
 
 export class OneShotTextRequestError extends Error {
-  public constructor(public readonly reason: 'unavailable' | 'invalid' | 'timeout' | 'cancelled', message: string) {
+  public constructor(public readonly reason: 'unavailable' | 'invalid' | 'timeout' | 'cancelled'
+    | 'output_truncated' | 'budget_missing' | 'budget_exhausted' | 'unpriced_cost'
+    | 'source_identity_missing' | 'model_unavailable' | 'save_failed', message: string) {
     super(message);
     this.name = 'OneShotTextRequestError';
   }
@@ -113,10 +115,10 @@ export async function requestOneShotText(input: OneShotTextRequestInput): Promis
   const isTitle = input.purpose === 'session_title';
   const source = isTitle ? 'subagent' : 'reviewer';
   if (isTitle && (!input.taskCostBudget || !input.taskRunBudget)) {
-    throw new OneShotTextRequestError('unavailable', 'Session title requires the owning task budget / 会话标题需要所属任务预算');
+    throw new OneShotTextRequestError('budget_missing', 'Session title requires the owning task budget / 会话标题需要所属任务预算');
   }
   if (!input.sourceConfig.apiKey.trim() && requiresModelSourceApiKey(input.sourceConfig)) {
-    throw new OneShotTextRequestError('unavailable', input.language === 'en'
+    throw new OneShotTextRequestError(isTitle ? 'model_unavailable' : 'unavailable', input.language === 'en'
       ? (isTitle ? 'The configured subagent model credentials are invalid or missing.' : 'The configured approval model credentials are invalid or missing.')
       : (isTitle ? '子代理模型的凭据无效或缺失。' : '审批模型的凭据无效或缺失。'));
   }
@@ -129,7 +131,7 @@ export async function requestOneShotText(input: OneShotTextRequestInput): Promis
     provider: input.sourceConfig.provider, protocol,
     supportsBilling: input.sourceConfig.supportsBilling, requestStartedAt
   });
-  const maxOutputTokens = isTitle ? Math.min(input.maxOutputTokens ?? 256, 256) : input.maxOutputTokens;
+  const maxOutputTokens = isTitle ? Math.min(input.maxOutputTokens ?? 512, 512) : input.maxOutputTokens;
   const body = buildOneShotTextProviderBody({
     modelId: input.model.id, model: input.model, provider: input.sourceConfig.provider,
     systemPrompt: input.systemPrompt, userPrompt: input.userPrompt, maxOutputTokens,
@@ -144,13 +146,21 @@ export async function requestOneShotText(input: OneShotTextRequestInput): Promis
       { thinkingEnabled: false, reasoningEffort: 'high' }).maxTokens, Math.max(1, Math.floor(maxOutputTokens))) };
   const budget = await loadProviderRequestBudget({ model: admittedModel, sourceId: input.sourceConfig.sourceId,
     baseUrl: input.sourceConfig.baseUrl, provider: input.sourceConfig.provider, body }, input.globalStorageUri);
+  if (isTitle && input.taskRunBudget) {
+    const { state, limits, tree } = input.taskRunBudget;
+    const available = Math.min(limits.maxUpstreamTokens > 0 ? limits.maxUpstreamTokens - state.upstreamTokens : Infinity,
+      tree.limit > 0 ? tree.limit - tree.usedTokens : Infinity);
+    budget.actualMaxOutputTokens = Math.min(budget.actualMaxOutputTokens, available - budget.inputBudgetTokens);
+    if (budget.actualMaxOutputTokens < 1) throw new OneShotTextRequestError('budget_exhausted', 'Insufficient title token budget');
+  }
   applyProviderRequestBudget(body, budget);
   const attemptSnapshots: UsagePriceSnapshot[] = [];
   const attemptCacheObservations: ProviderCacheObservation[] = [];
   const costBudget = input.taskCostBudget ?? new ExecutionCostBudget(getConfiguredAgentMaxCost());
   let costReservation: ReturnType<ExecutionCostBudget['reserve']> | undefined;
   let tokenReservation: ReturnType<NonNullable<AgentRequest['taskRunBudget']>['reservePhysicalRequest']> | undefined;
-  const timeoutMs = isTitle ? Math.min(20_000, Math.max(1, input.timeoutMs ?? 20_000)) : input.timeoutMs;
+  let dispatchAccepted = false;
+  const timeoutMs = isTitle ? Math.min(30_000, Math.max(1, input.timeoutMs ?? 30_000)) : input.timeoutMs;
   const deadlines = [input.taskRunBudget?.deadlineAt,
     timeoutMs === undefined ? undefined : Date.now() + timeoutMs].filter((n): n is number => typeof n === 'number' && Number.isFinite(n));
   const runDeadlineAt = deadlines.length ? Math.min(...deadlines) : undefined;
@@ -172,7 +182,7 @@ export async function requestOneShotText(input: OneShotTextRequestInput): Promis
             * Math.max(price.inputRate ?? NaN, price.cacheHitRate ?? NaN, rates?.peakInputPrice ?? 0, rates?.peakCacheHitPrice ?? 0)
             + budget.actualMaxOutputTokens * Math.max(price.outputRate ?? NaN, rates?.peakOutputPrice ?? 0)) / 1_000_000;
           if (!price.supportsBilling || price.unavailableReason || !Number.isFinite(upperCost) || !price.currency) {
-            throw new OneShotTextRequestError('unavailable', isTitle
+            throw new OneShotTextRequestError(isTitle ? 'unpriced_cost' : 'unavailable', isTitle
               ? 'Session title model cannot be priced under the task cost limit / 标题模型无法在任务费用上限内计价'
               : 'Approval reviewer cannot be priced under the configured task cost limit / 审批模型无法在任务费用上限内计价');
           }
@@ -180,7 +190,11 @@ export async function requestOneShotText(input: OneShotTextRequestInput): Promis
         }
         try { tokenReservation = input.taskRunBudget?.reservePhysicalRequest(budget.inputBudgetTokens, budget.actualMaxOutputTokens); }
         catch (error) { if (costReservation) costBudget.settle(costReservation, 0); costReservation = undefined; throw error; }
-        await input.onBudgetChanged?.();
+        try { await input.onBudgetChanged?.(); }
+        catch (error) {
+          if (isTitle) throw new OneShotTextRequestError('save_failed', 'Title budget reservation could not be saved');
+          throw error;
+        }
       } },
       onAttempt: async ({ attemptIndex, startedAt }) => {
         attemptSnapshots[attemptIndex] = createSnapshot(startedAt);
@@ -195,23 +209,35 @@ export async function requestOneShotText(input: OneShotTextRequestInput): Promis
           // second Provider attempt. A failed write prevents the POST.
           const attempt = createUsageLedgerRecords({ requestId, attempts: attemptSnapshots,
             source, cacheObservations: attemptCacheObservations })[attemptIndex];
-          await input.onUsageLedgerRecord?.({ ...attempt, requestBudget: budget, purpose: 'session_title' });
+          try { await input.onUsageLedgerRecord?.({ ...attempt, requestBudget: budget, purpose: 'session_title' }); }
+          catch { throw new OneShotTextRequestError('save_failed', 'Title attempt persistence unavailable'); }
         }
+        dispatchAccepted = true;
       }
     });
+  } catch (error) {
+    if (isTitle && error instanceof LogicalBudgetExceededError) {
+      throw new OneShotTextRequestError('budget_exhausted', error.message);
+    }
+    throw error;
   } finally {
     // Cleanup/settlement is independent of a late stale result or a ledger write
     // failure. No missing Provider counters are synthesized from response text.
     const usage = normalizeDeepSeekUsage(response?.usage);
+    const undispatched = isTitle && !dispatchAccepted;
     const records = createUsageLedgerRecords({
-      requestId, attempts: attemptSnapshots, usage, source,
+      requestId, attempts: undispatched ? [] : attemptSnapshots, usage, source,
       observedUsage: response?.usage ? { promptTokens: response.usage.prompt_tokens,
         completionTokens: response.usage.completion_tokens, totalTokens: response.usage.total_tokens,
         reasoningTokens: response.usage.completion_tokens_details?.reasoning_tokens } : undefined,
       cacheObservations: attemptCacheObservations
     }).map((record): ProviderUsageLedgerRecord => ({ ...record, requestBudget: budget,
       ...(isTitle ? { purpose: 'session_title' } : {}) }));
-    if (tokenReservation) input.taskRunBudget?.settlePhysicalRequest(tokenReservation, response?.usage ?? undefined, response?.ok === true);
+    if (tokenReservation) {
+      if (undispatched) input.taskRunBudget?.releaseUndispatchedRequest(tokenReservation);
+      else input.taskRunBudget?.settlePhysicalRequest(tokenReservation, response?.usage ?? undefined, response?.ok === true);
+    }
+    if (undispatched && costReservation) costBudget.settle(costReservation, 0);
     const billed = records.find((record) => record.kind === 'usage_response');
     if (costReservation && response?.ok && billed?.cost !== undefined
       && (billed.pricingStatus === 'priced' || billed.pricingStatus === 'estimated_upper_bound')) costBudget.settle(costReservation, billed.cost);
@@ -228,13 +254,14 @@ export async function requestOneShotText(input: OneShotTextRequestInput): Promis
       }), ...(isTitle ? { purpose: 'session_title' as const } : {}) });
     } finally { await input.onBudgetChanged?.(); }
   }
-  const hasTools = Boolean(response.message?.tool_calls?.length
+  const hasTools = Boolean((isTitle && response.finishReason === 'tool_calls') || response.message?.tool_calls?.length
     || response.nativeOutputItems?.some(item => item.type === 'function_call')
     || response.nativeAnthropicContentBlocks?.some(block => block.type === 'tool_use'));
   if (!response.ok || response.finishReason === 'length' || hasTools || !response.message?.content?.trim()) {
     const reason = input.signal?.aborted ? 'cancelled'
       : response.failureKind === 'run_time_limit' || response.failureKind === 'request_timeout' ? 'timeout'
-        : response.ok ? 'invalid' : 'unavailable';
+        : isTitle && response.finishReason === 'length' ? 'output_truncated'
+          : response.ok || (isTitle && response.failureKind === 'protocol') ? 'invalid' : 'unavailable';
     throw new OneShotTextRequestError(reason, isTitle
       ? 'Session title returned no usable response / 会话标题未返回可用响应'
       : response.error ?? (input.language === 'en' ? 'Approval reviewer returned no usable response.' : '审批模型未返回可用响应。'));

@@ -29,9 +29,9 @@ test('explicit title regeneration has one small serializable allowance independe
   oldTask.runBudget!.deadlineAt = new Date(now - 1).toISOString();
   assert.throws(() => restoreSessionTitleBudget(oldTask, now), /time budget is exhausted/u);
   const manual = createManualSessionTitleBudget(now);
-  assert.equal(manual.maxExecutionMs, 20_000);
+  assert.equal(manual.maxExecutionMs, 30_000);
   assert.equal(manual.usedMs, 0);
-  assert.equal(manual.runBudget!.deadlineAt, new Date(now + 20_000).toISOString());
+  assert.equal(manual.runBudget!.deadlineAt, new Date(now + 30_000).toISOString());
   assert.equal(manual.budgetLimits!.maxModelRequests, 1);
   assert.equal(manual.budgetLimits!.maxUpstreamTokens, 32_768);
   assert.deepEqual(JSON.parse(JSON.stringify(normalizeUserTaskBudgets(JSON.parse(JSON.stringify({ manual }))).manual)), manual);
@@ -110,6 +110,8 @@ test('title follow-main freezes the completed source and records usage against t
   }
   const settings = new DelayedSettings(storageUri, 'workspace:title');
   const sourceStore = new ModelSourceStore(storageUri);
+  await sourceStore.createSource({ id: 'completed-source', provider: 'openai-compatible', apiKey: 'resolved-current-key',
+    baseUrl: 'https://completed.invalid/v1', models: [{ id: 'completed-model' }] });
   const parentRequest = {
     model: { id: 'completed-model', label: 'Completed', provider: 'openai-compatible', sourceId: 'completed-source', contextWindowTokens: 32768, maxOutputTokens: 8192 },
     sourceConfig: { sourceId: 'completed-source', provider: 'openai-compatible' as const, apiKey: 'test', baseUrl: 'https://completed.invalid/v1', supportsBilling: false }
@@ -123,6 +125,7 @@ test('title follow-main freezes the completed source and records usage against t
       dispatched++;
       assert.match(String(url), /^https:\/\/completed\.invalid/u);
       assert.equal(JSON.parse(String(init?.body)).model, 'completed-model');
+      assert.equal((init?.headers as Record<string, string>).Authorization, 'Bearer resolved-current-key');
       assert.equal(latest.runBudget!.modelRequests, 4, 'reservation is saved before transport');
       return new Response('data: ' + JSON.stringify({ choices: [{ delta: { content: '{"decision":"set","title":"审批排查"}' }, finish_reason: 'stop' }] })
         + '\n\ndata: ' + JSON.stringify({ choices: [], usage: { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 } }) + '\n\ndata: [DONE]\n\n');
@@ -159,7 +162,7 @@ test('missing fixed title model never falls back to the completed main source', 
         sourceConfig: { sourceId: 'main', provider: 'openai-compatible', apiKey: 'test', baseUrl: 'https://main.invalid', supportsBilling: false } },
       language: 'en', sessionId: 'session', taskId: 'root', userPrompt: '{}', token: 'token', signal: new AbortController().signal,
       taskBudget: budget(), onUsageLedgerRecord: () => undefined }), (error: unknown) =>
-        error instanceof OneShotTextRequestError && error.reason === 'unavailable' && /missing, disabled, or unavailable/u.test(error.message));
+        error instanceof OneShotTextRequestError && error.reason === 'model_unavailable' && /missing, disabled, or unavailable/u.test(error.message));
     assert.equal(calls, 0);
   } finally { globalThis.fetch = originalFetch; rmSync(directory, { recursive: true, force: true }); }
 });
@@ -169,6 +172,8 @@ test('a captured explicit subagent setting cannot be replaced by later settings 
   const storageUri = vscode.Uri.file(directory);
   const settingsStore = new SubagentSettingsStore(storageUri, 'workspace:title');
   const sourceStore = new ModelSourceStore(storageUri);
+  await sourceStore.createSource({ id: 'captured-source', provider: 'openai-compatible', apiKey: 'resolved-key',
+    baseUrl: 'https://captured.invalid/v1', models: [{ id: 'captured-main' }] });
   let settingsReads = 0, calls = 0;
   settingsStore.load = async () => { settingsReads++; throw new Error('the click setting must already be frozen'); };
   const setting: Pick<SubagentModelSetting, 'mode' | 'sourceId' | 'modelId'> = { mode: 'follow-main' };
@@ -189,5 +194,54 @@ test('a captured explicit subagent setting cannot be replaced by later settings 
     assert.equal(await pending, '{"decision":"set","title":"模型选择快照"}');
     assert.equal(settingsReads, 0);
     assert.equal(calls, 1);
+  } finally { globalThis.fetch = originalFetch; rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('title source identity and owning allowance failures have explicit reasons and never issue a POST', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'keepseek-title-boundaries-'));
+  const storageUri = vscode.Uri.file(directory);
+  const sourceStore = new ModelSourceStore(storageUri);
+  const settingsStore = new SubagentSettingsStore(storageUri, 'workspace:title');
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => { calls++; throw new Error('must not dispatch'); }) as typeof fetch;
+  const base = { globalStorageUri: storageUri, workspaceKey: 'workspace:title', sourceStore, settingsStore,
+    setting: { mode: 'follow-main' as const },
+    parentRequest: { model: { id: 'completed-model', label: 'Completed', provider: 'openai-compatible' } },
+    language: 'en' as const, sessionId: 'session', taskId: 'task', userPrompt: '{}', token: 'token',
+    signal: new AbortController().signal, taskBudget: budget(), onUsageLedgerRecord: () => undefined };
+  try {
+    await assert.rejects(requestSessionTitle(base), error =>
+      error instanceof OneShotTextRequestError && error.reason === 'source_identity_missing');
+    const missing = budget(); delete missing.runBudget;
+    await assert.rejects(requestSessionTitle({ ...base, taskBudget: missing }), error =>
+      error instanceof OneShotTextRequestError && error.reason === 'budget_missing');
+    const exhausted = budget(); exhausted.budgetLimits!.maxModelRequests = 3;
+    await assert.rejects(requestSessionTitle({ ...base, taskBudget: exhausted }), error =>
+      error instanceof OneShotTextRequestError && error.reason === 'budget_exhausted');
+    assert.equal(calls, 0);
+  } finally { globalThis.fetch = originalFetch; rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('follow-main uses fresh credentials for the frozen source and refuses endpoint changes', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'keepseek-title-source-identity-'));
+  const storageUri = vscode.Uri.file(directory);
+  const sourceStore = new ModelSourceStore(storageUri);
+  await sourceStore.createSource({ id: 'frozen-source', provider: 'openai-compatible', apiKey: 'current-key',
+    baseUrl: 'https://changed.invalid/v1', models: [{ id: 'completed-model' }] });
+  const settingsStore = new SubagentSettingsStore(storageUri, 'workspace:title');
+  let calls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => { calls++; throw new Error('must not dispatch'); }) as typeof fetch;
+  try {
+    await assert.rejects(requestSessionTitle({ globalStorageUri: storageUri, workspaceKey: 'workspace:title',
+      sourceStore, settingsStore, setting: { mode: 'follow-main' },
+      parentRequest: { model: { id: 'completed-model', label: 'Completed', provider: 'openai-compatible', sourceId: 'frozen-source' },
+        sourceConfig: { sourceId: 'frozen-source', provider: 'openai-compatible', apiKey: 'obsolete-key',
+          baseUrl: 'https://original.invalid/v1', supportsBilling: false } },
+      language: 'en', sessionId: 'session', taskId: 'task', userPrompt: '{}', token: 'token',
+      signal: new AbortController().signal, taskBudget: budget(), onUsageLedgerRecord: () => undefined }), error =>
+      error instanceof OneShotTextRequestError && error.reason === 'source_identity_missing');
+    assert.equal(calls, 0);
   } finally { globalThis.fetch = originalFetch; rmSync(directory, { recursive: true, force: true }); }
 });

@@ -1,7 +1,9 @@
+import { createLogicalRunBudgetState } from '../src/agent/executionPolicy';
 import { buildProviderRequestProjection } from '../src/agent/providerRequestProjection';
 import { getConfiguredAgentSettings } from '../src/shared/config';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,10 +11,10 @@ import { ChatSessionStore, createEmptySession, normalizeStoredSessions,
   type ChatSessionStorageAdapter, type StoredWorkspaceSessionState } from '../src/sessions/chatSessionStore';
 import { SessionTitleCoordinator } from '../src/sessions/sessionTitleCoordinator';
 import { OneShotTextRequestError } from '../src/agent/oneShotTextRequest';
-import { buildSessionTitleMaterial, buildSessionTitleRegenerationMaterial } from '../src/sessions/sessionTitle';
+import { buildSessionTitleMaterial, buildSessionTitleRegenerationMaterial, sessionTitleMessageHash } from '../src/sessions/sessionTitle';
 import { createHistoryTruncationPlan, executeHistoryTruncation } from '../src/sessions/historyTruncation';
 import type { ChatMessage, ChatSession } from '../src/shared/types';
-import { GlobalSessionStorage, getWorkspaceHash } from '../src/sessions/globalSessionStorage';
+import { GlobalSessionStorage, getWorkspaceHash, automaticTitleCommit } from '../src/sessions/globalSessionStorage';
 import * as vscode from './stubs/vscode';
 
 const scope = { key: 'workspace:title', name: 'Title', folderUris: [] };
@@ -225,7 +227,7 @@ test('switching sessions keeps the result scoped; deleting a session cannot resu
   assert.equal(deleted.store.getSessionById(deleted.session.id), undefined);
 });
 
-test('a new logical turn cancels the old attempt and stale callbacks cannot replace new state', async () => {
+test('explicit destructive invalidation cancels the old attempt and stale callbacks cannot replace new state', async () => {
   const { store, session, coordinator } = await fixture();
   const oldResponse = deferred<string>();
   const called = deferred<void>();
@@ -344,7 +346,7 @@ test('manual rename during candidate persistence wins in live state and after re
   assert.equal(restart.getActiveSession().customTitle, 'Manual');
 });
 
-test('history truncation preserves retained title basis and resets removed basis within existing transaction', async () => {
+test('history truncation preserves a committed title and permanent stop even when its old basis is removed', async () => {
   const { store, session, coordinator } = await fixture();
   await coordinator.complete(session.id, 'turn-1', async () => set);
   session.messages.push(...pair('turn-2', '无关后续问题'));
@@ -354,8 +356,9 @@ test('history truncation preserves retained title basis and resets removed basis
   assert.equal(session.title, '审批失败排查');
   const changed = createHistoryTruncationPlan(session, 'turn-1', pair('replacement-1', '编辑后的新主题')[0])!;
   await executeHistoryTruncation(session, changed, { persistSession: () => store.persist(), invalidateOperations: async () => {} });
-  assert.equal(session.autoTitle?.status, 'pending');
-  assert.equal(session.title, '编辑后的新主题');
+  assert.equal(session.autoTitle?.status, 'completed');
+  assert.equal(session.autoTitle?.stopped, 'named');
+  assert.equal(session.title, '审批失败排查');
   assert.equal(session.messages[0].id, 'replacement-1');
 });
 
@@ -632,7 +635,7 @@ for (const previousKind of ['automatic', 'custom'] as const) {
   });
 }
 
-for (const invalidation of ['rename', 'new-turn', 'delete'] as const) {
+for (const invalidation of ['rename', 'destructive-invalidation', 'delete'] as const) {
   test(`manual response cannot overwrite ${invalidation} and concurrent explicit requests dispatch once`, async () => {
     const { store, session, coordinator } = await fixture();
     await store.renameSession(session.id, 'Manual');
@@ -642,7 +645,7 @@ for (const invalidation of ['rename', 'new-turn', 'delete'] as const) {
     await started.promise;
     assert.equal(await coordinator.regenerate(session.id, 'turn-1', async () => { throw new Error('duplicate'); }, material), false);
     if (invalidation === 'rename') await store.renameSession(session.id, 'Manual');
-    if (invalidation === 'new-turn') { coordinator.cancel(session.id); session.messages.push(...pair('turn-2')); await store.persist(); }
+    if (invalidation === 'destructive-invalidation') { coordinator.cancel(session.id); session.messages.push(...pair('turn-2')); await store.persist(); }
     if (invalidation === 'delete') await store.deleteSessions([session.id]);
     response.resolve(set);
     assert.equal(await work, false);
@@ -791,4 +794,338 @@ test('a cancelled manual claim keeps its committed automatic revision if the cor
   assert.equal(recovered.title, '审批失败排查');
   assert.equal(recovered.autoTitle?.status, 'completed');
   assert.equal(recovered.autoTitle?.manualAttempt, undefined);
+});
+
+
+for (const committed of [true, false]) {
+  test(`old v1 ${committed ? 'canonical committed' : 'shard-only'} title is verified before archived basis migration`, async t => {
+    const root = await mkdtemp(join(tmpdir(), 'keepseek-title-legacy-hash-'));
+    t.after(() => removeStorageRoot(root));
+    const storage = new GlobalSessionStorage(vscode.Uri.file(root) as never);
+    const store = new ChatSessionStore(storage, 'en', scope);
+    await store.initialize();
+    const session = store.getActiveSession();
+    session.messages = pair('legacy-hash');
+    await store.persist();
+    const basis = { messages: session.messages.map(message => ({ id: message.id, hash: sessionTitleMessageHash(message) })),
+      lastMessageId: session.messages.at(-1)!.id };
+    const legacy = { ...structuredClone(session), title: '旧标题保留', messages: [],
+      autoTitle: { version: 1 as const, status: 'completed' as const, revision: 4,
+        completed: { taskId: 'legacy-hash', basis }, lastOutcome: 'set' as const } };
+    // Calculate the original format independently, so a new hash used for an
+    // old marker cannot accidentally make both sides of this test agree.
+    const legacyHash = createHash('sha256').update(JSON.stringify([
+      legacy.id, legacy.title, 4, 'legacy-hash', basis.messages.map(ref => [ref.id, ref.hash]), basis.lastMessageId
+    ])).digest('hex');
+    assert.equal(automaticTitleCommit(legacy), legacyHash);
+    const directory = join(root, 'chat-sessions', 'v2', 'workspaces', getWorkspaceHash(scope.key));
+    const indexPath = join(directory, 'index.json');
+    const index = JSON.parse(await readFile(indexPath, 'utf8'));
+    const entry = index.sessions.find((item: { id: string }) => item.id === session.id);
+    if (committed) { entry.title = legacy.title; entry.autoTitleCommit = legacyHash; }
+    await writeFile(join(directory, entry.storageFile), JSON.stringify({ version: 2, workspaceKey: scope.key, session: legacy }));
+    await writeFile(indexPath, JSON.stringify(index));
+    const restart = new ChatSessionStore(new GlobalSessionStorage(vscode.Uri.file(root) as never), 'en', scope);
+    await restart.initialize();
+    const recovered = restart.getActiveSession();
+    assert.equal(recovered.autoTitle?.stopped, committed ? 'named' : undefined);
+    assert.equal(recovered.autoTitle?.status, committed ? 'completed' : 'pending');
+    assert.equal(recovered.title, committed ? legacy.title : session.title);
+    assert.equal(recovered.autoTitle?.version, 2);
+    let requests = 0;
+    await new SessionTitleCoordinator(restart).complete(recovered.id, 'legacy-hash', async () => { requests++; return set; });
+    assert.equal(requests, 0);
+    await restart.persist();
+    if (committed) {
+      const currentHash = automaticTitleCommit(recovered);
+      assert.ok(currentHash); assert.notEqual(currentHash, legacyHash);
+      const currentIndex = JSON.parse(await readFile(indexPath, 'utf8'));
+      assert.equal(currentIndex.sessions.find((item: { id: string }) => item.id === session.id).autoTitleCommit, currentHash);
+      // Simulate losing the very first v2 index replacement after the
+      // migrated shard is durable. The surviving old proof still commits it.
+      await writeFile(indexPath, JSON.stringify(index));
+      const secondRestart = new ChatSessionStore(new GlobalSessionStorage(vscode.Uri.file(root) as never), 'en', scope);
+      await secondRestart.initialize();
+      assert.equal(secondRestart.getActiveSession().autoTitle?.stopped, 'named');
+    }
+  });
+}
+
+test('an archived committed stop survives clone without retaining attempt tokens or old identities', async () => {
+  const { store, storage, session, coordinator } = await fixture();
+  assert.equal(await coordinator.complete(session.id, 'turn-1', async () => set), true);
+  session.messages = [];
+  await store.persist();
+  const restarted = new ChatSessionStore(storage, 'en', scope);
+  await restarted.initialize();
+  assert.equal(restarted.getActiveSession().autoTitle?.stopped, 'named');
+  const copyStorage = new MemoryStorage({ activeSessionId: '', sessions: [] });
+  copyStorage.loadWorkspaceSessions = async () => structuredClone(storage.state.sessions);
+  const copiedStore = new ChatSessionStore(copyStorage, 'en', { ...scope, key: 'workspace:archived-copy' });
+  await copiedStore.initialize();
+  const copied = await copiedStore.copyOtherWorkspaceSession(scope.key, session.id);
+  assert.ok(copied);
+  assert.equal(copied.title, session.title);
+  assert.equal(copied.autoTitle?.stopped, 'named');
+  assert.equal(copied.autoTitle?.attempt, undefined);
+  assert.equal(copied.autoTitle?.manualAttempt, undefined);
+  assert.equal(copied.autoTitle?.completed, undefined);
+  let requests = 0;
+  await new SessionTitleCoordinator(copiedStore).complete(copied.id, 'turn-1', async () => { requests++; return set; });
+  assert.equal(requests, 0);
+});
+
+test('persisted attempt dedupe rejects an older deferred root after a later root also deferred', async () => {
+  const { store, session, storage, coordinator } = await fixture();
+  let requests = 0;
+  const defer = async () => { requests++; return '{"decision":"defer","title":null}'; };
+  await coordinator.complete(session.id, 'turn-1', defer);
+  session.messages.push(...pair('turn-2'));
+  await store.persist();
+  await coordinator.complete(session.id, 'turn-2', defer);
+  await coordinator.complete(session.id, 'turn-1', defer);
+  const restart = new ChatSessionStore(storage, 'en', scope);
+  await restart.initialize();
+  await new SessionTitleCoordinator(restart).complete(session.id, 'turn-1', defer);
+  assert.equal(requests, 2);
+  assert.deepEqual(restart.getActiveSession().autoTitle?.attemptedTaskIds, ['turn-1', 'turn-2']);
+});
+
+
+test('ordinary later turns preserve an automatic in-flight snapshot and stop all later automatic requests on success', async () => {
+  const { store, session, coordinator } = await fixture();
+  const started = deferred<void>(), response = deferred<string>();
+  let requests = 0;
+  const pending = coordinator.complete(session.id, 'turn-1', async input => {
+    requests++; started.resolve();
+    assert.equal(input.signal.aborted, false);
+    return response.promise;
+  });
+  await started.promise;
+  const revision = session.autoTitle!.revision;
+  session.messages.push(...pair('turn-2', '另一轮完全不同的问题'));
+  await store.persist();
+  assert.equal(session.autoTitle!.revision, revision);
+  response.resolve(set);
+  assert.equal(await pending, true);
+  assert.equal(session.autoTitle?.stopped, 'named');
+  await coordinator.complete(session.id, 'turn-2', async () => { requests++; return set; });
+  assert.equal(requests, 1);
+});
+
+test('manual frozen two-round material permits later ordinary appends while selected-body mutation rejects it', async () => {
+  for (const mutate of [false, true]) {
+    const { store, session, coordinator } = await fixture();
+    const started = deferred<void>(), response = deferred<string>();
+    const material = buildSessionTitleRegenerationMaterial(session.messages, 'turn-1')!;
+    const pending = coordinator.regenerateResult(session.id, 'turn-1', async () => { started.resolve(); return response.promise; }, material);
+    await started.promise;
+    if (mutate) session.messages[0].content = '已修改选中的正文';
+    else session.messages.push(...pair('turn-2', '刷新接受后才追加的主题'));
+    await store.persist();
+    response.resolve(set);
+    const result = await pending;
+    assert.equal(result.outcome, mutate ? 'stale' : 'updated');
+    assert.equal(session.title, mutate ? 'Temporary title' : '审批失败排查');
+  }
+});
+
+test('a manual request preempts an old automatic save and its late settlement cannot remove the new claim', async () => {
+  const { store, session, storage, coordinator } = await fixture();
+  const saving = deferred<void>(), release = deferred<void>();
+  let blocked = false, automaticRequests = 0, manualRequests = 0;
+  storage.beforeSave = async state => {
+    if (!blocked && state.sessions[0].title === '审批失败排查') {
+      blocked = true; saving.resolve(); await release.promise;
+    }
+  };
+  const automatic = coordinator.complete(session.id, 'turn-1', async () => { automaticRequests++; return set; });
+  await saving.promise;
+  const material = buildSessionTitleRegenerationMaterial(session.messages, 'turn-1')!;
+  const manual = coordinator.regenerateResult(session.id, 'turn-1', async () => {
+    manualRequests++; return '{"decision":"set","title":"会话审批边界"}';
+  }, material);
+  release.resolve();
+  assert.equal(await automatic, false);
+  assert.deepEqual(await manual, { outcome: 'updated' });
+  assert.equal(automaticRequests, 1); assert.equal(manualRequests, 1);
+  assert.equal(session.title, '会话审批边界');
+  assert.equal(session.autoTitle?.stopped, 'named');
+  assert.equal(session.autoTitle?.manualAttempt, undefined);
+  const restart = new ChatSessionStore(storage, 'en', scope);
+  await restart.initialize();
+  assert.equal(restart.getActiveSession().title, session.title);
+});
+
+
+test('v2 commit hash requires the explicit durable stop field and hashes it separately from provenance', async () => {
+  const { session, coordinator } = await fixture();
+  await coordinator.complete(session.id, 'turn-1', async () => set);
+  const committed = automaticTitleCommit(session);
+  assert.ok(committed);
+  const missing = structuredClone(session);
+  delete missing.autoTitle!.stopped;
+  assert.equal(automaticTitleCommit(missing), undefined);
+  const withoutProvenance = structuredClone(session);
+  delete withoutProvenance.autoTitle!.completed;
+  assert.ok(automaticTitleCommit(withoutProvenance));
+  assert.notEqual(automaticTitleCommit(withoutProvenance), committed);
+});
+
+
+test('two truly legacy rounds refresh through normalization and title persistence without userTask backfill', async () => {
+  const legacy = [...pair('legacy-first', '检查第一轮命令审批'), ...pair('legacy-latest', '解释最近一轮模型来源')];
+  for (const entry of legacy) delete entry.userTask;
+  const rawBefore = JSON.stringify(legacy);
+  const normalized = normalizeStoredSessions({ sessions: [{ ...createEmptySession('en', scope), messages: legacy }] }, scope)[0];
+  assert.equal(JSON.stringify(legacy), rawBefore, 'normalization must not mutate the supplied legacy messages');
+  assert.ok(normalized.messages.every(entry => !entry.userTask));
+  const { store, session, storage, coordinator } = await fixture(legacy);
+  assert.ok(session.messages.every(entry => !entry.userTask));
+  const before = JSON.stringify(session.messages);
+  const material = buildSessionTitleRegenerationMaterial(session.messages, 'legacy-latest')!;
+  assert.ok(material);
+  const excerpts = JSON.parse(material.userPrompt).excerpts;
+  assert.equal(excerpts.length, 4);
+  let calls = 0;
+  assert.equal(await coordinator.regenerate(session.id, 'legacy-latest', async input => {
+    calls++;
+    assert.deepEqual(JSON.parse(input.userPrompt).excerpts, excerpts);
+    return set;
+  }, material), true);
+  await store.persist();
+  assert.equal(calls, 1);
+  assert.equal(JSON.stringify(session.messages), before);
+  assert.ok(storage.state.sessions[0].messages.every(entry => !entry.userTask));
+  const restart = new ChatSessionStore(storage, 'en', scope);
+  await restart.initialize();
+  assert.equal(JSON.stringify(restart.getActiveSession().messages), before);
+  assert.equal(restart.getActiveSession().autoTitle?.stopped, 'named');
+});
+
+
+test('clone after manual title success removes auxiliary request tokens and remaps spent ordinary task budgets', async () => {
+  const { store, storage, session, coordinator } = await fixture();
+  const spent = { version: 1 as const, usedMs: 1200, maxExecutionMs: 9000, maxCost: 5,
+    usedCostByCurrency: { USD: 1.5 }, runBudget: createLogicalRunBudgetState({
+      modelRequests: 3, upstreamTokens: 111, treeUpstreamTokens: 111,
+      deadlineAt: '2026-01-01T00:00:00.000Z'
+    }) };
+  session.userTaskBudgets = { 'turn-1': structuredClone(spent), 'archived-root': structuredClone(spent) };
+  let token = '';
+  assert.equal(await coordinator.regenerate(session.id, 'turn-1', async request => {
+    token = request.token;
+    session.userTaskBudgets![`session_title_manual_${token}`] = structuredClone(spent);
+    await store.persist();
+    return set;
+  }, buildSessionTitleRegenerationMaterial(session.messages, 'turn-1')!), true);
+  assert.ok(token);
+  assert.ok(session.userTaskBudgets[`session_title_manual_${token}`]);
+  const copyStorage = new MemoryStorage({ activeSessionId: '', sessions: [] });
+  copyStorage.loadWorkspaceSessions = async () => structuredClone(storage.state.sessions);
+  const destination = new ChatSessionStore(copyStorage, 'en', { ...scope, key: 'workspace:budget-copy' });
+  await destination.initialize();
+  const copy = await destination.copyOtherWorkspaceSession(scope.key, session.id);
+  assert.ok(copy);
+  const root = copy.messages.find(message => message.role === 'user')!.userTask!.id;
+  assert.notEqual(root, 'turn-1');
+  const copiedBudget = copy.userTaskBudgets![root];
+  assert.equal(copiedBudget.usedMs, spent.usedMs);
+  assert.equal(copiedBudget.maxExecutionMs, spent.maxExecutionMs);
+  assert.equal(copiedBudget.maxCost, spent.maxCost);
+  assert.deepEqual(copiedBudget.usedCostByCurrency, spent.usedCostByCurrency);
+  assert.deepEqual(copiedBudget.runBudget, spent.runBudget);
+  assert.equal(Object.keys(copy.userTaskBudgets!).length, 2, 'archived ordinary spent allowance is preserved under another new identity');
+  assert.equal(Object.hasOwn(copy.userTaskBudgets!, 'turn-1'), false);
+  assert.equal(Object.hasOwn(copy.userTaskBudgets!, 'archived-root'), false);
+  assert.equal(Object.keys(copy.userTaskBudgets!).some(key => key.startsWith('session_title_manual_')), false);
+  assert.equal(JSON.stringify(copy).includes(token), false);
+  assert.equal(copy.title, session.title);
+  assert.equal(copy.autoTitle?.stopped, 'named');
+  assert.equal(copy.autoTitle?.attempt, undefined);
+  assert.equal(copy.autoTitle?.manualAttempt, undefined);
+  copy.userTaskBudgets![root].usedMs++;
+  assert.equal(session.userTaskBudgets['turn-1'].usedMs, spent.usedMs, 'copy budget does not share source mutable state');
+});
+
+
+test('more than two hundred deferred roots keep bounded dedupe and never dispatch old duplicates after restart', async () => {
+  const { store, session, storage, coordinator } = await fixture();
+  let requests = 0;
+  const defer = async () => { requests++; return '{"decision":"defer","title":null}'; };
+  for (let round = 1; round <= 210; round++) {
+    if (round > 1) session.messages.push(...pair(`turn-${round}`));
+    await coordinator.complete(session.id, `turn-${round}`, defer);
+  }
+  assert.equal(requests, 210);
+  assert.ok((session.autoTitle?.attemptedTaskIds?.length ?? 0) <= 64);
+  assert.deepEqual(session.autoTitle?.attemptedThrough, { taskId: 'turn-210', originMessageId: 'turn-210' });
+  for (const round of [1, 25, 100, 150, 200, 210]) await coordinator.complete(session.id, `turn-${round}`, defer);
+  assert.equal(requests, 210, 'the cursor protects consumed roots outside the ID suffix');
+  const restart = new ChatSessionStore(storage, 'en', scope);
+  await restart.initialize();
+  const restarted = restart.getActiveSession();
+  const titles = new SessionTitleCoordinator(restart);
+  await titles.complete(restarted.id, 'turn-1', defer);
+  assert.equal(requests, 210);
+  restarted.messages.push(...pair('turn-211'));
+  await titles.complete(restarted.id, 'turn-211', defer);
+  assert.equal(requests, 211, 'the next new real root still has its own one-request opportunity');
+  assert.ok((restarted.autoTitle?.attemptedTaskIds?.length ?? 0) <= 64);
+  const plan = createHistoryTruncationPlan(restarted, 'turn-100', pair('edited-100')[0])!;
+  await executeHistoryTruncation(restarted, plan, { persistSession: () => restart.persist(), invalidateOperations: async () => {} });
+  await titles.complete(restarted.id, 'turn-1', defer);
+  assert.equal(requests, 211, 'removing the cursor by edit cannot revive consumed roots in the retained prefix');
+});
+
+test('out-of-order direct store completion keeps an earlier unattempted complete root as a sparse gap', async () => {
+  const { session, coordinator } = await fixture([...pair('turn-1'), ...pair('turn-2')]);
+  let requests = 0;
+  const defer = async () => { requests++; return '{"decision":"defer","title":null}'; };
+  await coordinator.complete(session.id, 'turn-2', defer);
+  assert.equal(session.autoTitle?.attemptedThrough, undefined, 'do not consume an earlier queued root merely to compact IDs');
+  await coordinator.complete(session.id, 'turn-1', defer);
+  assert.equal(requests, 2);
+  assert.deepEqual(session.autoTitle?.attemptedThrough, { taskId: 'turn-2', originMessageId: 'turn-2' });
+  await coordinator.complete(session.id, 'turn-2', defer);
+  assert.equal(requests, 2);
+});
+
+test('ordered observed completions stay bounded after a lazily loaded unnamed legacy history', async () => {
+  const history = Array.from({ length: 100 }, (_, index) => pair(`historical-${index}`)).flat();
+  const { session, coordinator } = await fixture(history);
+  let requests = 0;
+  const defer = async () => { requests++; return '{"decision":"defer","title":null}'; };
+  for (let round = 1; round <= 70; round++) {
+    const taskId = `observed-${round}`;
+    session.messages.push(...pair(taskId));
+    await coordinator.completeResult(session.id, taskId, defer, { orderedObservedPrefix: true });
+  }
+  assert.equal(requests, 70, 'loaded historical answers never manufacture paid completion events');
+  assert.ok((session.autoTitle?.attemptedTaskIds?.length ?? 0) <= 64);
+  assert.equal(session.autoTitle?.attemptedThrough?.taskId, 'observed-70');
+  await coordinator.complete(session.id, 'historical-0', defer);
+  assert.equal(requests, 70, 'the observed ordered prefix also retires old history without backfilling it');
+});
+
+test('a selected-body change during claim retires only that claim and leaves future new rounds eligible', async () => {
+  const { session, coordinator, storage, store } = await fixture();
+  let changed = false;
+  storage.beforeSave = () => {
+    if (!changed && session.autoTitle?.attempt) {
+      changed = true;
+      session.messages[0].content += ' changed while the claim was being persisted';
+    }
+  };
+  let requests = 0;
+  const request = async () => { requests++; return set; };
+  assert.equal(await coordinator.complete(session.id, 'turn-1', request), false);
+  assert.equal(requests, 0);
+  assert.equal(session.autoTitle?.attempt, undefined);
+  assert.equal(session.autoTitle?.status, 'pending');
+  storage.beforeSave = undefined;
+  session.messages.push(...pair('turn-2'));
+  await store.persist();
+  assert.equal(await coordinator.complete(session.id, 'turn-2', request), true);
+  assert.equal(requests, 1);
 });

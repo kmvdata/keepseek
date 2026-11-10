@@ -21,7 +21,7 @@
 | 横向空间、菜单边界与默认右侧容器 | [Webview 布局](keepseek-webview-layout.md) | `webview/styles.ts`、input 样式、`package.json`；`contextEntryPoints`、`scripts/verify-webview-layout.cjs` |
 | Markdown 列表连续编号、嵌套结构与复制原文 | [Markdown 列表渲染](keepseek-markdown-rendering.md) | `webview/script.ts`、`webview/styles.ts`；`markdownRendering` |
 | 本次任务与会话累计有效计时 | [计时口径](execution-time-statistics.md) | `sessions/executionTimeStats.ts`、`userTask.ts`；`executionTimeStats`、`usageStats` |
-| 会话自动短标题、历史列表刷新与并发提交 | [会话标题](keepseek-session-title-verification.md) | `sessions/sessionTitle*`、`provider/sessionTitle*`；`sessionTitle`、`sessionTitleStorage`、`sessionTitleCompletion`、`sessionTitleRequest`、`sessionTitleWebview`、`sessionTitleRegeneration` |
+| 首次有效标题后永久停止、手动最近两轮与并发提交 | [会话标题](keepseek-session-title-verification.md) | `sessions/sessionTitle*`、`provider/sessionTitle*`；`sessionTitle`、`sessionTitleStorage`、`sessionTitleCompletion`、`sessionTitleRequest`、`sessionTitleWebview`、`sessionTitleRegeneration` |
 
 表中的测试名对应 `test/<name>.test.ts`，默认入口是 [test/runTests.ts](../test/runTests.ts)。独立脚本是否需要执行由任务决定，不以未接入默认 runner 判定其无效。共享配置与插件专题内的版本探测、已通过项和限制保留其原始核验日期。[Composer 复刻规格](keepseek-composer-spec.md) 和 [移植骨架](keepseek-composer-porting-guide.md) 是面向其他技术栈的参考设计，不是当前 KeepSeek 的源码目录或 Host 消息规范。
 

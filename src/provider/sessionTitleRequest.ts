@@ -38,7 +38,7 @@ export interface SessionTitleRequestInput {
  * deadline or grant a full main/child run; the host persists this separate
  * record before dispatch and keeps it out of the main task clock. */
 export function createManualSessionTitleBudget(now = Date.now()): UserTaskBudget {
-  const maxExecutionMs = Math.min(20_000, getConfiguredModelRequestTimeoutMs(),
+  const maxExecutionMs = Math.min(30_000, getConfiguredModelRequestTimeoutMs(),
     ...[getConfiguredAgentMaxExecutionMs(), getConfiguredSubagentMaxExecutionMs()].filter(value => value > 0));
   const maxTokens = Math.min(32_768, getConfiguredSubagentMaxUpstreamTokens(),
     ...[getConfiguredAgentMaxTreeUpstreamTokens()].filter(value => value > 0));
@@ -59,21 +59,21 @@ export function restoreSessionTitleBudget(budget: UserTaskBudget, now = Date.now
   timeoutMs: number;
 } {
   if (!budget?.runBudget || !budget.budgetLimits) {
-    throw new OneShotTextRequestError('unavailable', 'Session title task budget is unavailable / 会话标题任务预算不可用');
+    throw new OneShotTextRequestError('budget_missing', 'Session title task budget is unavailable / 会话标题任务预算不可用');
   }
   const remainingMs = budget.maxExecutionMs > 0 ? budget.maxExecutionMs - budget.usedMs : Number.POSITIVE_INFINITY;
   const run = new LogicalRunBudget(budget.runBudget, budget.budgetLimits,
     new SharedUpstreamTokenBudget(budget.budgetLimits.maxTreeUpstreamTokens, budget.runBudget.treeUpstreamTokens),
     budget.maxExecutionMs, now);
   const deadlineMs = run.deadlineAt === undefined ? Number.POSITIVE_INFINITY : run.deadlineAt - now;
-  const timeoutMs = Math.min(20_000, getConfiguredModelRequestTimeoutMs(), remainingMs, deadlineMs);
+  const timeoutMs = Math.min(30_000, getConfiguredModelRequestTimeoutMs(), remainingMs, deadlineMs);
   if (!(timeoutMs > 0)) {
-    throw new OneShotTextRequestError('timeout', 'Session title task time budget is exhausted / 会话标题任务时间预算已用尽');
+    throw new OneShotTextRequestError('budget_exhausted', 'Session title task time budget is exhausted / 会话标题任务时间预算已用尽');
   }
   try { run.assertCanDispatch(); }
   catch (error) {
     if (!(error instanceof LogicalBudgetExceededError)) throw error;
-    throw new OneShotTextRequestError(error.budgetReason === 'run_time_budget_exhausted' ? 'timeout' : 'unavailable', error.message);
+    throw new OneShotTextRequestError('budget_exhausted', error.message);
   }
   return { cost: new ExecutionCostBudget(budget.maxCost ?? 0, budget.usedCostByCurrency), run, timeoutMs };
 }
@@ -111,20 +111,42 @@ export async function requestSessionTitle(input: SessionTitleRequestInput): Prom
   // Snapshot before any settings/credential await. follow-main cannot observe a
   // picker mutation while the auxiliary request is being prepared.
   const parentRequest = { model: { ...input.parentRequest.model },
-    sourceConfig: input.parentRequest.sourceConfig && { ...input.parentRequest.sourceConfig } };
-  const setting = input.setting && { ...input.setting };
+    sourceConfig: input.parentRequest.sourceConfig && { ...input.parentRequest.sourceConfig, apiKey: '' } };
+  const capturedSetting = input.setting && { ...input.setting };
   const original = structuredClone(input.taskBudget);
   const restored = restoreSessionTitleBudget(original);
   let resolved: Awaited<ReturnType<typeof resolveConfiguredSubagentModel>>;
   try {
+    const setting = capturedSetting ?? { ...await input.settingsStore.load() };
+    // An explicit execution source may be re-resolved through accountResolver;
+    // an absent identity must never select the current/global picker source.
+    const sourceId = parentRequest.sourceConfig?.sourceId ?? parentRequest.model.sourceId;
+    if (setting.mode === 'follow-main' && (!sourceId
+      || parentRequest.model.sourceId && parentRequest.model.sourceId !== sourceId)) {
+      throw new OneShotTextRequestError('source_identity_missing',
+        'Completed task source identity is unavailable / 已完成任务的来源身份不可核实');
+    }
     resolved = await resolveConfiguredSubagentModel({
       globalStorageUri: input.globalStorageUri, workspaceKey: input.workspaceKey,
       sourceStore: input.sourceStore, settingsStore: input.settingsStore,
-      parentRequest, language: input.language, setting
+      // Captured snapshots identify a source, but never supply reusable keys.
+      // Resolve its current credentials exclusively through accountResolver.
+      parentRequest: setting.mode === 'follow-main'
+        ? { model: { ...parentRequest.model, sourceId }, sourceConfig: undefined } : parentRequest,
+      language: input.language, setting
     });
+    if (setting.mode === 'follow-main' && (resolved.sourceConfig.provider !== parentRequest.model.provider
+      || parentRequest.sourceConfig && (resolved.sourceConfig.sourceId !== parentRequest.sourceConfig.sourceId
+        || resolved.sourceConfig.provider !== parentRequest.sourceConfig.provider
+        || resolved.sourceConfig.baseUrl !== parentRequest.sourceConfig.baseUrl))) {
+      throw new OneShotTextRequestError('source_identity_missing',
+        'Completed task source identity has changed / 已完成任务的来源身份已改变');
+    }
   } catch (error) {
     if (input.signal.aborted) throw new OneShotTextRequestError('cancelled', 'Session title cancelled / 会话标题已取消');
-    throw new OneShotTextRequestError('unavailable', error instanceof Error ? error.message : 'Session title model unavailable / 标题模型不可用');
+    if (error instanceof OneShotTextRequestError) throw error;
+    throw new OneShotTextRequestError('model_unavailable',
+      'The selected title model is missing, disabled, or unavailable / 标题模型已缺失、被禁用或不可用');
   }
   if (input.signal.aborted) throw new OneShotTextRequestError('cancelled', 'Session title cancelled / 会话标题已取消');
   const startedAt = performance.now();
@@ -143,14 +165,14 @@ export async function requestSessionTitle(input: SessionTitleRequestInput): Prom
       systemPrompt: SESSION_TITLE_SYSTEM_PROMPT, userPrompt: input.userPrompt,
       language: input.language, sessionId: input.sessionId, taskId: input.taskId,
       globalStorageUri: input.globalStorageUri, signal: input.signal,
-      maxOutputTokens: 256, timeoutMs: restored.timeoutMs,
+      maxOutputTokens: 512, timeoutMs: restored.timeoutMs,
       taskCostBudget: restored.cost, taskRunBudget: restored.run,
       onUsageLedgerRecord: input.onUsageLedgerRecord,
       onBudgetChanged: publishBudget
     });
   } catch (error) {
     if (error instanceof LogicalBudgetExceededError) {
-      throw new OneShotTextRequestError(error.budgetReason === 'run_time_budget_exhausted' ? 'timeout' : 'unavailable', error.message);
+      throw new OneShotTextRequestError('budget_exhausted', error.message);
     }
     throw error;
   } finally {

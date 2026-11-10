@@ -51,7 +51,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     provider,
     webviewProvider,
     vscode.commands.registerCommand('keepseek.showRuntimeDiagnostics', async () => {
-      const document = await vscode.workspace.openTextDocument({ language: 'json', content: JSON.stringify(getRuntimeIdentity(), null, 2) });
+      const document = await vscode.workspace.openTextDocument({ language: 'json', content: JSON.stringify({
+        ...getRuntimeIdentity(), sessionTitle: provider.getSessionTitleDiagnostics()
+      }, null, 2) });
       await vscode.window.showTextDocument(document, { preview: true });
     }),
     vscode.commands.registerCommand('keepseek.openChat', () => provider.reveal()),

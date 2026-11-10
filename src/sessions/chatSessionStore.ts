@@ -47,7 +47,7 @@ import {
   normalizeTurnUsageStatsValue
 } from '../agent/usageStats';
 import { normalizeUsageLedgerValue } from '../agent/usageLedger';
-import { cloneSessionTitleMetadata, lockSessionTitleMetadata, normalizeSessionTitle, sessionTitleBasisMatches,
+import { cloneSessionTitleMetadata, lockSessionTitleMetadata, normalizeSessionTitle, recordSessionTitleAttempt, sessionTitleTaskWasAttempted, sessionTitleTaskBasisMatches,
   type SessionTitleBasis, type SessionTitleMetadata } from './sessionTitle';
 
 export const SESSION_STORAGE_KEY = 'keepseek.chatSessions';
@@ -98,14 +98,20 @@ export interface DeleteSessionsResult {
   activeSessionChanged: boolean;
 }
 
+interface StagedSessionTitle {
+  token: string;
+  revision: number;
+  title: string;
+  metadata: SessionTitleMetadata;
+  clearCustomTitle?: boolean;
+}
+
 export class ChatSessionStore {
   private sessions: ChatSession[] = [];
   private sessionSummaries = new Map<string, ChatSessionSummary>();
   private activeSessionIdValue = '';
   private approvalModeValue: ApprovalMode = 'ask';
-  private readonly stagedTitles = new Map<string, {
-    token: string; revision: number; title: string; metadata: SessionTitleMetadata; clearCustomTitle?: boolean;
-  }>();
+  private readonly stagedTitles = new Map<string, StagedSessionTitle>();
   private readonly titleSessionPins = new Map<string, number>();
 
   /** Loaded sessions only: background naming must never load an entire old history. */
@@ -113,24 +119,32 @@ export class ChatSessionStore {
     return this.sessions.find(session => session.id === sessionId && this.isInCurrentWorkspace(session));
   }
 
+  /** Keep only sessions with observed title work resident; never hydrate here. */
+  public pinSessionForTitle(sessionId: string): () => void {
+    const key = JSON.stringify([this.workspaceScope.key, sessionId]);
+    this.titleSessionPins.set(key, (this.titleSessionPins.get(key) ?? 0) + 1);
+    return () => {
+      const remaining = (this.titleSessionPins.get(key) ?? 1) - 1;
+      if (remaining > 0) this.titleSessionPins.set(key, remaining);
+      else this.titleSessionPins.delete(key);
+    };
+  }
+
   /** Explicit history-row requests load only that session and keep it resident
    * through commit/notification, without changing the active conversation. */
   public async withSessionForTitle<T>(sessionId: string, action: (session: ChatSession) => Promise<T>): Promise<T | undefined> {
     const workspaceKey = this.workspaceScope.key;
-    const key = JSON.stringify([workspaceKey, sessionId]);
-    this.titleSessionPins.set(key, (this.titleSessionPins.get(key) ?? 0) + 1);
+    const release = this.pinSessionForTitle(sessionId);
     try {
-      const session = await this.loadSessionById(sessionId);
+      // Resident targets accept and freeze material in this same turn.
+      const session = this.getSessionById(sessionId) ?? await this.loadSessionById(sessionId);
       if (!session || this.workspaceScope.key !== workspaceKey || this.getSessionById(sessionId) !== session) return undefined;
       return await action(session);
-    } finally {
-      const remaining = (this.titleSessionPins.get(key) ?? 1) - 1;
-      if (remaining > 0) this.titleSessionPins.set(key, remaining);
-      else this.titleSessionPins.delete(key);
-    }
+    } finally { release(); }
   }
 
-  /** Synchronous invalidation wins against a response arriving during a new turn. */
+  /** Destructive edits and explicit title intent retire only the current claim.
+   * Ordinary appends and navigation must not call this method. */
   public invalidateSessionTitle(sessionId: string): void {
     const session = this.getSessionById(sessionId);
     if (!session) return;
@@ -147,23 +161,24 @@ export class ChatSessionStore {
   }
 
   public async claimSessionTitle(sessionId: string, taskId: string, basis: SessionTitleBasis,
-    mode: 'automatic' | 'manual' = 'automatic'): Promise<{
+    mode: 'automatic' | 'manual' = 'automatic', orderedObservedPrefix = false): Promise<{
     token: string; revision: number;
   } | undefined> {
     const session = this.getSessionById(sessionId);
     if (!session || (session.customTitle && mode === 'automatic') || session.pendingHistoryTruncation) return undefined;
     const state = normalizeSessionTitle(session.autoTitle, session.customTitle, { preserveRunning: true });
     if (state.manualAttempt || state.status === 'running'
-      || (mode === 'automatic' && (state.status !== 'pending' || state.lastAttemptTaskId === taskId))
-      || !sessionTitleBasisMatches(session.messages, basis)) return undefined;
+      || (mode === 'automatic' && (state.stopped || state.status !== 'pending' || sessionTitleTaskWasAttempted(state, session.messages, taskId)))
+      || !sessionTitleTaskBasisMatches(session.messages, taskId, basis)) return undefined;
     const token = randomUUID();
     // A manual claim keeps the committed revision intact. Its token provides
     // isolation; only a successful new title advances the revision. Otherwise a
     // failed claim-index write could invalidate the previously committed title.
     const revision = mode === 'manual' ? state.revision : state.revision + 1;
+    const consumed = recordSessionTitleAttempt(state, session.messages, taskId, mode, orderedObservedPrefix);
     session.autoTitle = mode === 'manual'
-      ? { ...state, revision, manualAttempt: { token, taskId, basis } }
-      : { ...state, status: 'running', revision, lastAttemptTaskId: taskId,
+      ? { ...state, revision, ...consumed, lastAttemptTaskId: taskId, manualAttempt: { token, taskId, basis } }
+      : { ...state, status: 'running', revision, ...consumed, lastAttemptTaskId: taskId,
         attempt: { token, taskId, basis }, completed: undefined };
     try { await this.persist('session_title_claim'); }
     catch (error) {
@@ -173,7 +188,11 @@ export class ChatSessionStore {
         ...session.autoTitle, status: 'pending', attempt: undefined, lastOutcome: 'save_failed' };
       throw error;
     }
-    return this.matchesTitleAttempt(sessionId, token, revision) ? { token, revision } : undefined;
+    if (this.matchesTitleAttempt(sessionId, token, revision)) return { token, revision };
+    if (session.autoTitle?.attempt?.token === token || session.autoTitle?.manualAttempt?.token === token) {
+      this.invalidateSessionTitle(sessionId);
+    }
+    return undefined;
   }
 
   /** Only a committed candidate is exposed to memory/UI. Retries save the same candidate. */
@@ -204,10 +223,10 @@ export class ChatSessionStore {
     }
     const revision = session.autoTitle!.revision;
     const prior = session.autoTitle!;
-    const priorMetadata = { version: prior.version, status: prior.status, revision: prior.revision,
-      lastAttemptTaskId: prior.lastAttemptTaskId, lastOutcome: prior.lastOutcome, completed: prior.completed };
+    const priorMetadata = { version: prior.version, status: prior.status, stopped: prior.stopped, revision: prior.revision,
+      lastAttemptTaskId: prior.lastAttemptTaskId, attemptedTaskIds: prior.attemptedTaskIds, attemptedThrough: prior.attemptedThrough, lastOutcome: prior.lastOutcome, completed: prior.completed };
     const candidate = { token, revision, title: result.title, clearCustomTitle: manual, metadata: {
-      ...session.autoTitle!, status: 'completed' as const, attempt: undefined, manualAttempt: undefined,
+      ...session.autoTitle!, version: 2 as const, status: 'completed' as const, stopped: 'named' as const, attempt: undefined, manualAttempt: undefined,
       revision: manual ? revision + 1 : revision,
       completed: { taskId: attempt.taskId, basis: attempt.basis }, lastOutcome: result.outcome,
       regenerationPrevious: manual ? { title: session.title, customTitle: session.customTitle, metadata: priorMetadata } : undefined
@@ -219,7 +238,7 @@ export class ChatSessionStore {
         await this.persist('session_title_commit');
         return this.getSessionById(sessionId)?.autoTitle === candidate.metadata ? 'committed' : 'stale';
       } catch {
-        this.stagedTitles.delete(sessionId);
+        if (this.stagedTitles.get(sessionId) === candidate) this.stagedTitles.delete(sessionId);
       }
     }
     if (!this.matchesTitleAttempt(sessionId, token, revision)) return 'stale';
@@ -233,9 +252,10 @@ export class ChatSessionStore {
     const session = this.getSessionById(sessionId);
     const manual = session?.autoTitle?.manualAttempt?.token === token;
     const attempt = manual ? session?.autoTitle?.manualAttempt : session?.autoTitle?.attempt;
-    return !!session && !!attempt && (manual || !session.customTitle) && !session.pendingHistoryTruncation
+    return !!session && !!attempt && (manual || !session.customTitle) && (!session.pendingHistoryTruncation || attempt.basis.messages.every(ref =>
+        session.pendingHistoryTruncation!.retainedMessageIds.includes(ref.id)))
       && (manual || session.autoTitle?.status === 'running') && session.autoTitle?.revision === revision
-      && attempt.token === token && sessionTitleBasisMatches(session.messages, attempt.basis);
+      && attempt.token === token && sessionTitleTaskBasisMatches(session.messages, attempt.taskId, attempt.basis);
   }
 
   public constructor(
@@ -387,6 +407,17 @@ export class ChatSessionStore {
       copiedIds.set(task.id, taskId);
       message.userTask = { ...task, id: taskId, originMessageId };
     }
+    // Copy spent root allowances under the new identities. Explicit title
+    // refresh budgets are one-shot auxiliary claims whose keys contain request
+    // tokens; neither those claims nor their token identities belong to a copy.
+    const copiedBudgets: NonNullable<ChatSession['userTaskBudgets']> = Object.create(null);
+    for (const [sourceTaskId, budget] of Object.entries(normalizeUserTaskBudgets(source.userTaskBudgets))) {
+      if (sourceTaskId.startsWith('session_title_manual_')) continue;
+      const taskId = copiedIds.get(sourceTaskId) ?? randomUUID();
+      copiedIds.set(sourceTaskId, taskId);
+      copiedBudgets[taskId] = budget;
+    }
+    copied.userTaskBudgets = copiedBudgets;
     copied.autoTitle = cloneSessionTitleMetadata(source.autoTitle, source.customTitle, copiedIds, copied.messages);
 
     this.sessions.unshift(copied);
@@ -570,6 +601,7 @@ export class ChatSessionStore {
       const next = this.pendingPersistence;
       this.pendingPersistence = undefined;
       const processing = performance.now();
+      const titleWrites = new Map<string, StagedSessionTitle>();
       try {
         // A title candidate stays out of live memory until this write commits.
         // Re-evaluate at the queue boundary: newer turns/renames may have
@@ -579,6 +611,7 @@ export class ChatSessionStore {
           if (!live || live.workspaceKey !== next.scope.key) continue;
           const staged = this.stagedTitles.get(saved.id);
           const valid = staged && this.matchesTitleAttempt(saved.id, staged.token, staged.revision);
+          if (valid) titleWrites.set(saved.id, staged);
           saved.title = valid ? staged.title : live.title;
           saved.customTitle = valid && staged.clearCustomTitle ? undefined : live.customTitle;
           saved.autoTitle = structuredClone(valid ? staged.metadata : live.autoTitle);
@@ -588,7 +621,7 @@ export class ChatSessionStore {
         await this.sessionStorage.saveWorkspace(next.scope, next.snapshot);
         for (const saved of next.snapshot.sessions) {
           const staged = this.stagedTitles.get(saved.id);
-          if (staged && saved.autoTitle?.status === 'completed'
+          if (staged && titleWrites.get(saved.id) === staged && saved.autoTitle?.status === 'completed'
             && saved.autoTitle.revision === staged.metadata.revision
             && saved.autoTitle.completed?.taskId === staged.metadata.completed?.taskId
             && this.matchesTitleAttempt(saved.id, staged.token, staged.revision)) {
@@ -617,7 +650,9 @@ export class ChatSessionStore {
       } catch (error) {
         // Pending generic saves are re-projected from live titles above. They
         // cannot resurrect a rejected staged candidate.
-        for (const saved of next.snapshot.sessions) this.stagedTitles.delete(saved.id);
+        for (const [sessionId, staged] of titleWrites) {
+          if (this.stagedTitles.get(sessionId) === staged) this.stagedTitles.delete(sessionId);
+        }
         this.rejectPersistenceWaitersThrough(next.revision, error);
         throw error;
       }
@@ -978,7 +1013,8 @@ export function getCurrentWorkspaceSessionScope(): WorkspaceSessionScope {
   };
 }
 
-export function normalizeStoredSessions(value: unknown, workspaceScope: WorkspaceSessionScope): ChatSession[] {
+export function normalizeStoredSessions(value: unknown, workspaceScope: WorkspaceSessionScope,
+  options: { confirmedLegacyTitleCompletion?: boolean } = {}): ChatSession[] {
   if (!isRecord(value) || !Array.isArray(value.sessions)) {
     return [];
   }
@@ -1014,7 +1050,8 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
     const workspaceFolders = Array.isArray(item.workspaceFolders)
       ? item.workspaceFolders.filter((folder): folder is string => typeof folder === 'string' && Boolean(folder))
       : workspaceScope.folderUris;
-    const autoTitle = normalizeSessionTitle(item.autoTitle, customTitle, { messages });
+    const autoTitle = normalizeSessionTitle(item.autoTitle, customTitle, { messages,
+      confirmedLegacyCompletion: options.confirmedLegacyTitleCompletion });
 
     sessions.push({
       id: item.id,
@@ -1105,6 +1142,7 @@ function normalizeStoredMessage(value: unknown): ChatMessage | undefined {
   return {
     id: value.id,
     userTask: normalizeUserTask(value.userTask),
+    ...(value.incompleteForTitle === true || value.isStreaming === true ? { incompleteForTitle: true as const } : {}),
     role,
     content: value.content,
     expandedContent: typeof value.expandedContent === 'string' ? value.expandedContent : undefined,

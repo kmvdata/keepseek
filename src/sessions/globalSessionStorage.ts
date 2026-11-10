@@ -19,6 +19,7 @@ import type { StartupPerformanceTrace } from '../shared/startupPerformance';
 import type { ApprovalMode, ChatSession, ChatSessionSummary, WorkspaceSummary } from '../shared/types';
 import { ToolEvidenceStore } from '../agent/evidence/store';
 import { SessionObjectStore } from './sessionObjectStore';
+import { normalizeSessionTitle } from './sessionTitle';
 
 export const SESSION_MIGRATION_KEY = 'keepseek.chatSessionsMigratedToGlobalV1';
 export const SESSION_CLEANUP_MIN_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -405,7 +406,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
         await workspaceState.update(SESSION_MIGRATION_KEY, true);
         return false;
       }
-      const legacySessions = normalizeStoredSessions(legacyState, currentWorkspaceScope);
+      const legacySessions = normalizeStoredSessions(legacyState, currentWorkspaceScope, { confirmedLegacyTitleCompletion: true });
       const activeSessionIdsByWorkspace = normalizeStoredActiveSessionIds(legacyState, legacySessions);
       for (const [workspaceKey, sessions] of groupSessionsByWorkspace(legacySessions)) {
         const scope = getWorkspaceScopeForSessions(workspaceKey, sessions, currentWorkspaceScope);
@@ -496,38 +497,42 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     const stored = Number(value.version) >= 3 ? await this.objects(uri).load(value) : value.session;
     if (!isRecord(stored)) return undefined;
     const scope = { key: index.workspaceKey, name: index.workspaceName, folderUris: index.workspaceFolders };
-    const session = normalizeStoredSessions({ sessions: [stored] }, scope)[0];
-    if (session?.autoTitle?.status === 'completed') {
-      const entry = index.sessions.find(candidate => candidate.id === session.id);
-      // Shards are written before the index. An interrupted/failed index commit
-      // must not turn a rejected title into success on restart or orphan repair.
-      if (!entry?.autoTitleCommit || entry.autoTitleCommit !== automaticTitleCommit(session)) {
-        const state = session.autoTitle;
-        const previous = state.regenerationPrevious;
-        if (previous && entry) {
-          const priorSession = { ...session, title: previous.title, customTitle: previous.customTitle,
-            autoTitle: previous.metadata };
-          const confirmedPrevious = previous.customTitle
-            ? entry.customTitle === previous.customTitle && entry.title === previous.title
-            : previous.metadata.status === 'completed'
-              ? !!entry.autoTitleCommit && entry.autoTitleCommit === automaticTitleCommit(priorSession)
-              : !entry.autoTitleCommit && entry.title === previous.title;
-          if (confirmedPrevious) {
-            session.title = previous.title;
-            session.customTitle = previous.customTitle;
-            session.autoTitle = previous.metadata;
-            return session.workspaceKey === index.workspaceKey ? session : undefined;
-          }
+    // Verify the exact on-disk generation before normalization. A legacy
+    // completed record may refer to archived bodies; testing its basis first
+    // would erase a genuinely committed stop before the index can attest it.
+    let candidate = stored;
+    const entry = index.sessions.find(item => item.id === stored.id);
+    let confirmedLegacyTitleCompletion = false;
+    const state = isRecord(stored.autoTitle) ? stored.autoTitle : undefined;
+    if (state && (state.status === 'completed' || state.stopped === 'named')) {
+      const confirmed = titleMatchesIndex(stored as unknown as ChatSession, entry);
+      confirmedLegacyTitleCompletion = confirmed && state.version === 1;
+      if (!confirmed) {
+        const previous = isRecord(state.regenerationPrevious) ? state.regenerationPrevious : undefined;
+        const prior = previous && isRecord(previous.metadata) && typeof previous.title === 'string'
+          ? { ...stored, title: previous.title, customTitle: previous.customTitle, autoTitle: previous.metadata } : undefined;
+        const priorHash = prior ? automaticTitleCommit(prior as unknown as ChatSession) : undefined;
+        const confirmedPrevious = !!prior && !!entry && (typeof previous?.customTitle === 'string'
+          ? entry.customTitle === previous.customTitle && entry.title === previous.title
+          : priorHash ? titleMatchesIndex(prior as unknown as ChatSession, entry) : !entry.autoTitleCommit && entry.title === previous?.title);
+        if (confirmedPrevious) {
+          candidate = prior!;
+          confirmedLegacyTitleCompletion = isRecord(candidate.autoTitle) && candidate.autoTitle.version === 1;
+        } else {
+          const taskId = typeof state.lastAttemptTaskId === 'string' ? state.lastAttemptTaskId
+            : isRecord(state.completed) && typeof state.completed.taskId === 'string' ? state.completed.taskId : undefined;
+          candidate = { ...stored, autoTitle: { version: 2, status: 'pending',
+            revision: typeof state.revision === 'number' ? state.revision + 1 : 1,
+            stopped: entry?.customTitle ? 'manual' : undefined, lastAttemptTaskId: taskId,
+            lastOutcome: entry?.customTitle ? 'manual' : 'save_failed' },
+          customTitle: entry?.customTitle, title: entry?.customTitle ?? entry?.title
+            ?? createSessionTitle(Array.isArray(stored.messages)
+              ? (stored.messages.find(item => isRecord(item) && item.role === 'user'
+                && typeof item.content === 'string') as { content?: string } | undefined)?.content ?? '' : '') };
         }
-        session.autoTitle = { version: 1, status: 'pending', revision: state.revision + 1,
-          lastAttemptTaskId: state.lastAttemptTaskId ?? state.completed?.taskId,
-          lastOutcome: entry?.customTitle ? 'manual' : 'save_failed' };
-        session.customTitle = entry?.customTitle ?? session.customTitle;
-        session.title = session.customTitle ?? entry?.title
-          ?? createSessionTitle(session.messages.find(message => message.role === 'user'
-            && !message.contextMeta?.displayKind)?.content ?? '');
       }
     }
+    const session = normalizeStoredSessions({ sessions: [candidate] }, scope, { confirmedLegacyTitleCompletion })[0];
     return session?.workspaceKey === index.workspaceKey ? session : undefined;
   }
 
@@ -790,13 +795,37 @@ function normalizeSessionIndexEntry(value: unknown, workspaceKey: string, worksp
   };
 }
 
-function automaticTitleCommit(session: ChatSession): string | undefined {
+/** The first generic v2 write can reach the shard and then fail before the
+ * old index is replaced. Accept its v1 proof only for the same committed
+ * title, revision and exact legacy provenance. New requests always use scoped bases. */
+function titleMatchesIndex(session: ChatSession, entry?: SessionIndexEntry): boolean {
+  if (!entry?.autoTitleCommit || entry.title !== session.title || entry.customTitle) return false;
+  if (automaticTitleCommit(session) === entry.autoTitleCommit) return true;
   const state = session.autoTitle;
-  if (session.customTitle || state?.status !== 'completed' || !state.completed) return undefined;
+  return state?.version === 2 && state.stopped === 'named' && state.status === 'completed'
+    && !!state.completed && !state.completed.basis?.scope
+    && automaticTitleCommit({ ...session, autoTitle: { ...state, version: 1 } }) === entry.autoTitleCommit;
+}
+
+/** The format is selected from the stored metadata version. Never hash a
+ * migrated v2 object when verifying an old v1 index marker. */
+export function automaticTitleCommit(session: ChatSession): string | undefined {
+  if (session.customTitle || !session.autoTitle || typeof session.id !== 'string' || typeof session.title !== 'string') return undefined;
+  const raw = session.autoTitle;
+  const state = normalizeSessionTitle(raw, undefined, { preserveRunning: true });
+  if (raw.version === 1) {
+    if (raw.status !== 'completed' || !state.completed) return undefined;
+    return createHash('sha256').update(JSON.stringify([
+      session.id, session.title, state.revision, state.completed.taskId,
+      state.completed.basis.messages.map(ref => [ref.id, ref.hash]), state.completed.basis.lastMessageId,
+      ...(state.completed.basis.conversation ? [state.completed.basis.conversation] : [])
+    ]), 'utf8').digest('hex');
+  }
+  if (raw.version !== 2 || raw.stopped !== 'named' || raw.status !== 'completed'
+    || state.stopped !== 'named' || state.status !== 'completed') return undefined;
   return createHash('sha256').update(JSON.stringify([
-    session.id, session.title, state.revision, state.completed.taskId,
-    state.completed.basis.messages.map(ref => [ref.id, ref.hash]), state.completed.basis.lastMessageId,
-    ...(state.completed.basis.conversation ? [state.completed.basis.conversation] : [])
+    'session_title_v2', session.id, session.title, state.revision, state.stopped,
+    state.completed ? [state.completed.taskId, state.completed.basis] : null
   ]), 'utf8').digest('hex');
 }
 
@@ -807,7 +836,7 @@ function normalizeLegacyWorkspaceSessionFile(value: unknown, fallback?: Workspac
   const workspaceName = nonEmptyString(value.workspaceName) ?? fallback?.name ?? workspaceKey;
   const workspaceFolders = Array.isArray(value.workspaceFolders) ? stringArray(value.workspaceFolders) : fallback?.folderUris ?? [];
   const scope = { key: workspaceKey, name: workspaceName, folderUris: workspaceFolders };
-  const sessions = normalizeStoredSessions(value, scope).filter((session) => session.workspaceKey === workspaceKey);
+  const sessions = normalizeStoredSessions(value, scope, { confirmedLegacyTitleCompletion: true }).filter((session) => session.workspaceKey === workspaceKey);
   const fallbackActiveId = fallback && 'activeSessionId' in fallback ? fallback.activeSessionId : undefined;
   const activeSessionId = chooseActiveSessionId(sessions, nonEmptyString(value.activeSessionId), fallbackActiveId);
   return {

@@ -91,7 +91,7 @@ export async function executeHistoryTruncation(
     // Invalidate before the journal's first asynchronous barrier. A late title
     // response cannot commit against history being removed.
     const naming = reconcileSessionTitleAfterTruncation(session.autoTitle, session.customTitle,
-      session.messages.filter(message => plan.retainedMessageIds.includes(message.id)));
+      session.messages.filter(message => plan.retainedMessageIds.includes(message.id)), plan.removedMessageIds);
     session.autoTitle = naming.metadata;
     if (naming.resetTitle && !session.customTitle) {
       const firstUser = session.messages.find(message => message.role === 'user' && plan.retainedMessageIds.includes(message.id))

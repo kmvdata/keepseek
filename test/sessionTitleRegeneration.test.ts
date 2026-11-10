@@ -162,7 +162,7 @@ async function fixture(t: TestContext, options: { legacy?: boolean; customTitle?
     setRequest: (next: typeof request) => { request = next; } };
 }
 
-test('title refresh Host route rebuilds a legacy custom title with all dialogue without changing the main request', async t => {
+test('title refresh Host route rebuilds a legacy custom title with the latest two rounds without changing the main request', async t => {
   const { host, store, storage, session, posts, inputs } = await fixture(t, { legacy: true, customTitle: 'User chosen name' });
   const before = JSON.stringify([session.messages, session.contextInstructions, session.requestProtocol, session.executionTime,
     session.lastTurnUsage, session.userTaskBudgets?.preservedRoot]);
@@ -174,7 +174,8 @@ test('title refresh Host route rebuilds a legacy custom title with all dialogue 
   const requestBytes = mainRequest();
   await host.handleMessage({ type: 'regenerateSessionTitle', sessionId: session.id, requestId: 'gesture-1' });
   assert.equal(inputs.length, 1);
-  assert.match(inputs[0].userPrompt, /最早的审批预算约束/u);
+  assert.doesNotMatch(inputs[0].userPrompt, /最早的审批预算约束/u);
+  assert.equal(JSON.parse(inputs[0].userPrompt).excerpts.length, 4);
   assert.match(inputs[0].userPrompt, /中间的编辑重发缓存/u);
   assert.match(inputs[0].userPrompt, /最终的标题重建需求/u);
   assert.equal(session.title, '会话标题重建');
@@ -315,6 +316,58 @@ test('a stale title response retains its charged usage durably after a newer man
   assert.equal(store.activeSessionId, active.id);
   assert.equal(store.getSessionById(target.id)?.title, 'My newer title');
   assert.equal(posts.some(post => post.type === 'sessionTitleUpdated' && post.sessionId === target.id), false);
+});
+
+test('a cancelled title retains its late physical usage after the host changes workspace scope', async t => {
+  const { host, store, session, posts, inputs, setRequest, storageUri } = await fixture(t);
+  const started = deferred(), release = deferred();
+  t.after(() => release.resolve());
+  const record: ProviderUsageLedgerRecord = { ...createUsageLedgerRecords({ requestId: 'cross-workspace-title-charge', source: 'subagent',
+    usage: { promptTokens: 75, completionTokens: 15, totalTokens: 90, cacheHitTokens: 0, cacheMissTokens: 75, cacheDataStatus: 'reported' },
+    attempts: [createUsagePriceSnapshot({ originalModelId: 'fixture-title-model', sourceId: 'source-a', provider: 'deepseek', protocol: 'chat-completions',
+      requestStartedAt: new Date(0).toISOString(), supportsBilling: true, rates: { inputPrice: 1, cacheHitPrice: 0.1, outputPrice: 2, currency: 'USD' } })] })[0],
+    purpose: 'session_title' };
+  setRequest(async input => {
+    started.resolve();
+    await release.promise;
+    await input.onUsageLedgerRecord(record);
+    return generated;
+  });
+  const pending = host.handleMessage({ type: 'regenerateSessionTitle', sessionId: session.id, requestId: 'scope-before-settlement' });
+  await started.promise;
+  const scopeHost = host as TitleHost & { cancelAllSessionTitleWork(): void };
+  scopeHost.cancelAllSessionTitleWork();
+  assert.equal(inputs[0].signal.aborted, true);
+  await store.setWorkspaceScope({ key: 'workspace:other-title-scope', name: 'Other scope', folderUris: [] });
+  const next = store.getActiveSession();
+  const nextTitle = next.title;
+  assert.equal(store.getSessionById(session.id), undefined, 'settlement cannot depend on an old target being resident in the current scope');
+  release.resolve();
+  await pending;
+  const durable = await new UsageLedgerStore(storageUri as never).current(session.id);
+  assert.equal(inputs.length, 1);
+  assert.equal(durable.ledger.records.length, 1);
+  assert.equal(durable.ledger.records[0].requestId, 'cross-workspace-title-charge');
+  assert.equal(durable.ledger.records[0].usage?.totalTokens, 90);
+  assert.ok(durable.ledger.records[0].cost > 0);
+  assert.equal(store.activeSessionId, next.id);
+  assert.equal(next.title, nextTitle);
+  assert.equal(posts.some(post => post.type === 'sessionTitleUpdated' && post.sessionId === session.id), false);
+  assert.equal(host.manualSessionTitleRequests.size, 0);
+});
+
+test('read-only runtime title diagnostics neither hydrate history nor dispatch naming requests', async t => {
+  const { host, session, storage, inputs } = await fixture(t, { historyCount: 2 });
+  const snapshot = JSON.stringify([session.messages, session.title, session.autoTitle]);
+  const diagnosticsHost = host as TitleHost & { getSessionTitleDiagnostics(): { candidates: number; inFlight: number } };
+  for (let index = 0; index < 3; index++) {
+    const diagnostics = diagnosticsHost.getSessionTitleDiagnostics();
+    assert.equal(diagnostics.candidates, 0);
+    assert.equal(diagnostics.inFlight, 0);
+  }
+  assert.equal(inputs.length, 0);
+  assert.deepEqual(storage.sessionLoads, []);
+  assert.equal(JSON.stringify([session.messages, session.title, session.autoTitle]), snapshot);
 });
 
 test('a configured fixed title model remains usable when the main picker selection is missing', async t => {
@@ -577,7 +630,7 @@ test('manual rename during a history load retires the old request and concurrent
   assert.equal(store.activeSessionId, active.id);
 });
 
-test('a new real user intent retires a history refresh still preparing its context', async t => {
+test('a new user intent without a persisted question preserves the accepted history refresh', async t => {
   const { host, store, storage, history, inputs } = await fixture(t, { historyCount: 1 });
   const target = history[0];
   const started = deferred(), release = deferred();
@@ -591,11 +644,11 @@ test('a new real user intent retires a history refresh still preparing its conte
     // intent, before any main Provider/context work is authorized by the test.
     Object.assign(host, { awaitRunContextRefresh: async () => false });
     await host.handleMessage({ type: 'sendPrompt', prompt: 'A new question', sourceId: 'source-a', modelId: 'main-a' });
-    assert.equal(host.manualSessionTitleRequests.has(target.id), false);
+    assert.equal(host.manualSessionTitleRequests.has(target.id), true);
   } finally { release.resolve(); }
   await pending;
-  assert.equal(inputs.length, 0);
-  assert.equal(store.getSessionById(target.id)?.title, target.title);
+  assert.equal(inputs.length, 1);
+  assert.equal(store.getSessionById(target.id)?.title, '会话标题重建');
 });
 
 test('an older history refresh stays resident through commit even with fifty newer loaded conversations', async t => {

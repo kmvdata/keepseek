@@ -8,7 +8,7 @@ import { createEmptySession, normalizeStoredSessions } from '../src/sessions/cha
 import type { ChatMessage } from '../src/shared/types';
 import { usageFormattersFragment } from '../src/webview/input/usage/formatters';
 import { WEBVIEW_TRANSLATIONS } from '../src/shared/i18n';
-import { taskGoal } from '../src/sessions/userTask';
+import { taskForSegment, taskGoal } from '../src/sessions/userTask';
 import { createUsageDetailsViewModel } from '../src/agent/subagentUsageStats';
 import { createEmptySessionUsageStats } from '../src/agent/usageStats';
 import { createWebviewDomHarness } from './webviewDomHarness';
@@ -156,9 +156,11 @@ test('legacy explicit continuations join only their original user task and prese
     { id: 'auto', role: 'user', content: 'host result', createdAt: '', contextMeta: { displayKind: 'delegated_auto_continue' } }, message('b', 8681),
     { id: 'new', role: 'user', content: 'continue with an independent question', createdAt: '' }, message('c', 1000)
   ];
+  const before = JSON.stringify(session.messages);
   session.executionTime = reconcileExecutionTime(session.executionTime, session.messages);
-  assert.equal(session.messages[3].userTask?.id, 'first');
-  assert.equal(session.messages[5].userTask?.id, 'new');
+  assert.equal(JSON.stringify(session.messages), before);
+  assert.deepEqual(session.executionTime.tasks?.first.segments, ['a', 'b']);
+  assert.deepEqual(session.executionTime.tasks?.new.segments, ['c']);
   assert.equal(executionTimeView(session).totalMs, 48151);
   assert.equal(executionTimeView(session).currentMs, 1000);
   const snapshot = JSON.stringify(session.executionTime);
@@ -177,6 +179,10 @@ test('legacy supplementary user turn with the same archived execution ID cannot 
   session.executionTime = reconcileExecutionTime(session.executionTime, session.messages);
   assert.equal(executionTimeView(session).totalMs, 4000);
   assert.equal(executionTimeView(session).currentMs, 4000);
+  assert.ok(session.messages.every(entry => !entry.userTask));
+  assert.deepEqual(session.executionTime.tasks?.user.segments, ['segment']);
+  // Resuming an actual execution remains an explicit compatibility boundary.
+  assert.equal(taskForSegment(session, 'segment')?.id, 'user');
   assert.equal(session.messages[2].userTask?.id, 'user');
   assert.equal(taskGoal(session.messages, 'user'), 'original\n\nadditional requirement');
   assert.deepEqual(session.messages.map(m => m.content), contents);
@@ -257,4 +263,26 @@ test('complete webview handles timing ticks and keeps new/history session naviga
   delete view.window.keepseekInputControls;
   assert.doesNotThrow(() => tick(a.id, 67_000));
   assert.equal(view.state.usageMetrics.executionTime.currentMs, 67_000);
+});
+
+
+test('timing reconciliation derives legacy roots from frozen messages without writing task links', () => {
+  const messages: ChatMessage[] = [
+    { id: 'legacy-user', role: 'user', content: 'Explain timing', createdAt: '' },
+    { ...message('legacy-run', 1200), id: 'legacy-answer', content: 'Timing answer' },
+    { id: 'legacy-continuation', role: 'user', content: 'Host continuation', createdAt: '',
+      contextMeta: { displayKind: 'draft_run_auto_continue' } },
+    { ...message('legacy-next-run', 800), id: 'legacy-final-answer', content: 'Final answer' }
+  ];
+  const before = JSON.stringify(messages);
+  for (const entry of messages) Object.freeze(entry);
+  Object.freeze(messages);
+  const stats = reconcileExecutionTime(undefined, messages);
+  assert.equal(JSON.stringify(messages), before);
+  assert.ok(messages.every(entry => !entry.userTask));
+  assert.deepEqual(stats.tasks?.['legacy-user'].segments, ['legacy-run', 'legacy-next-run']);
+  assert.equal(stats.tasks?.['legacy-user'].usedMs, 2000);
+  assert.equal(stats.currentTaskId, 'legacy-user');
+  assert.equal(stats.incomplete, true);
+  assert.equal(JSON.stringify(reconcileExecutionTime(stats, messages)), JSON.stringify(stats));
 });

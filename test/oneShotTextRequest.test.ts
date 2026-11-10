@@ -59,7 +59,7 @@ test('session title physical requests use isolated three-protocol bodies, small 
       req.onBudgetChanged = () => { phases.push('budget'); };
       assert.equal(await requestOneShotText(req), '{"decision":"set","title":"Approval fix"}');
       assert.equal(calls, 1);
-      assert.equal(body[provider === 'openai-responses' ? 'max_output_tokens' : 'max_tokens'], 256);
+      assert.equal(body[provider === 'openai-responses' ? 'max_output_tokens' : 'max_tokens'], 512);
       assert.equal(body.tools, undefined);
       assert.equal(Boolean(body.thinking && (body.thinking as { type: string }).type !== 'disabled'), false);
       assert.equal(body.reasoning, undefined);
@@ -72,7 +72,7 @@ test('session title physical requests use isolated three-protocol bodies, small 
       assert.equal(records[0].source, 'subagent');
       assert.equal(records[0].requestId, 'session_title_claim');
       assert.equal(records[0].usage?.totalTokens, 120);
-      assert.equal(records[0].requestBudget?.actualMaxOutputTokens, 256);
+      assert.equal(records[0].requestBudget?.actualMaxOutputTokens, 512);
       assert.equal(normalizeUsageLedgerRecord(records[0])?.purpose, 'session_title');
       assert.equal(normalizeUsageLedgerRecord({ ...records[0], source: 'reviewer' })?.purpose, undefined);
       assert.equal(req.taskRunBudget!.state.modelRequests, 1);
@@ -109,6 +109,7 @@ test('title caching reuses the official Anthropic policy without changing compat
     assert.equal(JSON.parse(bodies[1]).cache_control, undefined, 'unknown compatible gateways receive no unsupported cache hint');
     assert.equal(bodies[0], bodies[2], 'host request identities are absent from the model body and do not spoil a stable prefix');
     assert.equal(JSON.parse(bodies[3]).cache_control, undefined, 'existing approval reviewer payloads retain their previous policy');
+    assert.equal(JSON.parse(bodies[3]).max_tokens, 8192, 'the title cap does not clamp the approval reviewer');
   } finally { globalThis.fetch = original; }
 });
 
@@ -134,17 +135,20 @@ test('title failures make no network retry and retain unknown attempt usage and 
 test('title truncation and unexpected tool calls reject after recording returned usage', async () => {
   const original = globalThis.fetch;
   try {
-    for (const stage of ['length', 'tools'] as const) {
+    for (const stage of ['length', 'tools', 'tool_marker'] as const) {
       const req = input();
       const records: ProviderUsageLedgerRecord[] = [];
       req.onUsageLedgerRecord = capture(records);
-      globalThis.fetch = (async () => stage === 'length' ? reply('openai-compatible', 'length') : new Response(
+      globalThis.fetch = (async () => stage !== 'tools' ? reply('openai-compatible', stage === 'length' ? 'length' : 'tool_calls') : new Response(
         'data: ' + JSON.stringify({ choices: [{ delta: { content: '{}', tool_calls: [{ index: 0, id: 'x', type: 'function', function: { name: 'unexpected', arguments: '{}' } }] }, finish_reason: 'tool_calls' }] }) + '\n\n'
         + 'data: ' + JSON.stringify({ choices: [], usage: { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 } }) + '\n\ndata: [DONE]\n\n'
       )) as typeof fetch;
-      await assert.rejects(requestOneShotText(req));
+      await assert.rejects(requestOneShotText(req), error =>
+        (error as { reason: string }).reason === (stage === 'length' ? 'output_truncated' : 'invalid'));
       assert.equal(records.length, 1);
-      assert.equal(records[0].usage?.totalTokens, 120);
+      // A dangling tool marker is rejected by the stream parser before its usage tail.
+      if (stage === 'tool_marker') assert.equal(records[0].kind, 'attempt_without_usage');
+      else assert.equal(records[0].usage?.totalTokens, 120);
     }
   } finally { globalThis.fetch = original; }
 });
@@ -164,7 +168,7 @@ test('title short timeout cancels transport and records its single unknown attem
     const pending = requestOneShotText(req);
     const rejected = assert.rejects(pending, error => (error as { reason: string }).reason === 'timeout');
     await started;
-    t.mock.timers.tick(20_001);
+    t.mock.timers.tick(30_001);
     await rejected;
     assert.equal(signal?.aborted, true);
     assert.equal(records.length, 1);
@@ -235,6 +239,102 @@ test('title durable attempt intent precedes dispatch and a persistence failure c
   try {
     await assert.rejects(requestOneShotText(req), /attempt persistence unavailable/u);
     assert.equal(calls, 0);
-    assert.equal(intents, 2, 'cleanup may retry persisting the same unknown attempt without requesting the model');
+    assert.equal(intents, 1, 'a rejected intent never creates a physical attempt record');
+    assert.equal(req.taskRunBudget!.state.modelRequests, 0);
+    assert.equal(req.taskRunBudget!.state.upstreamTokens, 0);
+  } finally { globalThis.fetch = original; }
+});
+
+test('cancellation at the pre-dispatch persistence barrier releases only the title reservation', async () => {
+  const req = input();
+  const controller = new AbortController();
+  req.signal = controller.signal;
+  const budget = req.taskRunBudget!;
+  const other = budget.reservePhysicalRequest(40, 16);
+  req.onBudgetChanged = () => controller.abort();
+  const records: ProviderUsageLedgerRecord[] = [];
+  req.onUsageLedgerRecord = capture(records);
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => { calls++; return reply('openai-compatible'); };
+  try {
+    await assert.rejects(requestOneShotText(req), { reason: 'cancelled' });
+    assert.equal(calls, 0);
+    assert.equal(records.length, 0);
+    assert.equal(budget.state.modelRequests, 1);
+    assert.equal(budget.state.promptTokens, other.promptTokens);
+    assert.equal(budget.tree.usedTokens, other.upstreamTokens);
+    assert.equal(budget.state.upstreamTokens, other.upstreamTokens);
+  } finally { globalThis.fetch = original; }
+});
+
+test('title output uses the remaining root token allowance at the physical request', async () => {
+  const req = input();
+  const records: ProviderUsageLedgerRecord[] = [];
+  req.onUsageLedgerRecord = capture(records);
+  const original = globalThis.fetch;
+  const outputs: number[] = [];
+  globalThis.fetch = async (_url, init) => {
+    outputs.push(JSON.parse(String(init?.body)).max_tokens);
+    return reply('openai-compatible');
+  };
+  try {
+    await requestOneShotText(req);
+    const next = input();
+    next.taskRunBudget!.limits.maxUpstreamTokens = records[0].requestBudget!.inputBudgetTokens + 48;
+    await requestOneShotText(next);
+    assert.deepEqual(outputs, [512, 48]);
+  } finally { globalThis.fetch = original; }
+});
+
+test('title output overrides are bounded at the physical request on every protocol', async () => {
+  const original = globalThis.fetch;
+  try {
+    for (const provider of ['openai-compatible', 'openai-responses', 'anthropic-compatible'] as const) {
+      for (const [requested, expected] of [[128, 128], [4096, 512]] as const) {
+        const req = input(provider);
+        req.maxOutputTokens = requested;
+        let actual = 0;
+        globalThis.fetch = (async (_url, init) => {
+          const body = JSON.parse(String(init?.body));
+          actual = body[provider === 'openai-responses' ? 'max_output_tokens' : 'max_tokens'];
+          return reply(provider);
+        }) as typeof fetch;
+        await requestOneShotText(req);
+        assert.equal(actual, expected);
+      }
+    }
+  } finally { globalThis.fetch = original; }
+});
+
+test('title output truncation is a distinct terminal reason on all protocols', async () => {
+  const original = globalThis.fetch;
+  try {
+    for (const provider of ['openai-compatible', 'openai-responses', 'anthropic-compatible'] as const) {
+      const records: ProviderUsageLedgerRecord[] = [];
+      const req = input(provider); req.onUsageLedgerRecord = capture(records);
+      let calls = 0;
+      globalThis.fetch = (async () => { calls++; return reply(provider, 'length'); }) as typeof fetch;
+      await assert.rejects(requestOneShotText(req), error =>
+        (error as { reason: string }).reason === 'output_truncated');
+      assert.equal(calls, 1);
+      assert.equal(records[0].usage?.totalTokens, 120);
+    }
+  } finally { globalThis.fetch = original; }
+});
+
+test('title reasoning text cannot supply missing visible content', async () => {
+  const original = globalThis.fetch;
+  let calls = 0;
+  const records: ProviderUsageLedgerRecord[] = [];
+  const req = input(); req.onUsageLedgerRecord = capture(records);
+  globalThis.fetch = (async () => { calls++; return new Response(
+    'data: ' + JSON.stringify({ choices: [{ delta: { reasoning_content: '{"decision":"set","title":"Hidden title"}' }, finish_reason: 'stop' }] })
+      + '\n\ndata: ' + JSON.stringify({ choices: [], usage: { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 } })
+      + '\n\ndata: [DONE]\n\n'); }) as typeof fetch;
+  try {
+    await assert.rejects(requestOneShotText(req));
+    assert.equal(calls, 1);
+    assert.equal(records[0].usage?.totalTokens, 120);
   } finally { globalThis.fetch = original; }
 });

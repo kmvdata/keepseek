@@ -5,7 +5,7 @@ import {
   buildSessionTitleMaterial, buildSessionTitleRegenerationMaterial, cloneSessionTitleMetadata, getSessionTitleRegenerationTaskId,
   lockSessionTitleMetadata, normalizeSessionTitle,
   parseSessionTitleResult, reconcileSessionTitleAfterTruncation, sessionTitleBasisMatches,
-  sessionTitleConversationFingerprint, sessionTitleDisplayWidth, sessionTitleMessageHash, SESSION_TITLE_SYSTEM_PROMPT,
+  sessionTitleConversationFingerprint, sessionTitleDisplayWidth, sessionTitleMessageHash, sessionTitleTaskBasisMatches, isSessionTitleFinalAnswer, SESSION_TITLE_SYSTEM_PROMPT,
   SESSION_TITLE_REGENERATION_MAX_CHARS,
   type SessionTitleMetadata
 } from '../src/sessions/sessionTitle';
@@ -25,11 +25,13 @@ function completed(messages = fixture()): SessionTitleMetadata {
 test('title schema permits a meaningful unresolved topic, defer is explicit, malformed output is never repaired', () => {
   assert.deepEqual(parseSessionTitleResult('{"decision":"set","title":"审批失败排查"}'), { decision: 'set', title: '审批失败排查' });
   assert.deepEqual(parseSessionTitleResult('{"decision":"defer","title":null}'), { decision: 'defer', title: null });
-  for (const text of ['', '审批失败排查', '```json\n{"decision":"set","title":"审批排查"}\n```',
+  for (const text of ['', '审批失败排查', '```json\n{"decision":"set","title":"审批排查"}\n``` extra',
     '{"decision":"set","title":"审批排查"', '{"decision":"set","title":null}',
     '{"decision":"defer","title":"以后再试"}', '{"decision":"set","title":"审批排查","explanation":"x"}']) {
     assert.equal(parseSessionTitleResult(text), undefined, text);
   }
+  assert.deepEqual(parseSessionTitleResult('\uFEFF  ```json\n{"decision":"set","title":"审批排查"}\n```  '), { decision: 'set', title: '审批排查' });
+  assert.equal(parseSessionTitleResult('{"decision":"set","title":"审批排查"}{"decision":"defer","title":null}'), undefined);
   assert.match(SESSION_TITLE_SYSTEM_PROMPT, /unresolved question can have a title/u);
 });
 
@@ -68,13 +70,15 @@ test('load keeps consumed rounds, clears interrupted claims and never trusts a m
   const basis = buildSessionTitleMaterial(fixture(), 'u1')!.basis;
   const running: SessionTitleMetadata = { version: 1, status: 'running', revision: 2,
     lastAttemptTaskId: 'u1', attempt: { taskId: 'u1', token: 'attempt1', basis } };
-  assert.deepEqual(normalizeSessionTitle(running), { version: 1, status: 'pending', revision: 2,
+  assert.deepEqual(normalizeSessionTitle(running), { version: 2, status: 'pending', revision: 2,
     lastAttemptTaskId: 'u1', lastOutcome: 'interrupted' });
-  assert.deepEqual(normalizeSessionTitle(running, undefined, { preserveRunning: true }), { ...running, lastOutcome: undefined });
+  assert.deepEqual(normalizeSessionTitle(running, undefined, { preserveRunning: true }), { ...running, version: 2, lastOutcome: undefined });
   assert.equal(normalizeSessionTitle(completed()).status, 'completed');
   assert.equal(normalizeSessionTitle(completed(), 'My title').status, 'pending');
   assert.equal(normalizeSessionTitle(completed(), 'My title').lastOutcome, 'manual');
   assert.equal(normalizeSessionTitle({ ...completed(), version: 9 }).status, 'pending');
+  assert.equal(normalizeSessionTitle({ ...completed(), version: 2 }).stopped, undefined,
+    'a v2 completed diagnostic without durable stop cannot manufacture successful naming');
   assert.equal(normalizeSessionTitle({ ...completed(), completed: { taskId: 'u1', basis: { messages: [] } } }).status, 'pending');
   assert.equal(normalizeSessionTitle({ version: 1, status: 'made-up', revision: Infinity }).revision, 0);
   assert.equal(normalizeSessionTitle(undefined).status, 'pending');
@@ -107,16 +111,17 @@ test('completed load provenance must match actual message content, chronology an
   assert.equal(normalizeSessionTitle(metadata, 'manual title', { messages: [] }).lastOutcome, 'manual');
 });
 
-test('new context after greeting enters the next compact snapshot, preserving roles and effective chronology', () => {
+test('new context after greeting uses at most two complete real rounds, preserving roles and chronology', () => {
   const messages = [message('u1', 'user', '你好'), message('a1', 'assistant', '你好，有什么可以帮你？'),
     message('u2', 'user', '修复编辑重发后旧操作记录残留', 'u2'), message('a2', 'assistant', '先确认操作记录的归属。', 'u2')];
   const material = buildSessionTitleMaterial(messages, 'u2')!;
   const data = JSON.parse(material.userPrompt);
-  assert.equal(data.includesConversationStart, false, 'a loaded window never claims to contain the original beginning');
-  assert.deepEqual(data.excerpts.map((excerpt: { id: string }) => excerpt.id), ['u1', 'u2', 'a2']);
+  assert.equal(data.scope, 'recent_two_complete_turns');
+  assert.deepEqual(data.excerpts.map((excerpt: { role: string }) => excerpt.role), ['user', 'assistant', 'user', 'assistant']);
+  assert.deepEqual(material.basis.messages.map(item => item.id), ['u1', 'a1', 'u2', 'a2']);
   assert.match(material.userPrompt, /修复编辑重发/u);
   assert.ok(sessionTitleBasisMatches(messages, material.basis));
-  assert.equal(JSON.parse(buildSessionTitleMaterial(messages, 'u2', { historyStartKnown: true })!.userPrompt).includesConversationStart, true);
+  assert.equal(buildSessionTitleMaterial(messages, 'u2', { historyStartKnown: true })!.userPrompt, material.userPrompt);
   assert.equal(buildSessionTitleMaterial(messages, 'missing'), undefined);
   messages[3].isStreaming = true;
   assert.equal(buildSessionTitleMaterial(messages, 'u2'), undefined);
@@ -151,7 +156,7 @@ test('material is bounded data and excludes tool/replay/reasoning/attachment and
   const short = buildSessionTitleMaterial(megabytes, 'u1', { maxChars: 2000 })!;
   assert.ok(short.userPrompt.length <= 2000);
   assert.match(short.userPrompt, /审批归属排查/u);
-  assert.ok(!short.userPrompt.includes('TAIL_SENTINEL'));
+  assert.match(short.userPrompt, /TAIL_SENTINEL/u, 'long message tails retain a bounded share');
 });
 
 test('basis hashes ignore host accounting and replay but detect changed or missing naming content', () => {
@@ -167,114 +172,100 @@ test('basis hashes ignore host accounting and replay but detect changed or missi
   assert.equal(sessionTitleBasisMatches(messages.slice(0, 1), material.basis), false);
 });
 
-test('history edits retain an automatic title only when every naming basis message survives unchanged', () => {
+test('committed stop survives removed naming content while in-flight basis is still invalidated', () => {
   const messages = fixture();
-  const metadata = completed(messages);
-  messages.push(message('u2', 'user', 'unrelated followup', 'u2'));
-  assert.deepEqual(reconcileSessionTitleAfterTruncation(metadata, undefined, messages.slice(0, 2)),
-    { metadata: normalizeSessionTitle(metadata), resetTitle: false });
-  const invalidated = reconcileSessionTitleAfterTruncation(metadata, undefined, messages.slice(0, 1));
-  assert.equal(invalidated.resetTitle, true);
-  assert.equal(invalidated.metadata.status, 'pending');
-  assert.equal(invalidated.metadata.revision, 4);
-  assert.equal(invalidated.metadata.lastAttemptTaskId, undefined);
+  const old = completed(messages);
+  const metadata = normalizeSessionTitle(old);
+  assert.equal(metadata.stopped, 'named');
+  const truncated = reconcileSessionTitleAfterTruncation(metadata, undefined, messages.slice(0, 1));
+  assert.equal(truncated.resetTitle, false);
+  assert.equal(truncated.metadata.stopped, 'named');
+  assert.equal(truncated.metadata.status, 'completed');
+  assert.equal(sessionTitleTaskBasisMatches(messages.slice(0, 1), 'u1', metadata.completed!.basis), false);
+  assert.equal(normalizeSessionTitle(metadata, undefined, { messages: [] }).stopped, 'named');
+  assert.equal(normalizeSessionTitle(old, undefined, { messages: [], confirmedLegacyCompletion: true }).stopped, 'named');
+  assert.equal(normalizeSessionTitle(old, undefined, { messages: [] }).stopped, undefined,
+    'unverified old metadata cannot invent a completed canonical commit');
   const manual = reconcileSessionTitleAfterTruncation(metadata, 'manual name', []);
   assert.equal(manual.resetTitle, false);
-  assert.equal(manual.metadata.lastOutcome, 'manual');
+  assert.equal(manual.metadata.stopped, 'manual');
 });
 
-test('copies remap completed title provenance and never clone a live attempt or consumed round', () => {
+test('copies remap committed provenance, retain stop without old content, and never clone executable claims', () => {
   const messages = fixture();
   const copies = messages.map(item => ({ ...item, id: `copy-${item.id}` }));
   const map = new Map(messages.map((item, index) => [item.id, copies[index].id]));
   const cloned = cloneSessionTitleMetadata(completed(messages), undefined, map, copies);
-  assert.equal(cloned.status, 'completed');
+  assert.equal(cloned.stopped, 'named');
   assert.equal(cloned.completed!.taskId, 'copy-u1');
   assert.ok(sessionTitleBasisMatches(copies, cloned.completed!.basis));
-  assert.equal(cloneSessionTitleMetadata(completed(messages), undefined, new Map(), copies).status, 'pending');
-  const running = { version: 1, status: 'running', revision: 1, lastAttemptTaskId: 'u1',
+  const archived = cloneSessionTitleMetadata(completed(messages), undefined, new Map(), []);
+  assert.equal(archived.stopped, 'named');
+  assert.equal(archived.completed, undefined);
+  const running = { version: 1, status: 'running', revision: 1, lastAttemptTaskId: 'u1', attemptedTaskIds: ['u1'],
     attempt: { token: 'live-token', taskId: 'u1', basis: completed(messages).completed!.basis } };
   const copiedPending = cloneSessionTitleMetadata(running, undefined, map, copies);
   assert.equal(copiedPending.status, 'pending');
   assert.equal(copiedPending.attempt, undefined);
-  assert.equal(copiedPending.lastAttemptTaskId, undefined);
-  assert.equal(cloneSessionTitleMetadata(running, 'manual', map, copies).lastOutcome, 'manual');
+  assert.equal(copiedPending.attemptedTaskIds, undefined);
+  assert.equal(cloneSessionTitleMetadata(running, 'manual', map, copies).stopped, 'manual');
 });
 
-test('manual regeneration covers every visible user and assistant turn, including middle topics', () => {
+test('manual material excludes every earlier topic and binds only the latest two complete real rounds', () => {
   const messages: ChatMessage[] = [];
   for (let turn = 1; turn <= 18; turn++) messages.push(
-    message(`u${turn}`, 'user', `第${turn}轮处理${turn === 8 ? '极光风控' : '会话导航'}需求`, `u${turn}`),
+    message(`u${turn}`, 'user', `第${turn}轮处理${turn === 8 ? 'EARLY_THEME' : `TOPIC_${turn}_UNIQUE`}需求`, `u${turn}`),
     message(`a${turn}`, 'assistant', `第${turn}轮给出具体检查步骤`, `u${turn}`));
   const unchanged = structuredClone(messages);
-  const material = buildSessionTitleRegenerationMaterial(messages, 'u18', { historyStartKnown: true })!;
+  const material = buildSessionTitleRegenerationMaterial(messages, 'u18')!;
   const data = JSON.parse(material.userPrompt);
-  assert.equal(data.includesConversationStart, true);
-  assert.equal(data.scope, 'all visible conversation turns');
-  assert.equal(data.excerpts.length, messages.length);
-  assert.deepEqual(data.excerpts.map((excerpt: { role: string }) => excerpt.role), messages.map(item => item.role));
-  assert.match(material.userPrompt, /极光风控/u);
-  assert.equal(material.basis.conversation?.messageCount, messages.length);
-  assert.equal(material.basis.messages.length, 2, 'all-history provenance stays compact');
-  assert.ok(sessionTitleBasisMatches(messages, material.basis));
-  assert.deepEqual(messages, unchanged, 'regeneration never mutates main request history');
-  messages[15].content += ' changed middle answer';
-  assert.equal(sessionTitleBasisMatches(messages, material.basis), false);
+  assert.equal(data.excerpts.length, 4);
+  assert.deepEqual(data.excerpts.map((excerpt: { role: string }) => excerpt.role), ['user', 'assistant', 'user', 'assistant']);
+  assert.doesNotMatch(material.userPrompt, /EARLY_THEME|TOPIC_16_UNIQUE/u);
+  assert.match(material.userPrompt, /TOPIC_17_UNIQUE/u);
+  assert.match(material.userPrompt, /TOPIC_18_UNIQUE/u);
+  assert.equal(material.basis.scope, 'recent_turns_v2');
+  assert.equal(material.basis.conversation, undefined);
+  assert.deepEqual(material.basis.messages.map(item => item.id), ['u17', 'a17', 'u18', 'a18']);
+  assert.ok(sessionTitleTaskBasisMatches(messages, 'u18', material.basis));
+  assert.deepEqual(messages, unchanged);
+  messages[15].content += ' unrelated earlier edit';
+  assert.ok(sessionTitleTaskBasisMatches(messages, 'u18', material.basis));
+  messages.push(message('u19', 'user', 'LATER_THEME', 'u19'));
+  assert.ok(sessionTitleTaskBasisMatches(messages, 'u18', material.basis), 'later append does not invalidate frozen input');
+  messages[35].content += ' selected edit';
+  assert.equal(sessionTitleTaskBasisMatches(messages, 'u18', material.basis), false);
 });
 
-test('regeneration material has stable content-only bytes for repeat requests and short appended turns', () => {
+test('recent-turn material has deterministic content-only bytes and automatic candidates stop at their own boundary', () => {
   const messages = fixture();
-  messages[0].content = 'KeepSeek 审批关联 ' + 'A'.repeat(4000) + '最终目标';
   const first = buildSessionTitleRegenerationMaterial(messages, 'u1')!;
-  assert.equal(buildSessionTitleRegenerationMaterial(messages, 'u1')!.userPrompt, first.userPrompt);
   const remapped = messages.map(item => ({ ...item, id: item.id + '-copy', createdAt: '2099-12-30',
     userTask: { ...item.userTask!, id: 'copy-task', originMessageId: 'u1-copy' } }));
-  assert.equal(buildSessionTitleRegenerationMaterial(remapped, 'copy-task')!.userPrompt, first.userPrompt,
-    'request payload excludes message and task IDs, timestamps and title metadata');
-  messages.push(message('u2', 'user', '再检查取消路径', 'u2'), message('a2', 'assistant', '核对取消源。', 'u2'));
-  const next = buildSessionTitleRegenerationMaterial(messages, 'u2')!;
-  assert.deepEqual(JSON.parse(next.userPrompt).excerpts.slice(0, 2), JSON.parse(first.userPrompt).excerpts,
-    'a short added turn preserves existing excerpt bytes before total budget pressure');
-  assert.equal(SESSION_TITLE_REGENERATION_MAX_CHARS, 32_000);
+  assert.equal(buildSessionTitleRegenerationMaterial(remapped, 'copy-task')!.userPrompt, first.userPrompt);
+  messages.push(message('u2', 'user', 'LATER_THEME', 'u2'), message('a2', 'assistant', 'Later answer', 'u2'));
+  assert.equal(buildSessionTitleMaterial(messages, 'u1')!.userPrompt, first.userPrompt);
+  assert.equal(SESSION_TITLE_REGENERATION_MAX_CHARS, 8000);
 });
 
-test('regeneration keeps long message middles when the complete visible conversation fits the input budget', () => {
-  const messages = fixture();
-  messages[0].content = '开头主题 ' + 'A'.repeat(3500) + ' 中间唯一对象AuroraRisk ' + 'B'.repeat(3500) + ' 最终目的';
-  messages[1].content = '需要核对具体实现。';
-  const material = buildSessionTitleRegenerationMaterial(messages, 'u1')!;
-  const data = JSON.parse(material.userPrompt);
-  assert.equal(data.excerpts[0].text, messages[0].content);
-  assert.equal(data.excerpts[1].text, messages[1].content);
-  assert.match(material.userPrompt, /AuroraRisk/u);
-  assert.ok(!material.userPrompt.includes('[excerpt omitted]'));
-});
-
-test('manual all-history projection is bounded, Unicode safe and refuses impossible row coverage', () => {
+test('recent-two projection stays bounded with escaping, graphemes and thousands of old rounds', () => {
   const messages: ChatMessage[] = [];
-  for (let turn = 1; turn <= 35; turn++) messages.push(
-    message(`u${turn}`, 'user', `主题${turn} 👩‍💻 e\u0301 ` + '𠮷'.repeat(2000), `u${turn}`),
-    message(`a${turn}`, 'assistant', `答复${turn} ` + '解决步骤'.repeat(2000), `u${turn}`));
-  const material = buildSessionTitleRegenerationMaterial(messages, 'u35')!;
-  assert.ok(material.userPrompt.length <= 32_000);
+  for (let turn = 1; turn <= 2000; turn++) messages.push(
+    message(`u${turn}`, 'user', `主题${turn} 👩‍💻 e\u0301 \" ` + '𠮷'.repeat(2000) + ' USER_TAIL', `u${turn}`),
+    message(`a${turn}`, 'assistant', `答复${turn} ` + '解决步骤'.repeat(2000) + ' ANSWER_TAIL', `u${turn}`));
+  const material = buildSessionTitleRegenerationMaterial(messages, 'u2000', { maxChars: 2000 })!;
+  assert.ok(material.userPrompt.length <= 2000);
+  assert.equal(material.userPrompt, buildSessionTitleRegenerationMaterial(messages, 'u2000', { maxChars: 2000 })!.userPrompt);
   const data = JSON.parse(material.userPrompt);
-  assert.equal(data.excerpts.length, 70);
+  assert.equal(data.excerpts.length, 4);
+  assert.match(material.userPrompt, /USER_TAIL/u);
+  assert.match(material.userPrompt, /ANSWER_TAIL/u);
   for (const excerpt of data.excerpts) {
-    assert.ok(excerpt.text.length > 0);
     assert.equal([...excerpt.text].some(character => {
       const point = character.codePointAt(0)!;
       return point >= 0xd800 && point <= 0xdfff;
-    }), false, 'bounded excerpts never contain a broken surrogate');
+    }), false);
   }
-  const short = buildSessionTitleRegenerationMaterial(messages, 'u35', { maxChars: 8000 })!;
-  assert.ok(short.userPrompt.length <= 8000);
-  assert.equal(JSON.parse(short.userPrompt).excerpts.length, 70);
-  const impossible: ChatMessage[] = [];
-  for (let turn = 1; turn <= 2000; turn++) impossible.push(
-    message(`u${turn}`, 'user', 'specific topic', `u${turn}`),
-    message(`a${turn}`, 'assistant', 'specific answer', `u${turn}`));
-  assert.equal(buildSessionTitleRegenerationMaterial(impossible, 'u2000'), undefined,
-    'do not silently sample away rounds when even their data envelope cannot fit');
 });
 
 test('manual material and whole-conversation fingerprints exclude hidden fields and host-only continuation records', () => {
@@ -313,7 +304,8 @@ test('manual regeneration accepts legacy conversation task links without borrowi
   const material = buildSessionTitleRegenerationMaterial(messages, 'new-user')!;
   assert.equal(getSessionTitleRegenerationTaskId(messages), 'new-user');
   assert.equal(material.basis.lastMessageId, 'new-answer');
-  assert.deepEqual(material.basis.messages.map(item => item.id), ['new-user', 'new-answer']);
+  assert.deepEqual(material.basis.messages.map(item => item.id), ['old-user', 'old-answer', 'new-user', 'new-answer']);
+  assert.ok(sessionTitleTaskBasisMatches(messages, 'new-user', material.basis));
   assert.equal(JSON.parse(material.userPrompt).excerpts.length, 4);
   assert.ok(sessionTitleBasisMatches(messages, material.basis));
   const earlier = buildSessionTitleRegenerationMaterial(messages, 'old-user')!;
@@ -340,4 +332,33 @@ test('manual task selection rejects an unanswered or streaming latest turn and i
   assert.equal(getSessionTitleRegenerationTaskId(messages), 'u2');
   answer.userTask!.originMessageId = 'u1';
   assert.equal(getSessionTitleRegenerationTaskId(messages), undefined, 'corrupt task links cannot borrow an earlier origin');
+});
+
+
+test('complete clarification and waiting Apply can be named but explicit partial/error records cannot', () => {
+  const answer = fixture()[1];
+  const details = { status: 'waiting' } as NonNullable<ChatMessage['runDetails']>;
+  answer.runDetails = details;
+  answer.runState = { status: 'completed', stopReason: 'waiting_for_user' } as ChatMessage['runState'];
+  assert.equal(isSessionTitleFinalAnswer(answer), true);
+  for (const status of ['stopped', 'running'] as const) {
+    answer.runDetails = { ...details, status };
+    assert.equal(isSessionTitleFinalAnswer(answer), false, status);
+  }
+  for (const status of ['failed', 'blocked'] as const) {
+    answer.runDetails = { ...details, status };
+    assert.equal(isSessionTitleFinalAnswer(answer), true, 'complete engineering failure explanations can have topics');
+    answer.runState = undefined;
+    assert.equal(isSessionTitleFinalAnswer(answer), false, 'raw terminal error alone is not a final answer');
+    answer.runState = { status: 'completed', stopReason: 'waiting_for_user' } as ChatMessage['runState'];
+  }
+  answer.runDetails = { ...details, status: 'succeeded', outputTruncation: { finishReason: 'length', requestId: 'x', toolsExecuted: 0 } };
+  assert.equal(isSessionTitleFinalAnswer(answer), false);
+});
+
+test('credential-only selected turns produce no material instead of borrowing the earlier topic', () => {
+  const messages = fixture();
+  messages.push(message('u2', 'user', 'secret=credential-value', 'u2'), message('a2', 'assistant', 'bearer long-credential', 'u2'),
+    message('u3', 'user', 'me@example.com', 'u3'), message('a3', 'assistant', '/Users/private/key', 'u3'));
+  assert.equal(buildSessionTitleRegenerationMaterial(messages, 'u3'), undefined);
 });

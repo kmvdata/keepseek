@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { DelegatedApprovalQueue } from '../src/agent/approvalMode';
 import { createEmptySession } from '../src/sessions/chatSessionStore';
+import { buildSessionTitleMaterial } from '../src/sessions/sessionTitle';
 import type { AgentResponse, ChatMessage, ChatSession } from '../src/shared/types';
 import {
   captureSessionTitleCompletion,
@@ -60,10 +61,10 @@ test('a returned response requesting approval continuation is not a final comple
   }
 });
 
-test('failed, stopped, budget paused, truncated, interrupted and streaming answers never qualify', () => {
+test('raw errors, stopped, budget paused, truncated, interrupted and streaming answers never qualify', () => {
   const cases: Array<(session: ChatSession, message: ChatMessage) => void> = [
-    (_s, m) => { m.runDetails!.status = 'failed'; },
-    (_s, m) => { m.runDetails!.status = 'blocked'; },
+    (_s, m) => { m.runDetails!.status = 'failed'; m.runDetails!.failureReason = 'provider_error'; },
+    (_s, m) => { m.runDetails!.status = 'blocked'; m.runCheckpointArchive!.summary.status = 'blocked'; },
     (_s, m) => { m.runDetails!.status = 'stopped'; },
     (_s, m) => { m.runDetails!.failureReason = 'provider_error'; },
     (_s, m) => { m.runDetails!.budgetStopReason = 'cost_limit'; },
@@ -83,18 +84,18 @@ test('failed, stopped, budget paused, truncated, interrupted and streaming answe
   assert.equal(checkSessionTitleCompletion(session, completion, { aborted: true }).ready, false);
 });
 
-test('new turns and internal continuations supersede an earlier segment; only the new final response qualifies', () => {
+test('new user turns retain older completed rounds while internal continuations replace earlier segments', () => {
   for (const reason of ['user', 'approval', 'command', 'repair', 'plan', 'recovery'] as const) {
     const { session, assistant, response, completion } = fixture();
     const link = { ...assistant.userTask!, reason,
       ...(reason === 'user' ? { id: 'new-task', originMessageId: 'next-user' } : {}) };
     session.messages.push({ id: 'next-user', role: 'user', content: '下一段', createdAt: '', userTask: link });
-    assert.deepEqual(checkSessionTitleCompletion(session, completion), { ready: false, reason: 'superseded' });
+    assert.equal(checkSessionTitleCompletion(session, completion).ready, reason === 'user');
     const next = { ...assistant, id: 'next-answer', userTask: link };
     session.messages.push(next);
     const latest = captureSessionTitleCompletion(session.id, next, response)!;
     assert.equal(checkSessionTitleCompletion(session, latest).ready, true);
-    assert.equal(checkSessionTitleCompletion(session, completion).ready, false);
+    assert.equal(checkSessionTitleCompletion(session, completion).ready, reason === 'user');
   }
 });
 
@@ -110,10 +111,15 @@ test('scope checks reject deleted or unlinked origin messages without modifying 
   assert.equal(checkSessionTitleCompletion(session, completion).ready, false);
 });
 
-test('repair and root-scoped approval processing block only their active lifecycle', () => {
+test('a complete repair draft waiting for Apply qualifies while active approval processing waits', () => {
   const { session, completion } = fixture();
+  session.messages[0].contextMeta = { isProtected: true, protectedReason: 'first_user_request' };
+  session.messages[1].contextMeta = { isProtected: true, protectedReason: 'draft_edit_result' };
   session.repairLoop = { status: 'waiting_for_apply', iteration: 1, maxIterations: 3, pendingDraftEditIds: ['draft'] };
-  assert.equal(checkSessionTitleCompletion(session, completion).ready, false);
+  assert.equal(checkSessionTitleCompletion(session, completion).ready, true);
+  const material = buildSessionTitleMaterial(session.messages, completion.taskId)!;
+  assert.match(material.userPrompt, /排查审批失败/u);
+  assert.match(material.userPrompt, /需要你补充错误日志/u);
   session.repairLoop.status = 'completed';
   assert.equal(checkSessionTitleCompletion(session, completion).ready, true);
   session.approvalProcessing = { version: 1, rootTaskId: completion.taskId, runId: 'segment', mode: 'delegate',
@@ -135,4 +141,14 @@ test('approval lifecycle observation neither claims nor starts queued work and i
   assert.equal(queue.hasPending('session', 'root'), true);
   queue.finish(claimed.controller);
   assert.equal(queue.hasPending('session'), false);
+});
+
+
+test('a complete explanation can be named even when its engineering task plan is blocked or failed', () => {
+  for (const status of ['blocked', 'failed', 'waiting'] as const) {
+    const { session, assistant, completion } = fixture();
+    assistant.runDetails!.status = status;
+    assistant.content = '命令未成功，需要修复依赖；完整诊断方案如下。';
+    assert.equal(checkSessionTitleCompletion(session, completion).ready, true);
+  }
 });

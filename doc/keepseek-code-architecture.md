@@ -123,6 +123,7 @@ ask 由用户逐项/批量批准；delegate 对符合宿主规则的常规操作
 | 模块/数据 | 权威与边界 |
 | --- | --- |
 | [chatSessionStore.ts](../src/sessions/chatSessionStore.ts) | 当前 workspace 会话门面、内存状态、选择与保存协调；除原生 replay 外的 normalize/migration 仍在此 |
+| [sessionTitle.ts](../src/sessions/sessionTitle.ts)、[sessionTitleCoordinator.ts](../src/sessions/sessionTitleCoordinator.ts) | 唯一标题元数据、永久停止与独立 attempt；消费前缀游标/近期身份；共享真实轮/最近两轮 material/basis；串行请求、用户抢占和过期提交保护 |
 | [providerReplayNormalization.ts](../src/sessions/providerReplayNormalization.ts) | 原生 Responses/Anthropic replay 的纯完整校验、容量限制和复制；Store/Provider 共用，禁止接受部分非法 replay |
 | [globalSessionStorage.ts](../src/sessions/globalSessionStorage.ts) | 按 workspace/session 分片的持久化 adapter，索引/全局 manifest V2 |
 | [sessionObjectStore.ts](../src/sessions/sessionObjectStore.ts) | session shard V4 对象图、hash/scope/revision/写锁、对象先于 manifest 提交；兼容 V3 与旧 V2 迁移 |
@@ -131,6 +132,8 @@ ask 由用户逐项/批量批准；delegate 对符合宿主规则的常规操作
 | `ChatSession.messages` | UI 持久历史，append-only；`contextCompression` / `historyArchive` 仅是请求投影状态 |
 | `requestProtocol` / `contextInstructions` | 冻结 lane/工具 schema 与稳定上下文字节；normalizer 不反写旧前缀 |
 | `runCheckpoint` / `runCheckpointArchive` | 当前可恢复状态与归档引用；普通加载仅展开最新未结束 checkpoint，UI 不接收完整对象图 |
+
+标题的 Host 完成候选与 drain 独立于命令续跑和项目上下文准入；只有真实完成回答的 durable 事件可制造自动候选，启动/历史/诊断只读不补发。普通追加不提升标题 revision 或取消有效 attempt，首次合格标题与停止状态跨 shard/index staged commit 后永久停止；截断、归档和旧依据缺失不解锁已提交标题。新 basis 只绑定所选最多两轮正文，旧 whole-history basis/hash 保留旧格式读取；旧 canonical commit 先核验再迁移，shard-only 不构成成功。手动历史刷新只惰性加载目标并冻结最近两轮，不选回 active，不带全历史/摘要/展开内容。请求固定无工具、一次 set/defer，标题专属 512 输出/30 秒上限；自动共享本轮根预算及准入预占，手动新建窄辅助预算，reviewer 合同不变。实现边界与原生请求计数验收见[会话标题](keepseek-session-title-verification.md)。
 
 默认存储由各 Store 通过 `globalStorageUri` 解析。来源/子代理设置、`chat-sessions/v2` 索引及 shard、兼容 `chat-sessions/v1` evidence/child、`usage-ledger/v2`、`change-sets/v4`、DraftRun 和审批文件各由所属 Store 管理。业务层不拼版本路径，也不在项目仓库保存密钥或真实会话。JSON 优先 `writeJsonAtomic()`；未知副作用不自动重试，迁移与恢复在副本验证。
 

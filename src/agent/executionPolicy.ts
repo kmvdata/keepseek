@@ -194,6 +194,15 @@ export class LogicalRunBudget {
     return { promptTokens, outputTokens: reservedOutputTokens, upstreamTokens };
   }
 
+  /** Release a reservation when a pre-dispatch barrier prevented the POST. */
+  public releaseUndispatchedRequest(reservation: PhysicalRequestReservation): void {
+    this.state.modelRequests -= 1;
+    this.state.promptTokens -= reservation.promptTokens;
+    this.state.upstreamTokens -= reservation.upstreamTokens;
+    this.tree.reconcile(reservation.upstreamTokens, 0);
+    this.syncTree();
+  }
+
   public settlePhysicalRequest(
     reservation: PhysicalRequestReservation,
     usage?: {

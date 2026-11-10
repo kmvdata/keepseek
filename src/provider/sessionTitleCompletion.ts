@@ -1,4 +1,5 @@
 import type { AgentResponse, ChatMessage, ChatSession } from '../shared/types';
+import { isSessionTitleFinalAnswer, isSessionTitleOrigin } from '../sessions/sessionTitle';
 
 /** Captured only from a real, returned AgentResponse. A state refresh, idle
  * transition or historical message cannot manufacture a completion event. */
@@ -11,6 +12,7 @@ export interface SessionTitleCompletion {
 }
 
 export interface SessionTitleCompletionBlockers {
+  /** Blockers refer to this candidate's root task, not an unrelated new turn. */
   running?: boolean;
   queuedApproval?: boolean;
   commandContinuation?: boolean;
@@ -37,45 +39,52 @@ export function captureSessionTitleCompletion(
 
 export type SessionTitleCompletionCheck =
   | { ready: true; taskId: string; messageId: string }
-  | { ready: false; reason: 'scope' | 'superseded' | 'incomplete' | 'continuation' | 'stopped' };
+  | { ready: false; reason: 'scope' | 'superseded' | 'incomplete' | 'continuation' | 'stopped'; terminal?: true };
 
-/** Read current host state after the answer is durable and all continuation
- * coordinators have had their opportunity to run. Task IDs are host links,
- * never Provider trace/run IDs. Drafts alone do not keep an ask turn open. */
+/** Inspect only this observed round. Later real user inputs do not invalidate
+ * a completed answer; another segment of the same task does replace it. A
+ * complete proposal waiting for Apply is already a useful visible answer. */
 export function checkSessionTitleCompletion(
   session: ChatSession,
   completion: SessionTitleCompletion,
   blockers: SessionTitleCompletionBlockers = {}
 ): SessionTitleCompletionCheck {
-  if (session.id !== completion.sessionId || session.pendingHistoryTruncation) return { ready: false, reason: 'scope' };
-  const message = session.messages.find(item => item.id === completion.assistantMessageId);
+  if (session.id !== completion.sessionId || session.pendingHistoryTruncation) {
+    return { ready: false, reason: 'scope', terminal: true };
+  }
+  const messageIndex = session.messages.findIndex(item => item.id === completion.assistantMessageId);
+  const message = session.messages[messageIndex];
   const task = message?.userTask;
   const origin = task && session.messages.find(item => item.id === task.originMessageId);
   if (!message || message.role !== 'assistant' || task?.id !== completion.taskId || !origin
-    || origin.role !== 'user' || origin.contextMeta?.displayKind || origin.userTask?.id !== task.id) {
-    return { ready: false, reason: 'scope' };
+    || !isSessionTitleOrigin(origin)
+    || origin.userTask?.id !== task.id) {
+    return { ready: false, reason: 'scope', terminal: true };
   }
-  const latestTaskMessage = [...session.messages].reverse().find(item => item.userTask?.id);
-  if (latestTaskMessage?.id !== message.id) return { ready: false, reason: 'superseded' };
-  if (blockers.aborted) return { ready: false, reason: 'stopped' };
-  if (Object.entries(blockers).some(([key, value]) => key !== 'aborted' && value)
-    || completion.approvalContinuationRequired || completion.approvalContinuationStopReason) {
-    return { ready: false, reason: 'continuation' };
+  if (session.messages.slice(messageIndex + 1).some(item => item.userTask?.id === task.id)) {
+    return { ready: false, reason: 'superseded', terminal: true };
   }
-  if (message.isStreaming || !message.content.trim()) return { ready: false, reason: 'incomplete' };
-  const details = message.runDetails;
-  const checkpoint = message.runCheckpoint ?? message.runCheckpointArchive?.summary;
-  if (!details || details.status !== 'succeeded' || details.budgetStopReason || details.budgetPause
-    || details.failureReason || details.outputTruncation
-    || checkpoint && (checkpoint.status !== 'completed' || checkpoint.stopReason && checkpoint.stopReason !== 'completed')) {
-    return { ready: false, reason: 'stopped' };
+  if (blockers.aborted || completion.approvalContinuationStopReason) {
+    return { ready: false, reason: 'stopped', terminal: true };
+  }
+  // A continuation boundary cannot become a final answer. A later segment
+  // registers its own returned answer under the same user task.
+  if (completion.approvalContinuationRequired) return { ready: false, reason: 'continuation', terminal: true };
+  if (Object.entries(blockers).some(([key, value]) => key !== 'aborted' && value)) return { ready: false, reason: 'continuation' };
+  if (message.isStreaming) return { ready: false, reason: 'incomplete' };
+  if (!message.content.trim()) return { ready: false, reason: 'incomplete', terminal: true };
+  if (!message.runDetails || !isSessionTitleFinalAnswer(message)) {
+    return { ready: false, reason: 'stopped', terminal: true };
   }
   const processing = session.approvalProcessing;
   if (processing?.rootTaskId === completion.taskId
-    && ['processing', 'replanning', 'waiting_user', 'blocked', 'stopped'].includes(processing.status)) {
-    return { ready: false, reason: 'continuation' };
-  }
-  if (session.repairLoop && !['idle', 'completed', 'blocked'].includes(session.repairLoop.status)) {
+    && ['processing', 'replanning'].includes(processing.status)) return { ready: false, reason: 'continuation' };
+  // waiting_for_apply is a complete draft, not an active automatic segment.
+  // Session repair state belongs to the current tail task; never let a later
+  // task's repairs hold an older durable completion.
+  const latestTask = [...session.messages].reverse().find(item => item.userTask)?.userTask?.id;
+  if (latestTask === task.id && session.repairLoop
+    && ['validation_failed', 'reading_problems', 'generating_repair', 'ready_for_validation', 'running_validation'].includes(session.repairLoop.status)) {
     return { ready: false, reason: 'continuation' };
   }
   return { ready: true, taskId: completion.taskId, messageId: message.id };

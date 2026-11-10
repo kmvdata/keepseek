@@ -63,7 +63,7 @@ Webview → Host 消息唯一入口仍是 `provider/webviewMessages.ts`；Host �
 | `userTaskBudgets` / 完整 checkpoint 读取 | 不必挡正文 | 相应继续/恢复前必须完成 | 安全时间、费用、逻辑调用量、委派树与恢复键权威 |
 | Usage Ledger 展示重建、参考费用/缓存观测 | 不阻塞 | 不阻塞 | 请求级原始记录单独耐久；这些汇总不是安全预算 |
 | 子代理摘要、活动展示恢复 | 不阻塞 | 不阻塞 | `restoreUsage()` 只读 summaries/activities，不恢复 scheduler 预算或调度任务 |
-| 标题生成/手动刷新、余额 | 不阻塞 | 不因展示占主任务 | 有独立 session/request 所有权；自动命名继承原任务剩余额度，手动刷新使用独立小预算，真实用量归目标会话 |
+| 标题生成/手动刷新、余额 | 不阻塞 | 不因展示占主任务 | 独立 session/request 所有权与 durable 候选 drain；自动继承本轮根任务余量并协调预占，手动使用独立小预算；真实用量归目标，首次成功永久停止 |
 
 导航不等待整个 `startupInitializationPromise`。会话及必要安全存储跨过初始化屏障后，即使旧活动会话项目上下文、模型目录或展示工作仍在加载，也可开始目标会话事务。create/select/copy 的目标正文、安全选择保存、操作记录恢复及截断失效 flush 完成后，同步释放导航 owner。项目上下文继续按目标 session/generation 准备，此时 canEdit=true、canNavigate=true、canSubmit=false；上下文和其它执行必要条件满足后在同次状态更新开放提交。导航方法返回的 Promise 仍可等待上下文完成供调用方收口，但 UI 导航能力不依赖这个 Promise 结算。会话/上下文 generation 变化使旧启动或导航上下文工作的 ready、error 和 finally 失效，A→B→A 也不能把第一次进入 A 的结果赋给第二次 A；旧 finally 不释放新 owner、不重复发布 sessionChanged 抬高新入口 revision 下界。不可取消的读取可继续完成缓存，但不能回写新会话状态。
 
@@ -72,6 +72,8 @@ Webview → Host 消息唯一入口仍是 `provider/webviewMessages.ts`；Host �
 原始 Provider usage 记录在传输推进前单独持久化。`usageMetrics.displayReadiness` 使用 `loading/ready/incomplete` 表达展示恢复状态。展示重建失败保留内联迁移来源和不完整标记；不能把缺失统计当作 0。后台结果核验所属会话与数据版本，不能选择回旧会话或把展示完成误标为运行就绪。
 
 安全预算来自 `sessions/userTaskBudget.ts`、`getTaskCheckpoint()` 与 Runner checkpoint：`usedMs/maxExecutionMs/maxCost/usedCostByCurrency/runBudget/budgetLimits/delegationBudget/commandRecoveryKeys`。Runner 用 checkpoint 恢复任务时钟、费用及委派树；审批 reviewer/子代理继承同一上限。展示后台化不修改这些恢复/合并路径，不少计、重复计或归零；正费用上限遇不可计价来源仍 fail-closed。
+
+自动标题在真实完整回答保存成功并释放前台 owner 后独立 drain，不依赖命令续跑准入或当前项目指令/Skills 就绪。每 session 串行保留完成候选，普通新轮和切换查看不取消有效在途；busy 等待不消费，首次有效标题与停止标记共同提交后清空候选并永久停止。手动刷新在确认目标时冻结最多最近两个完整真实轮，只选 user/final assistant 的 content；最新输入未答完则 busy/no_material，不取更早轮。手动改名（含同文本）与刷新抢占旧自动请求；旧结果/保存/finally 不能覆盖新意图。标题不占输入或 UserTaskClock，自动与同 root task 续跑的预算准入必须协调，不能仅靠结算增量合并。完整状态、迁移与验收见[会话标题](keepseek-session-title-verification.md)。
 
 `ChatSessionStore.persist()` 和 `CoalescedWriter` 的等待者仅在其 revision 或包含它的更新完整快照提交成功后完成。可合并普通快照，不可用 debounce、best-effort 或“界面已空闲”替代必要屏障。必要保存失败保留内存状态、明确阻塞及重试范围；展示错误不重新锁住整个输入框，未知副作用不得自动重跑。
 

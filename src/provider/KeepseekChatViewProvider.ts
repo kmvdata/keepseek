@@ -1,7 +1,7 @@
 import type { AgentRequest } from '../shared/types';
 import { InteractionCoordinator, deriveSessionTitleCapability, type InteractionOperation, type InteractionPhase } from './interactionState';
 import { SessionTitleCoordinator, type SessionTitleRequest, type SessionTitleRegenerationOutcome } from '../sessions/sessionTitleCoordinator';
-import { buildSessionTitleRegenerationMaterial, getSessionTitleRegenerationTaskId } from '../sessions/sessionTitle';
+import { hasConsumedTitleRound, buildSessionTitleRegenerationMaterial, getSessionTitleRegenerationTaskId } from '../sessions/sessionTitle';
 import { captureSessionTitleCompletion, checkSessionTitleCompletion, type SessionTitleCompletion } from './sessionTitleCompletion';
 import { requestSessionTitle, mergeSessionTitleTaskBudget, createManualSessionTitleBudget } from './sessionTitleRequest';
 import { approvalDisposition } from '../approvals/approvalReviewTypes';
@@ -262,16 +262,25 @@ interface CommandSettingsReadiness {
   approvalMode: StartupLoadState;
 }
 
+interface SessionTitleCandidate {
+  completion: SessionTitleCompletion;
+  durable: boolean;
+  /** Identity only: credentials are resolved at dispatch, never queued. */
+  parentRequest: Pick<AgentRequest, 'model' | 'sourceConfig'>;
+  setting?: SubagentModelSetting;
+}
+
 export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = CHAT_VIEW_TYPE;
 
   private readonly fileContext = new FileContextStore();
   private readonly sessionTitles: SessionTitleCoordinator;
-  private readonly sessionTitleCandidates = new Map<string, {
-    completion: SessionTitleCompletion;
-    durable: boolean;
-    parentRequest: Pick<AgentRequest, 'model' | 'sourceConfig'>;
-  }>();
+  private readonly sessionTitleCandidates = new Map<string, Map<string, SessionTitleCandidate>>();
+  private readonly sessionTitleQueuePins = new Map<string, () => void>();
+  private readonly sessionTitleDrains = new Set<string>();
+  /** A title and continuation of the same root never admit from stale balances. */
+  private readonly sessionTitleBudgetLeases = new Map<string, Promise<void>>();
+  private readonly sessionTitleDiagnostics = new Map<string, { reason: string; elapsedMs: number }>();
   private titleLifecycleDisposed = false;
   private readonly manualSessionTitleRequests = new Map<string, string>();
   /** Process-local duplicate delivery protection; never restores paid requests. */
@@ -439,7 +448,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.postState();
   }
 
-  private async loadTaskBudget(session: ChatSession, link: UserTaskLink): Promise<import('../sessions/userTaskBudget').UserTaskBudget | undefined> {
+  private async loadTaskBudget(session: ChatSession, link: UserTaskLink, titleOwnsLease = false): Promise<import('../sessions/userTaskBudget').UserTaskBudget | undefined> {
+    if (!titleOwnsLease) await this.waitForSessionTitleBudget(session.id, link.id);
     const existing = session.userTaskBudgets?.[link.id];
     if (existing) return existing;
     const message = [...session.messages].reverse().find(item => item.userTask?.id === link.id && executionSegmentId(item));
@@ -448,6 +458,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     if (!checkpoint) throw new Error(this.t('approvalIdentityMissing'));
     session.userTaskBudgets ??= {};
     return session.userTaskBudgets[link.id] = taskBudgetFromCheckpoint(checkpoint);
+  }
+
+  private async waitForSessionTitleBudget(sessionId: string, taskId: string): Promise<void> {
+    await this.sessionTitleBudgetLeases?.get(JSON.stringify([sessionId, taskId]));
   }
 
   private taskTimingTimer?: ReturnType<typeof setInterval>;
@@ -556,8 +570,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         if (session) this.postToWebview({ type: 'sessionTitleUpdated', sessionId, title: session.title,
           ...(requestId ? { regenerated: true, requestId } : {}) });
       },
-      onDiagnostic: (sessionId, _taskId, outcome, elapsedMs) => console.info('[KeepSeek] session_title', {
-        session: createHash('sha256').update(sessionId).digest('hex').slice(0, 12), outcome, elapsedMs })
+      onDiagnostic: (sessionId, taskId, outcome, elapsedMs, facts) => this.recordSessionTitleDiagnostic(sessionId, taskId, outcome, elapsedMs, facts),
+      onSettled: () => this.flushSessionTitleCompletions()
     });
     this.usageLedgerStore = new UsageLedgerStore(this.globalStorageUri);
     this.traceLogService = new InteractionTraceLogService(this.globalStorageUri);
@@ -4464,10 +4478,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private abortPrompt(): void {
-    if (this.isBusy || this.isStartingRun || this.activeDraftRunId) {
-      const id = this.sessionStore.activeSessionId;
-      this.cancelSessionTitleWork(id);
-    }
     this.externalAuthorizationEpoch = (this.externalAuthorizationEpoch ?? 0) + 1;
     this.manualToolApproval?.decide(false);
     this.changeActionAbortController?.abort();
@@ -5029,6 +5039,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.backgroundRunCoordinator.waitForApply(this.language === 'en'
         ? 'Review and apply the pending ChangeSet, then choose Resume.'
         : '请审核并应用待确认 ChangeSet，然后点击继续。');
+      this.flushSessionTitleCompletions();
       return;
     }
     if (response.repairLoop.stopReason === 'validation_passed' || response.repairLoop.status === 'completed') {
@@ -5084,6 +5095,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     session.updatedAt = new Date().toISOString();
     await this.sessionStore.persist();
     this.postState();
+    this.flushSessionTitleCompletions();
   }
 
   private updateRunDetailsForChangeSet(
@@ -5268,8 +5280,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
     const operation = this.interactions.begin('task', session.id, 'preparing_task');
     if (!operation) return;
-    const work = this.enterTaskWork(session, message.userTask);
-    this.activeTaskScope = work;
+    let work: ReturnType<UserTaskClock['enter']> | undefined;
     // Lock synchronously, before any await: duplicate clicks cannot start twice.
     const controller = new AbortController();
     this.currentRunAbortController = controller;
@@ -5280,6 +5291,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     let refreshTimer: ReturnType<typeof setTimeout> | undefined;
     const refresh = () => { if (!refreshTimer) refreshTimer = setTimeout(() => { refreshTimer = undefined; this.postState({ omitMessages: true }); }, 100); };
     try {
+      if (message.userTask) {
+        const latestBudget = await this.loadTaskBudget(session, message.userTask);
+        if (controller.signal.aborted) return;
+        if (latestBudget) inheritTaskBudget(cp, latestBudget);
+      }
+      work = this.enterTaskWork(session, message.userTask);
+      this.activeTaskScope = work;
       const currentModel = findModelBySelection(this.availableModels, { sourceId: cp.source.sourceId, modelId: cp.source.modelId });
       const blocker = recoveryBlocker(cp, currentModel);
       if (blocker) throw new Error(blocker);
@@ -5328,6 +5346,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
       this.modelSelectionTransactions.beginRun({ sourceId: cp.source.sourceId, modelId: cp.source.modelId });
       message.isStreaming = true;
+      message.incompleteForTitle = true;
       // Interrupted display deltas and the old error notice cannot become the
       // committed prefix of a recovered model attempt.
       message.content = (cp.state?.toolRounds.map((round) => round.assistantContent ?? '').join('') ?? '')
@@ -5399,6 +5418,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         response.approvalContinuationRequired = false;
         response.approvalToolResults = undefined;
       }
+      if (!controller.signal.aborted && !response.approvalContinuationRequired && !response.approvalContinuationStopReason) delete message.incompleteForTitle;
       message.content = response.message;
       message.reasoningContent = response.reasoningContent;
       message.toolRounds = response.toolRounds;
@@ -5430,8 +5450,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         this.queueResponseApprovals(session, message, response, cp.taskId);
       }
       if (!controller.signal.aborted) {
-        const frozen = this.approvalMainContexts.get(`${session.id}:${message.id}`);
-        if (frozen?.sourceConfig) this.rememberSessionTitleCompletion(session, message, response, { model: frozen.model, sourceConfig: frozen.sourceConfig });
+        // Recovery already verified this execution's source and endpoint.
+        // The bounded approval-context cache may have evicted the entry.
+        this.rememberSessionTitleCompletion(session, message, response, {
+          model: { ...(cp.outputFailure ? currentModel : checkpointForResume.request.model), sourceId: source.sourceId },
+          sourceConfig: source
+        });
       }
     } catch (error) {
       vscode.window.showWarningMessage(getErrorMessage(error));
@@ -5452,12 +5476,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         this.setAgentActivity({ base: 'idle', phase: 'idle' });
         try {
           await this.sessionStore.persist();
-          const title = this.sessionTitleCandidates?.get(session.id);
-          if (title?.completion.assistantMessageId === message.id) title.durable = true;
+          this.markSessionTitleDurable(session.id, message.userTask?.id, message.id);
         }
         catch (error) {
           this.interactionFailure = { sessionId: session.id, message: this.t('runStorageFailed') + ': ' + getErrorMessage(error) };
-          this.sessionTitleCandidates?.delete(session.id);
+          this.retireSessionTitleCandidate(session.id, message.userTask?.id);
           vscode.window.showErrorMessage(this.t('runStorageFailed') + ': ' + getErrorMessage(error));
         }
       } finally {
@@ -5466,6 +5489,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         settled();
         this.postState({ immediate: true });
       }
+      this.flushSessionTitleCompletions();
       if (!controller.signal.aborted && !this.interactionFailure) this.scheduleDraftRunAutoContinuation();
     }
   }
@@ -5553,7 +5577,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const operation = inheritedOperation ?? this.interactions.begin('task', this.sessionStore.activeSessionId, 'preparing_task');
     if (!operation || !this.interactions.owns(operation)) return;
     this.interactions.update(operation, 'preparing_task');
-    if (!incoming?.delegatedContinuation && !incoming?.draftRunAutoContinue && !incoming?.repairLoop && !incoming?.planExecutionContinuation) this.cancelSessionTitleWork(this.sessionStore.activeSessionId);
     if (!incoming?.draftRunBatch) this.draftRunBatches?.cancel();
     const taskSessionForSave = this.sessionStore.getActiveSession();
     const preparationController = new AbortController();
@@ -5617,9 +5640,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           : sendOptions.draftRunAutoContinue ? 'command' : sendOptions.repairLoop ? 'repair' : 'recovery' }
         : { version: 1, id: userMessageId, originMessageId: userMessageId, reason: 'user' };
       args[4] = { ...sendOptions, interactionOperation: operation, userMessageId, userTask, approvalRootTaskId: userTask.id };
-      if (!inherited || sendOptions.replaceMessageId) {
-        this.cancelSessionTitleWork(taskSession.id);
+      if (sendOptions.replaceMessageId) {
+        const cut = taskSession.messages.findIndex(message => message.id === sendOptions.replaceMessageId);
+        if (cut >= 0) this.retireTruncatedTitleWork(taskSession, taskSession.messages.slice(cut).map(message => message.id));
       }
+      await this.waitForSessionTitleBudget(taskSession.id, userTask.id);
+      if (preparationController.signal.aborted) return;
       work = this.enterTaskWork(taskSession, userTask);
       this.activeTaskScope = work;
       if (taskSession.approvalMode === 'delegate' && taskSession.executionMode === 'plan'
@@ -5639,11 +5665,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.postState({ immediate: true, omitMessages: true });
       try {
         if (userTask) await this.sessionStore.persist();
-        const title = this.sessionTitleCandidates?.get(taskSessionForSave.id);
-        if (title && userTask && title.completion.taskId === userTask.id) title.durable = true;
+        this.markSessionTitleDurable(taskSessionForSave.id, userTask?.id);
         if (userTask && this.interactionFailure?.sessionId === taskSessionForSave.id && !taskSessionForSave.pendingHistoryTruncation) this.interactionFailure = undefined;
       } catch (error) {
-        this.sessionTitleCandidates?.delete(taskSessionForSave.id);
+        this.retireSessionTitleCandidate(taskSessionForSave.id, userTask?.id);
         this.interactionFailure = { sessionId: taskSessionForSave.id, message: this.t('runStorageFailed') + ': ' + getErrorMessage(error) };
         vscode.window.showErrorMessage(this.interactionFailure.message);
       } finally {
@@ -5653,6 +5678,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         settled();
         this.postState({ immediate: true });
       }
+      this.flushSessionTitleCompletions();
       if (!preparationController.signal.aborted && !this.interactionFailure) this.scheduleDraftRunAutoContinuation();
     }
   }
@@ -5661,7 +5687,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     return {
       persistSession: () => this.sessionStore.persist(),
       invalidateOperations: async (scope: HistoryTruncationScope) => {
-        this.cancelSessionTitleWork(session.id);
+        this.retireTruncatedTitleWork(session, scope.removedMessageIds);
         this.externalAuthorizationEpoch = (this.externalAuthorizationEpoch ?? 0) + 1;
         this.manualToolApproval?.decide(false);
         this.externalEffectGrants?.clear();
@@ -6080,11 +6106,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       const contextInstructions = rebaseStableContext ? computedContextInstructions : activeSession.contextInstructions;
 
       if (truncation) {
-        if (replacementIndex === 0 && !activeSession.customTitle && activeSession.autoTitle?.status !== 'completed') {
+        if (replacementIndex === 0 && !activeSession.customTitle && !activeSession.autoTitle?.stopped && activeSession.autoTitle?.status !== 'completed') {
           activeSession.title = createSessionTitle(trimmedPrompt, this.language);
         }
       } else if (!activeSession.messages.length) {
-        if (!activeSession.customTitle && activeSession.autoTitle?.status !== 'completed') {
+        if (!activeSession.customTitle && !activeSession.autoTitle?.stopped && activeSession.autoTitle?.status !== 'completed') {
           activeSession.title = createSessionTitle(trimmedPrompt, this.language);
         }
         activeSession.createdAt = now;
@@ -6189,6 +6215,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         // If compatibility validation rejects the new turn, retain the stopped
         // task on this tail as well. A subsequent send cannot accidentally
         // escape its logical budget just because an error message was appended.
+        incompleteForTitle: true,
         runCheckpoint: noProgressRecovery ? snapshotCheckpoint(noProgressRecovery) : undefined,
         isStreaming: true
       };
@@ -6242,6 +6269,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         if (!vscode.workspace.isTrusted) throw new Error(this.t('runRecoveryWorkspaceChanged'));
         agentRequest.checkpoint = recoverNoProgressWithUserTurn(noProgressRecovery, agentRequest,
           (vscode.workspace.workspaceFolders ?? []).map(folder => folder.uri.toString()));
+        if (inheritedBudget) inheritTaskBudget(agentRequest.checkpoint, inheritedBudget);
         // The new real turn and its inherited logical budget are durable before
         // any Provider request. No approval/permit is copied by this transition.
         await this.saveAgentCheckpoint(activeSession, assistantMessage, agentRequest.checkpoint);
@@ -6434,6 +6462,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       };
 
       if (assistantMessage) {
+        if (!abortController.signal.aborted && !response.approvalContinuationRequired && !response.approvalContinuationStopReason) delete assistantMessage.incompleteForTitle;
         assistantMessage.content = response.message;
         assistantMessage.reasoningContent = response.reasoningContent;
         if (!planPhaseViolation && (response.draftEdits.length || response.draftRuns?.length)) {
@@ -6534,12 +6563,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       const activeSession = this.sessionStore.getActiveSession();
       if (!activeSession.messages.length) {
         const now = new Date().toISOString();
-        if (!activeSession.customTitle && activeSession.autoTitle?.status !== 'completed') {
+        if (!activeSession.customTitle && !activeSession.autoTitle?.stopped && activeSession.autoTitle?.status !== 'completed') {
           activeSession.title = createSessionTitle(trimmedPrompt, this.language);
         }
         activeSession.createdAt = now;
       }
       if (assistantMessage) {
+        assistantMessage.incompleteForTitle = true;
         const reason = assistantMessage.runCheckpoint?.stopReason;
         const errorText = `${reason ? this.t('runStopped_' + reason) : this.t('errorPrefix')}: ${getErrorMessage(error)}`;
         const hasPartialOutput = Boolean(assistantMessage.content.trim() || assistantMessage.reasoningContent?.trim());
@@ -6551,6 +6581,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         this.messages.push({
           id: randomUUID(),
           role: 'assistant',
+          incompleteForTitle: true,
           content: `${this.t('errorPrefix')}: ${getErrorMessage(error)}`,
           createdAt: new Date().toISOString(),
           modelId: model.id
@@ -7211,6 +7242,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.startupStatePostCount += 1;
     this.fullStateSent = true;
     this.recordInteractionPublication(Boolean(visibleMessages));
+    this.flushSessionTitleCompletions();
     this.scheduleDraftRunAutoContinuation();
   }
 
@@ -7255,10 +7287,78 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private rememberSessionTitleCompletion(session: ChatSession, message: ChatMessage, response: AgentResponse,
     parentRequest: Pick<AgentRequest, 'model' | 'sourceConfig'>): void {
     const completion = captureSessionTitleCompletion(session.id, message, response);
-    if (!completion) return;
-    this.sessionTitleCandidates?.set(session.id, { completion, durable: false, parentRequest: {
-      model: { ...parentRequest.model }, sourceConfig: parentRequest.sourceConfig && { ...parentRequest.sourceConfig }
-    } });
+    if (!completion || session.customTitle || session.autoTitle?.stopped || session.autoTitle?.status === 'completed'
+      || hasConsumedTitleRound(session.messages, session.autoTitle, completion.taskId)) return;
+    const queue = this.sessionTitleCandidates.get(session.id) ?? new Map<string, SessionTitleCandidate>();
+    if (!this.sessionTitleCandidates.has(session.id) && this.sessionTitleQueuePins) {
+      this.sessionTitleQueuePins.set(session.id, this.sessionStore.pinSessionForTitle(session.id));
+    }
+    this.sessionTitleCandidates.set(session.id, queue);
+    // Updating a still-unsettled logical turn keeps its original position.
+    queue.set(completion.taskId, { completion, durable: false, parentRequest: {
+      model: { ...parentRequest.model, sourceId: parentRequest.sourceConfig?.sourceId ?? parentRequest.model.sourceId },
+      sourceConfig: parentRequest.sourceConfig && { ...parentRequest.sourceConfig, apiKey: '' }
+    }, setting: this.subagentModelSetting && structuredClone(this.subagentModelSetting) });
+  }
+
+  private markSessionTitleDurable(sessionId: string, taskId?: string, messageId?: string): void {
+    const candidate = taskId && this.sessionTitleCandidates?.get(sessionId)?.get(taskId);
+    if (candidate && (!messageId || candidate.completion.assistantMessageId === messageId)) candidate.durable = true;
+  }
+
+  private retireSessionTitleCandidate(sessionId: string, taskId?: string): void {
+    const queue = this.sessionTitleCandidates?.get(sessionId);
+    if (taskId) queue?.delete(taskId);
+    if (!queue?.size) this.clearSessionTitleCandidates(sessionId);
+  }
+
+  private clearSessionTitleCandidates(sessionId: string): void {
+    this.sessionTitleCandidates?.delete(sessionId);
+    this.sessionTitleQueuePins?.get(sessionId)?.();
+    this.sessionTitleQueuePins?.delete(sessionId);
+  }
+
+  private recordSessionTitleDiagnostic(sessionId: string, taskId: string, reason: string, elapsedMs = 0,
+    facts?: { mode: 'automatic' | 'manual'; materialRounds: number; materialChars: number }): void {
+    if (this.sessionTitleDiagnostics?.get(sessionId)?.reason === reason) return;
+    this.sessionTitleDiagnostics?.set(sessionId, { reason, elapsedMs });
+    if (this.sessionTitleDiagnostics?.size > 128) this.sessionTitleDiagnostics.delete(this.sessionTitleDiagnostics.keys().next().value!);
+    console.info('[KeepSeek] session_title', {
+      session: createHash('sha256').update(sessionId).digest('hex').slice(0, 12),
+      task: createHash('sha256').update(taskId).digest('hex').slice(0, 12), reason, elapsedMs, ...facts
+    });
+  }
+
+  /** A read-only, already-loaded snapshot. No history hydration or model lookup. */
+  public getSessionTitleDiagnostics() {
+    const session = this.sessionStore.getSessionById(this.sessionStore.activeSessionId);
+    const capability = this.sessionTitleCapability();
+    return {
+      stopped: session?.autoTitle?.stopped ?? (session?.customTitle ? 'manual' : session?.autoTitle?.status === 'completed' ? 'named' : null),
+      candidates: session && this.sessionTitleCandidates?.get(session.id)?.size || 0,
+      inFlight: session && (this.sessionTitles.isRunning(session.id) || this.manualSessionTitleRequests.has(session.id)) ? 1 : 0,
+      lastReason: session ? this.sessionTitleDiagnostics?.get(session.id)?.reason ?? session.autoTitle?.lastOutcome ?? null : null,
+      modelReady: Boolean(this.selectedSessionTitleModel()) && this.commandSettingsReadiness?.subagentModel === 'ready',
+      capabilityReason: capability.reason ?? null
+    };
+  }
+
+  private retireTruncatedTitleWork(session: ChatSession, removedMessageIds: readonly string[]): void {
+    const removed = new Set(removedMessageIds);
+    const attempt = session.autoTitle?.manualAttempt ?? session.autoTitle?.attempt;
+    // Recovery may have already invalidated the persisted attempt.
+    if ((!attempt || attempt.basis.messages.some(ref => removed.has(ref.id)))
+      && (this.sessionTitles?.isRunning(session.id) || this.manualSessionTitleRequests?.has(session.id))) {
+      this.sessionTitles?.cancel(session.id);
+      const requestId = this.manualSessionTitleRequests?.get(session.id);
+      if (requestId) {
+        this.manualSessionTitleRequests.delete(session.id);
+        this.finishSessionTitleRequest(session.id, requestId, 'cancelled');
+      }
+    }
+    for (const [taskId, candidate] of this.sessionTitleCandidates?.get(session.id) ?? []) {
+      if (removed.has(candidate.completion.assistantMessageId)) this.retireSessionTitleCandidate(session.id, taskId);
+    }
   }
 
   private cancelSessionTitleWork(sessionId: string): void {
@@ -7268,7 +7368,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.finishSessionTitleRequest(sessionId, requestId, 'cancelled');
     }
     this.sessionTitles?.cancel(sessionId);
-    this.sessionTitleCandidates?.delete(sessionId);
+    this.clearSessionTitleCandidates(sessionId);
   }
 
   private cancelAllSessionTitleWork(): void {
@@ -7277,7 +7377,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
     this.manualSessionTitleRequests?.clear();
     this.sessionTitles?.cancelAll();
-    this.sessionTitleCandidates?.clear();
+    for (const sessionId of this.sessionTitleCandidates?.keys() ?? []) this.clearSessionTitleCandidates(sessionId);
   }
 
   private sessionTitleCapability(capturedModel?: KeepseekModel) {
@@ -7344,8 +7444,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const setting = structuredClone(this.subagentModelSetting);
     const workspaceKey = this.sessionStore.workspaceKey;
     // Occupy synchronously, including the asynchronous history-loading phase.
+    this.sessionTitles.cancel(sessionId);
     this.manualSessionTitleRequests.set(sessionId, requestId);
-    this.sessionTitleCandidates.delete(sessionId);
+    this.clearSessionTitleCandidates(sessionId);
     this.postToWebview({ type: 'sessionTitleRegeneration', sessionId, requestId, running: true });
     let outcome: SessionTitleRegenerationOutcome = 'stale';
     let terminalReason: string | undefined;
@@ -7376,6 +7477,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       if (this.manualSessionTitleRequests.get(sessionId) === requestId) {
         this.manualSessionTitleRequests.delete(sessionId);
         this.finishSessionTitleRequest(sessionId, requestId, outcome, terminalReason);
+        this.flushSessionTitleCompletions();
       }
     }
   }
@@ -7407,11 +7509,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       onUsageLedgerRecord: async record => {
         const latest = this.sessionStore.getSessionById(sessionId);
         if (latest) await this.applyUsageLedgerRecord(latest, record);
+        else await this.usageLedgerStore.append(sessionId, record);
       },
       onBudgetChanged: async next => {
-        if (!vscode.workspace.isTrusted || this.titleLifecycleDisposed) {
-          this.cancelSessionTitleWork(sessionId); throw new Error('stale');
-        }
         const latest = this.sessionStore.getSessionById(sessionId);
         const current = latest?.userTaskBudgets?.[taskId];
         if (!latest || !current) return;
@@ -7422,63 +7522,99 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  /** Only explicit response candidates reach this convergence point. UI refreshes
-   * may drain existing continuations but never manufacture a naming attempt. */
+  /** Only observed real responses are queued; startup/history/diagnostics never
+   * discover work. Each session drains compact references in completion order. */
   private flushSessionTitleCompletions(): void {
     if (!this.sessionTitles || this.titleLifecycleDisposed) return;
-    if (!vscode.workspace.isTrusted) {
-      this.cancelAllSessionTitleWork(); return;
-    }
-    for (const [sessionId, candidate] of this.sessionTitleCandidates) {
-      if (!candidate.durable) continue;
+    if (!vscode.workspace.isTrusted) { this.cancelAllSessionTitleWork(); return; }
+    if (!this.sessionReady || !this.approvalDataReady) return;
+    for (const [sessionId, queue] of this.sessionTitleCandidates) {
+      if (this.sessionTitleDrains?.has(sessionId) || this.manualSessionTitleRequests?.has(sessionId)
+        || this.sessionTitles.isRunning(sessionId)) continue;
       const session = this.sessionStore.getSessionById(sessionId);
-      if (!session) { this.sessionTitleCandidates.delete(sessionId); continue; }
-      const runs = this.getRootTaskDraftRuns(session, candidate.completion.taskId);
-      const background = this.backgroundRunCoordinator.getActiveRun();
-      const check = checkSessionTitleCompletion(session, candidate.completion, {
-        running: this.isBusy || this.isStartingRun || !!this.activeDraftRunId || !!this.activeChangeActions?.size,
-        queuedApproval: this.delegatedApprovalInFlight || this.delegatedApprovals.hasPending(sessionId, candidate.completion.taskId),
-        commandContinuation: this.draftRunAutoContinueInFlight || this.draftRunBatches?.pending
-          || runs.some(run => !!run.autoContinueRequested && !run.resultBoundMessageId),
-        manualApproval: !!this.manualToolApproval,
-        background: background?.sessionId === sessionId && ['running', 'waiting_for_apply', 'waiting_for_authorization'].includes(background.status)
-      });
-      if (!check.ready) {
-        if (['scope', 'superseded', 'stopped'].includes(check.reason)) this.sessionTitleCandidates.delete(sessionId);
+      if (session?.pendingHistoryTruncation) continue;
+      if (!session || session.customTitle || session.autoTitle?.stopped || session.autoTitle?.status === 'completed') {
+        this.clearSessionTitleCandidates(sessionId);
         continue;
       }
-      // Consume the volatile event once. Persistent round dedup lives in Store.
-      this.sessionTitleCandidates.delete(sessionId);
-      void this.sessionTitles.complete(sessionId, check.taskId, async request => {
+      const candidate = queue.values().next().value as SessionTitleCandidate | undefined;
+      if (!candidate) { this.clearSessionTitleCandidates(sessionId); continue; }
+      const taskId = candidate.completion.taskId;
+      if (!candidate.durable) { this.recordSessionTitleDiagnostic(sessionId, taskId, 'not_durable'); continue; }
+      const foreground = this.interactionCoordinator?.current;
+      const latestTask = [...session.messages].reverse().find(message => message.userTask)?.userTask?.id;
+      const sameTask = latestTask === taskId && this.sessionStore.activeSessionId === sessionId;
+      const runs = this.getRootTaskDraftRuns(session, taskId);
+      const background = this.backgroundRunCoordinator.getActiveRun();
+      const check = checkSessionTitleCompletion(session, candidate.completion, {
+        running: foreground?.sessionId === sessionId && foreground.kind === 'task'
+          || !!this.taskClock?.owns(sessionId, taskId)
+          || sameTask && (this.isBusy || !!this.activeDraftRunId || !!this.activeChangeActions?.size),
+        queuedApproval: this.delegatedApprovals.hasPending(sessionId, taskId)
+          || sameTask && this.delegatedApprovalInFlight,
+        commandContinuation: sameTask && (this.draftRunAutoContinueInFlight || this.draftRunBatches?.pending)
+          || runs.some(run => !!run.autoContinueRequested && !run.resultBoundMessageId),
+        manualApproval: sameTask && !!this.manualToolApproval,
+        background: background?.sessionId === sessionId && sameTask && background.status === 'running'
+      });
+      if (!check.ready) {
+        this.recordSessionTitleDiagnostic(sessionId, taskId, check.reason === 'continuation' ? 'context_independent_wait' : check.reason);
+        if (check.terminal) {
+          this.retireSessionTitleCandidate(sessionId, taskId);
+          // Finite queue progress after retiring an unusable terminal, no polling.
+          queueMicrotask(() => this.flushSessionTitleCompletions());
+        }
+        continue;
+      }
+      // Occupy before the first await. Continuations wait before loading this
+      // root's ledger; other roots and the composer retain their own ownership.
+      this.sessionTitleDrains?.add(sessionId);
+      const leaseKey = JSON.stringify([sessionId, taskId]);
+      let release!: () => void;
+      const lease = new Promise<void>(resolve => { release = resolve; });
+      this.sessionTitleBudgetLeases?.set(leaseKey, lease);
+      void this.sessionTitles.completeResult(sessionId, taskId, async request => {
         const current = this.sessionStore.getSessionById(sessionId);
         const message = current?.messages.find(item => item.id === check.messageId);
-        if (!current || !message?.userTask || request.signal.aborted) throw new Error('stale');
-        const budget = await this.loadTaskBudget(current, message.userTask);
-        if (!budget || request.signal.aborted) throw new Error('unavailable');
+        if (!current || !message?.userTask || request.signal.aborted) throw Object.assign(new Error('stale'), { reason: 'cancelled' });
+        let budget: import('../sessions/userTaskBudget').UserTaskBudget | undefined;
+        try { budget = await this.loadTaskBudget(current, message.userTask, true); }
+        catch { throw Object.assign(new Error('Task budget unavailable'), { reason: 'budget_missing' }); }
+        if (!budget) throw Object.assign(new Error('Task budget unavailable'), { reason: 'budget_missing' });
+        if (request.signal.aborted) throw Object.assign(new Error('stale'), { reason: 'cancelled' });
         let previousBudget = structuredClone(budget);
         return requestSessionTitle({
           globalStorageUri: this.globalStorageUri, workspaceKey: this.sessionStore.workspaceKey,
           sourceStore: this.sourceStore, settingsStore: this.subagentSettingsStore,
-          parentRequest: candidate.parentRequest, language: this.language,
-          sessionId, taskId: check.taskId, userPrompt: request.userPrompt,
+          parentRequest: candidate.parentRequest, setting: candidate.setting, language: this.language,
+          sessionId, taskId, userPrompt: request.userPrompt,
           token: request.token, signal: request.signal, taskBudget: structuredClone(budget),
           onUsageLedgerRecord: async record => {
             const latest = this.sessionStore.getSessionById(sessionId);
             if (latest) await this.applyUsageLedgerRecord(latest, record);
+            else await this.usageLedgerStore.append(sessionId, record);
           },
           onBudgetChanged: async next => {
-            if (!vscode.workspace.isTrusted || this.titleLifecycleDisposed) {
-              this.cancelSessionTitleWork(sessionId);
-              throw new Error('stale');
-            }
+            // Settlement survives cancellation/trust loss; only admission is
+            // stopped by its signal. Already-spent counters must never vanish.
             const latest = this.sessionStore.getSessionById(sessionId);
-            const taskBudget = latest?.userTaskBudgets?.[check.taskId];
+            const taskBudget = latest?.userTaskBudgets?.[taskId];
             if (!latest || !taskBudget) return;
-            latest.userTaskBudgets![check.taskId] = mergeSessionTitleTaskBudget(taskBudget, previousBudget, next);
+            latest.userTaskBudgets![taskId] = mergeSessionTitleTaskBudget(taskBudget, previousBudget, next);
             previousBudget = structuredClone(next);
             await this.sessionStore.persist('session_title_budget');
           }
         });
+      }, { orderedObservedPrefix: true }).then(result => {
+        if (result.outcome !== 'busy' && this.sessionTitleCandidates.get(sessionId) === queue && queue.get(taskId) === candidate) this.retireSessionTitleCandidate(sessionId, taskId);
+      }).catch(() => {
+        if (this.sessionTitleCandidates.get(sessionId) === queue && queue.get(taskId) === candidate) this.retireSessionTitleCandidate(sessionId, taskId);
+        this.recordSessionTitleDiagnostic(sessionId, taskId, 'failed');
+      }).finally(() => {
+        if (this.sessionTitleBudgetLeases?.get(leaseKey) === lease) this.sessionTitleBudgetLeases.delete(leaseKey);
+        release();
+        this.sessionTitleDrains?.delete(sessionId);
+        this.flushSessionTitleCompletions();
       });
     }
   }
