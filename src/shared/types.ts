@@ -1598,6 +1598,9 @@ export interface AgentRequest {
   taskCostBudget?: import('../agent/executionPolicy').ExecutionCostBudget;
   /** Runtime-only logical/tree budget ledger; excluded from persisted request bytes. */
   taskRunBudget?: import('../agent/executionPolicy').LogicalRunBudget;
+  /** Original root allowance prepared at durable input acceptance. Runtime
+   * only; never a serialized checkpoint or Provider request field. */
+  preparedTaskBudget?: import('../agent/taskBudget').PreparedAgentTaskBudget;
   prompt: string;
   model: KeepseekModel;
   settings: AgentSettings;
@@ -1784,7 +1787,22 @@ export interface AgentTraceLogInfo {
   uri: string;
 }
 
+/** Runtime-only root allowance shared with bounded auxiliary work. Never
+ * serialized into Provider requests, checkpoints or child task capsules. */
+export interface AgentTaskBudgetAuthority {
+  run: import('../agent/executionPolicy').LogicalRunBudget;
+  cost: import('../agent/executionPolicy').ExecutionCostBudget;
+  snapshot: () => import('../sessions/userTaskBudget').UserTaskBudget;
+  persist: () => Promise<void>;
+}
+
 export interface AgentRunCallbacks {
+  /** Published after the initial root allowance is durable, including /draft. */
+  onTaskBudgetReady?: (budget: AgentTaskBudgetAuthority) => Promise<void> | void;
+  /** The first main request owns its slot before auxiliary work may dispatch. */
+  onFirstModelRequestAdmitted?: () => Promise<void> | void;
+  /** Releases auxiliary preparation when the main segment made no request. */
+  onTaskBudgetSettled?: () => Promise<void> | void;
   beforeModelRequest?: () => Promise<void>;
   beforeRetry?: () => Promise<void>;
   onCheckpoint?: (checkpoint: import('../agent/runCheckpoint').RunCheckpoint) => Promise<void>;

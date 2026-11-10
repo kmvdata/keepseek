@@ -165,7 +165,8 @@ export class ChatSessionStore {
     token: string; revision: number;
   } | undefined> {
     const session = this.getSessionById(sessionId);
-    if (!session || (session.customTitle && mode === 'automatic') || session.pendingHistoryTruncation) return undefined;
+    if (!session || (session.customTitle && mode === 'automatic') || session.pendingHistoryTruncation
+      && basis.messages.some(ref => !session.pendingHistoryTruncation!.retainedMessageIds.includes(ref.id))) return undefined;
     const state = normalizeSessionTitle(session.autoTitle, session.customTitle, { preserveRunning: true });
     if (state.manualAttempt || state.status === 'running'
       || (mode === 'automatic' && (state.stopped || state.status !== 'pending' || sessionTitleTaskWasAttempted(state, session.messages, taskId)))

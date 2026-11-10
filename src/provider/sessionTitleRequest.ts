@@ -2,13 +2,13 @@ import type * as vscode from 'vscode';
 import type { ModelSourceStore } from '../accounts/accountStore';
 import type { SubagentSettingsStore } from '../accounts/subagentSettingsStore';
 import { resolveConfiguredSubagentModel } from '../accounts/subagentModelResolver';
-import { createLogicalRunBudgetState, ExecutionCostBudget, LogicalBudgetExceededError, LogicalRunBudget, SharedUpstreamTokenBudget } from '../agent/executionPolicy';
+import { abortable, createLogicalRunBudgetState, ExecutionCostBudget, LogicalBudgetExceededError, LogicalRunBudget, SharedUpstreamTokenBudget } from '../agent/executionPolicy';
 import type { SubagentModelSetting } from '../agent/subagents/types';
 import { OneShotTextRequestError, requestOneShotText } from '../agent/oneShotTextRequest';
 import { getConfiguredAgentMaxCost, getConfiguredAgentMaxExecutionMs, getConfiguredAgentMaxTreeUpstreamTokens,
   getConfiguredModelRequestTimeoutMs, getConfiguredSubagentMaxExecutionMs, getConfiguredSubagentMaxUpstreamTokens } from '../shared/config';
 import type { KeepseekLanguage } from '../shared/i18n';
-import type { AgentRequest, ProviderUsageLedgerRecord } from '../shared/types';
+import type { AgentRequest, AgentTaskBudgetAuthority, ProviderUsageLedgerRecord } from '../shared/types';
 import { SESSION_TITLE_SYSTEM_PROMPT } from '../sessions/sessionTitle';
 import type { UserTaskBudget } from '../sessions/userTaskBudget';
 
@@ -32,6 +32,15 @@ export interface SessionTitleRequestInput {
   /** Persist only this task's counters, before dispatch and after settlement. */
   onBudgetChanged?: (next: UserTaskBudget) => Promise<void> | void;
 }
+
+/** The running main request and its title reserve against these exact objects.
+ * A serialized snapshot is never an admission authority for concurrent work. */
+export type SessionTitleLiveBudget = Pick<AgentTaskBudgetAuthority, 'run' | 'cost' | 'snapshot'>;
+export type InputSessionTitleRequestInput = Omit<SessionTitleRequestInput, 'taskBudget'> & {
+  /** Main-first gate: resolve after its first reservation is durable, or after
+   * a no-request shortcut settles. Rejection never grants a fresh allowance. */
+  liveBudget: Promise<SessionTitleLiveBudget>;
+};
 
 /** An explicit user regeneration is a new, narrowly bounded auxiliary action,
  * not another segment of the old task. Its allowance must not restore an old
@@ -61,10 +70,15 @@ export function restoreSessionTitleBudget(budget: UserTaskBudget, now = Date.now
   if (!budget?.runBudget || !budget.budgetLimits) {
     throw new OneShotTextRequestError('budget_missing', 'Session title task budget is unavailable / 会话标题任务预算不可用');
   }
-  const remainingMs = budget.maxExecutionMs > 0 ? budget.maxExecutionMs - budget.usedMs : Number.POSITIVE_INFINITY;
   const run = new LogicalRunBudget(budget.runBudget, budget.budgetLimits,
     new SharedUpstreamTokenBudget(budget.budgetLimits.maxTreeUpstreamTokens, budget.runBudget.treeUpstreamTokens),
     budget.maxExecutionMs, now);
+  return { cost: new ExecutionCostBudget(budget.maxCost ?? 0, budget.usedCostByCurrency), run,
+    timeoutMs: sessionTitleBudgetTimeout(budget, run, now) };
+}
+
+function sessionTitleBudgetTimeout(budget: UserTaskBudget, run: LogicalRunBudget, now = Date.now()): number {
+  const remainingMs = budget.maxExecutionMs > 0 ? budget.maxExecutionMs - budget.usedMs : Number.POSITIVE_INFINITY;
   const deadlineMs = run.deadlineAt === undefined ? Number.POSITIVE_INFINITY : run.deadlineAt - now;
   const timeoutMs = Math.min(30_000, getConfiguredModelRequestTimeoutMs(), remainingMs, deadlineMs);
   if (!(timeoutMs > 0)) {
@@ -75,7 +89,7 @@ export function restoreSessionTitleBudget(budget: UserTaskBudget, now = Date.now
     if (!(error instanceof LogicalBudgetExceededError)) throw error;
     throw new OneShotTextRequestError('budget_exhausted', error.message);
   }
-  return { cost: new ExecutionCostBudget(budget.maxCost ?? 0, budget.usedCostByCurrency), run, timeoutMs };
+  return timeoutMs;
 }
 
 /** Merge this auxiliary request's delta into the latest task record. Callers
@@ -106,15 +120,29 @@ export function mergeSessionTitleTaskBudget(
   return merged;
 }
 
-export async function requestSessionTitle(input: SessionTitleRequestInput): Promise<string> {
+export function requestSessionTitle(input: SessionTitleRequestInput): Promise<string> {
+  return requestSessionTitleInternal(input);
+}
+
+/** Input naming prepares its model immediately, independently of the main
+ * response, then admits against the same live root allowance as that request. */
+export function requestInputSessionTitle(input: InputSessionTitleRequestInput): Promise<string> {
+  return requestSessionTitleInternal(input);
+}
+
+async function requestSessionTitleInternal(input: SessionTitleRequestInput | InputSessionTitleRequestInput): Promise<string> {
+  // Subscribe before even the cancellation check: a rejected main preparation
+  // must not leave an abandoned unhandled Promise after a title is retired.
+  const pendingLive = 'liveBudget' in input ? input.liveBudget.then(
+    value => ({ ok: true as const, value }), error => ({ ok: false as const, error })) : undefined;
   if (input.signal.aborted) throw new OneShotTextRequestError('cancelled', 'Session title cancelled / 会话标题已取消');
   // Snapshot before any settings/credential await. follow-main cannot observe a
   // picker mutation while the auxiliary request is being prepared.
   const parentRequest = { model: { ...input.parentRequest.model },
     sourceConfig: input.parentRequest.sourceConfig && { ...input.parentRequest.sourceConfig, apiKey: '' } };
   const capturedSetting = input.setting && { ...input.setting };
-  const original = structuredClone(input.taskBudget);
-  const restored = restoreSessionTitleBudget(original);
+  const original = 'taskBudget' in input ? structuredClone(input.taskBudget) : undefined;
+  let restored = original ? restoreSessionTitleBudget(original) : undefined;
   let resolved: Awaited<ReturnType<typeof resolveConfiguredSubagentModel>>;
   try {
     const setting = capturedSetting ?? { ...await input.settingsStore.load() };
@@ -149,13 +177,34 @@ export async function requestSessionTitle(input: SessionTitleRequestInput): Prom
       'The selected title model is missing, disabled, or unavailable / 标题模型已缺失、被禁用或不可用');
   }
   if (input.signal.aborted) throw new OneShotTextRequestError('cancelled', 'Session title cancelled / 会话标题已取消');
+  let live: SessionTitleLiveBudget | undefined;
+  if (pendingLive) {
+    try {
+      const ready = await abortable(pendingLive, input.signal);
+      if (!ready.ok) throw ready.error;
+      live = ready.value;
+      const snapshot = live.snapshot();
+      if (!snapshot.runBudget || !snapshot.budgetLimits) throw new Error('Missing root allowance');
+      restored = { cost: live.cost, run: live.run, timeoutMs: sessionTitleBudgetTimeout(snapshot, live.run) };
+    } catch (error) {
+      if (input.signal.aborted) throw new OneShotTextRequestError('cancelled', 'Session title cancelled / 会话标题已取消');
+      if (error instanceof OneShotTextRequestError) throw error;
+      throw new OneShotTextRequestError('budget_missing', 'Input title root budget unavailable / 输入标题所属任务预算不可用');
+    }
+  }
+  if (!restored) throw new OneShotTextRequestError('budget_missing', 'Session title task budget is unavailable / 会话标题任务预算不可用');
+  const activeBudget = restored;
   const startedAt = performance.now();
   const publishBudget = async () => {
-    const next = structuredClone(original);
-    next.usedMs = original.usedMs + Math.max(0, Math.floor(performance.now() - startedAt));
-    next.usedCostByCurrency = restored.cost.snapshot();
-    restored.run.syncUsedMs(next.usedMs);
-    next.runBudget = { ...restored.run.state };
+    // Concurrent work has one clock and one admission ledger. Sampling its
+    // authority preserves main/child reservations and never double-adds time.
+    const next = live ? live.snapshot() : structuredClone(original!);
+    if (!live) {
+      next.usedMs = original!.usedMs + Math.max(0, Math.floor(performance.now() - startedAt));
+      next.usedCostByCurrency = activeBudget.cost.snapshot();
+      activeBudget.run.syncUsedMs(next.usedMs);
+      next.runBudget = { ...activeBudget.run.state };
+    }
     await input.onBudgetChanged?.(next);
   };
   try {
@@ -165,8 +214,8 @@ export async function requestSessionTitle(input: SessionTitleRequestInput): Prom
       systemPrompt: SESSION_TITLE_SYSTEM_PROMPT, userPrompt: input.userPrompt,
       language: input.language, sessionId: input.sessionId, taskId: input.taskId,
       globalStorageUri: input.globalStorageUri, signal: input.signal,
-      maxOutputTokens: 512, timeoutMs: restored.timeoutMs,
-      taskCostBudget: restored.cost, taskRunBudget: restored.run,
+      maxOutputTokens: 512, timeoutMs: activeBudget.timeoutMs,
+      taskCostBudget: activeBudget.cost, taskRunBudget: activeBudget.run,
       onUsageLedgerRecord: input.onUsageLedgerRecord,
       onBudgetChanged: publishBudget
     });

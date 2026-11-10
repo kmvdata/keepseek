@@ -17,7 +17,7 @@
 | 上下文/安全就绪 | 当前会话必须恢复正确操作、历史与请求上下文；失败不默认为 ready |
 | 后台展示就绪 | 加载中/不完整单独表达，不进入执行预算或主运行状态 |
 
-模型流结束不意味着必要保存已经成功。状态立即转为保存或后续准备；待生效模型切换单独显示准备阶段，完成后再进入必要保存；必要屏障成功后再开放依赖能力。`activeRunSettled`、标题 durable 标记、workspace 切换/退出等待及内部续跑必须遵守同一屏障。旧操作 finally 不得清掉后来取得的 token、控制器、settled promise 或提示。
+模型流结束不意味着必要保存已经成功。状态立即转为保存或后续准备；待生效模型切换单独显示准备阶段，完成后再进入必要保存；必要屏障成功后再开放依赖能力。`activeRunSettled`、workspace 切换/退出等待及内部续跑必须遵守相应回答保存屏障；标题的 durable 标记只依赖此前真实用户指令的提交保存屏障，不能拖到回答结束。旧操作 finally 不得清掉后来取得的 token、控制器、settled promise 或提示。
 
 内部审批、计划执行、DraftRun 自动续跑、repair 与恢复交接必须同步转移拥有者；不能先释放互斥再 await 后续入口。根 taskId、计时、预算、幂等记录与审批范围不因交接重置。epoch 是同一任务的受控请求边界，不产生新授权。
 
@@ -63,7 +63,7 @@ Webview → Host 消息唯一入口仍是 `provider/webviewMessages.ts`；Host �
 | `userTaskBudgets` / 完整 checkpoint 读取 | 不必挡正文 | 相应继续/恢复前必须完成 | 安全时间、费用、逻辑调用量、委派树与恢复键权威 |
 | Usage Ledger 展示重建、参考费用/缓存观测 | 不阻塞 | 不阻塞 | 请求级原始记录单独耐久；这些汇总不是安全预算 |
 | 子代理摘要、活动展示恢复 | 不阻塞 | 不阻塞 | `restoreUsage()` 只读 summaries/activities，不恢复 scheduler 预算或调度任务 |
-| 标题生成/手动刷新、余额 | 不阻塞 | 不因展示占主任务 | 独立 session/request 所有权与 durable 候选 drain；自动继承本轮根任务余量并协调预占，手动使用独立小预算；真实用量归目标，首次成功永久停止 |
+| 标题生成/手动刷新、余额 | 不阻塞 | 不因展示占主任务 | 独立 session/request 所有权；用户指令 durable 后并行 drain，自动与主任务共享根预算预占，手动使用独立小预算；真实用量归目标，首次成功永久停止 |
 
 导航不等待整个 `startupInitializationPromise`。会话及必要安全存储跨过初始化屏障后，即使旧活动会话项目上下文、模型目录或展示工作仍在加载，也可开始目标会话事务。create/select/copy 的目标正文、安全选择保存、操作记录恢复及截断失效 flush 完成后，同步释放导航 owner。项目上下文继续按目标 session/generation 准备，此时 canEdit=true、canNavigate=true、canSubmit=false；上下文和其它执行必要条件满足后在同次状态更新开放提交。导航方法返回的 Promise 仍可等待上下文完成供调用方收口，但 UI 导航能力不依赖这个 Promise 结算。会话/上下文 generation 变化使旧启动或导航上下文工作的 ready、error 和 finally 失效，A→B→A 也不能把第一次进入 A 的结果赋给第二次 A；旧 finally 不释放新 owner、不重复发布 sessionChanged 抬高新入口 revision 下界。不可取消的读取可继续完成缓存，但不能回写新会话状态。
 
@@ -73,7 +73,7 @@ Webview → Host 消息唯一入口仍是 `provider/webviewMessages.ts`；Host �
 
 安全预算来自 `sessions/userTaskBudget.ts`、`getTaskCheckpoint()` 与 Runner checkpoint：`usedMs/maxExecutionMs/maxCost/usedCostByCurrency/runBudget/budgetLimits/delegationBudget/commandRecoveryKeys`。Runner 用 checkpoint 恢复任务时钟、费用及委派树；审批 reviewer/子代理继承同一上限。展示后台化不修改这些恢复/合并路径，不少计、重复计或归零；正费用上限遇不可计价来源仍 fail-closed。
 
-自动标题在真实完整回答保存成功并释放前台 owner 后独立 drain，不依赖命令续跑准入或当前项目指令/Skills 就绪。每 session 串行保留完成候选，普通新轮和切换查看不取消有效在途；busy 等待不消费，首次有效标题与停止标记共同提交后清空候选并永久停止。手动刷新在确认目标时冻结最多最近两个完整真实轮，只选 user/final assistant 的 content；最新输入未答完则 busy/no_material，不取更早轮。手动改名（含同文本）与刷新抢占旧自动请求；旧结果/保存/finally 不能覆盖新意图。标题不占输入或 UserTaskClock，自动与同 root task 续跑的预算准入必须协调，不能仅靠结算增量合并。完整状态、迁移与验收见[会话标题](keepseek-session-title-verification.md)。
+自动标题在真实用户指令正文提交保存成功后独立准备并行请求，不等待完整助手回答、工程成功或前台 owner 释放；初次主请求也不等待标题响应。自动只用本条 user.content，手动在确认目标时冻结最多最近两条真实 user.content，均不携带助手、工具、展开内容或旧标题；手动仍遵守现有 busy/saving 能力门禁。每 session 串行保留已观察的真实提交候选，自动续跑/审批不新增轮次，普通追加和切换查看不取消有效在途；首次有效标题与停止标记共同提交后永久停止。新 user_inputs_v3 basis 仅核验所选用户正文，助手 streaming/失败或变化不使其过期；旧 basis 按原语义兼容读取。手动改名（含同文本）与刷新优先，旧结果/保存/finally 不覆盖新意图。用户正文保存后、预运行压缩前准备实际 root 活预算，并原对象注入 Runner。费用/token 无有限上限且请求无限或至少剩两次时可先开放标题，保留一次主调用余量；有限额度或仅余一次则等主请求首次预占耐久的短预算门，不等助手回答。用户亲自发送的 recovery 补充用新输入身份命名，同时保留旧执行 root 的已花额度。不能各从旧快照花同一余额或以等待完整标题响应串行阻塞初次主请求；后续同 root 续跑仍可等旧标题结算恢复单一权威。并行标题不重复累计主任务时间、不占输入 owner。完整状态、迁移与验收见[会话标题](keepseek-session-title-verification.md)。
 
 `ChatSessionStore.persist()` 和 `CoalescedWriter` 的等待者仅在其 revision 或包含它的更新完整快照提交成功后完成。可合并普通快照，不可用 debounce、best-effort 或“界面已空闲”替代必要屏障。必要保存失败保留内存状态、明确阻塞及重试范围；展示错误不重新锁住整个输入框，未知副作用不得自动重跑。
 

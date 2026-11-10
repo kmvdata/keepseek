@@ -3,6 +3,7 @@ import { hashApprovalValue } from '../approvals/approvalReviewHash';
 import { draftRunPreparedMessage } from './approvalMode';
 import { applyProviderRequestBudget, createRequestBudgetUsage, resolveProviderRequestBudget } from './requestBudget';
 import { ModelSourceStore, normalizeModelSourceProvider } from '../accounts/accountStore';
+import { resolveAgentLogicalBudgetLimits } from './taskBudget';
 import { createModelCatalog, findModelBySelection } from '../accounts/modelCatalog';
 import {
   ExecutionClock,
@@ -19,19 +20,11 @@ import { createRunCheckpoint, checkpointCopy, type RunCheckpoint, AgentInterrupt
 import { restorePluginSkillProgress, type PluginSkillProgress } from './runCheckpoint';
 import { assertPluginSkillsCurrent, executePluginSkillRead } from './pluginSkillRuntime';
 import {
-  getConfiguredAgentMaxContextEpochRollovers,
-  getConfiguredAgentMaxContinuations,
   getConfiguredAgentMaxCost,
   getConfiguredAgentMaxExecutionMs,
-  getConfiguredAgentMaxModelRequests,
-  getConfiguredAgentMaxToolCalls,
-  getConfiguredAgentMaxToolIterations,
-  getConfiguredAgentMaxTreeUpstreamTokens,
   getConfiguredEvidenceMaxBytes,
   getConfiguredPatchSettings,
-  getConfiguredProviderInlineResultMaxChars,
-  getConfiguredSubagentMaxUpstreamTokens,
-  DEFAULT_SUBAGENT_MAX_CONTEXT_EPOCH_ROLLOVERS
+  getConfiguredProviderInlineResultMaxChars
 } from '../shared/config';
 import { createHash, randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
@@ -422,16 +415,52 @@ export class AgentLoop {
         || endpointHash(request.sourceConfig.baseUrl) !== source.endpointHash))) throw new Error('Recovery source/model mismatch / 恢复来源或模型不匹配');
       request = { ...request, executionLimits: requestCheckpoint.request.executionLimits };
     }
-    const limit = request.checkpoint?.maxExecutionMs ?? mergeDurations(getConfiguredAgentMaxExecutionMs(), request.executionLimits?.maxRunMs);
-    const maxCost = request.taskCostBudget?.limit ?? (request.checkpoint
+    const prepared = request.preparedTaskBudget;
+    const rootTaskId = request.approvalRootTaskId ?? request.history.at(-1)?.userTask?.id;
+    if (prepared && (request.subagentContext || prepared.sessionId !== request.sessionId || prepared.rootTaskId !== rootTaskId
+      || request.taskCostBudget && request.taskCostBudget !== prepared.cost)) {
+      throw new Error('Prepared root budget identity mismatch / 预备根任务预算身份不匹配');
+    }
+    const configuredLimit = request.checkpoint?.maxExecutionMs ?? mergeDurations(getConfiguredAgentMaxExecutionMs(), request.executionLimits?.maxRunMs);
+    const limit = prepared ? mergeDurations(configuredLimit, prepared.maxExecutionMs) : configuredLimit;
+    const configuredMaxCost = request.taskCostBudget?.limit ?? (request.checkpoint
       ? request.checkpoint.maxCost ?? 0
       : mergeCostLimits(getConfiguredAgentMaxCost(), request.executionLimits?.maxCost));
+    // A newly stricter cost policy cannot silently replace the live shared
+    // cost object. Refuse this segment; already dispatched usage stays charged.
+    if (prepared && configuredMaxCost > 0 && (prepared.cost.limit === 0 || prepared.cost.limit > configuredMaxCost)) {
+      throw new Error('Prepared root cost policy changed / 预备根任务费用策略已变化');
+    }
+    const maxCost = prepared?.cost.limit ?? configuredMaxCost;
     const cp = request.checkpoint ? checkpointCopy(request.checkpoint) : createRunCheckpoint(request, limit,
       request.executionLimits?.timeLimitSource ?? (request.executionLimits?.maxRunMs ? 'explicit invocation + agent.maxExecutionMs' : 'agent.maxExecutionMs (0 = unlimited)'),
       (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.toString()), maxCost);
-    const taskCostBudget = request.taskCostBudget ?? new ExecutionCostBudget(maxCost, cp.usedCostByCurrency);
-    if (request.taskCostBudget) taskCostBudget.restoreAtLeast(cp.usedCostByCurrency ?? {});
-    let activeRunBudget: LogicalRunBudget | undefined;
+    const taskCostBudget = prepared?.cost ?? request.taskCostBudget ?? new ExecutionCostBudget(maxCost, cp.usedCostByCurrency);
+    if (request.taskCostBudget || prepared) taskCostBudget.restoreAtLeast(cp.usedCostByCurrency ?? {});
+    const initialBudgetLimits = this.getLogicalRunBudgetLimits(request);
+    if (cp.budgetLimits) for (const key of Object.keys(initialBudgetLimits) as Array<keyof typeof initialBudgetLimits>) {
+      initialBudgetLimits[key] = key === 'maxContinuations' ? Math.min(initialBudgetLimits[key], cp.budgetLimits[key])
+        : mergeUnlimitedBudgetLimits(initialBudgetLimits[key], cp.budgetLimits[key]);
+    }
+    const parentRunBudget = request.taskRunBudget;
+    const activeRunBudget = prepared?.run ?? new LogicalRunBudget(cp.runBudget, initialBudgetLimits,
+      parentRunBudget?.tree ?? new SharedUpstreamTokenBudget(initialBudgetLimits.maxTreeUpstreamTokens,
+        cp.runBudget?.treeUpstreamTokens ?? 0), limit, Date.now(), parentRunBudget?.deadlineAt);
+    if (prepared) {
+      for (const key of Object.keys(initialBudgetLimits) as Array<keyof typeof initialBudgetLimits>) {
+        activeRunBudget.limits[key] = key === 'maxContinuations' ? Math.min(activeRunBudget.limits[key], initialBudgetLimits[key])
+          : mergeUnlimitedBudgetLimits(activeRunBudget.limits[key], initialBudgetLimits[key]);
+      }
+      cp.usedMs = Math.max(cp.usedMs, activeRunBudget.state.usedMs);
+      const previous = prepared.snapshot();
+      cp.commandRecoveryKeys ??= previous.commandRecoveryKeys;
+      cp.commandRecoveryExhausted ??= previous.commandRecoveryExhausted;
+      cp.delegationBudget ??= previous.delegationBudget;
+      if (limit > 0) {
+        const deadline = Date.now() + Math.max(0, limit - cp.usedMs);
+        if (activeRunBudget.deadlineAt === undefined || deadline < activeRunBudget.deadlineAt) activeRunBudget.state.deadlineAt = new Date(deadline).toISOString();
+      }
+    }
     cp.maxCost = taskCostBudget.limit;
     if (!request.subagentContext && cp.delegationBudget) this.subagentTools?.restoreTree?.(cp.taskId, cp.delegationBudget);
     cp.attempt++; cp.status = 'running'; cp.stopReason = undefined; cp.error = undefined;
@@ -466,6 +495,15 @@ export class AgentLoop {
       }
       catch (error) { cp.status = 'blocked'; cp.stopReason = String(error).includes('resource limit') ? 'resource_limit' : 'storage_failure'; cp.error = String(error); controller.abort(error); throw error; }
     };
+    const snapshotBudget = (): import('../sessions/userTaskBudget').UserTaskBudget => {
+      const usedMs = ownClock.usedMs;
+      activeRunBudget.syncUsedMs(usedMs);
+      return structuredClone({ version: 1, usedMs, maxExecutionMs: limit, maxCost: taskCostBudget.limit,
+        usedCostByCurrency: taskCostBudget.snapshot(), runBudget: activeRunBudget.state,
+        budgetLimits: activeRunBudget.limits, delegationBudget: cp.delegationBudget,
+        commandRecoveryKeys: cp.commandRecoveryKeys, commandRecoveryExhausted: cp.commandRecoveryExhausted });
+    };
+    let firstModelRequestAdmitted = false;
     resumeClock();
     let checkpointBusy = false;
     const checkpointTimer = setInterval(() => {
@@ -476,6 +514,7 @@ export class AgentLoop {
     checkpointTimer.unref?.();
     try {
       await persist();
+      await callbacks.onTaskBudgetReady?.({ run: activeRunBudget, cost: taskCostBudget, snapshot: snapshotBudget, persist });
       const response = await this.runLoop({ ...request, checkpoint: cp, taskClock: request.taskClock ?? ownClock,
         taskCostBudget, signal: controller.signal }, {
         ...callbacks,
@@ -484,6 +523,10 @@ export class AgentLoop {
           cp.requestStartedAt = new Date().toISOString();
           cp.lastNetworkAt = undefined; cp.lastEventAt = undefined; cp.lastContentAt = undefined;
           await persist();
+          if (!firstModelRequestAdmitted) {
+            firstModelRequestAdmitted = true;
+            await callbacks.onFirstModelRequestAdmitted?.();
+          }
         },
         beforeRetry: async () => {
           this.throwIfAborted(controller.signal, request.language);
@@ -506,7 +549,7 @@ export class AgentLoop {
           else resumeClock();
           callbacks.onStatus?.(status);
         }
-      }, (budget) => { activeRunBudget = budget; });
+      }, activeRunBudget);
       cp.finalResponse = response;
       cp.status = response.runDetails.budgetPause?.resumable
         ? 'interrupted'
@@ -534,13 +577,14 @@ export class AgentLoop {
       clearInterval(checkpointTimer);
       suspendClock(); ownClock.dispose();
       signals.forEach((signal) => signal.removeEventListener('abort', abort));
+      await callbacks.onTaskBudgetSettled?.();
     }
   }
 
   private async runLoop(
     request: AgentRequest,
     callbacks: AgentRunCallbacks,
-    onBudgetReady?: (budget: LogicalRunBudget) => void
+    preparedBudget?: LogicalRunBudget
   ): Promise<AgentResponse> {
     this.workspaceTools.setAuthorizedExternalReferenceUris(request.authorizedExternalReferenceUris);
     this.workspaceTools.setDelegatedFileAuthorization?.(request.approvalMode === 'delegate' && !request.persona);
@@ -907,18 +951,29 @@ export class AgentLoop {
       maxContinuationOutputChars: 0
     };
     if (checkpoint.budgetLimits) for (const key of Object.keys(budgetLimits) as Array<keyof typeof budgetLimits>) {
-      budgetLimits[key] = mergeUnlimitedBudgetLimits(budgetLimits[key], checkpoint.budgetLimits[key]);
+      budgetLimits[key] = key === 'maxContinuations' ? Math.min(budgetLimits[key], checkpoint.budgetLimits[key])
+        : mergeUnlimitedBudgetLimits(budgetLimits[key], checkpoint.budgetLimits[key]);
     }
     const sharedTreeBudget = parentRunBudget?.tree ?? new SharedUpstreamTokenBudget(
       budgetLimits.maxTreeUpstreamTokens,
       checkpoint.runBudget?.treeUpstreamTokens ?? 0
     );
-    const logicalBudget = new LogicalRunBudget(checkpoint.runBudget, budgetLimits,
+    const logicalBudget = preparedBudget ?? new LogicalRunBudget(checkpoint.runBudget, budgetLimits,
       sharedTreeBudget, runtimeConfig.maxRunMs, Date.now(), parentRunBudget?.deadlineAt);
+    if (budgetLimits.maxTreeUpstreamTokens > 0 && (logicalBudget.tree.limit === 0
+      || logicalBudget.tree.limit > budgetLimits.maxTreeUpstreamTokens)) {
+      // The tree is one immutable admission authority for main/title/children.
+      // A configuration refresh cannot replace it with an independent ledger.
+      throw new AgentInterruptedError('waiting_for_user', 'Shared task token policy changed / 共享任务 token 策略已变化');
+    }
+    // Runtime source resolution may only narrow the prepublished allowance.
+    for (const key of Object.keys(budgetLimits) as Array<keyof typeof budgetLimits>) {
+      logicalBudget.limits[key] = key === 'maxContinuations' ? Math.min(logicalBudget.limits[key], budgetLimits[key])
+        : mergeUnlimitedBudgetLimits(logicalBudget.limits[key], budgetLimits[key]);
+    }
     checkpoint.runBudget = logicalBudget.state;
     checkpoint.modelRequests = logicalBudget.state.modelRequests;
     request = { ...request, taskRunBudget: logicalBudget };
-    onBudgetReady?.(logicalBudget);
     taskPlan.beginExecution();
     const buildCurrentProviderProjection = (boundaryIds?: Set<string>): ReturnType<typeof buildProviderRequestProjection> => buildProviderRequestProjection({
       model: request.model,
@@ -5302,6 +5357,10 @@ ${launch.evidence.content}`;
     return content || undefined;
   }
 
+  private getLogicalRunBudgetLimits(request: AgentRequest): import('./executionPolicy').LogicalRunBudgetLimits {
+    return resolveAgentLogicalBudgetLimits(request);
+  }
+
   private async getRuntimeConfig(request: AgentRequest): Promise<AgentRuntimeConfig> {
     const sourceConfig = request.sourceConfig ?? await resolveModelSourceConfig(
       request.model.sourceId,
@@ -5316,6 +5375,7 @@ ${launch.evidence.content}`;
       throw new MissingModelSourceApiKeyError(request.language);
     }
     const profile = getAgentRuntimeProfile(request.model, request.settings);
+    const logicalLimits = this.getLogicalRunBudgetLimits(request);
     const maxCost = request.taskCostBudget?.limit ?? mergeCostLimits(
       getConfiguredAgentMaxCost(),
       request.executionLimits?.maxCost
@@ -5335,14 +5395,8 @@ ${launch.evidence.content}`;
       contextWindowTokens: profile.contextWindowTokens,
       maxTokens: profile.maxTokens,
       toolsEnabled: request.executionLimits?.toolsEnabled !== false,
-      maxToolIterations: mergeUnlimitedBudgetLimits(
-        request.subagentContext ? 0 : getConfiguredAgentMaxToolIterations(),
-        request.executionLimits?.maxToolIterations
-      ),
-      maxToolCalls: mergeUnlimitedBudgetLimits(
-        request.subagentContext ? 0 : getConfiguredAgentMaxToolCalls(),
-        request.executionLimits?.maxToolCalls
-      ),
+      maxToolIterations: logicalLimits.maxToolRounds,
+      maxToolCalls: logicalLimits.maxToolCalls,
       maxRunMs: request.checkpoint?.maxExecutionMs ?? mergeDurations(getConfiguredAgentMaxExecutionMs(), request.executionLimits?.maxRunMs),
       maxCost,
       streamIdleTimeoutMs: 0,
@@ -5353,23 +5407,11 @@ ${launch.evidence.content}`;
       requestRetryBaseMs: getConfiguredRequestRetryBaseMs(),
       maxValidationRuns: clampFeatureLimit(getConfiguredMaxValidationRuns(), request.executionLimits?.maxValidationRuns),
       maxRepairIterations: getConfiguredMaxRepairIterations(),
-      maxModelRequests: mergeUnlimitedBudgetLimits(
-        getConfiguredAgentMaxModelRequests(Boolean(request.subagentContext)),
-        request.executionLimits?.maxModelRequests
-      ),
-      maxContinuations: clampConfiguredLimit(
-        getConfiguredAgentMaxContinuations(), request.executionLimits?.maxContinuations, true),
-      maxContextEpochRollovers: mergeUnlimitedBudgetLimits(
-        request.subagentContext
-          ? DEFAULT_SUBAGENT_MAX_CONTEXT_EPOCH_ROLLOVERS
-          : getConfiguredAgentMaxContextEpochRollovers(),
-        request.executionLimits?.maxContextEpochRollovers),
-      maxUpstreamTokens: mergeUnlimitedBudgetLimits(
-        request.subagentContext ? getConfiguredSubagentMaxUpstreamTokens() : getConfiguredAgentMaxTreeUpstreamTokens(),
-        request.executionLimits?.maxUpstreamTokens
-      ),
-      maxTreeUpstreamTokens: mergeUnlimitedBudgetLimits(
-        getConfiguredAgentMaxTreeUpstreamTokens(), request.executionLimits?.maxTreeUpstreamTokens),
+      maxModelRequests: logicalLimits.maxModelRequests,
+      maxContinuations: logicalLimits.maxContinuations,
+      maxContextEpochRollovers: logicalLimits.maxContextEpochRollovers,
+      maxUpstreamTokens: logicalLimits.maxUpstreamTokens,
+      maxTreeUpstreamTokens: logicalLimits.maxTreeUpstreamTokens,
     };
   }
 
@@ -5511,13 +5553,6 @@ function clampFeatureLimit(configuredLimit: number, requestedLimit: number | und
     return configuredLimit;
   }
   return Math.max(0, Math.min(configuredLimit, Math.floor(requestedLimit)));
-}
-
-function clampConfiguredLimit(configuredLimit: number, requestedLimit: number | undefined, allowZero = false): number {
-  if (typeof requestedLimit !== 'number' || !Number.isFinite(requestedLimit)) return configuredLimit;
-  const normalized = Math.floor(requestedLimit);
-  if (allowZero && normalized === 0) return 0;
-  return normalized > 0 ? Math.min(configuredLimit, normalized) : configuredLimit;
 }
 
 /** Zero represents infinity for execution budgets. Merge only positive

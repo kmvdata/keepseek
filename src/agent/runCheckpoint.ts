@@ -59,7 +59,7 @@ export interface RunCheckpoint {
   lastStepAt?: string;
   updatedAt: string;
   /** Exact original projection input; credentials and runtime handles excluded. */
-  request: Omit<AgentRequest, 'sourceConfig' | 'signal' | 'checkpoint' | 'taskClock' | 'taskCostBudget'>;
+  request: Omit<AgentRequest, 'sourceConfig' | 'signal' | 'checkpoint' | 'taskClock' | 'taskCostBudget' | 'preparedTaskBudget'>;
   source: { sourceId: string; modelId: string; provider: string; endpointHash: string };
   workspaceFolders: string[];
   requestStartedAt?: string;
@@ -135,6 +135,7 @@ export function createRunCheckpoint(
   delete input.taskClock;
   delete input.taskCostBudget;
   delete input.taskRunBudget;
+  delete input.preparedTaskBudget;
   input.history = input.history.map(({ runCheckpoint: _cp, runCheckpointArchive: _archive, ...message }) => message);
   return {
     outputBudgetPolicyVersion: OUTPUT_BUDGET_POLICY_VERSION,

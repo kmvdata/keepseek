@@ -18,8 +18,8 @@ export interface SessionTitleRegenerationResult {
   outcome: SessionTitleRegenerationOutcome;
 }
 
-/** Background-only coordinator. The host supplies a confirmed final logical
- * turn; this module never starts a main task or owns UI busy/clock state. */
+/** Background-only coordinator. The host supplies an accepted, durable user
+ * input; this module never starts a main task or owns UI busy/clock state. */
 export class SessionTitleCoordinator {
   private readonly running = new Map<string, { controller: AbortController; mode: 'automatic' | 'manual' }>();
   private disposed = false;
@@ -107,7 +107,8 @@ export class SessionTitleCoordinator {
     }
     const material = suppliedMaterial ?? buildSessionTitleMaterial(session.messages, taskId);
     if (!material) { diagnose('no_material'); return { outcome: 'no_material' }; }
-    materialRounds = material.basis.scope === 'recent_turns_v2' ? material.basis.messages.length / 2 : 0;
+    materialRounds = material.basis.scope === 'user_inputs_v3' ? material.basis.messages.length
+      : material.basis.scope === 'recent_turns_v2' ? material.basis.messages.length / 2 : 0;
     materialChars = material.userPrompt.length;
     if (!sessionTitleTaskBasisMatches(session.messages, taskId, material.basis)) {
       diagnose('invalid_basis'); return { outcome: 'stale' };

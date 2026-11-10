@@ -72,6 +72,7 @@ Webview 是字符串生成的页面，不是独立前端应用。`input/composer
 | 关注点 | 权威入口 | 数据与边界 |
 | --- | --- | --- |
 | 请求快照 | [AgentRequestCoordinator](../src/agent/agentRequestCoordinator.ts) | 会话快照、归档与摘要刷新；送入 Runner |
+| 活根预算 | [taskBudget.ts](../src/agent/taskBudget.ts) | 提交后、压缩前准备实际 run/cost 权威；配置与旧 root 限制共同收紧；原对象注入 Runner，不能序列化或另开额度 |
 | 主循环 | [runner.ts](../src/agent/runner.ts) 的 `AgentLoop` / `AgentRunner` | 模型轮、工具路由、容量/epoch、输出接续；只生成 DraftEdit/DraftRun |
 | 静态字节 | [protocol.ts](../src/agent/protocol.ts) | system、工具名称/排序/schema、持久化 user 展开字节 |
 | 三协议投影 | [providerRequestProjection.ts](../src/agent/providerRequestProjection.ts) 的 `buildProviderRequestProjection()` | 实际 payload、token 估算、压缩、准入与硬上限共用；禁止分别重建 messages/tools |
@@ -123,7 +124,7 @@ ask 由用户逐项/批量批准；delegate 对符合宿主规则的常规操作
 | 模块/数据 | 权威与边界 |
 | --- | --- |
 | [chatSessionStore.ts](../src/sessions/chatSessionStore.ts) | 当前 workspace 会话门面、内存状态、选择与保存协调；除原生 replay 外的 normalize/migration 仍在此 |
-| [sessionTitle.ts](../src/sessions/sessionTitle.ts)、[sessionTitleCoordinator.ts](../src/sessions/sessionTitleCoordinator.ts) | 唯一标题元数据、永久停止与独立 attempt；消费前缀游标/近期身份；共享真实轮/最近两轮 material/basis；串行请求、用户抢占和过期提交保护 |
+| [sessionTitle.ts](../src/sessions/sessionTitle.ts)、[sessionTitleCoordinator.ts](../src/sessions/sessionTitleCoordinator.ts) | 唯一标题元数据、永久停止与独立 attempt；消费前缀游标/近期身份；共享真实用户输入识别；自动单条/手动最多两条 user-only material/basis；串行请求、用户抢占和过期提交保护 |
 | [providerReplayNormalization.ts](../src/sessions/providerReplayNormalization.ts) | 原生 Responses/Anthropic replay 的纯完整校验、容量限制和复制；Store/Provider 共用，禁止接受部分非法 replay |
 | [globalSessionStorage.ts](../src/sessions/globalSessionStorage.ts) | 按 workspace/session 分片的持久化 adapter，索引/全局 manifest V2 |
 | [sessionObjectStore.ts](../src/sessions/sessionObjectStore.ts) | session shard V4 对象图、hash/scope/revision/写锁、对象先于 manifest 提交；兼容 V3 与旧 V2 迁移 |
@@ -133,7 +134,7 @@ ask 由用户逐项/批量批准；delegate 对符合宿主规则的常规操作
 | `requestProtocol` / `contextInstructions` | 冻结 lane/工具 schema 与稳定上下文字节；normalizer 不反写旧前缀 |
 | `runCheckpoint` / `runCheckpointArchive` | 当前可恢复状态与归档引用；普通加载仅展开最新未结束 checkpoint，UI 不接收完整对象图 |
 
-标题的 Host 完成候选与 drain 独立于命令续跑和项目上下文准入；只有真实完成回答的 durable 事件可制造自动候选，启动/历史/诊断只读不补发。普通追加不提升标题 revision 或取消有效 attempt，首次合格标题与停止状态跨 shard/index staged commit 后永久停止；截断、归档和旧依据缺失不解锁已提交标题。新 basis 只绑定所选最多两轮正文，旧 whole-history basis/hash 保留旧格式读取；旧 canonical commit 先核验再迁移，shard-only 不构成成功。手动历史刷新只惰性加载目标并冻结最近两轮，不选回 active，不带全历史/摘要/展开内容。请求固定无工具、一次 set/defer，标题专属 512 输出/30 秒上限；自动共享本轮根预算及准入预占，手动新建窄辅助预算，reviewer 合同不变。实现边界与原生请求计数验收见[会话标题](keepseek-session-title-verification.md)。
+标题的 Host 候选由真实用户指令跨过提交保存屏障后制造，与主请求并行 drain，不等待助手回答或前台 owner 释放；启动/历史/诊断只读不补发。自动仅取本条 user.content，手动只惰性加载目标并冻结最近最多两条 user.content，不携带 assistant、全历史、摘要或展开内容。新 user_inputs_v3 basis 只绑定所选 user ID/hash，助手变化不使其过期；旧 recent_turns_v2/whole-history basis 与 hash 仍按原格式读取。首次合格标题及 stopped 跨 shard/index staged commit 后永久停止，普通追加/切换不取消有效 attempt，截断/归档不解锁已提交标题；旧 canonical commit 先核验再迁移，shard-only 不算成功。请求固定无工具、一次 set/defer，目的导向，标题专属 512 输出/30 秒上限；`prepareAgentTaskBudget()` 在用户提交后、预运行压缩前准备实际 root 的同一 run/cost 活对象并注入 Runner；无有限费用/token 上限且至少有两次请求余量时可先开放标题，否则等主请求首次预占耐久的短预算门，不能等整个标题响应；真实用户 recovery 补充的命名消息身份与原执行预算 root 分离、已花额度不重置；手动仍用独立窄预算，reviewer 合同不变。实现边界与原生请求计数验收见[会话标题](keepseek-session-title-verification.md)。
 
 默认存储由各 Store 通过 `globalStorageUri` 解析。来源/子代理设置、`chat-sessions/v2` 索引及 shard、兼容 `chat-sessions/v1` evidence/child、`usage-ledger/v2`、`change-sets/v4`、DraftRun 和审批文件各由所属 Store 管理。业务层不拼版本路径，也不在项目仓库保存密钥或真实会话。JSON 优先 `writeJsonAtomic()`；未知副作用不自动重试，迁移与恢复在副本验证。
 

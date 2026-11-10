@@ -19,6 +19,12 @@ import { OneShotTextRequestError } from '../src/agent/oneShotTextRequest';
 import type { SubagentModelSetting } from '../src/agent/subagents/types';
 import { createUsageLedgerRecords, createUsagePriceSnapshot } from '../src/agent/usageLedger';
 import { UsageLedgerStore } from '../src/agent/usageLedgerStore';
+import type { ModelSourceStore } from '../src/accounts/accountStore';
+import { SESSION_TITLE_SYSTEM_PROMPT } from '../src/sessions/sessionTitle';
+import { createRunCheckpoint } from '../src/agent/runCheckpoint';
+import { createLogicalRunBudgetState } from '../src/agent/executionPolicy';
+import { taskBudgetFromCheckpoint } from '../src/sessions/userTaskBudget';
+import type { AgentRequest } from '../src/shared/types';
 
 const scope = { key: 'workspace:title-regeneration', name: 'Title regeneration', folderUris: [] };
 const generated = '{"decision":"set","title":"会话标题重建"}';
@@ -100,7 +106,7 @@ function pair(taskId: string, prompt: string): ChatMessage[] {
   const userTask = { version: 1 as const, id: taskId, originMessageId: taskId, reason: 'user' as const };
   return [
     { id: taskId, role: 'user', content: prompt, createdAt: new Date(0).toISOString(), userTask },
-    { id: `${taskId}-answer`, role: 'assistant', content: `讨论 ${prompt} 的实现。`, createdAt: new Date(1).toISOString(), userTask }
+    { id: `${taskId}-answer`, role: 'assistant', content: `ASSISTANT_ONLY_MARKER 讨论 ${prompt} 的实现。`, createdAt: new Date(1).toISOString(), userTask }
   ];
 }
 
@@ -162,7 +168,7 @@ async function fixture(t: TestContext, options: { legacy?: boolean; customTitle?
     setRequest: (next: typeof request) => { request = next; } };
 }
 
-test('title refresh Host route rebuilds a legacy custom title with the latest two rounds without changing the main request', async t => {
+test('title refresh Host route uses only the latest two real user inputs without changing the main request', async t => {
   const { host, store, storage, session, posts, inputs } = await fixture(t, { legacy: true, customTitle: 'User chosen name' });
   const before = JSON.stringify([session.messages, session.contextInstructions, session.requestProtocol, session.executionTime,
     session.lastTurnUsage, session.userTaskBudgets?.preservedRoot]);
@@ -175,7 +181,9 @@ test('title refresh Host route rebuilds a legacy custom title with the latest tw
   await host.handleMessage({ type: 'regenerateSessionTitle', sessionId: session.id, requestId: 'gesture-1' });
   assert.equal(inputs.length, 1);
   assert.doesNotMatch(inputs[0].userPrompt, /最早的审批预算约束/u);
-  assert.equal(JSON.parse(inputs[0].userPrompt).excerpts.length, 4);
+  assert.equal(JSON.parse(inputs[0].userPrompt).excerpts.length, 2);
+  assert.ok(JSON.parse(inputs[0].userPrompt).excerpts.every((item: { role: string }) => item.role === 'user'));
+  assert.doesNotMatch(inputs[0].userPrompt, /ASSISTANT_ONLY_MARKER/u);
   assert.match(inputs[0].userPrompt, /中间的编辑重发缓存/u);
   assert.match(inputs[0].userPrompt, /最终的标题重建需求/u);
   assert.equal(session.title, '会话标题重建');
@@ -662,4 +670,342 @@ test('an older history refresh stays resident through commit even with fifty new
   assert.equal(storage.state.sessions.find(item => item.id === target.id)?.title, '会话标题重建');
   assert.ok(posts.some(post => post.type === 'sessionTitleUpdated' && post.sessionId === target.id));
   assert.equal(store.activeSessionId, active.id);
+});
+
+
+test('manual title refresh can name a latest accepted user intent that has no assistant answer', async t => {
+  const { host, session, inputs } = await fixture(t, { customTitle: 'Previous chosen name' });
+  const latest = pair('latest-unanswered', '最新用户目标是压缩任务侧栏占用空间')[0];
+  latest.expandedContent = 'EXPANDED_ATTACHMENT_SECRET';
+  latest.providerContent = 'PROVIDER_TAIL_SECRET';
+  session.messages.push(latest);
+  await host.handleMessage({ type: 'regenerateSessionTitle', sessionId: session.id, requestId: 'latest-user-only' });
+  assert.equal(inputs.length, 1);
+  const data = JSON.parse(inputs[0].userPrompt) as { excerpts: Array<{ role: string; text: string }> };
+  assert.equal(data.excerpts.length, 2);
+  assert.ok(data.excerpts.every(excerpt => excerpt.role === 'user'));
+  assert.match(inputs[0].userPrompt, /最新用户目标是压缩任务侧栏占用空间/u);
+  assert.doesNotMatch(inputs[0].userPrompt, /ASSISTANT_ONLY_MARKER|EXPANDED_ATTACHMENT_SECRET|PROVIDER_TAIL_SECRET|最早的审批预算约束/u);
+  assert.equal(session.title, '会话标题重建');
+  assert.equal(session.autoTitle?.stopped, 'named');
+});
+
+test('manual title materials ignore failed or cancelled assistant output while preserving its latest user intent', async t => {
+  const { host, session, inputs } = await fixture(t);
+  const lastAnswer = session.messages.at(-1)!;
+  lastAnswer.content = 'RAW_ASSISTANT_FAILURE_SECRET';
+  lastAnswer.incompleteForTitle = true;
+  lastAnswer.runDetails = { status: 'failed' } as ChatMessage['runDetails'];
+  await host.handleMessage({ type: 'regenerateSessionTitle', sessionId: session.id, requestId: 'user-purpose-after-failure' });
+  assert.equal(inputs.length, 1);
+  assert.match(inputs[0].userPrompt, /最终的标题重建需求/u);
+  assert.doesNotMatch(inputs[0].userPrompt, /RAW_ASSISTANT_FAILURE_SECRET|ASSISTANT_ONLY_MARKER/u);
+  assert.equal(session.title, '会话标题重建');
+});
+
+
+function streamingReply(text: string): Response {
+  return new Response('data: ' + JSON.stringify({ choices: [{ delta: { content: text }, finish_reason: 'stop' }] })
+    + '\n\ndata: ' + JSON.stringify({ choices: [], usage: { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 } })
+    + '\n\ndata: [DONE]\n\n');
+}
+
+async function prepareRealSubmissionRoute(host: TitleHost): Promise<void> {
+  const sourceStore = (host as unknown as { sourceStore: ModelSourceStore }).sourceStore;
+  await sourceStore.createSource({ id: 'source-a', provider: 'deepseek', name: 'Captured source', apiKey: 'fake-key',
+    baseUrl: 'https://input-title-test.invalid/v1', models: [{ id: 'main-a', contextWindowTokens: 32768, maxOutputTokens: 8192 }] });
+  Object.assign(host, {
+    refreshModelSourceState: async () => {}, awaitRunContextRefresh: async () => true,
+    modelSelectionTransactions: { beginRun() {}, getSnapshot: () => ({}) },
+    refreshCurrentRunContext: async () => ({ context: { projectInstructions: [], skills: [], metadata: {
+      precedence: [], beforeDeduplicationCount: 0, afterDeduplicationCount: 0, totalCharacterCount: 0,
+      totalTokenEstimate: 0, truncated: false, sources: [], discarded: [], possibleConflicts: []
+    } }, failures: [] }),
+    refreshContextCompressionBeforeRun: async () => {}, scheduleContextCompressionRefresh: () => {},
+    updateActiveSessionContextUsage: () => {}, createCurrentSessionContextUsage: () => undefined,
+    applyPromptCacheDiagnostics: () => [], createRunCacheSummary: () => undefined,
+    applyPendingModelSelectionAfterRun: async () => {}, refreshBalance: async () => {},
+    postState: () => {}, setAgentActivity: () => {}, scheduleDraftRunAutoContinuation: () => {}
+  });
+}
+
+test('the real accepted-input route commits a purpose title before its main assistant answer exists', { timeout: 15000 }, async t => {
+  const { host, session, storage } = await fixture(t);
+  await prepareRealSubmissionRoute(host);
+  const mainStarted = deferred(), titleCommitted = deferred(), mainReply = deferred<Response>();
+  const titleInputs: string[] = [];
+  let mainPosts = 0, settled = false;
+  const originalFetch = globalThis.fetch;
+  host.views.add({ webview: { postMessage(message: Record<string, unknown>) {
+    if (message.type === 'sessionTitleUpdated' && message.sessionId === session.id) titleCommitted.resolve();
+    return Promise.resolve(true);
+  } } });
+  globalThis.fetch = (async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: string }> };
+    if (body.messages[0]?.content === SESSION_TITLE_SYSTEM_PROMPT) {
+      titleInputs.push(body.messages.at(-1)!.content);
+      assert.ok(storage.state.sessions.find(saved => saved.id === session.id)?.messages.some(message =>
+        message.role === 'user' && message.content === 'USER_PURPOSE_MARKER 精简任务侧栏占用空间'), 'the user text is durable before naming');
+      return streamingReply('{"decision":"set","title":"任务侧栏精简"}');
+    }
+    mainPosts++;
+    mainStarted.resolve();
+    return new Promise<Response>((resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      void mainReply.promise.then(resolve, reject);
+    });
+  }) as typeof fetch;
+  let sent: Promise<void> | undefined;
+  try {
+    sent = host.handleMessage({ type: 'sendPrompt', prompt: 'USER_PURPOSE_MARKER 精简任务侧栏占用空间',
+      sourceId: 'source-a', modelId: 'main-a' }).then(() => { settled = true; });
+    await mainStarted.promise;
+    await titleCommitted.promise;
+    assert.equal(settled, false, 'title completion cannot await the main answer');
+    assert.equal(mainPosts, 1);
+    assert.equal(titleInputs.length, 1);
+    const material = JSON.parse(titleInputs[0]) as { excerpts: Array<{ role: string; text: string }> };
+    assert.equal(material.excerpts.length, 1);
+    assert.equal(material.excerpts[0].role, 'user');
+    assert.match(titleInputs[0], /USER_PURPOSE_MARKER/u);
+    assert.doesNotMatch(titleInputs[0], /ASSISTANT_ONLY_MARKER|最早的审批预算约束|最终的标题重建需求/u);
+    assert.equal(session.title, '任务侧栏精简');
+    assert.equal(session.autoTitle?.stopped, 'named');
+    assert.equal(session.messages.at(-1)?.role, 'assistant');
+    assert.equal(session.messages.at(-1)?.content, '');
+    assert.equal(session.messages.at(-1)?.isStreaming, true);
+    mainReply.resolve(streamingReply('LONG_ASSISTANT_REPLY_MARKER '.repeat(500)));
+    await sent;
+    assert.equal(titleInputs.length, 1, 'the final response never creates another title request');
+  } finally {
+    mainReply.resolve(streamingReply('Complete main answer'));
+    await sent?.catch(() => {});
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('a failed real initial user persistence dispatches neither main nor title requests', async t => {
+  const { host, session, storage } = await fixture(t);
+  await prepareRealSubmissionRoute(host);
+  const save = storage.saveWorkspace.bind(storage);
+  storage.saveWorkspace = async (...args: Parameters<typeof save>) => {
+    if (args[1].sessions.some(saved => saved.messages.some(message => message.content === 'UNSAVED_PURPOSE_MARKER'))) {
+      throw new Error('injected initial user persistence failure');
+    }
+    await save(...args);
+  };
+  const originalFetch = globalThis.fetch;
+  let posts = 0;
+  globalThis.fetch = (async () => { posts++; return streamingReply('Unexpected response'); }) as typeof fetch;
+  try {
+    await host.handleMessage({ type: 'sendPrompt', prompt: 'UNSAVED_PURPOSE_MARKER', sourceId: 'source-a', modelId: 'main-a' });
+    assert.equal(posts, 0);
+    assert.ok(session.messages.some(message => message.content === 'UNSAVED_PURPOSE_MARKER'));
+    assert.equal(session.autoTitle?.stopped, undefined);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+
+test('cancelling the main answer does not cancel an already accepted user-purpose title', { timeout: 15000 }, async t => {
+  const { host, session } = await fixture(t);
+  await prepareRealSubmissionRoute(host);
+  const mainStarted = deferred(), titleStarted = deferred(), titleCommitted = deferred();
+  const titleReply = deferred<Response>();
+  const originalFetch = globalThis.fetch;
+  let titleSignal: AbortSignal | undefined;
+  host.views.add({ webview: { postMessage(message: Record<string, unknown>) {
+    if (message.type === 'sessionTitleUpdated' && message.sessionId === session.id) titleCommitted.resolve();
+    return Promise.resolve(true);
+  } } });
+  globalThis.fetch = (async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as { messages: Array<{ content: string }> };
+    if (body.messages[0]?.content === SESSION_TITLE_SYSTEM_PROMPT) {
+      titleSignal = init?.signal ?? undefined;
+      titleStarted.resolve();
+      return titleReply.promise;
+    }
+    mainStarted.resolve();
+    return new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+    });
+  }) as typeof fetch;
+  let sent: Promise<void> | undefined;
+  try {
+    sent = host.handleMessage({ type: 'sendPrompt', prompt: '优化账号管理入口响应速度', sourceId: 'source-a', modelId: 'main-a' });
+    await Promise.all([mainStarted.promise, titleStarted.promise]);
+    await host.handleMessage({ type: 'abortPrompt', sessionId: session.id });
+    await sent;
+    assert.equal(titleSignal?.aborted, false, 'title has a separate cancellation owner from the main answer');
+    titleReply.resolve(streamingReply('{"decision":"set","title":"账号入口提速"}'));
+    await titleCommitted.promise;
+    assert.equal(session.title, '账号入口提速');
+    assert.equal(session.autoTitle?.stopped, 'named');
+  } finally {
+    titleReply.resolve(streamingReply('{"decision":"defer","title":null}'));
+    await sent?.catch(() => {});
+    globalThis.fetch = originalFetch;
+  }
+});
+
+
+test('an accepted purpose title commits before a slow pre-run compression refresh finishes', { timeout: 15000 }, async t => {
+  const { host, session } = await fixture(t);
+  await prepareRealSubmissionRoute(host);
+  const compressionEntered = deferred(), releaseCompression = deferred(), titleCommitted = deferred();
+  Object.assign(host, { refreshContextCompressionBeforeRun: async () => {
+    compressionEntered.resolve();
+    await releaseCompression.promise;
+  } });
+  host.views.add({ webview: { postMessage(message: Record<string, unknown>) {
+    if (message.type === 'sessionTitleUpdated' && message.sessionId === session.id) titleCommitted.resolve();
+    return Promise.resolve(true);
+  } } });
+  const originalFetch = globalThis.fetch;
+  t.after(() => { releaseCompression.resolve(); globalThis.fetch = originalFetch; });
+  let mainPosts = 0, titlePosts = 0;
+  globalThis.fetch = (async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as { messages: Array<{ content: string }> };
+    if (body.messages[0]?.content === SESSION_TITLE_SYSTEM_PROMPT) {
+      titlePosts++;
+      assert.match(body.messages.at(-1)!.content, /压缩任务侧栏占用/u);
+      return streamingReply('{"decision":"set","title":"任务侧栏精简"}');
+    }
+    mainPosts++;
+    return streamingReply('Complete main response after the compression refresh');
+  }) as typeof fetch;
+  let sent: Promise<void> | undefined;
+  try {
+    sent = host.handleMessage({ type: 'sendPrompt', prompt: '压缩任务侧栏占用空间', sourceId: 'source-a', modelId: 'main-a' });
+    await compressionEntered.promise;
+    await titleCommitted.promise;
+    assert.equal(titlePosts, 1);
+    assert.equal(mainPosts, 0, 'the main request is still waiting only for its own context refresh');
+    assert.equal(session.messages.at(-1)?.role, 'user', 'title does not need even an assistant placeholder');
+    assert.equal(session.title, '任务侧栏精简');
+    releaseCompression.resolve();
+    await sent;
+    assert.equal(mainPosts, 1);
+    assert.equal(titlePosts, 1);
+    const latestInput = [...session.messages].reverse().find(message => message.role === 'user')!;
+    assert.equal(session.userTaskBudgets?.[latestInput.userTask!.id]?.runBudget?.modelRequests, 2,
+      'the prepared authority must be reused by the main run after the title already spent its slot');
+  } finally {
+    releaseCompression.resolve();
+    await sent?.catch(() => {});
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('a real no-progress user supplement has its own title opportunity while retaining the original spent root allowance', { timeout: 15000 }, async t => {
+  const { host, session, store, inputs } = await fixture(t);
+  await prepareRealSubmissionRoute(host);
+  const previousUser = session.messages.at(-2)!;
+  const previousAssistant = session.messages.at(-1)!;
+  const rootTaskId = previousUser.userTask!.id;
+  const source = { sourceId: 'source-a', provider: 'deepseek' as const, apiKey: 'fake-key',
+    baseUrl: 'https://input-title-test.invalid/v1', supportsBilling: false };
+  const oldRequest: AgentRequest = {
+    prompt: previousUser.content, history: session.messages.slice(0, -1), model: { ...host.availableModels[0] },
+    settings: getConfiguredAgentSettings(), contextFiles: [], contextInstructions: session.contextInstructions,
+    language: 'en', sessionId: session.id, requestProtocolVersion: session.requestProtocol?.version,
+    executionMode: 'normal', approvalMode: 'ask', approvalRootTaskId: rootTaskId,
+    sourceConfig: source, authorizedExternalReferenceUris: []
+  };
+  const cp = createRunCheckpoint(oldRequest, 0, 'stored no-progress root allowance',
+    (vscode.workspace.workspaceFolders ?? []).map(folder => folder.uri.toString()));
+  cp.status = 'interrupted'; cp.stopReason = 'no_progress_loop'; cp.usedMs = 250; cp.modelRequests = 2;
+  cp.runBudget = createLogicalRunBudgetState({ modelRequests: 2, upstreamTokens: 200, treeUpstreamTokens: 200, usedMs: 250 });
+  cp.budgetLimits = { maxModelRequests: 4, maxToolRounds: 0, maxToolCalls: 0, maxContinuations: 0,
+    maxContextEpochRollovers: 0, maxUpstreamTokens: 100000, maxTreeUpstreamTokens: 100000,
+    maxContinuationOutputTokens: 0, maxContinuationOutputChars: 0 };
+  cp.state = { messages: [{ role: 'user', content: previousUser.content }], toolRounds: [], draftEdits: [], draftRuns: [],
+    reasoningParts: [], turn: 0, toolCallCount: 0, validationRunCount: 0, toolResultTokens: 0,
+    repairLoop: { status: 'idle', iteration: 0, maxIterations: 2, pendingDraftEditIds: [] } };
+  previousAssistant.runCheckpoint = cp;
+  previousAssistant.incompleteForTitle = true;
+  session.userTaskBudgets![rootTaskId] = taskBudgetFromCheckpoint(cp);
+  session.autoTitle = { version: 2, status: 'pending', revision: 1, lastAttemptTaskId: rootTaskId,
+    attemptedTaskIds: [rootTaskId], attemptedThrough: { taskId: rootTaskId, originMessageId: previousUser.id }, lastOutcome: 'defer' };
+  await store.persist();
+  const titleCommitted = deferred();
+  host.views.add({ webview: { postMessage(message: Record<string, unknown>) {
+    if (message.type === 'sessionTitleUpdated' && message.sessionId === session.id) titleCommitted.resolve();
+    return Promise.resolve(true);
+  } } });
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  let mainPosts = 0, titlePosts = 0;
+  const titleMaterials: string[] = [];
+  globalThis.fetch = (async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as { messages: Array<{ content: string }> };
+    if (body.messages[0]?.content === SESSION_TITLE_SYSTEM_PROMPT) {
+      titlePosts++; titleMaterials.push(body.messages.at(-1)!.content);
+      return streamingReply('{"decision":"set","title":"账号入口提速"}');
+    }
+    mainPosts++;
+    assert.match(String(init?.body), /NEW_RECOVERY_PURPOSE_MARKER/u);
+    return streamingReply('Use the new evidence to improve the account entry response');
+  }) as typeof fetch;
+  try {
+    await host.handleMessage({ type: 'sendPrompt', prompt: 'NEW_RECOVERY_PURPOSE_MARKER 优化账号管理入口响应速度',
+      sourceId: 'source-a', modelId: 'main-a' });
+    assert.equal(mainPosts, 1, 'the accepted recovery must reach its main request without waiting on its own title lease');
+    await titleCommitted.promise;
+    const latestInput = [...session.messages].reverse().find(message => message.role === 'user')!;
+    assert.equal(latestInput.userTask?.id, rootTaskId);
+    assert.equal(latestInput.userTask?.reason, 'recovery');
+    assert.notEqual(latestInput.id, previousUser.id);
+    assert.equal(mainPosts, 1);
+    assert.equal(titlePosts, 1);
+    assert.match(titleMaterials[0], /NEW_RECOVERY_PURPOSE_MARKER/u);
+    assert.doesNotMatch(titleMaterials[0], /ASSISTANT_ONLY_MARKER|最早的审批预算约束/u);
+    assert.equal(session.title, '账号入口提速');
+    assert.equal(session.autoTitle?.lastAttemptTaskId, latestInput.id, 'naming dedupe uses the new input identity');
+    assert.equal(session.userTaskBudgets![rootTaskId].runBudget?.modelRequests, 4, 'main and title retain the two previous spent requests');
+    assert.equal(Object.hasOwn(session.userTaskBudgets!, latestInput.id), false, 'a new naming input does not manufacture a fresh root allowance');
+    assert.equal(session.userTaskBudgets!.preservedRoot.usedMs, 42);
+    await host.handleMessage({ type: 'regenerateSessionTitle', sessionId: session.id, requestId: 'latest-recovery-purpose' });
+    assert.equal(inputs.length, 1);
+    assert.match(inputs[0].userPrompt, /NEW_RECOVERY_PURPOSE_MARKER/u);
+    assert.equal(JSON.parse(inputs[0].userPrompt).excerpts.length, 2);
+    assert.doesNotMatch(inputs[0].userPrompt, /ASSISTANT_ONLY_MARKER|最早的审批预算约束/u);
+    assert.equal(session.userTaskBudgets![rootTaskId].runBudget?.modelRequests, 4);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+
+test('an unexpected automatic-title enrollment failure cannot abort the real main request or lose its accepted user input', async t => {
+  const { host, session } = await fixture(t);
+  await prepareRealSubmissionRoute(host);
+  const oldTitle = session.title;
+  const titleHost = host as unknown as { rememberSessionTitleSubmission: (...args: unknown[]) => void };
+  const originalRemember = titleHost.rememberSessionTitleSubmission;
+  titleHost.rememberSessionTitleSubmission = () => { throw new Error('injected auxiliary enrollment failure'); };
+  const originalFetch = globalThis.fetch;
+  let mainPosts = 0, titlePosts = 0;
+  globalThis.fetch = (async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as { messages: Array<{ content: string }> };
+    if (body.messages[0]?.content === SESSION_TITLE_SYSTEM_PROMPT) {
+      titlePosts++;
+      return streamingReply('{"decision":"set","title":"Unexpected title"}');
+    }
+    mainPosts++;
+    return streamingReply('The main request still completes after the auxiliary service failed.');
+  }) as typeof fetch;
+  try {
+    await host.handleMessage({ type: 'sendPrompt', prompt: 'PRESERVED_MAIN_PURPOSE_MARKER 优化账号设置入口',
+      sourceId: 'source-a', modelId: 'main-a' });
+    assert.equal(mainPosts, 1);
+    assert.equal(titlePosts, 0);
+    assert.ok(session.messages.some(message => message.role === 'user' && message.content === 'PRESERVED_MAIN_PURPOSE_MARKER 优化账号设置入口'));
+    assert.match(session.messages.at(-1)!.content, /main request still completes/u);
+    assert.equal(session.messages.at(-1)!.isStreaming, undefined);
+    assert.equal(session.title, oldTitle);
+    assert.equal(session.autoTitle?.stopped, undefined);
+    assert.equal(host.isBusy, false);
+    assert.equal(host.isStartingRun, false);
+  } finally {
+    titleHost.rememberSessionTitleSubmission = originalRemember;
+    globalThis.fetch = originalFetch;
+  }
 });

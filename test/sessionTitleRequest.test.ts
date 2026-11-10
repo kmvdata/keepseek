@@ -9,11 +9,14 @@ import { ModelSourceStore } from '../src/accounts/accountStore';
 import { SubagentSettingsStore } from '../src/accounts/subagentSettingsStore';
 import type { SubagentModelSetting } from '../src/agent/subagents/types';
 import { createLogicalRunBudgetState } from '../src/agent/executionPolicy';
-import { createManualSessionTitleBudget, requestSessionTitle, restoreSessionTitleBudget, mergeSessionTitleTaskBudget } from '../src/provider/sessionTitleRequest';
+import { createManualSessionTitleBudget, requestSessionTitle, requestInputSessionTitle, restoreSessionTitleBudget, mergeSessionTitleTaskBudget, type SessionTitleLiveBudget } from '../src/provider/sessionTitleRequest';
 import { OneShotTextRequestError } from '../src/agent/oneShotTextRequest';
 import type { UserTaskBudget } from '../src/sessions/userTaskBudget';
 import { normalizeUserTaskBudgets } from '../src/sessions/userTaskBudget';
-import type { ProviderUsageLedgerRecord } from '../src/shared/types';
+import type { AgentRequest, ProviderUsageLedgerRecord } from '../src/shared/types';
+import { prepareAgentTaskBudget, canStartInputTitleBeforeMain } from '../src/agent/taskBudget';
+import { createRunCheckpoint } from '../src/agent/runCheckpoint';
+import { AgentRunner } from '../src/agent/runner';
 
 function budget(): UserTaskBudget {
   return { version: 1, usedMs: 500, maxExecutionMs: 60_000, maxCost: 0, usedCostByCurrency: {},
@@ -244,4 +247,167 @@ test('follow-main uses fresh credentials for the frozen source and refuses endpo
       error instanceof OneShotTextRequestError && error.reason === 'source_identity_missing');
     assert.equal(calls, 0);
   } finally { globalThis.fetch = originalFetch; rmSync(directory, { recursive: true, force: true }); }
+});
+
+function deferredBudget<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+async function inputTitleFixture() {
+  const directory = mkdtempSync(join(tmpdir(), 'keepseek-input-title-request-'));
+  const globalStorageUri = vscode.Uri.file(directory);
+  const sourceStore = new ModelSourceStore(globalStorageUri);
+  await sourceStore.createSource({ id: 'input-source', provider: 'openai-compatible', apiKey: 'resolved-key',
+    baseUrl: 'https://input.invalid/v1', models: [{ id: 'input-model', contextWindowTokens: 32768, maxOutputTokens: 8192 }] });
+  const settingsStore = new SubagentSettingsStore(globalStorageUri, 'workspace:title');
+  const initial = budget();
+  const { run, cost } = restoreSessionTitleBudget(initial);
+  const authority: SessionTitleLiveBudget = { run, cost, snapshot: () => ({ ...structuredClone(initial),
+    runBudget: structuredClone(run.state), budgetLimits: { ...run.limits }, usedCostByCurrency: cost.snapshot() }) };
+  const base = { globalStorageUri, workspaceKey: 'workspace:title', sourceStore, settingsStore,
+    parentRequest: { model: { id: 'input-model', label: 'Input', sourceId: 'input-source', provider: 'openai-compatible',
+      contextWindowTokens: 32768, maxOutputTokens: 8192 } },
+    language: 'en' as const, sessionId: 'session', taskId: 'root', userPrompt: '{"userInput":"Fix title input timing"}',
+    token: 'input-title', signal: new AbortController().signal, onUsageLedgerRecord: () => undefined };
+  return { directory, initial, authority, base };
+}
+
+test('input title prepares its model before main admission and preserves the live root clock and reservations', async () => {
+  const { directory, initial, authority, base } = await inputTitleFixture();
+  const gate = deferredBudget<SessionTitleLiveBudget>();
+  const preparing = deferredBudget<void>();
+  base.settingsStore.load = async () => { preparing.resolve(); return { version: 1, mode: 'follow-main', updatedAt: new Date().toISOString() }; };
+  const originalFetch = globalThis.fetch;
+  let posts = 0;
+  const saved: UserTaskBudget[] = [];
+  globalThis.fetch = async () => {
+    posts++;
+    assert.equal(saved.at(-1)?.runBudget?.modelRequests, 5, 'both main and title reservations precede the title POST');
+    return new Response('data: ' + JSON.stringify({ choices: [{ delta: { content: '{"decision":"set","title":"Title input timing"}' }, finish_reason: 'stop' }] })
+      + '\n\ndata: ' + JSON.stringify({ choices: [], usage: { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 } }) + '\n\ndata: [DONE]\n\n');
+  };
+  try {
+    const pending = requestInputSessionTitle({ ...base, liveBudget: gate.promise,
+      onBudgetChanged: next => { saved.push(next); } });
+    await preparing.promise;
+    assert.equal(posts, 0, 'model preparation is eager but admission waits for the owning main request');
+    const main = authority.run.reservePhysicalRequest(100, 200);
+    gate.resolve(authority);
+    assert.equal(await pending, '{"decision":"set","title":"Title input timing"}');
+    assert.equal(posts, 1);
+    assert.equal(authority.run.state.modelRequests, 5);
+    assert.equal(authority.run.state.upstreamTokens, 720, 'main pending reservation remains alongside actual title usage');
+    assert.equal(authority.run.state.usedMs, initial.usedMs, 'title network time is not double-added to the main clock');
+    assert.equal(saved.at(-1)?.usedMs, initial.usedMs);
+    authority.run.settlePhysicalRequest(main, { prompt_tokens: 80, completion_tokens: 30, total_tokens: 110 });
+    assert.equal(authority.run.state.upstreamTokens, 530);
+  } finally { globalThis.fetch = originalFetch; rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('input title cannot borrow a fresh allowance after the main consumes the final request slot', async () => {
+  const { directory, authority, base } = await inputTitleFixture();
+  authority.run.limits.maxModelRequests = 4;
+  authority.run.reservePhysicalRequest(100, 200);
+  const originalFetch = globalThis.fetch;
+  let posts = 0;
+  globalThis.fetch = async () => { posts++; throw new Error('exhausted title must not POST'); };
+  try {
+    await assert.rejects(requestInputSessionTitle({ ...base, liveBudget: Promise.resolve(authority) }),
+      error => error instanceof OneShotTextRequestError && error.reason === 'budget_exhausted');
+    assert.equal(posts, 0);
+    assert.equal(authority.run.state.modelRequests, 4);
+  } finally { globalThis.fetch = originalFetch; rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('input title cancellation releases a pending admission wait without dispatch or synthetic usage', async () => {
+  const { directory, authority, base } = await inputTitleFixture();
+  const gate = deferredBudget<SessionTitleLiveBudget>();
+  const preparing = deferredBudget<void>();
+  base.settingsStore.load = async () => { preparing.resolve(); return { version: 1, mode: 'follow-main', updatedAt: new Date().toISOString() }; };
+  const controller = new AbortController();
+  const originalFetch = globalThis.fetch;
+  let posts = 0, records = 0;
+  globalThis.fetch = async () => { posts++; throw new Error('cancelled title must not POST'); };
+  try {
+    const pending = requestInputSessionTitle({ ...base, signal: controller.signal, liveBudget: gate.promise,
+      onUsageLedgerRecord: () => { records++; } });
+    await preparing.promise;
+    controller.abort();
+    await assert.rejects(pending, error => error instanceof OneShotTextRequestError && error.reason === 'cancelled');
+    gate.reject(new Error('later main failure'));
+    await Promise.resolve();
+    assert.equal(posts, 0); assert.equal(records, 0);
+    assert.equal(authority.run.state.modelRequests, 3);
+  } finally { globalThis.fetch = originalFetch; rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('an early input title preserves a real main slot and finite ceilings retain main-first admission', () => {
+  const unlimited = prepareAgentTaskBudget({ sessionId: 'session', rootTaskId: 'root' });
+  assert.equal(canStartInputTitleBeforeMain(unlimited), true);
+  assert.equal(unlimited.run.state.modelRequests, 0, 'preparation never manufactures a physical main request');
+  const scarce = prepareAgentTaskBudget({ sessionId: 'session', rootTaskId: 'root', executionLimits: { maxModelRequests: 1 } });
+  assert.equal(canStartInputTitleBeforeMain(scarce), false);
+  const two = prepareAgentTaskBudget({ sessionId: 'session', rootTaskId: 'root', executionLimits: { maxModelRequests: 2 } });
+  assert.equal(canStartInputTitleBeforeMain(two), true);
+  two.run.reservePhysicalRequest(100, 512);
+  assert.equal(canStartInputTitleBeforeMain(two), false, 'the remaining slot stays available for the main request');
+  two.run.reservePhysicalRequest(100, 8192);
+  assert.equal(two.run.state.modelRequests, 2);
+  for (const executionLimits of [{ maxCost: 1 }, { maxUpstreamTokens: 100_000 }, { maxTreeUpstreamTokens: 100_000 }]) {
+    assert.equal(canStartInputTitleBeforeMain(prepareAgentTaskBudget({ sessionId: 'session', rootTaskId: 'root', executionLimits })), false);
+  }
+});
+
+test('prepared original task budgets preserve spent root metadata, the stricter clock and recovery limits', () => {
+  const previous = budget();
+  previous.runBudget!.usedMs = 100;
+  previous.runBudget!.deadlineAt = new Date(Date.now() + 5000).toISOString();
+  previous.maxCost = 0.2;
+  previous.usedCostByCurrency = { USD: 0.08 };
+  previous.commandRecoveryKeys = ['a'.repeat(64)];
+  previous.commandRecoveryExhausted = true;
+  previous.delegationBudget = { count: 2, parents: [['parent', 2]], paths: [['scope', 'path']] };
+  const before = structuredClone(previous);
+  const prepared = prepareAgentTaskBudget({ sessionId: 'session', rootTaskId: 'root', priorBudget: previous });
+  const snapshot = prepared.snapshot();
+  assert.equal(snapshot.usedMs, 500);
+  assert.equal(snapshot.runBudget!.usedMs, 500);
+  assert.equal(snapshot.runBudget!.modelRequests, 3);
+  assert.equal(snapshot.runBudget!.upstreamTokens, 300);
+  assert.equal(snapshot.runBudget!.deadlineAt, previous.runBudget!.deadlineAt);
+  assert.equal(snapshot.budgetLimits!.maxContinuations, 0, 'zero continuation allowance cannot be silently reopened');
+  assert.equal(snapshot.maxCost, 0.2);
+  assert.deepEqual(snapshot.usedCostByCurrency, { USD: 0.08 });
+  assert.deepEqual(snapshot.commandRecoveryKeys, previous.commandRecoveryKeys);
+  assert.equal(snapshot.commandRecoveryExhausted, true);
+  assert.deepEqual(snapshot.delegationBudget, previous.delegationBudget);
+  assert.deepEqual(previous, before);
+  assert.throws(() => prepareAgentTaskBudget({ sessionId: 'session', rootTaskId: 'root', priorBudget: {
+    version: 1, usedMs: 500, maxExecutionMs: 60_000
+  } }), /Original task budget is unavailable/u);
+});
+
+test('prepared task authorities cannot enter a serialized request or be reused for another root or session', async () => {
+  const prepared = prepareAgentTaskBudget({ sessionId: 'session', rootTaskId: 'root' });
+  const request: AgentRequest = {
+    sessionId: 'session', approvalRootTaskId: 'root', prompt: 'Fix the title timing',
+    model: { id: 'input-model', label: 'Input', provider: 'openai-compatible', sourceId: 'input-source' },
+    settings: { thinkingEnabled: false, reasoningEffort: 'high', compressionThreshold: 'balanced' },
+    contextFiles: [], history: [], language: 'en', approvalMode: 'ask', preparedTaskBudget: prepared,
+    sourceConfig: { sourceId: 'input-source', provider: 'openai-compatible', apiKey: '', baseUrl: 'https://input.invalid', supportsBilling: false }
+  };
+  const checkpoint = createRunCheckpoint(request, 0, 'test', [], 0);
+  assert.equal(Object.hasOwn(checkpoint.request, 'preparedTaskBudget'), false);
+  assert.doesNotThrow(() => JSON.stringify(checkpoint));
+  const originalFetch = globalThis.fetch;
+  let posts = 0;
+  globalThis.fetch = async () => { posts++; throw new Error('mismatched authority must not dispatch'); };
+  try {
+    await assert.rejects(new AgentRunner().run({ ...request, sessionId: 'other-session' }), /budget identity mismatch/u);
+    await assert.rejects(new AgentRunner().run({ ...request, approvalRootTaskId: 'other-root' }), /budget identity mismatch/u);
+    assert.equal(posts, 0);
+  } finally { globalThis.fetch = originalFetch; }
 });

@@ -1,154 +1,128 @@
 import './registerVscodeStub';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { DelegatedApprovalQueue } from '../src/agent/approvalMode';
 import { createEmptySession } from '../src/sessions/chatSessionStore';
-import { buildSessionTitleMaterial } from '../src/sessions/sessionTitle';
-import type { AgentResponse, ChatMessage, ChatSession } from '../src/shared/types';
-import {
-  captureSessionTitleCompletion,
-  checkSessionTitleCompletion,
-  type SessionTitleCompletionBlockers
-} from '../src/provider/sessionTitleCompletion';
+import { captureSessionTitleSubmission, checkSessionTitleSubmission } from '../src/provider/sessionTitleCompletion';
+import { createHistoryTruncationPlan } from '../src/sessions/historyTruncation';
+import type { ChatMessage } from '../src/shared/types';
 
 function fixture() {
   const session = createEmptySession();
-  const link = { version: 1 as const, id: 'logical-task', originMessageId: 'real-user', reason: 'user' as const };
-  const user: ChatMessage = { id: 'real-user', role: 'user', content: '排查审批失败', createdAt: '2026-11-06T00:00:00Z', userTask: link };
-  const assistant: ChatMessage = { id: 'final-answer', role: 'assistant', content: '需要你补充错误日志。',
-    createdAt: '2026-11-06T00:01:00Z', userTask: link,
-    runDetails: { status: 'succeeded' } as ChatMessage['runDetails'],
-    runCheckpointArchive: { version: 1, objectHash: 'a'.repeat(64), summary: {
-      taskId: 'execution-segment', status: 'completed', stopReason: 'completed', usedMs: 1000,
-      maxExecutionMs: 0, limitSource: 'test', attempt: 1, modelRequests: 1, retries: 0, steps: 0, canResume: false
-    } } };
-  session.messages = [user, assistant];
-  const response = { approvalContinuationRequired: false } as AgentResponse;
-  const completion = captureSessionTitleCompletion(session.id, assistant, response)!;
-  return { session, assistant, response, completion };
+  const user: ChatMessage = { id: 'user-1', role: 'user', content: '定位 KeepSeek 输入框无法发送的原因', createdAt: '',
+    userTask: { version: 1, id: 'root-1', originMessageId: 'user-1', reason: 'user' } };
+  session.messages.push(user);
+  const submission = captureSessionTitleSubmission(session.id, user)!;
+  return { session, user, submission };
 }
 
-test('a durable final clarification is eligible and uses the logical task, never the execution or trace ID', () => {
-  const { session, completion } = fixture();
-  assert.deepEqual(checkSessionTitleCompletion(session, completion), {
-    ready: true, taskId: 'logical-task', messageId: 'final-answer'
-  });
-  assert.equal(captureSessionTitleCompletion(session.id,
-    { ...session.messages[1], userTask: undefined }, {} as AgentResponse), undefined);
+test('a real user input is nameable before any assistant answer exists', () => {
+  const { session, submission } = fixture();
+  assert.deepEqual(checkSessionTitleSubmission(session, submission), { ready: true, taskId: 'root-1', messageId: 'user-1' });
 });
 
-test('ask plan and ordinary prepared draft replies do not depend on pending draft counts', () => {
-  const { session, completion } = fixture();
-  session.approvalMode = 'ask';
-  session.executionMode = 'plan';
-  assert.equal(checkSessionTitleCompletion(session, completion).ready, true);
-});
-
-for (const blocker of ['running', 'queuedApproval', 'commandContinuation', 'planContinuation', 'background', 'manualApproval'] as const) {
-  test(`${blocker} prevents early completion between internal execution segments`, () => {
-    const { session, completion } = fixture();
-    const blockers: SessionTitleCompletionBlockers = { [blocker]: true };
-    assert.deepEqual(checkSessionTitleCompletion(session, completion, blockers), { ready: false, reason: 'continuation' });
-    assert.equal(checkSessionTitleCompletion(session, completion, { [blocker]: false }).ready, true);
-  });
-}
-
-test('a returned response requesting approval continuation is not a final completion', () => {
-  const { session, assistant, response } = fixture();
-  for (const extra of [{ approvalContinuationRequired: true }, { approvalContinuationStopReason: 'reviewer_unavailable' }]) {
-    const completion = captureSessionTitleCompletion(session.id, assistant, { ...response, ...extra })!;
-    assert.equal(checkSessionTitleCompletion(session, completion).ready, false);
+test('assistant streaming, failure, cancellation and approval work do not gate an accepted user purpose', () => {
+  const { session, user, submission } = fixture();
+  for (const status of ['running', 'failed', 'cancelled', 'waiting', 'blocked'] as const) {
+    session.messages.splice(1, session.messages.length, { id: 'assistant-1', role: 'assistant', content: 'partial answer', createdAt: '',
+      userTask: user.userTask, isStreaming: true, incompleteForTitle: true,
+      runDetails: { status } as ChatMessage['runDetails'] });
+    assert.equal(checkSessionTitleSubmission(session, submission).ready, true);
   }
+  session.repairLoop = { status: 'running_validation', iteration: 1, maxIterations: 3, pendingDraftEditIds: [] };
+  session.approvalProcessing = { version: 1, rootTaskId: 'root-1', runId: 'segment-1', mode: 'delegate', status: 'processing', targets: [], updatedAt: '' };
+  assert.equal(checkSessionTitleSubmission(session, submission).ready, true);
 });
 
-test('raw errors, stopped, budget paused, truncated, interrupted and streaming answers never qualify', () => {
-  const cases: Array<(session: ChatSession, message: ChatMessage) => void> = [
-    (_s, m) => { m.runDetails!.status = 'failed'; m.runDetails!.failureReason = 'provider_error'; },
-    (_s, m) => { m.runDetails!.status = 'blocked'; m.runCheckpointArchive!.summary.status = 'blocked'; },
-    (_s, m) => { m.runDetails!.status = 'stopped'; },
-    (_s, m) => { m.runDetails!.failureReason = 'provider_error'; },
-    (_s, m) => { m.runDetails!.budgetStopReason = 'cost_limit'; },
-    (_s, m) => { m.runDetails!.budgetPause = { kind: 'explicit_tool_budget', resumable: true, segment: 1 }; },
-    (_s, m) => { m.runDetails!.outputTruncation = { finishReason: 'length', requestId: 'request', toolsExecuted: 0 }; },
-    (_s, m) => { m.runCheckpointArchive!.summary.status = 'interrupted'; },
-    (_s, m) => { m.runCheckpointArchive!.summary.stopReason = 'no_progress_loop'; },
-    (_s, m) => { m.isStreaming = true; },
-    (_s, m) => { m.content = ' \n '; }
-  ];
-  for (const change of cases) {
-    const { session, assistant, completion } = fixture();
-    change(session, assistant);
-    assert.equal(checkSessionTitleCompletion(session, completion).ready, false);
+test('ordinary newer user input and same-root internal continuation preserve an older submission snapshot', () => {
+  const { session, user, submission } = fixture();
+  session.messages.push({ ...user, id: 'continuation', content: 'tool result', userTask: { ...user.userTask!, reason: 'command' },
+    contextMeta: { displayKind: 'draft_run_auto_continue', protectedReason: 'draft_run_result' } });
+  session.messages.push({ ...user, id: 'user-2', content: '第二个真实目的',
+    userTask: { version: 1, id: 'root-2', originMessageId: 'user-2', reason: 'user' } });
+  assert.equal(checkSessionTitleSubmission(session, submission).ready, true);
+  assert.equal(captureSessionTitleSubmission(session.id, session.messages[1]), undefined);
+  assert.equal(captureSessionTitleSubmission(session.id, session.messages[2])?.taskId, 'root-2');
+});
+
+test('capture rejects assistant output, empty inputs and protected host-only user notifications', () => {
+  const { session, user } = fixture();
+  assert.equal(captureSessionTitleSubmission(session.id, { ...user, role: 'assistant' }), undefined);
+  assert.equal(captureSessionTitleSubmission(session.id, { ...user, content: '  ' }), undefined);
+  assert.equal(captureSessionTitleSubmission(session.id, { ...user, isStreaming: true }), undefined);
+  assert.equal(captureSessionTitleSubmission(session.id, { ...user, contextMeta: { displayKind: 'delegated_auto_continue' } }), undefined);
+  assert.equal(captureSessionTitleSubmission(session.id, { ...user, contextMeta: { protectedReason: 'background_run_result' } }), undefined);
+});
+
+test('a real user with a first-input protection tag still supplies its own input only', () => {
+  const { session, user } = fixture();
+  user.contextMeta = { protectedReason: 'first_user_request' };
+  assert.ok(captureSessionTitleSubmission(session.id, user));
+  user.contextMeta = { protectedReason: 'draft_run_result' };
+  assert.ok(captureSessionTitleSubmission(session.id, user));
+});
+
+test('selected user edits, deletion and workspace/session mismatch invalidate the queued input', () => {
+  const { session, user, submission } = fixture();
+  user.content += ' changed';
+  assert.equal(checkSessionTitleSubmission(session, submission).ready, false);
+  user.content = '定位 KeepSeek 输入框无法发送的原因';
+  assert.equal(checkSessionTitleSubmission({ ...session, id: 'different-session' }, submission).ready, false);
+  user.userTask = { ...user.userTask!, id: 'different-root' };
+  assert.equal(checkSessionTitleSubmission(session, submission).ready, false);
+  session.messages = [];
+  assert.equal(checkSessionTitleSubmission(session, submission).ready, false);
+});
+
+test('legacy genuine user inputs are identified without manufacturing task links', () => {
+  const { session, user } = fixture();
+  user.userTask = undefined;
+  const before = JSON.stringify(user);
+  const submission = captureSessionTitleSubmission(session.id, user)!;
+  assert.equal(submission.taskId, user.id);
+  assert.equal(checkSessionTitleSubmission(session, submission).ready, true);
+  assert.equal(JSON.stringify(user), before);
+});
+
+test('unrelated history truncation preserves a retained selected input; removing it retires the candidate', () => {
+  const { session, user, submission } = fixture();
+  const next: ChatMessage = { ...user, id: 'user-2', userTask: { version: 1, id: 'root-2', originMessageId: 'user-2', reason: 'user' } };
+  session.messages.push(next);
+  session.pendingHistoryTruncation = createHistoryTruncationPlan(session, next.id, { ...next, id: 'replacement' })!;
+  assert.equal(checkSessionTitleSubmission(session, submission).ready, true);
+  session.pendingHistoryTruncation = undefined;
+  session.pendingHistoryTruncation = createHistoryTruncationPlan(session, user.id, { ...user, id: 'replacement' })!;
+  assert.equal(checkSessionTitleSubmission(session, submission).ready, false);
+});
+
+test('a genuine recovery supplement has a fresh naming identity while sharing its original execution root', () => {
+  const { session, user, submission: original } = fixture();
+  const recovery: ChatMessage = { ...user, id: 'recovery-user', content: '先处理网络断连，再恢复原来的验证',
+    userTask: { ...user.userTask!, reason: 'recovery' } };
+  session.messages.push(recovery);
+  const next = captureSessionTitleSubmission(session.id, recovery)!;
+  assert.ok(next);
+  assert.equal(next.taskId, recovery.id);
+  assert.equal(next.rootTaskId, user.userTask!.id);
+  assert.notEqual(next.taskId, original.taskId);
+  assert.equal(recovery.userTask!.id, user.userTask!.id, 'naming does not grant another root execution budget');
+  assert.equal(checkSessionTitleSubmission(session, original).ready, true);
+  assert.equal(checkSessionTitleSubmission(session, next).ready, true);
+  recovery.content += ' 用户随后修改了补充指令';
+  assert.equal(checkSessionTitleSubmission(session, next).ready, false);
+  assert.equal(checkSessionTitleSubmission(session, original).ready, true);
+  recovery.content = '先处理网络断连，再恢复原来的验证';
+  recovery.userTask = { ...recovery.userTask!, id: 'different-budget-root' };
+  assert.equal(checkSessionTitleSubmission(session, next).ready, false, 'an unchanged input cannot retarget another root budget');
+});
+
+test('internal command, repair, plan and approval user records do not become fresh input submissions', () => {
+  const { session, user } = fixture();
+  for (const reason of ['command', 'repair', 'plan', 'approval'] as const) {
+    const internal: ChatMessage = { ...user, id: `internal-${reason}`, content: '自动运行下一段',
+      userTask: { ...user.userTask!, reason } };
+    assert.equal(captureSessionTitleSubmission(session.id, internal), undefined, reason);
   }
-  const { session, completion } = fixture();
-  assert.equal(checkSessionTitleCompletion(session, completion, { aborted: true }).ready, false);
-});
-
-test('new user turns retain older completed rounds while internal continuations replace earlier segments', () => {
-  for (const reason of ['user', 'approval', 'command', 'repair', 'plan', 'recovery'] as const) {
-    const { session, assistant, response, completion } = fixture();
-    const link = { ...assistant.userTask!, reason,
-      ...(reason === 'user' ? { id: 'new-task', originMessageId: 'next-user' } : {}) };
-    session.messages.push({ id: 'next-user', role: 'user', content: '下一段', createdAt: '', userTask: link });
-    assert.equal(checkSessionTitleCompletion(session, completion).ready, reason === 'user');
-    const next = { ...assistant, id: 'next-answer', userTask: link };
-    session.messages.push(next);
-    const latest = captureSessionTitleCompletion(session.id, next, response)!;
-    assert.equal(checkSessionTitleCompletion(session, latest).ready, true);
-    assert.equal(checkSessionTitleCompletion(session, completion).ready, reason === 'user');
-  }
-});
-
-test('scope checks reject deleted or unlinked origin messages without modifying retained request bytes', () => {
-  const { session, completion } = fixture();
-  session.messages[0].providerContent = 'retained provider bytes\n';
-  session.contextInstructions = 'stable instructions\n';
-  const before = JSON.stringify(session);
-  assert.equal(checkSessionTitleCompletion(session, completion).ready, true);
-  assert.equal(JSON.stringify(session), before);
-  assert.equal(checkSessionTitleCompletion({ ...session, id: 'other' }, completion).ready, false);
-  session.messages.shift();
-  assert.equal(checkSessionTitleCompletion(session, completion).ready, false);
-});
-
-test('a complete repair draft waiting for Apply qualifies while active approval processing waits', () => {
-  const { session, completion } = fixture();
-  session.messages[0].contextMeta = { isProtected: true, protectedReason: 'first_user_request' };
-  session.messages[1].contextMeta = { isProtected: true, protectedReason: 'draft_edit_result' };
-  session.repairLoop = { status: 'waiting_for_apply', iteration: 1, maxIterations: 3, pendingDraftEditIds: ['draft'] };
-  assert.equal(checkSessionTitleCompletion(session, completion).ready, true);
-  const material = buildSessionTitleMaterial(session.messages, completion.taskId)!;
-  assert.match(material.userPrompt, /排查审批失败/u);
-  assert.match(material.userPrompt, /需要你补充错误日志/u);
-  session.repairLoop.status = 'completed';
-  assert.equal(checkSessionTitleCompletion(session, completion).ready, true);
-  session.approvalProcessing = { version: 1, rootTaskId: completion.taskId, runId: 'segment', mode: 'delegate',
-    status: 'processing', targets: [], updatedAt: '' };
-  assert.equal(checkSessionTitleCompletion(session, completion).ready, false);
-  session.approvalProcessing.status = 'completed';
-  assert.equal(checkSessionTitleCompletion(session, completion).ready, true);
-});
-
-test('approval lifecycle observation neither claims nor starts queued work and isolates session/root task', () => {
-  const queue = new DelegatedApprovalQueue();
-  queue.enqueue({ sessionId: 'session', runId: 'segment', rootTaskId: 'root', editIds: ['edit'], draftRunIds: [] });
-  assert.equal(queue.hasPending('session'), true);
-  assert.equal(queue.hasPending('session', 'root'), true);
-  assert.equal(queue.hasPending('other'), false);
-  assert.equal(queue.hasPending('session', 'other'), false);
-  const claimed = queue.take('session')!;
-  assert.ok(claimed);
-  assert.equal(queue.hasPending('session', 'root'), true);
-  queue.finish(claimed.controller);
-  assert.equal(queue.hasPending('session'), false);
-});
-
-
-test('a complete explanation can be named even when its engineering task plan is blocked or failed', () => {
-  for (const status of ['blocked', 'failed', 'waiting'] as const) {
-    const { session, assistant, completion } = fixture();
-    assistant.runDetails!.status = status;
-    assistant.content = '命令未成功，需要修复依赖；完整诊断方案如下。';
-    assert.equal(checkSessionTitleCompletion(session, completion).ready, true);
-  }
+  const protectedRecovery: ChatMessage = { ...user, id: 'protected-recovery',
+    userTask: { ...user.userTask!, reason: 'recovery' }, contextMeta: { displayKind: 'draft_run_auto_continue' } };
+  assert.equal(captureSessionTitleSubmission(session.id, protectedRecovery), undefined);
 });

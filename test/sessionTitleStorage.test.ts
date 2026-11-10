@@ -172,11 +172,11 @@ test('automatic title commits once to session and history without changing messa
   assert.equal(requests, 1);
 });
 
-test('defer and invalid responses consume only their turn and later material includes new context', async () => {
+test('defer and invalid responses consume only their input and the next request uses its new purpose', async () => {
   const { store, session, coordinator } = await fixture(pair('turn-1', '你好'));
   let calls = 0;
   for (let turn = 1; turn <= 4; turn++) {
-    if (turn > 1) { coordinator.cancel(session.id); session.messages.push(...pair(`turn-${turn}`, turn === 4 ? '修复编辑重发的旧操作记录' : '我想做个功能')); await store.persist(); }
+    if (turn > 1) { session.messages.push(...pair(`turn-${turn}`, turn === 4 ? '修复编辑重发的旧操作记录' : '我想做个功能')); await store.persist(); }
     await coordinator.complete(session.id, `turn-${turn}`, async input => {
       calls++;
       if (turn === 4) { assert.match(input.userPrompt, /修复编辑重发/); return set; }
@@ -913,7 +913,7 @@ test('ordinary later turns preserve an automatic in-flight snapshot and stop all
   assert.equal(requests, 1);
 });
 
-test('manual frozen two-round material permits later ordinary appends while selected-body mutation rejects it', async () => {
+test('manual frozen user-only material permits later ordinary appends while selected-body mutation rejects it', async () => {
   for (const mutate of [false, true]) {
     const { store, session, coordinator } = await fixture();
     const started = deferred<void>(), response = deferred<string>();
@@ -986,7 +986,7 @@ test('two truly legacy rounds refresh through normalization and title persistenc
   const material = buildSessionTitleRegenerationMaterial(session.messages, 'legacy-latest')!;
   assert.ok(material);
   const excerpts = JSON.parse(material.userPrompt).excerpts;
-  assert.equal(excerpts.length, 4);
+  assert.equal(excerpts.length, 2);
   let calls = 0;
   assert.equal(await coordinator.regenerate(session.id, 'legacy-latest', async input => {
     calls++;
@@ -1128,4 +1128,101 @@ test('a selected-body change during claim retires only that claim and leaves fut
   await store.persist();
   assert.equal(await coordinator.complete(session.id, 'turn-2', request), true);
   assert.equal(requests, 1);
+});
+
+test('an accepted user purpose commits a durable title while its first assistant reply is still streaming', async () => {
+  const user = pair('input-now', '修复 KeepSeek 输入框发送阻塞')[0];
+  const { session, coordinator, storage } = await fixture([user]);
+  let calls = 0;
+  const started = deferred<void>(), response = deferred<string>();
+  const work = coordinator.complete(session.id, 'input-now', async input => {
+    calls++;
+    const data = JSON.parse(input.userPrompt);
+    assert.deepEqual(data.excerpts.map((part: { role: string }) => part.role), ['user']);
+    assert.match(input.userPrompt, /输入框发送阻塞/u);
+    assert.equal(session.messages.some(message => message.role === 'assistant'), false);
+    started.resolve();
+    return response.promise;
+  });
+  await started.promise;
+  const assistant: ChatMessage = { id: 'still-streaming', role: 'assistant', content: 'ASSISTANT_SECRET_NOT_TITLE_MATERIAL',
+    reasoningContent: 'PRIVATE_REASONING', isStreaming: true, incompleteForTitle: true, createdAt: '', userTask: user.userTask,
+    runDetails: { status: 'running' } as ChatMessage['runDetails'] };
+  session.messages.push(assistant);
+  response.resolve(set);
+  assert.equal(await work, true);
+  assert.equal(calls, 1);
+  assert.equal(assistant.isStreaming, true, 'title completion never owns the main stream lifecycle');
+  assert.equal(session.autoTitle?.completed?.basis.scope, 'user_inputs_v3');
+  assert.deepEqual(session.autoTitle?.completed?.basis.messages.map(ref => ref.id), ['input-now']);
+  assert.equal(session.autoTitle?.completed?.basis.lastMessageId, 'input-now');
+  assert.equal(storage.state.sessions[0].autoTitle?.stopped, 'named');
+});
+
+test('manual latest input can be named without an answer and ignores changes to all assistant bodies', async () => {
+  const first = pair('first-input', '理解旧的审批用途');
+  const newest = pair('latest-input', '定位模型来源切换失败')[0];
+  const { session, coordinator, store } = await fixture([...first, newest]);
+  const material = buildSessionTitleRegenerationMaterial(session.messages, 'latest-input')!;
+  assert.deepEqual(material.basis.messages.map(ref => ref.id), ['first-input', 'latest-input']);
+  assert.deepEqual(JSON.parse(material.userPrompt).excerpts.map((part: { role: string }) => part.role), ['user', 'user']);
+  const started = deferred<void>(), response = deferred<string>();
+  const work = coordinator.regenerateResult(session.id, 'latest-input', async () => { started.resolve(); return response.promise; }, material);
+  await started.promise;
+  session.messages[1].content = 'COMPLETELY_CHANGED_OLD_ANSWER';
+  session.messages.push({ id: 'latest-answer', role: 'assistant', content: 'stream changed', isStreaming: true, createdAt: '', userTask: newest.userTask });
+  await store.persist();
+  response.resolve(set);
+  assert.deepEqual(await work, { outcome: 'updated' });
+  assert.equal(session.autoTitle?.stopped, 'named');
+});
+
+test('a canonical user-input title survives a real shard/index restart before any answer exists', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'keepseek-input-title-commit-'));
+  t.after(() => removeStorageRoot(root));
+  const uri = vscode.Uri.file(root) as never;
+  const store = new ChatSessionStore(new GlobalSessionStorage(uri), 'en', scope);
+  await store.initialize();
+  const session = store.getActiveSession();
+  session.messages = [pair('user-only', '减少标题生成 token 消耗')[0]];
+  await store.persist();
+  let calls = 0;
+  assert.equal(await new SessionTitleCoordinator(store).complete(session.id, 'user-only', async () => { calls++; return set; }), true);
+  const commit = automaticTitleCommit(session);
+  assert.ok(commit);
+  const restarted = new ChatSessionStore(new GlobalSessionStorage(uri), 'en', scope);
+  await restarted.initialize();
+  const reloaded = restarted.getActiveSession();
+  assert.equal(reloaded.autoTitle?.stopped, 'named');
+  assert.equal(reloaded.autoTitle?.completed?.basis.scope, 'user_inputs_v3');
+  assert.equal(automaticTitleCommit(reloaded), commit);
+  assert.equal(reloaded.messages.some(message => message.role === 'assistant'), false);
+  reloaded.messages.push(pair('next-input', '完全不同的下一任务')[0]);
+  await restarted.persist();
+  assert.equal(await new SessionTitleCoordinator(restarted).complete(reloaded.id, 'next-input', async () => { calls++; return set; }), false);
+  assert.equal(calls, 1);
+});
+
+test('a real recovery supplement may retry naming after an earlier defer without minting a new root task', async () => {
+  const initial = pair('shared-root', '你好')[0];
+  const { session, coordinator, storage } = await fixture([initial]);
+  let calls = 0;
+  assert.equal(await coordinator.complete(session.id, 'shared-root', async () => {
+    calls++;
+    return '{"decision":"defer","title":null}';
+  }), false);
+  const supplement: ChatMessage = { ...initial, id: 'recovery-purpose', content: '修复网络断连后恢复验证任务',
+    userTask: { ...initial.userTask!, reason: 'recovery' } };
+  session.messages.push(supplement);
+  assert.equal(await coordinator.complete(session.id, supplement.id, async input => {
+    calls++;
+    assert.deepEqual(JSON.parse(input.userPrompt).excerpts.map((part: { text: string }) => part.text), [supplement.content]);
+    return set;
+  }), true);
+  assert.equal(calls, 2);
+  assert.equal(session.autoTitle?.completed?.taskId, supplement.id);
+  assert.equal(session.autoTitle?.completed?.basis.lastMessageId, supplement.id);
+  assert.equal(session.autoTitle?.stopped, 'named');
+  assert.equal(supplement.userTask!.id, initial.userTask!.id);
+  assert.equal(storage.state.sessions[0].messages[1].userTask?.id, initial.userTask!.id);
 });

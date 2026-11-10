@@ -8,17 +8,16 @@ import { DelegatedApprovalQueue } from '../src/agent/approvalMode';
 import { ChatSessionStore, createEmptySession, type StoredWorkspaceSessionState } from '../src/sessions/chatSessionStore';
 import { SessionTitleCoordinator } from '../src/sessions/sessionTitleCoordinator';
 import { buildSessionTitleRegenerationMaterial } from '../src/sessions/sessionTitle';
-import type { SessionTitleCompletion } from '../src/provider/sessionTitleCompletion';
+import type { SessionTitleSubmission } from '../src/provider/sessionTitleCompletion';
 import type { SessionTitleRequestInput } from '../src/provider/sessionTitleRequest';
-import { createManualSessionTitleBudget, restoreSessionTitleBudget } from '../src/provider/sessionTitleRequest';
 import type { SessionTitleRequest } from '../src/sessions/sessionTitleCoordinator';
 import type { UserTaskBudget } from '../src/sessions/userTaskBudget';
 import type { AgentRequest, AgentResponse, ChatMessage, ChatSession } from '../src/shared/types';
 
 type Parent = Pick<AgentRequest, 'model' | 'sourceConfig'>;
-type Candidate = { completion: SessionTitleCompletion; parentRequest: Parent; durable: boolean };
+type Candidate = { submission: SessionTitleSubmission; parentRequest: Parent; durable: boolean };
 type Host = {
-  rememberSessionTitleCompletion(session: ChatSession, message: ChatMessage, response: AgentResponse, parent: Parent): void;
+  rememberSessionTitleSubmission(session: ChatSession, message: ChatMessage, parent: Parent): void;
   flushSessionTitleCompletions(): void;
   maybeAutoContinueDraftRun(): Promise<void>;
   loadTaskBudget(session: ChatSession, link: NonNullable<ChatMessage['userTask']>): Promise<UserTaskBudget | undefined>;
@@ -44,15 +43,13 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function turn(session: ChatSession, taskId = 'root', suffix = '') {
+function turn(session: ChatSession, taskId = 'root') {
   const task = { version: 1 as const, id: taskId, originMessageId: `user-${taskId}`, reason: 'user' as const };
-  if (!session.messages.some(message => message.id === task.originMessageId)) session.messages.push({
-    id: task.originMessageId, role: 'user', content: '排查 KeepSeek 审批失败', createdAt: '', userTask: task
-  });
-  const message: ChatMessage = { id: `answer-${taskId}${suffix}`, role: 'assistant', content: '请补充错误日志。', createdAt: '',
-    userTask: task, runDetails: { status: 'succeeded' } as ChatMessage['runDetails'] };
-  session.messages.push(message);
-  return message;
+  const existing = session.messages.find(message => message.id === task.originMessageId);
+  if (existing) return existing;
+  const user: ChatMessage = { id: task.originMessageId, role: 'user', content: `排查 KeepSeek 审批失败 ${taskId}`, createdAt: '', userTask: task };
+  session.messages.push(user);
+  return user;
 }
 
 function fixture() {
@@ -90,49 +87,50 @@ function fixture() {
     activate: (session: ChatSession) => { active = session; store.activeSessionId = session.id; } };
 }
 
-test('production completion routing requires a durable response and consumes the event exactly once', () => {
+test('a durable accepted user input dispatches immediately while the main answer is still pending', async () => {
   const f = fixture();
-  const message = turn(f.a);
-  f.host.rememberSessionTitleCompletion(f.a, message, {} as AgentResponse, f.parent);
-  f.host.flushSessionTitleCompletions();
-  assert.equal(f.calls.length, 0, 'capture alone is not the response persistence barrier');
-  [...f.host.sessionTitleCandidates.get(f.a.id)!.values()].at(-1)!.durable = true;
-  f.host.flushSessionTitleCompletions();
-  f.host.flushSessionTitleCompletions();
-  assert.equal(f.calls.length, 1);
-  assert.equal(f.calls[0].taskId, 'root');
-  assert.equal(f.host.isBusy, false);
-  assert.equal(f.host.isStartingRun, false);
+  const user = turn(f.a);
+  f.a.messages.push({ id: 'pending-answer', role: 'assistant', content: '', createdAt: '', userTask: user.userTask, isStreaming: true });
+  Object.assign(f.host, { isBusy: true });
+  const owner = f.host.interactions.begin('task', f.a.id, 'running')!;
+  try {
+    await f.store.persist();
+    f.host.rememberSessionTitleSubmission(f.a, user, f.parent);
+    f.host.flushSessionTitleCompletions();
+    f.host.flushSessionTitleCompletions();
+    assert.equal(f.calls.length, 1);
+    assert.equal(f.calls[0].taskId, 'root');
+    assert.equal(f.host.isBusy, true, 'naming never takes over the foreground task');
+    assert.equal(f.host.interactions.current, owner);
+    assert.equal(f.a.messages.at(-1)?.isStreaming, true);
+  } finally { f.host.interactions.finish(owner); }
 });
 
-test('production approval drain converges several internal responses to one final title candidate', async () => {
+test('internal approval, command, plan and repair inputs never manufacture title submissions', async () => {
   const f = fixture();
-  f.a.approvalMode = 'delegate';
-  let segments = 0;
-  const enqueue = () => f.queue.enqueue({ sessionId: f.a.id, rootTaskId: 'root', runId: `segment-${segments}`,
-    editIds: ['prepared-edit'], draftRunIds: [] });
-  enqueue();
-  Object.assign(f.host, { executeDelegatedApprovals: async (entry: NonNullable<ReturnType<DelegatedApprovalQueue['take']>>) => {
-    const message = turn(f.a, 'root', String(++segments));
-    f.host.rememberSessionTitleCompletion(f.a, message, {} as AgentResponse, f.parent);
-    [...f.host.sessionTitleCandidates.get(f.a.id)!.values()].at(-1)!.durable = true;
-    f.host.flushSessionTitleCompletions();
-    assert.equal(f.calls.length, 0, 'the active approval queue holds the response');
-    if (segments < 3) enqueue();
-    f.queue.finish(entry.controller);
-  } });
-  await f.host.maybeAutoContinueDraftRun();
-  assert.equal(segments, 3);
+  const user = turn(f.a);
+  for (const reason of ['approval', 'command', 'plan', 'repair', 'recovery'] as const) {
+    const internal: ChatMessage = { id: `internal-${reason}`, role: 'user', content: 'HOST_CONTINUATION_SECRET', createdAt: '',
+      userTask: { ...user.userTask!, reason },
+      contextMeta: { isProtected: true, protectedReason: 'delegated_approval_result', displayKind: 'delegated_auto_continue' } };
+    f.a.messages.push(internal);
+    f.host.rememberSessionTitleSubmission(f.a, internal, f.parent);
+  }
+  f.a.messages.push({ id: 'raw-assistant', role: 'assistant', content: 'ASSISTANT_SECRET', createdAt: '', userTask: user.userTask });
+  f.host.rememberSessionTitleSubmission(f.a, f.a.messages.at(-1)!, f.parent);
+  f.host.flushSessionTitleCompletions();
+  assert.equal(f.calls.length, 0);
+  f.host.rememberSessionTitleSubmission(f.a, user, f.parent);
+  f.host.flushSessionTitleCompletions();
   assert.equal(f.calls.length, 1);
   await f.host.maybeAutoContinueDraftRun();
-  assert.equal(f.calls.length, 1, 'refresh-driven drains cannot create another event');
+  assert.equal(f.calls.length, 1, 'continuation drains do not create another observed user submission');
 });
 
 test('switching to B preserves A source snapshot and loads/publishes only A task budget', async () => {
   const f = fixture();
   const message = turn(f.a);
-  f.host.rememberSessionTitleCompletion(f.a, message, {} as AgentResponse, f.parent);
-  [...f.host.sessionTitleCandidates.get(f.a.id)!.values()].at(-1)!.durable = true;
+  f.host.rememberSessionTitleSubmission(f.a, message, f.parent);
   f.parent.model.id = 'mutated';
   f.parent.sourceConfig = { ...f.parent.sourceConfig!, sourceId: 'mutated' };
   f.activate(f.b); f.host.selectedSourceId = 'source-b'; f.host.selectedModelId = 'main-b';
@@ -160,38 +158,32 @@ test('switching to B preserves A source snapshot and loads/publishes only A task
 });
 
 for (const fail of [false, true]) {
-  test(`production send wrapper gates title dispatch until its final save ${fail ? 'fails' : 'succeeds'}`, async () => {
+  test(`an accepted user purpose stays eligible while the outer final save ${fail ? 'fails' : 'succeeds'}`, async () => {
     const f = fixture();
     const saved = deferred<void>(), startedSaving = deferred<void>();
+    let userAccepted = false;
     f.store.persist = async () => { startedSaving.resolve(); await saved.promise; };
     Object.assign(f.host, { sendPromptImpl: async (_prompt: string, _source: string, _model: string, _settings: unknown,
       options: { userTask: NonNullable<ChatMessage['userTask']> }) => {
-      const task = options.userTask;
-      const message = turn(f.a, task.id);
-      f.a.messages[0].id = task.originMessageId;
-      f.a.messages[0].userTask = task;
-      f.a.messages[0].contextMeta = { isProtected: true, protectedReason: 'first_user_request' };
-      f.a.messages[0].userTask = task;
-      message.userTask = task;
-      f.host.rememberSessionTitleCompletion(f.a, message, {} as AgentResponse, f.parent);
+      const user: ChatMessage = { id: options.userTask.originMessageId, role: 'user', content: '排查审批失败', createdAt: '', userTask: options.userTask };
+      f.a.messages.push(user);
+      // This stub represents the already-confirmed initial user persistence;
+      // the real send path's initial barrier is tested in regeneration tests.
+      userAccepted = true;
+      f.host.rememberSessionTitleSubmission(f.a, user, f.parent);
+      f.host.flushSessionTitleCompletions();
+      assert.equal(f.calls.length, 1, 'a final assistant/persistence event is not needed');
       return {} as AgentResponse;
     } });
     const sent = f.host.sendPrompt('排查审批失败', 'source-a', 'main-a');
     await startedSaving.promise;
-    assert.equal(f.host.isStartingRun, true, 'necessary final persistence retains admission ownership');
-    const saving = f.host.interactions.snapshot({ sessionId: f.a.id, revision: 1, sessionReady: true,
-      requestContextReady: true, approvalDataReady: true, cancellable: true });
-    assert.equal(saving.phase, 'saving');
-    assert.equal(saving.canSubmit, false);
-    assert.equal(saving.canCancel, false, 'final persistence has no model cancellation target');
-    await f.host.maybeAutoContinueDraftRun();
-    assert.equal(f.calls.length, 0, 'a timer running during persistence cannot dispatch title');
-    if (fail) saved.reject(new Error('simulated storage failure'));
+    assert.equal(userAccepted, true);
+    assert.equal(f.calls.length, 1);
+    if (fail) saved.reject(new Error('simulated final response storage failure'));
     else saved.resolve();
     await sent;
     await f.host.maybeAutoContinueDraftRun();
-    assert.equal(f.calls.length, fail ? 0 : 1);
-    assert.equal(f.host.sessionTitleCandidates.size, 0);
+    assert.equal(f.calls.length, 1, 'the accepted input opportunity is independent of final answer durability');
   });
 }
 
@@ -293,7 +285,7 @@ test('manual refresh preempts automatic work and old response/finally cannot cle
 
 const settleHost = () => new Promise<void>(resolve => setImmediate(resolve));
 
-test('production queue preserves three completed rounds during in-flight work and stops after first set', async () => {
+test('production queue preserves three accepted user inputs during in-flight work and stops after first set', async () => {
   const f = fixture();
   const replies = [deferred<{ outcome: string }>(), deferred<{ outcome: string }>(), deferred<{ outcome: string }>()];
   const order: string[] = [];
@@ -304,8 +296,7 @@ test('production queue preserves three completed rounds during in-flight work an
   };
   for (const taskId of ['one', 'two', 'three']) {
     const message = turn(f.a, taskId);
-    f.host.rememberSessionTitleCompletion(f.a, message, {} as AgentResponse, f.parent);
-    f.host.sessionTitleCandidates.get(f.a.id)!.get(taskId)!.durable = true;
+    f.host.rememberSessionTitleSubmission(f.a, message, f.parent);
     f.host.flushSessionTitleCompletions();
   }
   assert.deepEqual(order, ['one']);
@@ -317,8 +308,7 @@ test('production queue preserves three completed rounds during in-flight work an
   await settleHost();
   assert.deepEqual(order, ['one', 'two', 'three']);
   const fourth = turn(f.a, 'four');
-  f.host.rememberSessionTitleCompletion(f.a, fourth, {} as AgentResponse, f.parent);
-  f.host.sessionTitleCandidates.get(f.a.id)!.get('four')!.durable = true;
+  f.host.rememberSessionTitleSubmission(f.a, fourth, f.parent);
   f.a.title = '审批失败排查';
   f.a.autoTitle = { version: 2, status: 'completed', stopped: 'named', revision: 0 };
   replies[2].resolve({ outcome: 'updated' });
@@ -331,8 +321,7 @@ test('production queue preserves three completed rounds during in-flight work an
 test('production busy is not candidate consumption and a later settled drain retries admission only', async () => {
   const f = fixture();
   const message = turn(f.a);
-  f.host.rememberSessionTitleCompletion(f.a, message, {} as AgentResponse, f.parent);
-  f.host.sessionTitleCandidates.get(f.a.id)!.get('root')!.durable = true;
+  f.host.rememberSessionTitleSubmission(f.a, message, f.parent);
   let busy = false, admissions = 0, requests = 0;
   f.host.sessionTitles.isRunning = () => busy;
   f.host.sessionTitles.completeResult = async () => {
@@ -358,8 +347,7 @@ test('production title scheduling is independent of Skills readiness and unrelat
   const f = fixture();
   Object.assign(f.host, { requestContextReady: false, interactionFailure: { sessionId: f.a.id, message: 'Skills unavailable' } });
   const message = turn(f.a);
-  f.host.rememberSessionTitleCompletion(f.a, message, {} as AgentResponse, f.parent);
-  f.host.sessionTitleCandidates.get(f.a.id)!.get('root')!.durable = true;
+  f.host.rememberSessionTitleSubmission(f.a, message, f.parent);
   f.host.flushSessionTitleCompletions();
   assert.equal(f.calls.length, 1);
   assert.equal(f.host.isBusy, false);
@@ -370,8 +358,7 @@ test('production title scheduling is independent of Skills readiness and unrelat
 test('storage readiness and trust still block production title dispatch', async () => {
   const f = fixture();
   const message = turn(f.a);
-  f.host.rememberSessionTitleCompletion(f.a, message, {} as AgentResponse, f.parent);
-  f.host.sessionTitleCandidates.get(f.a.id)!.get('root')!.durable = true;
+  f.host.rememberSessionTitleSubmission(f.a, message, f.parent);
   Object.assign(f.host, { sessionReady: false });
   f.host.flushSessionTitleCompletions();
   assert.equal(f.calls.length, 0);
@@ -387,47 +374,15 @@ test('storage readiness and trust still block production title dispatch', async 
   await settleHost();
 });
 
-test('same-root continuation reads the settled title reservation before checking its last physical request allowance', async () => {
+test('a pending main runtime, queued approval and tool work do not delay an accepted input title', async () => {
   const f = fixture();
-  const message = turn(f.a, 'last-allowance');
-  const budget = createManualSessionTitleBudget();
-  f.a.userTaskBudgets = { 'last-allowance': budget };
-  f.host.rememberSessionTitleCompletion(f.a, message, {} as AgentResponse, f.parent);
-  f.host.sessionTitleCandidates.get(f.a.id)!.get('last-allowance')!.durable = true;
-  const started = deferred<void>(), response = deferred<void>();
-  let physicalPosts = 0, resumeLoaded = false;
-  const requests = require('../src/provider/sessionTitleRequest') as { requestSessionTitle(input: SessionTitleRequestInput): Promise<string> };
-  const original = requests.requestSessionTitle;
-  requests.requestSessionTitle = async input => {
-    const restored = restoreSessionTitleBudget(input.taskBudget);
-    restored.run.reservePhysicalRequest(100, 512);
-    await input.onBudgetChanged?.({ ...input.taskBudget, runBudget: { ...restored.run.state } });
-    physicalPosts++;
-    started.resolve();
-    await response.promise;
-    // Cancellation/no reported usage never refunds this physical POST.
-    await input.onBudgetChanged?.({ ...input.taskBudget, runBudget: { ...restored.run.state } });
-    return deferTitle;
-  };
-  f.host.sessionTitles.completeResult = async (_sessionId, _taskId, request) => {
-    await request({ systemPrompt: '', userPrompt: 'selected material', signal: new AbortController().signal, token: 'claim' });
-    return { outcome: 'no_material' };
-  };
-  try {
-    f.host.flushSessionTitleCompletions();
-    await started.promise;
-    const resumed = f.host.loadTaskBudget(f.a, message.userTask!).then(current => {
-      resumeLoaded = true;
-      return current;
-    });
-    await settleHost();
-    assert.equal(resumeLoaded, false, 'continuation cannot admit from a snapshot preceding the title reservation');
-    assert.equal(f.a.userTaskBudgets!['last-allowance'].runBudget!.modelRequests, 1);
-    response.resolve();
-    const current = await resumed;
-    assert.equal(resumeLoaded, true);
-    assert.throws(() => restoreSessionTitleBudget(current!), /model_request_budget_exhausted/u);
-    assert.equal(physicalPosts, 1);
-    assert.equal(f.a.userTaskBudgets!['last-allowance'].runBudget!.modelRequests, 1);
-  } finally { requests.requestSessionTitle = original; }
+  const user = turn(f.a, 'parallel-purpose');
+  Object.assign(f.host, { isBusy: true, delegatedApprovalInFlight: true, draftRunAutoContinueInFlight: true,
+    activeChangeActions: new Set(['pending-apply']), taskClock: { owns: () => true } });
+  f.queue.enqueue({ sessionId: f.a.id, rootTaskId: 'parallel-purpose', runId: 'segment', editIds: ['edit'], draftRunIds: [] });
+  f.host.rememberSessionTitleSubmission(f.a, user, f.parent);
+  f.host.flushSessionTitleCompletions();
+  assert.equal(f.calls.length, 1, 'the accepted user body is already the complete title material');
+  assert.equal(f.host.isBusy, true);
+  await settleHost();
 });

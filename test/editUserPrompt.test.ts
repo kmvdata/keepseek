@@ -432,6 +432,10 @@ async function createFixture(root: string, mode: 'ask' | 'delegate') {
     authorizedExternalReferenceUris: new Set(), activeChangeActions: new Set(), sessionReady: true, approvalDataReady: true, requestContextReady: true,
     commandSettingsReadiness: { mainModel: 'ready', subagentModel: 'ready', executionMode: 'ready', approvalMode: 'ready' },
     runContextReadiness: 'ready', stateRevision: 0,
+    // This headless fixture runs only the main Agent transport. Initialize
+    // input-title lifecycle collections, but do not create a paid coordinator.
+    sessionTitleCandidates: new Map(), sessionTitleDrains: new Set(), sessionTitleBudgetLeases: new Map(),
+    sessionTitleDiagnostics: new Map(), manualSessionTitleRequests: new Map(), sessionTitleResults: new Map(),
     fileContext: { getAll: () => [] }, agentSettings: settings, availableModels: [model], selectedSourceId: 'source', selectedModelId: 'model',
     modelSelectionTransactions: { beginRun: () => {} }, repairLoopsBySession: new Map(), taskPlansBySession: new Map(),
     currentRunContextsBySession: new Map(), slimToolNamesBySession: new Map(), sessionTraceLogUris: new Map(), approvalMainContexts: new Map(),
