@@ -24,6 +24,7 @@ import './changeSet.test';
 import './applyWorkflow.test';
 import './config.test';
 import './contextEntryPoints.test';
+import './markdownRendering.test';
 import './inputComposition.test';
 import './contextMaintenanceBenchmark.test';
 import './currentRunContext.test';

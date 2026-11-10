@@ -5067,7 +5067,16 @@ ${conversationsSessionListFragment.source}
         .split(String.fromCharCode(13)).join(lineBreak);
       if (!text) return;
 
-      var lines = text.split(lineBreak);
+      renderMarkdownBlocks(container, text.split(lineBreak), hideExpandedReferences, renderOptions, 0);
+    }
+
+    function renderMarkdownBlocks(container, lines, hideExpandedReferences, renderOptions, depth) {
+      var lineBreak = String.fromCharCode(10);
+      // Keep adversarially deep lists readable without exhausting the Webview stack.
+      if (depth >= 64) {
+        appendMarkdownParagraph(container, lines.join(lineBreak), renderOptions);
+        return;
+      }
       var index = 0;
       while (index < lines.length) {
         if (isMarkdownBlankLine(lines[index])) {
@@ -5126,9 +5135,9 @@ ${conversationsSessionListFragment.source}
         }
 
         var listItem = parseMarkdownListItemLine(lines[index]);
-        if (listItem) {
-          var list = collectMarkdownList(lines, index, listItem.ordered);
-          appendMarkdownList(container, list.ordered, list.items, renderOptions);
+        if (listItem && listItem.indent <= 3) {
+          var list = collectMarkdownList(lines, index, listItem);
+          appendMarkdownList(container, list, hideExpandedReferences, renderOptions, depth);
           index = list.index;
           continue;
         }
@@ -5204,11 +5213,12 @@ ${conversationsSessionListFragment.source}
     }
 
     function isMarkdownBlockStart(line, lines, index) {
+      var listItem = parseMarkdownListItemLine(line);
       return Boolean(
         parseMarkdownFenceLine(line) ||
         parseMarkdownHeadingLine(line) ||
         parseMarkdownQuoteLine(line) ||
-        parseMarkdownListItemLine(line) ||
+        (listItem && listItem.indent <= 3) ||
         isMarkdownRuleLine(line) ||
         (lines && typeof index === 'number' && isMarkdownTableStart(lines, index))
       );
@@ -5371,59 +5381,92 @@ ${conversationsSessionListFragment.source}
     }
 
     function parseMarkdownListItemLine(line) {
-      var unordered = /^ {0,3}([-+*])\\s+(.*)$/.exec(String(line || ''));
-      if (unordered) {
-        return { ordered: false, text: unordered[2] || '' };
-      }
-      var ordered = /^ {0,3}(\\d{1,9})[.)]\\s+(.*)$/.exec(String(line || ''));
-      if (ordered) {
-        return { ordered: true, text: ordered[2] || '' };
-      }
-      return null;
+      var match = /^([ \\t]*)([-+*]|\\d{1,9}[.)])(?:([ \\t]+)(.*)|$)/.exec(String(line || ''));
+      if (!match) return null;
+      var marker = match[2];
+      var ordered = marker.length > 1;
+      var indent = markdownWhitespaceEndColumn(match[1], 0);
+      return {
+        ordered: ordered,
+        start: ordered ? Number(marker.slice(0, -1)) : null,
+        delimiter: marker.charAt(marker.length - 1),
+        indent: indent,
+        contentIndent: markdownWhitespaceEndColumn(match[3] || ' ', indent + marker.length),
+        text: match[4] || ''
+      };
     }
 
-    function collectMarkdownList(lines, start, ordered) {
+    function markdownWhitespaceEndColumn(text, column) {
+      for (var i = 0; i < text.length; i++) {
+        if (text.charAt(i) === ' ') column += 1;
+        else if (text.charAt(i) === String.fromCharCode(9)) column += 4 - column % 4;
+        else break;
+      }
+      return column;
+    }
+
+    function trimMarkdownListIndent(line, columns) {
+      var text = String(line || '');
+      var column = 0;
+      var index = 0;
+      while (index < text.length && column < columns) {
+        if (text.charAt(index) === ' ') column += 1;
+        else if (text.charAt(index) === String.fromCharCode(9)) column += 4 - column % 4;
+        else break;
+        index += 1;
+      }
+      return ' '.repeat(Math.max(0, column - columns)) + text.slice(index);
+    }
+
+    function isSameMarkdownList(item, first, contentIndent) {
+      return item && item.indent < contentIndent && item.ordered === first.ordered && item.delimiter === first.delimiter;
+    }
+
+    function collectMarkdownList(lines, start, first) {
       var items = [];
       var index = start;
-      var current = null;
-      var lineBreak = String.fromCharCode(10);
+      var siblingContentIndent = first.contentIndent;
 
       while (index < lines.length) {
         var item = parseMarkdownListItemLine(lines[index]);
-        if (item && item.ordered === ordered) {
-          current = { text: item.text };
-          items.push(current);
+        if (!isSameMarkdownList(item, first, siblingContentIndent) || isMarkdownRuleLine(lines[index])) break;
+        siblingContentIndent = item.contentIndent;
+        var itemLines = [item.text];
+        var lazyParagraph = Boolean(item.text.trim()) && !isMarkdownBlockStart(item.text, itemLines, 0);
+        items.push({ lines: itemLines });
+        index += 1;
+
+        while (index < lines.length) {
+          if (isMarkdownBlankLine(lines[index])) {
+            var next = index;
+            while (next < lines.length && isMarkdownBlankLine(lines[next])) next += 1;
+            if (next >= lines.length) {
+              index = next;
+              break;
+            }
+            var nextItem = parseMarkdownListItemLine(lines[next]);
+            if (isSameMarkdownList(nextItem, first, item.contentIndent) && !isMarkdownRuleLine(lines[next])) {
+              index = next;
+              break;
+            }
+            if (markdownWhitespaceEndColumn(lines[next], 0) < item.contentIndent) break;
+            lazyParagraph = false;
+            while (index < next) {
+              itemLines.push('');
+              index += 1;
+            }
+          }
+          // Strip exactly this parent's content indent; preserve child structure.
+          if (markdownWhitespaceEndColumn(lines[index], 0) < item.contentIndent &&
+              (!lazyParagraph || isMarkdownBlockStart(lines[index], lines, index))) break;
+          var contentLine = trimMarkdownListIndent(lines[index], item.contentIndent);
+          if (isMarkdownBlockStart(contentLine, lines, index)) lazyParagraph = false;
+          itemLines.push(contentLine);
           index += 1;
-          continue;
         }
-
-        if (current && !isMarkdownBlankLine(lines[index]) && isMarkdownListContinuationLine(lines[index])) {
-          current.text += lineBreak + trimMarkdownContinuationLine(lines[index]);
-          index += 1;
-          continue;
-        }
-
-        break;
       }
 
-      return { ordered: ordered, items: items, index: index };
-    }
-
-    function isMarkdownListContinuationLine(line) {
-      var text = String(line || '');
-      return text.indexOf('  ') === 0 || text.charAt(0) === String.fromCharCode(9);
-    }
-
-    function trimMarkdownContinuationLine(line) {
-      var text = String(line || '');
-      var count = 0;
-      while (count < text.length && count < 4 && text.charAt(count) === ' ') {
-        count += 1;
-      }
-      if (text.charAt(0) === String.fromCharCode(9)) {
-        return text.slice(1);
-      }
-      return text.slice(count);
+      return { ordered: first.ordered, start: first.start, items: items, index: index };
     }
 
     function collectMarkdownTable(lines, start) {
@@ -5627,12 +5670,13 @@ ${conversationsSessionListFragment.source}
       container.append(blockquote);
     }
 
-    function appendMarkdownList(container, ordered, items, options) {
-      var list = document.createElement(ordered ? 'ol' : 'ul');
+    function appendMarkdownList(container, listData, hideExpandedReferences, options, depth) {
+      var list = document.createElement(listData.ordered ? 'ol' : 'ul');
       list.className = 'message-markdown-list';
-      for (var i = 0; i < items.length; i++) {
+      if (listData.ordered && listData.start !== 1) list.setAttribute('start', String(listData.start));
+      for (var i = 0; i < listData.items.length; i++) {
         var item = document.createElement('li');
-        appendMarkdownInline(item, items[i].text, options);
+        renderMarkdownBlocks(item, listData.items[i].lines, hideExpandedReferences, options, depth + 1);
         list.append(item);
       }
       container.append(list);

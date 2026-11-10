@@ -1427,6 +1427,22 @@ ${conversationsStylesFragment.source}
       padding-left: 1px;
     }
 
+    .assistant-markdown li > p {
+      margin: 0;
+    }
+
+    .assistant-markdown li > p + p {
+      margin-top: 8px;
+    }
+
+    .assistant-markdown li > .message-markdown-list {
+      margin: 2px 0 0;
+    }
+
+    .assistant-markdown li > :last-child {
+      margin-bottom: 0;
+    }
+
     .assistant-markdown .message-table-wrap {
       width: 100%;
       max-width: 100%;

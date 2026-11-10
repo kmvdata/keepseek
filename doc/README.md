@@ -19,6 +19,7 @@
 | 首次加载、输入框状态、会话导航、提交与异步拥有者 | [交互生命周期](keepseek-interaction-lifecycle.md) | `provider/interactionState.ts`、Host/Webview 状态入口、`sharedProjectSources.ts`；`sessionNavigation`、`startupPerformance`、`interactionState`、`inputComposition` |
 | 输入、fragment、消息、快捷键 | [架构地图的 Host/Webview 入口](keepseek-code-architecture.md#2-宿主与-webview) | `webview/input/composition.ts`、`richTextShortcuts.ts`；`inputComposition`、`richTextShortcuts` |
 | 横向空间、菜单边界与默认右侧容器 | [Webview 布局](keepseek-webview-layout.md) | `webview/styles.ts`、input 样式、`package.json`；`contextEntryPoints`、`scripts/verify-webview-layout.cjs` |
+| Markdown 列表连续编号、嵌套结构与复制原文 | [Markdown 列表渲染](keepseek-markdown-rendering.md) | `webview/script.ts`、`webview/styles.ts`；`markdownRendering` |
 | 本次任务与会话累计有效计时 | [计时口径](execution-time-statistics.md) | `sessions/executionTimeStats.ts`、`userTask.ts`；`executionTimeStats`、`usageStats` |
 | 会话自动短标题、历史列表刷新与并发提交 | [会话标题](keepseek-session-title-verification.md) | `sessions/sessionTitle*`、`provider/sessionTitle*`；`sessionTitle`、`sessionTitleStorage`、`sessionTitleCompletion`、`sessionTitleRequest`、`sessionTitleWebview`、`sessionTitleRegeneration` |
 
