@@ -11,6 +11,7 @@ export const historySettingsDeclarationFragment: WebviewFragment = {
       var historyCleanupDays = document.getElementById('historyCleanupDays');
       var historyCleanupDaysField = document.getElementById('historyCleanupDaysField');
       var historyCleanupSummary = document.getElementById('historyCleanupSummary');
+      var historyCleanupNotice = document.getElementById('historyCleanupNotice');
       var historyCleanupSubmitBtn = document.getElementById('historyCleanupSubmitBtn');
       var historyCleanupRetryBtn = document.getElementById('historyCleanupRetryBtn');
       var historyCleanupAgainBtn = document.getElementById('historyCleanupAgainBtn');
@@ -39,6 +40,13 @@ export const historySettingsStateFragment: WebviewFragment = {
       var historyCleanupSubmitting = false;
       var historySettingsReturnFocus = null;
       var historySettingsSavePending = false;
+      var historyCleanupAwaitingReady = false;
+      var historyCleanupReadyRetried = false;
+      var historyCleanupAwaitingProtection = false;
+      var historyCleanupProtectionRetried = false;
+      var historyCleanupProtectionReady = false;
+      var historyCleanupRetryState = false;
+      var historyCleanupRecordNotice = '';
 
       function onHistorySettingsSaved(message) {
         if (!historySettingsSavePending) return;
@@ -54,14 +62,49 @@ export const historySettingsStateFragment: WebviewFragment = {
       }
 
       function historyCleanupErrorText(error) {
-        var code = String(error || '');
+        var structured = error && typeof error === 'object';
+        var code = structured ? String(error.code || '') : String(error || '');
+        var keys = {
+          loading_sessions: 'historyCleanupLoadingSessions', initialization_failed: 'historyCleanupInitializationFailed',
+          permission_denied: 'historyCleanupPermissionDenied', unsupported_storage: 'historyCleanupUnsupportedStorage',
+          unsafe_storage_path: 'historyCleanupUnsafeStoragePath', corrupt_index: 'historyCleanupCorruptIndex',
+          ownership_unverified: 'historyCleanupOwnershipUnverified', deletion_authority_unavailable: 'historyCleanupAuthorityUnavailable',
+          journal_corrupt: 'historyCleanupJournalCorrupt', journal_unavailable: 'historyCleanupJournalUnavailable',
+          storage_unavailable: 'historyCleanupStorageUnavailable', storage_io: 'historyCleanupStorageIO',
+          invalid_options: 'historyCleanupInvalidOptions', unavailable: 'historyCleanupUnavailable'
+        };
+        if (keys[code]) return t(keys[code]);
         if (code === 'history_changed') return t('historyCleanupHistoryChanged');
         if (['invalid_preview', 'expired_preview', 'stale_preview'].includes(code)) return t('historyCleanupPreviewExpired');
         if (code === 'cleanup_busy') return t('historyCleanupBusy');
         if (code === 'nothing_to_clean') return t('historyCleanupNoCandidates');
         if (['journal_corrupt', 'journal_unavailable', 'storage_failed', 'cleanup_failed'].includes(code)) return t('historyCleanupStorageFailed');
         if (/^[a-z_]+$/.test(code)) return t('historyCleanupStorageFailed');
-        return code || t('historyCleanupStorageFailed');
+        return !structured && code || t('historyCleanupStorageFailed');
+      }
+
+      function setHistoryCleanupNotice(text) {
+        if (!historyCleanupNotice) return;
+        historyCleanupNotice.textContent = text || '';
+        historyCleanupNotice.classList.toggle('hidden', !text);
+      }
+
+      function historyCleanupHasActiveOperation() {
+        return historyCleanupOperation && (historyCleanupOperation.status === 'confirming' || historyCleanupOperation.status === 'running');
+      }
+
+      function requestHistoryCleanupState() {
+        historyCleanupStateRequestId = nextHistoryCleanupRequestId();
+        vscode.postMessage({ type: 'getHistoryCleanupState', requestId: historyCleanupStateRequestId });
+      }
+
+      function retryHistoryCleanup() {
+        if (historyCleanupSubmitting || historyCleanupHasActiveOperation()) return;
+        if (historyCleanupRetryState) {
+          if (historyCleanupSummary) historyCleanupSummary.textContent = t('historyCleanupLoading');
+          if (historyCleanupRetryBtn) historyCleanupRetryBtn.classList.add('hidden');
+          requestHistoryCleanupState();
+        } else requestHistoryCleanupPreview();
       }
 
       function historyCleanupOptions(value) {
@@ -95,6 +138,14 @@ export const historySettingsStateFragment: WebviewFragment = {
         historyCleanupPreview = null;
         historyCleanupOperation = null;
         historyCleanupSubmitting = false;
+        historyCleanupAwaitingReady = false;
+        historyCleanupReadyRetried = false;
+        historyCleanupAwaitingProtection = false;
+        historyCleanupProtectionRetried = false;
+        historyCleanupProtectionReady = false;
+        historyCleanupRetryState = false;
+        historyCleanupRecordNotice = '';
+        setHistoryCleanupNotice('');
         if (historyCleanupScope) historyCleanupScope.value = 'current';
         if (historyCleanupMode) historyCleanupMode.value = 'olderThan';
         if (historyCleanupDays) historyCleanupDays.value = '3';
@@ -112,13 +163,20 @@ export const historySettingsStateFragment: WebviewFragment = {
         if (historyCleanupSubmitBtn) historyCleanupSubmitBtn.disabled = true;
       }
 
-      function requestHistoryCleanupPreview() {
+      function requestHistoryCleanupPreview(automatic) {
         if (historyCleanupSubmitting || historyCleanupOperation) return;
+        if (automatic !== true) {
+          historyCleanupReadyRetried = false;
+          historyCleanupProtectionRetried = false;
+        }
+        historyCleanupAwaitingReady = false;
+        historyCleanupAwaitingProtection = false;
+        historyCleanupRetryState = false;
         invalidateHistoryCleanupPreview();
         historyCleanupStateRequestId = '';
         historyCleanupRequestId = nextHistoryCleanupRequestId();
         if (historyCleanupSummary) historyCleanupSummary.textContent = t('historyCleanupLoading');
-        if (historyCleanupRetryBtn) historyCleanupRetryBtn.classList.add('hidden');
+        if (historyCleanupRetryBtn) { historyCleanupRetryBtn.classList.add('hidden'); historyCleanupRetryBtn.textContent = t('historyCleanupRetry'); }
         setHistoryCleanupReadonly(false);
         var options = { type: 'previewHistoryCleanup', requestId: historyCleanupRequestId,
           scope: historyCleanupScope.value, mode: historyCleanupMode.value };
@@ -129,6 +187,8 @@ export const historySettingsStateFragment: WebviewFragment = {
       function renderHistoryCleanupOperation(operation) {
         historyCleanupOperation = operation;
         historyCleanupPreview = null;
+        historyCleanupAwaitingReady = false;
+        historyCleanupAwaitingProtection = false;
         var options = historyCleanupOptions(operation);
         if (historyCleanupScope) historyCleanupScope.value = options.scope;
         if (historyCleanupMode) historyCleanupMode.value = options.mode;
@@ -170,18 +230,45 @@ export const historySettingsStateFragment: WebviewFragment = {
       }
 
       function onHistoryCleanupMessage(message) {
+        if (message.type === 'historyCleanupReady') {
+          var protectionReady = message.phase === 'protection';
+          if (protectionReady) historyCleanupProtectionReady = message.available === true;
+          if (!(protectionReady ? historyCleanupAwaitingProtection : historyCleanupAwaitingReady)
+            || historyCleanupSubmitting || historyCleanupOperation || !historySettingsOverlay || historySettingsOverlay.classList.contains('hidden')) return;
+          if (message.available === false) {
+            historyCleanupAwaitingReady = false;
+            historyCleanupAwaitingProtection = false;
+            onHistoryCleanupMessage({ type: 'historyCleanupPreview', requestId: historyCleanupRequestId,
+              error: message.error || { code: 'initialization_failed', phase: 'initialization', retryable: false } });
+            return;
+          }
+          if (message.available !== true || (protectionReady ? historyCleanupProtectionRetried : historyCleanupReadyRetried)) return;
+          if (protectionReady) historyCleanupProtectionRetried = true;
+          else historyCleanupReadyRetried = true;
+          requestHistoryCleanupPreview(true);
+          return;
+        }
         if (message.type === 'historyCleanupPreview') {
           if (message.requestId !== historyCleanupRequestId || historyCleanupOperation || historyCleanupSubmitting) return;
           historyCleanupPreview = message;
+          historyCleanupAwaitingReady = !!message.error && typeof message.error === 'object' && message.error.code === 'loading_sessions';
+          historyCleanupAwaitingProtection = !message.error && message.protectionReady === false && message.protectedCount > 0;
+          if (message.protectionReady === true) historyCleanupProtectionReady = true;
+          var reasons = Array.isArray(message.diagnostics)
+            ? Array.from(new Set(message.diagnostics.map(function(item) { return historyCleanupErrorText(item); }))) : [];
+          setHistoryCleanupNotice([historyCleanupRecordNotice].concat(reasons).filter(Boolean).join('\\n'));
           if (historyCleanupRetryBtn) historyCleanupRetryBtn.classList.remove('hidden');
           if (historyCleanupSubmitBtn) historyCleanupSubmitBtn.disabled = !!message.error || !message.previewToken || !(message.candidateCount > 0);
           if (historyCleanupSummary) {
-            var text = message.error || historyCleanupRuleText(message) + '\\n' + t('historyCleanupPreviewCounts', {
+            var text = message.error ? historyCleanupErrorText(message.error) : historyCleanupRuleText(message) + '\\n' + t('historyCleanupPreviewCounts', {
               count: message.candidateCount || 0, favorites: message.favoriteCount || 0,
               protected: message.protectedCount || 0, unknown: message.unknownCount || 0 });
             if (!message.error && !(message.candidateCount > 0)) text += '\\n' + t(message.protectedCount > 0 ? 'historyCleanupAllProtected' : 'historyCleanupNoCandidates', { count: message.protectedCount || 0 });
             if (!message.error && (message.includesCurrentSession || message.includesCurrent)) text += '\\n' + t('historyCleanupIncludesCurrent');
             historyCleanupSummary.textContent = text;
+          }
+          if (historyCleanupAwaitingProtection && historyCleanupProtectionReady) {
+            onHistoryCleanupMessage({ type: 'historyCleanupReady', available: true, phase: 'protection' });
           }
           return;
         }
@@ -191,12 +278,30 @@ export const historySettingsStateFragment: WebviewFragment = {
         if (!operation) {
           if (message.error && (restoring || message.requestId === historyCleanupRequestId)) {
             historyCleanupStateRequestId = '';
+            if (historyCleanupHasActiveOperation()) {
+              setHistoryCleanupNotice(historyCleanupErrorText(message.error));
+              return;
+            }
+            // A terminal cached result cannot own the next retry after its
+            // readonly refresh failed. A confirmed live operation still can.
+            historyCleanupOperation = null;
             historyCleanupSubmitting = false;
             historyCleanupPreview = null;
-            setHistoryCleanupReadonly(false);
+            historyCleanupAwaitingReady = false;
+            historyCleanupAwaitingProtection = false;
+            if (restoring && message.allowPreview === true) {
+              resetHistoryCleanupForm();
+              historyCleanupRecordNotice = t('historyCleanupSavedStateNotice', { reason: historyCleanupErrorText(message.error) });
+              setHistoryCleanupNotice(historyCleanupRecordNotice);
+              requestHistoryCleanupPreview();
+              return;
+            }
+            historyCleanupRetryState = restoring;
+            setHistoryCleanupReadonly(restoring);
             if (historyCleanupSummary) historyCleanupSummary.textContent = historyCleanupErrorText(message.error);
-            if (historyCleanupSubmitBtn) historyCleanupSubmitBtn.disabled = true;
-            if (historyCleanupRetryBtn) historyCleanupRetryBtn.classList.remove('hidden');
+            if (historyCleanupSubmitBtn) { historyCleanupSubmitBtn.disabled = true; historyCleanupSubmitBtn.classList.remove('hidden'); }
+            if (historyCleanupAgainBtn) historyCleanupAgainBtn.classList.add('hidden');
+            if (historyCleanupRetryBtn) { historyCleanupRetryBtn.classList.remove('hidden'); historyCleanupRetryBtn.textContent = t(restoring ? 'historyCleanupRetryState' : 'historyCleanupRetry'); }
             return;
           }
           if (!restoring) return;
@@ -232,8 +337,7 @@ export const historySettingsOpenFragment: WebviewFragment = {
         invalidateHistoryCleanupPreview();
         if (historyCleanupOperation) renderHistoryCleanupOperation(historyCleanupOperation);
         else resetHistoryCleanupForm();
-        historyCleanupStateRequestId = nextHistoryCleanupRequestId();
-        vscode.postMessage({ type: 'getHistoryCleanupState', requestId: historyCleanupStateRequestId });
+        requestHistoryCleanupState();
         if (historyRetentionDaysInput) {
           historyRetentionDaysInput.focus();
           if (historyRetentionDaysInput.select) historyRetentionDaysInput.select();
@@ -290,7 +394,7 @@ export const historySettingsSaveBindingFragment: WebviewFragment = {
       [historyCleanupScope, historyCleanupMode, historyCleanupDays].forEach(function(element) {
         if (element) element.addEventListener('change', function() { requestHistoryCleanupPreview(); });
       });
-      if (historyCleanupRetryBtn) historyCleanupRetryBtn.addEventListener('click', requestHistoryCleanupPreview);
+      if (historyCleanupRetryBtn) historyCleanupRetryBtn.addEventListener('click', retryHistoryCleanup);
       if (historyCleanupAgainBtn) historyCleanupAgainBtn.addEventListener('click', function() {
         if (historyCleanupSubmitting) return;
         resetHistoryCleanupForm();

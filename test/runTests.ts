@@ -20,6 +20,8 @@ import './backgroundRunCoordinator.test';
 import './behaviorEvaluation.test';
 import './cacheByteStability.test';
 import './chatSessionStore.test';
+import './boundedWait.test';
+import './sessionBoundedStorage.test';
 import './changeSet.test';
 import './applyWorkflow.test';
 import './config.test';
@@ -122,3 +124,5 @@ import './sessionAssociatedCleanup.test';
 import './sessionUseLifetime.test';
 
 import './historyCleanupController.test';
+import './historyCleanupErrors.test';
+import './historyCleanupCatalog.test';

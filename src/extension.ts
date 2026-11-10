@@ -53,7 +53,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     webviewProvider,
     vscode.commands.registerCommand('keepseek.showRuntimeDiagnostics', async () => {
       const document = await vscode.workspace.openTextDocument({ language: 'json', content: JSON.stringify({
-        ...getRuntimeIdentity(), sessionTitle: provider.getSessionTitleDiagnostics()
+        ...getRuntimeIdentity(), sessionTitle: provider.getSessionTitleDiagnostics(), historyCleanup: provider.getHistoryCleanupDiagnostics()
       }, null, 2) });
       await vscode.window.showTextDocument(document, { preview: true });
     }),

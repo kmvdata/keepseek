@@ -43,6 +43,7 @@ export const historySettingsTemplateFragment: WebviewFragment = {
                 </select>
               </label>
             </div>
+            <p id="historyCleanupNotice" class="settings-field-hint hidden" role="status" aria-live="polite" aria-atomic="true"></p>
             <div id="historyCleanupSummary" class="history-cleanup-summary" role="status" aria-live="polite" aria-atomic="true"></div>
             <p class="settings-field-hint" data-i18n="historyCleanupWarning">会话及其专属运行记录不可恢复，相关回滚历史将不可用；已修改的项目文件不会回滚。</p>
             <div class="history-cleanup-actions">

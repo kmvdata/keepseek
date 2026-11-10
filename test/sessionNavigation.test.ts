@@ -6,14 +6,15 @@ import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import * as vscode from './stubs/vscode';
 import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
-import { ChatSessionStore, type StoredWorkspaceSessionState } from '../src/sessions/chatSessionStore';
+import { ChatSessionStore, HISTORY_SESSION_LOAD_TIMEOUT_MS, type StoredWorkspaceSessionState } from '../src/sessions/chatSessionStore';
 import { GlobalSessionStorage } from '../src/sessions/globalSessionStorage';
 import type { SessionTitleCoordinator } from '../src/sessions/sessionTitleCoordinator';
 import type { SharedProjectSources } from '../src/context/sharedProjectSources';
 import type { SkillStore } from '../src/skills/skillStore';
-import type { InteractionSnapshot } from '../src/provider/interactionState';
+import type { InteractionCoordinator, InteractionSnapshot } from '../src/provider/interactionState';
 import type { WebviewMessage } from '../src/provider/webviewMessages';
 import type { AgentResponse, ChatMessage, ChatSession } from '../src/shared/types';
+import { localize, type KeepseekLanguage } from '../src/shared/i18n';
 
 function deferred<T = void>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -34,6 +35,9 @@ interface NavigationHost {
   approvalDataReady: boolean;
   requestContextReady: boolean;
   sessionRecoveryReady: boolean;
+  language: KeepseekLanguage;
+  historySessionLoadTimeoutMs: number;
+  interactions: InteractionCoordinator;
   activeSessionEntryRevision: number;
   draftRunAutoContinueTimer?: ReturnType<typeof setTimeout>;
   scheduleDraftRunAutoContinuation(): void;
@@ -358,10 +362,12 @@ async function fixture(t: TestContext, options: { delayLoad?: boolean; loadFailu
   const previousStatusBarFactory = (vscode.window as unknown as { createStatusBarItem?: unknown }).createStatusBarItem;
   const previousAlignment = (vscode as unknown as { StatusBarAlignment?: unknown }).StatusBarAlignment;
   const errors: string[] = [];
+  const informations: string[] = [];
   Object.assign(vscode, { StatusBarAlignment: { Left: 1, Right: 2 } });
   Object.assign(vscode.window, {
     createStatusBarItem: () => ({ show() {}, hide() {}, dispose() {} }),
-    showErrorMessage: async (error: string) => { errors.push(error); }
+    showErrorMessage: async (error: string) => { errors.push(error); },
+    showInformationMessage: async (message: string) => { informations.push(message); return undefined; }
   });
   const provider = new KeepseekChatViewProvider(uri as never, store, uri as never,
     { keys: () => [], get: (_key: string, fallback: unknown) => fallback, update: async () => {} } as never,
@@ -384,7 +390,7 @@ async function fixture(t: TestContext, options: { delayLoad?: boolean; loadFailu
   });
   if (!options.delayLoad && !options.skipStartup) await host.initializeAfterWebviewReady();
   const publish = () => host.postState({ immediate: true, forceFull: true });
-  return { host, store, storage, scope, first, second, posts, errors, releaseLoad, initialization, publish };
+  return { host, store, storage, scope, first, second, posts, errors, informations, releaseLoad, initialization, publish };
 }
 
 /** The real Host admission, ownership and final persistence remain in use. */
@@ -819,4 +825,288 @@ test('early navigation state cannot schedule a continuation before recovery and 
   host.requestContextReady = true;
   host.scheduleDraftRunAutoContinuation();
   assert.ok(host.draftRunAutoContinueTimer, 'the ready startup full state can schedule continuation normally');
+});
+
+for (const stage of ['loadSession', 'isSessionDeleted'] as const) {
+  test(`history timeout bounds ${stage}, opens a ready empty session and ignores the late read`, { timeout: 3_000 }, async t => {
+    const { host, store, storage, first, second, posts, errors, informations, publish } = await fixture(t);
+    host.historySessionLoadTimeoutMs = 20;
+    host.language = stage === 'loadSession' ? 'en' : 'zh-CN';
+    const entered = deferred(); const release = deferred(); const completed = deferred();
+    t.after(() => release.resolve());
+    assert.equal(store.getSessionById(second.id), undefined, 'the target is a cold indexed history row');
+    if (stage === 'loadSession') {
+      const load = storage.loadSession.bind(storage);
+      storage.loadSession = async (workspaceKey, sessionId, options) => {
+        if (sessionId !== second.id) return load(workspaceKey, sessionId, options);
+        entered.resolve(); await release.promise;
+        try { return await load(workspaceKey, sessionId, options); }
+        finally { completed.resolve(); }
+      };
+    } else {
+      const isDeleted = storage.isSessionDeleted.bind(storage);
+      let pauseFirstCheck = true;
+      storage.isSessionDeleted = async (workspaceKey, sessionId) => {
+        if (sessionId !== second.id || !pauseFirstCheck) return isDeleted(workspaceKey, sessionId);
+        pauseFirstCheck = false;
+        entered.resolve(); await release.promise;
+        try { return await isDeleted(workspaceKey, sessionId); }
+        finally { completed.resolve(); }
+      };
+    }
+    const notification = deferred<string | undefined>();
+    t.after(() => notification.resolve(undefined));
+    vscode.window.showInformationMessage = async message => {
+      informations.push(message);
+      return notification.promise;
+    };
+    const selection = host.handleMessage({ type: 'selectSession', sessionId: second.id });
+    await entered.promise;
+    await selection;
+    publish();
+    const replacement = store.getActiveSession();
+    assert.notEqual(replacement.id, first.id);
+    assert.notEqual(replacement.id, second.id);
+    assert.equal(replacement.messages.length, 0);
+    assert.equal(lastState(posts).activeSessionId, replacement.id);
+    assert.equal(lastState(posts).interaction?.phase, 'idle');
+    assert.equal(lastState(posts).interaction?.canNavigate, true);
+    assert.equal(lastState(posts).interaction?.canSubmit, true);
+    assert.equal(lastState(posts).isBusy, false);
+    assert.deepEqual(errors, []);
+    assert.equal(informations.length, 1, 'notification does not require dismissal before navigation completes');
+    assert.equal(informations[0], localize(host.language, 'historySessionLoadTimeout', {
+      seconds: HISTORY_SESSION_LOAD_TIMEOUT_MS / 1000
+    }));
+    const entryRevision = host.activeSessionEntryRevision;
+    const changedCount = posts.filter(post => post.type === 'sessionChanged').length;
+    release.resolve(); await completed.promise;
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(store.activeSessionId, replacement.id);
+    assert.equal(store.getSessionById(second.id), undefined, 'late loading cannot make the abandoned body resident');
+    assert.equal(host.activeSessionEntryRevision, entryRevision);
+    assert.equal(posts.filter(post => post.type === 'sessionChanged').length, changedCount);
+    assert.deepEqual(errors, []);
+  });
+}
+
+test('history timeout reuses a different active empty session without another save or entry publication', { timeout: 3_000 }, async t => {
+  const { host, store, storage, second, posts, errors, informations, publish } = await fixture(t);
+  await host.handleMessage({ type: 'newSession' });
+  const empty = store.getActiveSession();
+  assert.equal(empty.messages.length, 0);
+  host.historySessionLoadTimeoutMs = 20;
+  const entered = deferred(); const release = deferred(); const completed = deferred();
+  t.after(() => release.resolve());
+  const load = storage.loadSession.bind(storage);
+  storage.loadSession = async (workspaceKey, sessionId, options) => {
+    if (sessionId !== second.id) return load(workspaceKey, sessionId, options);
+    entered.resolve(); await release.promise;
+    try { return await load(workspaceKey, sessionId, options); }
+    finally { completed.resolve(); }
+  };
+  let saves = 0;
+  const save = storage.saveWorkspace.bind(storage);
+  storage.saveWorkspace = async (...args) => { saves++; return save(...args); };
+  const entryRevision = host.activeSessionEntryRevision;
+  const changedCount = posts.filter(post => post.type === 'sessionChanged').length;
+  const selection = host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  await entered.promise; await selection;
+  publish();
+  assert.equal(store.getActiveSession(), empty);
+  assert.equal(lastState(posts).interaction?.canSubmit, true);
+  assert.equal(lastState(posts).interaction?.canNavigate, true);
+  assert.equal(saves, 0);
+  assert.equal(host.activeSessionEntryRevision, entryRevision);
+  assert.equal(posts.filter(post => post.type === 'sessionChanged').length, changedCount);
+  assert.equal(informations.length, 1);
+  assert.deepEqual(errors, []);
+  release.resolve(); await completed.promise;
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(store.getActiveSession(), empty);
+  assert.equal(saves, 0);
+  assert.equal(host.activeSessionEntryRevision, entryRevision);
+});
+
+test('history body released before its deadline follows normal selection and recovery', async t => {
+  const { host, store, storage, second, posts, errors, informations, publish } = await fixture(t);
+  host.historySessionLoadTimeoutMs = 1_000;
+  const entered = deferred(); const release = deferred();
+  t.after(() => release.resolve());
+  const load = storage.loadSession.bind(storage);
+  storage.loadSession = async (workspaceKey, sessionId, options) => {
+    if (sessionId === second.id) { entered.resolve(); await release.promise; }
+    return load(workspaceKey, sessionId, options);
+  };
+  const selection = host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  await entered.promise; release.resolve(); await selection;
+  publish();
+  assert.equal(store.activeSessionId, second.id);
+  assert.ok(store.getActiveSession().messages.some(message => message.id === 'task-second-user'));
+  assert.equal(lastState(posts).interaction?.canSubmit, true);
+  assert.equal(lastState(posts).interaction?.canNavigate, true);
+  assert.deepEqual(errors, []);
+  assert.deepEqual(informations, []);
+});
+
+test('history timeout reuse retains the empty session recovery barrier', { timeout: 3_000 }, async t => {
+  const { host, store, storage, second, posts, errors, publish } = await fixture(t);
+  await host.handleMessage({ type: 'newSession' });
+  const emptyId = store.activeSessionId;
+  host.sessionRecoveryReady = false;
+  host.historySessionLoadTimeoutMs = 20;
+  const entered = deferred(); const release = deferred(); const completed = deferred();
+  t.after(() => release.resolve());
+  const load = storage.loadSession.bind(storage);
+  storage.loadSession = async (workspaceKey, sessionId, options) => {
+    if (sessionId !== second.id) return load(workspaceKey, sessionId, options);
+    entered.resolve(); await release.promise;
+    try { return await load(workspaceKey, sessionId, options); }
+    finally { completed.resolve(); }
+  };
+  const selection = host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  await entered.promise; await selection;
+  publish();
+  assert.equal(store.activeSessionId, emptyId);
+  assert.equal(host.sessionRecoveryReady, false);
+  assert.equal(lastState(posts).interaction?.canNavigate, true);
+  assert.equal(lastState(posts).interaction?.canSubmit, false);
+  assert.equal(lastState(posts).interaction?.waitingReason, 'recovery');
+  assert.deepEqual(errors, []);
+  release.resolve(); await completed.promise;
+});
+
+test('history timeout replacement keeps a failed Skill refresh closed to submission', { timeout: 3_000 }, async t => {
+  const { host, store, storage, first, second, posts, errors, publish } = await fixture(t);
+  host.historySessionLoadTimeoutMs = 20;
+  const entered = deferred(); const release = deferred(); const completed = deferred();
+  t.after(() => release.resolve());
+  const load = storage.loadSession.bind(storage);
+  storage.loadSession = async (workspaceKey, sessionId, options) => {
+    if (sessionId !== second.id) return load(workspaceKey, sessionId, options);
+    entered.resolve(); await release.promise;
+    try { return await load(workspaceKey, sessionId, options); }
+    finally { completed.resolve(); }
+  };
+  host.skillStore.resolveAndLoadSkills = async () => { throw new Error('replacement Skill read failed'); };
+  const selection = host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  await entered.promise; await selection;
+  publish();
+  assert.notEqual(store.activeSessionId, first.id);
+  assert.notEqual(store.activeSessionId, second.id);
+  assert.equal(store.getActiveSession().messages.length, 0);
+  assert.equal(lastState(posts).interaction?.canNavigate, true);
+  assert.equal(lastState(posts).interaction?.canSubmit, false);
+  assert.equal(lastState(posts).interaction?.phase, 'failed');
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /replacement Skill read failed/u);
+  release.resolve(); await completed.promise;
+});
+
+test('history selection already saving never times out or creates a replacement', { timeout: 3_000 }, async t => {
+  const { host, store, storage, second, posts, errors, informations, publish } = await fixture(t);
+  host.historySessionLoadTimeoutMs = 20;
+  const entered = deferred(); const release = deferred();
+  t.after(() => release.resolve());
+  const save = storage.saveWorkspace.bind(storage);
+  storage.saveWorkspace = async (...args) => { entered.resolve(); await release.promise; return save(...args); };
+  const selection = host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  await entered.promise;
+  await new Promise<void>(resolve => setTimeout(resolve, 40));
+  publish();
+  assert.equal(store.activeSessionId, second.id);
+  assert.equal(lastState(posts).interaction?.phase, 'saving');
+  assert.equal(lastState(posts).interaction?.canNavigate, false);
+  assert.equal(lastState(posts).interaction?.canSubmit, false);
+  assert.deepEqual(informations, []);
+  release.resolve(); await selection;
+  publish();
+  assert.equal(store.activeSessionId, second.id);
+  assert.equal(lastState(posts).interaction?.canSubmit, true);
+  assert.deepEqual(errors, []);
+});
+
+test('history I/O failure retains failed preparation and retry instead of timeout fallback', async t => {
+  const { host, store, storage, first, second, posts, errors, informations, publish } = await fixture(t);
+  host.historySessionLoadTimeoutMs = 1_000;
+  const load = storage.loadSession.bind(storage);
+  storage.loadSession = async (workspaceKey, sessionId, options) => {
+    if (sessionId === second.id) throw new Error('injected history read failure');
+    return load(workspaceKey, sessionId, options);
+  };
+  await host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  publish();
+  assert.equal(store.activeSessionId, first.id);
+  assert.equal(lastState(posts).interaction?.phase, 'failed');
+  assert.equal(lastState(posts).interaction?.canSubmit, false);
+  assert.match(errors[0] ?? '', /injected history read failure/u);
+  assert.deepEqual(informations, []);
+  storage.loadSession = load;
+  await host.handleMessage({ type: 'retryInteraction' });
+  publish();
+  assert.equal(lastState(posts).interaction?.canSubmit, true);
+  await host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  assert.equal(store.activeSessionId, second.id);
+  assert.equal(errors.length, 1);
+});
+
+test('A to B to A keeps the newer recovery owner when an abandoned B selection times out', { timeout: 3_000 }, async t => {
+  const { host, store, storage, first, second, posts, errors, informations, publish } = await fixture(t);
+  host.historySessionLoadTimeoutMs = 1_000;
+  const oldReadEntered = deferred(); const releaseOldRead = deferred(); const oldReadCompleted = deferred();
+  const recoveryEntered = deferred(); const releaseRecovery = deferred();
+  t.after(() => { releaseOldRead.resolve(); releaseRecovery.resolve(); });
+  const load = storage.loadSession.bind(storage);
+  let pauseOldRead = true;
+  storage.loadSession = async (workspaceKey, sessionId, options) => {
+    if (sessionId === second.id && pauseOldRead) {
+      pauseOldRead = false; oldReadEntered.resolve(); await releaseOldRead.promise;
+      try { return await load(workspaceKey, sessionId, options); }
+      finally { oldReadCompleted.resolve(); }
+    }
+    return load(workspaceKey, sessionId, options);
+  };
+  const oldSelection = host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  let oldSelectionSettled = false;
+  void oldSelection.then(() => { oldSelectionSettled = true; });
+  await oldReadEntered.promise;
+  const oldOwner = host.interactions.current;
+  assert.ok(oldOwner);
+  // Simulate a foreground handoff while the old disk read cannot be cancelled.
+  // The obsolete selection may finish, but must never release a later token.
+  assert.equal(host.interactions.finish(oldOwner), true);
+  host.historySessionLoadTimeoutMs = 1_000;
+  await host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  assert.equal(store.activeSessionId, second.id);
+  const loadOperations = host.changeSets.loadSession!.bind(host.changeSets);
+  host.changeSets.loadSession = async sessionId => {
+    if (sessionId === first.id) { recoveryEntered.resolve(); await releaseRecovery.promise; }
+    return loadOperations(sessionId);
+  };
+  const newSelection = host.handleMessage({ type: 'selectSession', sessionId: first.id });
+  await recoveryEntered.promise;
+  assert.equal(oldSelectionSettled, false, 'the old deadline must expire while the new A recovery owner is pending');
+  const newOwner = host.interactions.current;
+  assert.ok(newOwner);
+  assert.notEqual(newOwner, oldOwner);
+  const entryRevision = host.activeSessionEntryRevision;
+  const changedCount = posts.filter(post => post.type === 'sessionChanged').length;
+  await oldSelection;
+  publish();
+  assert.equal(store.activeSessionId, first.id);
+  assert.equal(host.interactions.current, newOwner);
+  assert.equal(lastState(posts).interaction?.canNavigate, false);
+  assert.equal(lastState(posts).interaction?.canSubmit, false);
+  assert.equal(host.activeSessionEntryRevision, entryRevision);
+  assert.equal(posts.filter(post => post.type === 'sessionChanged').length, changedCount);
+  assert.deepEqual(informations, [], 'a stale timeout cannot announce a replacement it did not open');
+  assert.deepEqual(errors, []);
+  releaseOldRead.resolve(); await oldReadCompleted.promise;
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(host.interactions.current, newOwner);
+  assert.equal(store.activeSessionId, first.id);
+  assert.equal(host.activeSessionEntryRevision, entryRevision);
+  releaseRecovery.resolve(); await newSelection;
+  publish();
+  assert.equal(lastState(posts).interaction?.canSubmit, true);
 });

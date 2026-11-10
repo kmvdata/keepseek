@@ -3,6 +3,8 @@ import { createHistoryCleanupController } from './historyCleanupController';
 import { SessionUseLifetime } from './sessionUseLifetime';
 import { SessionAssociatedDataCleanup } from '../sessions/sessionAssociatedDataCleanup';
 import type { SessionHistoryCleanupService, HistoryCleanupTarget, HistoryCleanupPreview, HistoryCleanupState } from '../sessions/sessionHistoryCleanup';
+import { classifyHistoryCleanupError, localizeHistoryCleanupIssue, HistoryCleanupFailure,
+  type HistoryCleanupIssue, type HistoryCleanupPhase } from '../sessions/historyCleanupErrors';
 import { InteractionCoordinator, deriveSessionTitleCapability, deriveHistoryCleanupCapability, type InteractionOperation, type InteractionPhase } from './interactionState';
 import { SessionTitleCoordinator, type SessionTitleRequest, type SessionTitleRegenerationOutcome } from '../sessions/sessionTitleCoordinator';
 import { hasConsumedTitleRound, buildSessionTitleRegenerationMaterial, getSessionTitleRegenerationTaskId } from '../sessions/sessionTitle';
@@ -75,6 +77,7 @@ import { markTaskPlanReadyForValidation } from '../agent/taskPlan';
 import { getConfiguredKeepseekLanguage, getKeepseekLanguageName, localize, normalizeKeepseekLanguage, type KeepseekLanguage } from '../shared/i18n';
 import {
   ChatSessionStore,
+  HISTORY_SESSION_LOAD_TIMEOUT_MS,
   createSessionTitle,
   getCurrentWorkspaceSessionScope,
   getVisibleMessages
@@ -283,6 +286,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private readonly fileContext = new FileContextStore();
   private historyCleanup?: SessionHistoryCleanupService;
   private historyCleanupWorkspaceKey?: string;
+  private historyCleanupInitializationFailed = false;
+  private historyCleanupLastIssue?: HistoryCleanupIssue;
+  private historyCleanupCatalogIssues?: HistoryCleanupIssue[];
   private historyUseLifetime?: SessionUseLifetime;
   private historyCleanupDiagnostic?: { operationId: string; startedAt: number; reportedAt: number; key: string };
   private historyCleanupDeletedIds?: Map<string, Set<string>>;
@@ -356,6 +362,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     return this.interactionCoordinator ??= new InteractionCoordinator({ onDiagnostic: event => console.info('[KeepSeek] interaction', event) });
   }
   private interactionFailure?: { sessionId: string; message: string };
+  private historySessionLoadTimeoutMs = HISTORY_SESSION_LOAD_TIMEOUT_MS;
   private readonly usageDisplayReadiness = new Map<string, 'loading' | 'ready' | 'incomplete'>();
   private pendingSubmissionIds?: Set<string>;
   private activeSessionEntryRevision = 0;
@@ -1506,13 +1513,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       case 'getHistoryCleanupState': {
         try {
           const cleanup = this.getHistoryCleanupService();
-          if (!cleanup.hasLocalOwner()) {
-            await cleanup.recover(state => this.postToWebview({ type: 'historyCleanupState', requestId: message.requestId, operation: state }));
-          }
-          const operation = cleanup.getCurrentOperation();
+          // Opening settings reads the prior result. Physical recovery already
+          // runs independently after safety initialization, never in this query.
+          const operation = await cleanup.inspectCurrentOperation();
           this.postToWebview({ type: 'historyCleanupState', requestId: message.requestId, operation: operation?.status === 'cancelled' ? null : operation ?? null });
         } catch (error) {
-          this.postToWebview({ type: 'historyCleanupState', requestId: message.requestId, error: this.historyCleanupError(error), operation: null });
+          this.postToWebview({ type: 'historyCleanupState', requestId: message.requestId,
+            error: this.historyCleanupError(error, 'state'), operation: null, allowPreview: true });
         }
         return;
       }
@@ -1521,14 +1528,20 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'previewHistoryCleanup': {
         try {
-          await this.sessionInitialization;
+          if (this.historyCleanupInitializationFailed) throw new HistoryCleanupFailure('initialization_failed', 'initialization');
           const capability = deriveHistoryCleanupCapability({ sessionReady: this.sessionReady, disposed: this.titleLifecycleDisposed });
           if (!capability.available) throw new Error(capability.reason);
+          const protectionReady = this.approvalDataReady;
           const preview = await this.getHistoryCleanupService().preview(message.requestId, webviewId,
             { scope: message.scope, mode: message.mode, ...(message.days === undefined ? {} : { days: message.days }) }, this.sessionStore.workspaceKey);
-          this.postToWebview({ type: 'historyCleanupPreview', ...preview });
+          this.historyCleanupCatalogIssues = (preview.diagnostics ?? []).map(issue =>
+            localizeHistoryCleanupIssue({ code: issue.code, phase: issue.phase, retryable: issue.retryable ?? false }, this.language));
+          if (this.historyCleanupCatalogIssues.length) console.warn('[KeepSeek] history_cleanup', {
+            phase: 'preview', storageScheme: this.globalStorageUri?.scheme ?? 'unknown',
+            issues: this.historyCleanupCatalogIssues.map(issue => ({ code: issue.code, phase: issue.phase })) });
+          this.postToWebview({ type: 'historyCleanupPreview', ...preview, protectionReady });
         } catch (error) {
-          this.postToWebview({ type: 'historyCleanupPreview', requestId: message.requestId, error: this.historyCleanupError(error) });
+          this.postToWebview({ type: 'historyCleanupPreview', requestId: message.requestId, error: this.historyCleanupError(error, 'preview') });
         }
         return;
       }
@@ -1542,7 +1555,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           this.postState({ immediate: true, forceFull: true });
           await this.postOtherWorkspaces();
         } catch (error) {
-          this.postToWebview({ type: 'historyCleanupState', requestId: message.requestId, error: this.historyCleanupError(error) });
+          this.postToWebview({ type: 'historyCleanupState', requestId: message.requestId, error: this.historyCleanupError(error, 'execute') });
         }
         return;
       }
@@ -2671,6 +2684,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async createNewSession(): Promise<void> {
+    await this.createNewSessionForNavigation();
+  }
+
+  private async createNewSessionForNavigation(): Promise<ChatSession | undefined> {
     if (this.sessionReady && !this.interactionSnapshot(this.stateRevision).canNavigate) return;
     if (this.isBusy || this.isStartingRun || this.runContextRefreshInFlight || this.activeDraftRunId || this.activeChangeActions.size || this.hasActiveBackgroundRun()) {
       return;
@@ -2691,6 +2708,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.interactions.update(operation, 'preparing_context', session.id);
       this.publishSessionChanged();
       await this.prepareNavigatedSessionContext(operation, session, true);
+      return session;
     } catch (error) {
       if (this.interactions.owns(operation)) this.reportSessionPreparationFailure(this.sessionStore.activeSessionId, error);
     } finally {
@@ -2732,11 +2750,19 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       await this.ensureSessionNavigationReady();
       if (this.isBusy || this.hasActiveBackgroundRun()) return;
       const wasActiveSession = sessionId === this.sessionStore.activeSessionId;
-      const session = await this.sessionStore.selectSession(sessionId, targetId => {
-        this.interactions.update(operation, 'saving', targetId);
-        this.postState({ immediate: true });
+      const selection = await this.sessionStore.selectSessionBounded(sessionId, {
+        timeoutMs: this.historySessionLoadTimeoutMs,
+        onSaving: targetId => {
+          this.interactions.update(operation, 'saving', targetId);
+          this.postState({ immediate: true });
+        }
       });
-      if (!session) return;
+      if (selection.status === 'timeout') {
+        await this.fallbackFromSessionLoadTimeout(operation, sessionId);
+        return;
+      }
+      if (selection.status === 'missing') return;
+      const session = selection.session;
 
       if (!wasActiveSession) {
         this.interactionFailure = undefined;
@@ -2755,6 +2781,27 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         this.postState({ immediate: true, forceFull: true });
       }
     }
+  }
+
+  private async fallbackFromSessionLoadTimeout(operation: InteractionOperation, sessionId: string): Promise<void> {
+    console.info('[KeepSeek] interaction_stage', {
+      stage: 'session-body', event: 'timeout',
+      session: createHash('sha256').update(sessionId).digest('hex').slice(0, 12),
+      generation: operation.generation, operationId: operation.operationId,
+      timeoutMs: this.historySessionLoadTimeoutMs
+    });
+    // An obsolete timeout must neither release a later owner nor open another
+    // session. Release and reserve the replacement synchronously, before I/O.
+    if (!this.interactions.owns(operation)) return;
+    this.interactions.finish(operation);
+    const active = this.sessionStore.getActiveSession();
+    const reuseActive = active.messages.length === 0 && active.id !== sessionId;
+    const session = reuseActive ? active : await this.createNewSessionForNavigation();
+    if (!session) return;
+    if (reuseActive) this.postState({ immediate: true, forceFull: true });
+    void vscode.window.showInformationMessage(this.t('historySessionLoadTimeout', {
+      seconds: HISTORY_SESSION_LOAD_TIMEOUT_MS / 1000
+    }));
   }
 
   private async copyOtherWorkspaceSession(workspaceKey: string, sessionId: string): Promise<void> {
@@ -6907,6 +6954,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         vscode.window.showInformationMessage(this.t('approvalModeMigrationNotice'));
       }
       this.sessionReady = sessionResult[0]?.status === 'fulfilled';
+      this.historyCleanupInitializationFailed = false;
+      if (this.sessionReady) this.postToWebview({ type: 'historyCleanupReady', available: true });
       this.commandSettingsReadiness.executionMode = sessionResult[0]?.status === 'fulfilled' ? 'ready' : 'error';
       this.syncConfiguredState();
       this.postLightweightState();
@@ -6938,10 +6987,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         this.postStartupSettingsPatch();
         if (ready) {
           navigationReady();
+          this.postToWebview({ type: 'historyCleanupReady', available: true, phase: 'protection' });
           // Safety reads already consult tombstones. Physical recycling is
           // bounded background work, outside startup and model readiness.
           void Promise.resolve().then(() => this.getHistoryCleanupService().recover(operation => this.postToWebview({ type: 'historyCleanupState', operation })))
-            .catch(() => console.warn('[KeepSeek] history_cleanup', { stage: 'recovery', result: 'unavailable' }));
+            .catch(error => { this.historyCleanupError(error, 'recovery'); });
         }
         else navigationFailed(new Error(this.language === 'en' ? 'Safety recovery failed. Reload the window to retry.' : '操作记录恢复失败，请重新加载窗口重试。'));
       })();
@@ -7026,6 +7076,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       void this.refreshBalance();
       void Promise.all([subagentTask, validationTask]);
     })().catch((error: unknown) => {
+      if (!this.sessionReady) {
+        this.historyCleanupInitializationFailed = true;
+        this.postToWebview({ type: 'historyCleanupReady', available: false,
+          error: this.historyCleanupError(new HistoryCleanupFailure('initialization_failed', 'initialization', false, { cause: error }), 'initialization') });
+      }
       navigationFailed(error);
       console.warn('[KeepSeek] startup_stage', { stage: 'initialization', event: 'failed' });
       this.postLightweightState();
@@ -7311,14 +7366,20 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     return await vscode.window.showWarningMessage(text, { modal: true }, action) === action;
   }
 
-  private historyCleanupError(error: unknown): string {
-    const code = getErrorMessage(error);
-    const english = this.language === 'en';
-    if (code === 'history_changed') return english ? 'History changed. Preview and confirm again.' : '历史已变化，请重新预览并确认。';
-    if (/preview/u.test(code)) return english ? 'This preview expired or changed. Preview again.' : '预览已失效或过期，请重新预览。';
-    if (/busy/u.test(code)) return english ? 'A cleanup operation is already pending.' : '已有清理操作正在进行。';
-    if (/invalid/u.test(code)) return english ? 'Invalid cleanup options.' : '清理参数无效。';
-    return english ? 'History cleanup is unavailable. Retry after storage is ready.' : '暂时无法清理历史，请在存储就绪后重试。';
+  public getHistoryCleanupDiagnostics() {
+    return { version: 1, storageScheme: this.globalStorageUri?.scheme ?? 'unknown',
+      sessionReady: this.sessionReady, approvalDataReady: this.approvalDataReady,
+      sessionRecoveryReady: this.sessionRecoveryReady, initializationFailed: this.historyCleanupInitializationFailed,
+      lastIssue: this.historyCleanupLastIssue ? { ...this.historyCleanupLastIssue } : undefined,
+      catalogIssues: this.historyCleanupCatalogIssues?.map(issue => ({ ...issue })) };
+  }
+
+  private historyCleanupError(error: unknown, phase: HistoryCleanupPhase): HistoryCleanupIssue {
+    const issue = localizeHistoryCleanupIssue(classifyHistoryCleanupError(error, phase), this.language);
+    this.historyCleanupLastIssue = issue;
+    console.warn('[KeepSeek] history_cleanup', { phase: issue.phase, code: issue.code,
+      systemCode: issue.systemCode, storageScheme: this.globalStorageUri?.scheme ?? 'unknown', retryable: issue.retryable });
+    return issue;
   }
 
   private postState(options: { immediate?: boolean; forceFull?: boolean; omitMessages?: boolean } = {}): void {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -311,6 +311,115 @@ function journalFixture(count: number, operationId: string): HistoryCleanupJourn
       inaccessibleLegacy: 0, favoriteCount: 0, includesCurrentSession: false },
     items: Array.from({ length: count }, (_, index) => ({ target: entry(`journal-target-${index}`) })) };
 }
+
+test('readonly cleanup result inspection does not claim recovery or recycle interrupted targets', async () => {
+  const record = journalFixture(2, 'readonly-interrupted');
+  record.items[0].result = { status: 'removedPendingCleanup' };
+  let reads = 0, writes = 0, pendingReads = 0, recoveryCalls = 0;
+  const f = fixture();
+  const service = new SessionHistoryCleanupService({ ...f.adapter,
+    async recoverCommittedTarget() { recoveryCalls++; return { status: 'fullyDeleted' }; }
+  }, { journal: {
+    async load() { reads++; return structuredClone(record); },
+    async save() { writes++; },
+    async loadPending() { pendingReads++; return [structuredClone(record)]; }
+  } });
+  const state = await service.inspectCurrentOperation();
+  assert.equal(state?.operationId, record.state.operationId);
+  assert.equal(state?.status, 'running');
+  assert.equal(service.hasLocalOwner(), false);
+  assert.equal(service.getCurrentOperation(), undefined, 'inspection does not replace local execution state');
+  state!.fullyDeleted = 99;
+  assert.equal((await service.inspectCurrentOperation())?.fullyDeleted, 0);
+  assert.deepEqual({ reads, writes, pendingReads, recoveryCalls, deletes: f.deletes },
+    { reads: 2, writes: 0, pendingReads: 0, recoveryCalls: 0, deletes: 0 });
+});
+
+test('readonly cleanup inspection returns a live confirmation and ignores a late stale disk result', async () => {
+  const f = fixture();
+  const disk = deferred<HistoryCleanupJournalRecord | undefined>();
+  let reads = 0;
+  f.journal.load = async () => { reads++; return disk.promise; };
+  const inspection = f.service.inspectCurrentOperation();
+  const p = await preview(f.service);
+  const entered = deferred<void>(), confirm = deferred<boolean>();
+  const execution = f.service.request('live-inspection', 'view-1', p.previewToken, async () => {
+    entered.resolve(); return confirm.promise;
+  });
+  await entered.promise;
+  assert.equal((await f.service.inspectCurrentOperation())?.status, 'confirming');
+  assert.equal(reads, 1, 'live owner bypasses journal inspection');
+  disk.resolve(journalFixture(1, 'stale-operation'));
+  const observed = await inspection;
+  assert.equal(observed?.requestId, 'live-inspection');
+  assert.equal(observed?.status, 'confirming');
+  confirm.resolve(false);
+  await execution;
+  assert.equal(f.journal.writes, 0); assert.equal(f.deletes, 0);
+});
+
+test('readonly cleanup inspection failure does not poison a later preview or create deletion authority', async () => {
+  const f = fixture();
+  f.journal.load = async () => { throw new HistoryCleanupError('journal_corrupt'); };
+  await assert.rejects(f.service.inspectCurrentOperation(), error => error instanceof HistoryCleanupError && error.code === 'journal_corrupt');
+  assert.equal(f.service.hasLocalOwner(), false);
+  const p = await preview(f.service);
+  assert.equal(p.candidateCount, 1);
+  const result = await f.service.request('cancel-after-inspection-failure', 'view-1', p.previewToken, async () => false);
+  assert.equal(result.status, 'cancelled'); assert.equal(f.journal.writes, 0); assert.equal(f.deletes, 0);
+});
+
+test('cleanup preview preserves bounded safe catalog diagnostics without exposing raw paths', async () => {
+  const f = fixture([entry('a')], { async readCatalog() {
+    return { entries: [entry('a')], unknown: 1, diagnostics: Array.from({ length: 40 }, () => ({
+      code: 'corrupt_index' as const, phase: 'catalog' as const, retryable: false,
+      workspaceHash: '../../private/storage', rawPath: '/private/history/body'
+    })) };
+  } });
+  const p = await preview(f.service);
+  assert.equal(p.candidateCount, 1); assert.equal(p.unknownCount, 1);
+  assert.equal(p.diagnostics?.length, 32);
+  assert.deepEqual(p.diagnostics?.[0], { code: 'corrupt_index', phase: 'catalog', retryable: false });
+  assert.equal(JSON.stringify(p.diagnostics).includes('/private'), false);
+  assert.equal(f.journal.writes, 0); assert.equal(f.deletes, 0);
+});
+
+test('journal read errors distinguish corrupt JSON from denied access while preserving the underlying cause', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'keepseek-cleanup-journal-error-'));
+  const originalRead = vscode.workspace.fs.readFile;
+  try {
+    const workspaceKey = 'workspace:cleanup';
+    const hash = createHash('sha256').update(workspaceKey).digest('hex').slice(0, 32);
+    const directory = join(root, 'history-cleanup', 'v1', 'operations');
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, `${hash}.json`), '{broken');
+    const journal = new FileHistoryCleanupJournal(vscode.Uri.file(root) as never, workspaceKey);
+    await assert.rejects(journal.load(), error => error instanceof HistoryCleanupError
+      && error.code === 'journal_corrupt' && error.cause instanceof SyntaxError);
+    await writeFile(join(directory, `${hash}.json`), JSON.stringify({ version: 2, operationId: '' }));
+    await assert.rejects(journal.load(), error => error instanceof HistoryCleanupError && error.code === 'journal_corrupt');
+    const denied = Object.assign(new Error('denied'), { code: 'EACCES' });
+    vscode.workspace.fs.readFile = async uri => {
+      if (uri.fsPath.startsWith(root)) throw denied;
+      return originalRead(uri);
+    };
+    await assert.rejects(journal.load(), error => error instanceof HistoryCleanupError
+      && error.code === 'journal_unavailable' && error.cause === denied);
+  } finally { vscode.workspace.fs.readFile = originalRead; await rm(root, { recursive: true, force: true }); }
+});
+
+test('journal inspection refuses a symbolic-link parent as unavailable rather than corrupting or recovering it',
+  { skip: process.platform === 'win32' }, async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'keepseek-cleanup-journal-symlink-'));
+    try {
+      const root = join(directory, 'storage'), outside = join(directory, 'outside');
+      await mkdir(root); await mkdir(outside);
+      await symlink(outside, join(root, 'history-cleanup'));
+      const journal = new FileHistoryCleanupJournal(vscode.Uri.file(root) as never, 'workspace:cleanup');
+      await assert.rejects(journal.load(), error => error instanceof HistoryCleanupError
+        && error.code === 'journal_unavailable' && error.cause instanceof Error && /Symbolic-link/u.test(error.cause.message));
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
 
 test('a thousand durable per-target journal checkpoints write linear bytes rather than repeatedly copying the plan', async () => {
   const root = await mkdtemp(join(tmpdir(), 'keepseek-cleanup-journal-linear-'));

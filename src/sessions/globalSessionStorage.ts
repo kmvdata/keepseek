@@ -23,6 +23,7 @@ import { normalizeSessionTitle } from './sessionTitle';
 import { SessionDeletionAuthority } from './sessionDeletionAuthority';
 import { assertManagedStoragePath } from './sessionAssociatedPersistence';
 import type { HistoryCleanupCatalogEntry, HistoryCleanupTargetResult } from './sessionHistoryCleanup';
+import { HistoryCleanupFailure, type HistoryCleanupIssueCode, type HistoryCleanupPhase } from './historyCleanupErrors';
 
 export const SESSION_MIGRATION_KEY = 'keepseek.chatSessionsMigratedToGlobalV1';
 export const SESSION_CLEANUP_MIN_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -92,6 +93,32 @@ interface WorkspaceMetadata {
   folderUris: string[];
   activeSessionId?: string;
   updatedAt?: string;
+}
+
+export interface HistoryCleanupCatalogDiagnostic {
+  code: HistoryCleanupIssueCode;
+  phase: HistoryCleanupPhase;
+  retryable: boolean;
+  /** Stable storage identity only, never a project path, title or body. */
+  workspaceHash?: string;
+}
+export interface HistoryCleanupCatalog {
+  entries: HistoryCleanupCatalogEntry[];
+  unknown: number;
+  diagnostics: HistoryCleanupCatalogDiagnostic[];
+  ownershipComplete: boolean;
+}
+interface CleanupWorkspaceSnapshot {
+  workspaceKey: string;
+  entries: HistoryCleanupCatalogEntry[];
+  unknown: number;
+}
+interface CleanupIndexSnapshot {
+  workspaces: Map<string, CleanupWorkspaceSnapshot>;
+  unknownByHash: Map<string, number>;
+  diagnostics: HistoryCleanupCatalogDiagnostic[];
+  ownershipComplete: boolean;
+  collisions: Set<string>;
 }
 
 /** V2 stores a small project index and one atomic file per conversation. */
@@ -237,10 +264,24 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     this.scheduleManifestWorkspace(index);
   }
 
-  public async loadSession(workspaceKey: string, sessionId: string): Promise<ChatSession | undefined> {
+  public async loadSession(workspaceKey: string, sessionId: string, options: { readOnly?: boolean } = {}): Promise<ChatSession | undefined> {
     const normalizedWorkspaceKey = workspaceKey.trim();
     const normalizedSessionId = sessionId.trim();
     if (!normalizedWorkspaceKey || !normalizedSessionId) return undefined;
+    if (options.readOnly) {
+      // A bounded navigation may abandon this read. Index repair/migration can
+      // write an old active selection after a replacement session has committed,
+      // so only initialization and ordinary readers may perform those repairs.
+      const hash = getWorkspaceHash(normalizedWorkspaceKey);
+      const index = await this.readWorkspaceIndex(hash);
+      if (index) return index.workspaceKey === normalizedWorkspaceKey
+        ? await this.readSession(normalizedWorkspaceKey, normalizedSessionId, index) : undefined;
+      // Failed startup migration retains the intact V1 file as its authority.
+      // Keep that fallback readable without attempting migration during a read.
+      const legacy = await this.readLegacyWorkspaceSessionFile(hash);
+      return legacy?.workspaceKey === normalizedWorkspaceKey
+        ? legacy.sessions.find(session => session.id === normalizedSessionId) : undefined;
+    }
     const index = await this.loadIndexByWorkspaceKey(normalizedWorkspaceKey);
     return index ? await this.readSession(normalizedWorkspaceKey, normalizedSessionId, index) : undefined;
   }
@@ -749,73 +790,120 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     return (await this.deletionAuthority.listPending()).some(record => record.workspaceKey === workspaceKey);
   }
 
-  /** Raw indexes only: no normalization-generated timestamps, migrations,
-   * manifests, object graphs or checkpoints are written/read by preview. */
-  public async readHistoryCleanupCatalog(workspaceKey?: string): Promise<{ entries: HistoryCleanupCatalogEntry[]; unknown: number }> {
+  /** One immutable readonly summary snapshot supplies candidates and ownership.
+   * No migration, body/checkpoint hydration, manifest repair or persistence is
+   * permitted here. Unknown foreign ownership cannot authorize global-ID stores. */
+  public async readHistoryCleanupCatalog(workspaceKey?: string): Promise<HistoryCleanupCatalog> {
+    const snapshot = await this.readCleanupIndexSnapshot(workspaceKey);
     const entries: HistoryCleanupCatalogEntry[] = [];
     let unknown = 0;
-    const hashes = workspaceKey ? [getWorkspaceHash(workspaceKey)] : await this.listCleanupWorkspaceHashes();
-    for (const workspaceHash of hashes) {
+    for (const [hash, workspace] of snapshot.workspaces) {
+      if (workspaceKey && workspace.workspaceKey !== workspaceKey) continue;
+      unknown += workspace.unknown;
+      for (const candidate of workspace.entries) {
+        try {
+          if (await this.isSessionDeleted(candidate.workspaceKey, candidate.id)) continue;
+        } catch (error) {
+          candidate.unknownReason = 'deletion_authority_unavailable';
+          snapshot.diagnostics.push(this.cleanupDiagnostic(error, 'ownership', hash));
+        }
+        if (snapshot.collisions.has(candidate.id)) candidate.unknownReason = 'duplicate_session_identity';
+        else if (!snapshot.ownershipComplete) candidate.unknownReason ??= 'workspace_ownership_unverified';
+        if (!candidate.unknownReason) {
+          try {
+            if (await this.deletionAuthority.inspectUse(candidate.workspaceKey, candidate.id)) candidate.protectedReason = 'session_in_use';
+          } catch (error) {
+            candidate.unknownReason = 'storage_ownership_unavailable';
+            snapshot.diagnostics.push(this.cleanupDiagnostic(error, 'ownership', hash));
+          }
+        }
+        entries.push(candidate);
+      }
+    }
+    for (const [hash, count] of snapshot.unknownByHash) {
+      if (!workspaceKey || hash === getWorkspaceHash(workspaceKey)) unknown += count;
+    }
+    return { entries, unknown, diagnostics: snapshot.diagnostics, ownershipComplete: snapshot.ownershipComplete };
+  }
+
+  private async readCleanupIndexSnapshot(currentWorkspaceKey?: string): Promise<CleanupIndexSnapshot> {
+    if (this.globalStorageUri.scheme !== 'file') throw new HistoryCleanupFailure('unsupported_storage', 'catalog', false);
+    const result: CleanupIndexSnapshot = { workspaces: new Map(), unknownByHash: new Map(),
+      diagnostics: [], ownershipComplete: true, collisions: new Set() };
+    let hashes: string[];
+    try { hashes = await this.listCleanupWorkspaceHashes(); }
+    catch (error) { const issue = this.cleanupDiagnostic(error, 'catalog'); throw new HistoryCleanupFailure(issue.code, issue.phase, issue.retryable); }
+    if (currentWorkspaceKey && !hashes.includes(getWorkspaceHash(currentWorkspaceKey))) hashes.push(getWorkspaceHash(currentWorkspaceKey));
+    const owners = new Map<string, string>();
+    const recordUnknown = (hash: string, count: number, error: unknown, phase: HistoryCleanupPhase = 'catalog') => {
+      result.ownershipComplete = false;
+      result.unknownByHash.set(hash, (result.unknownByHash.get(hash) ?? 0) + Math.max(1, count));
+      result.diagnostics.push(this.cleanupDiagnostic(error, phase, hash));
+    };
+    for (const hash of hashes) {
       let raw: unknown;
-      try { raw = await this.readCleanupJson(this.getWorkspaceIndexUri(workspaceHash), 'cleanup summary index'); }
-      catch (error) { if (error instanceof SyntaxError) { unknown++; continue; } throw error; }
-      if (!raw) {
-        // An absent current project with no persisted history is an empty scope.
-        const files = await this.listCleanupShardFiles(workspaceHash);
-        if (files.length) unknown += files.length;
+      try { raw = await this.readCleanupJson(this.getWorkspaceIndexUri(hash), 'cleanup summary index'); }
+      catch (error) { recordUnknown(hash, 1, error); continue; }
+      let files: string[];
+      try { files = await this.listCleanupShardFiles(hash); }
+      catch (error) { recordUnknown(hash, 1, error); continue; }
+      if (raw === undefined) {
+        if (files.length) recordUnknown(hash, files.length, new HistoryCleanupFailure('corrupt_index', 'catalog', false));
         continue;
       }
       if (!isRecord(raw) || raw.version !== 2 || typeof raw.workspaceKey !== 'string'
-        || getWorkspaceHash(raw.workspaceKey) !== workspaceHash || !Array.isArray(raw.sessions)) { unknown++; continue; }
-      if (workspaceKey && raw.workspaceKey !== workspaceKey) { unknown++; continue; }
+        || getWorkspaceHash(raw.workspaceKey) !== hash || !Array.isArray(raw.sessions)) {
+        recordUnknown(hash, 1, new HistoryCleanupFailure('corrupt_index', 'catalog', false)); continue;
+      }
+      const workspace: CleanupWorkspaceSnapshot = { workspaceKey: raw.workspaceKey, entries: [], unknown: 0 };
+      result.workspaces.set(hash, workspace);
       for (const item of raw.sessions) {
         const candidate = this.cleanupEntry(raw.workspaceKey, item);
-        if (!candidate) { unknown++; continue; }
-        if (await this.isSessionDeleted(candidate.workspaceKey, candidate.id)) continue;
-        try {
-          if (await this.deletionAuthority.inspectUse(candidate.workspaceKey, candidate.id)) candidate.protectedReason = 'session_in_use';
-        } catch { candidate.protectedReason = 'storage_ownership_unavailable'; }
-        entries.push(candidate);
+        if (!candidate) { workspace.unknown++; result.ownershipComplete = false; continue; }
+        workspace.entries.push(candidate);
+        const owner = owners.get(candidate.id);
+        if (owner && owner !== raw.workspaceKey) result.collisions.add(candidate.id);
+        else owners.set(candidate.id, raw.workspaceKey);
       }
-      const knownFiles = new Set(raw.sessions.filter(isRecord).map(item => typeof item.id === 'string' ? `${getSessionHash(item.id)}.json` : ''));
-      unknown += (await this.listCleanupShardFiles(workspaceHash)).filter(file => !knownFiles.has(file)).length;
+      // A malformed summary with a known ID is already counted above; its
+      // canonical shard must not be counted a second time as an orphan.
+      const knownFiles = new Set(raw.sessions.filter(isRecord).flatMap(item => typeof item.id === 'string'
+        ? [`${getSessionHash(item.id)}.json`] : []));
+      const orphans = files.filter(file => !knownFiles.has(file)).length;
+      if (orphans) { workspace.unknown += orphans; result.ownershipComplete = false; }
+      if (workspace.unknown) result.diagnostics.push({ code: 'ownership_unverified', phase: 'ownership', retryable: false, workspaceHash: hash });
     }
-    // Legacy-only projects cannot be safely expanded for a summary preview.
+    // A legacy-only source has no trusted bounded owner summary. Preserve it
+    // and surface the limitation instead of reading combined message bodies.
     try {
       await assertManagedStoragePath(this.globalStorageUri, this.legacyWorkspacesUri);
       for (const [name, type] of await vscode.workspace.fs.readDirectory(this.legacyWorkspacesUri)) {
         if (type !== vscode.FileType.File || !/^[a-f0-9]{32}\.json$/u.test(name)) continue;
-        const legacyHash = name.slice(0, -5);
-        if (workspaceKey && legacyHash !== getWorkspaceHash(workspaceKey)) continue;
-        unknown++;
+        const hash = name.slice(0, -5);
+        result.unknownByHash.set(hash, (result.unknownByHash.get(hash) ?? 0) + 1);
+        result.ownershipComplete = false;
+        result.diagnostics.push({ code: 'ownership_unverified', phase: 'ownership', retryable: false, workspaceHash: hash });
       }
-    } catch (error) { if (!isFileNotFoundError(error)) throw error; }
-    const ownership = new Map<string, string>();
-    const collisions = new Set<string>();
-    for (const hash of await this.listCleanupWorkspaceHashes()) {
-      const raw = await this.readCleanupJson(this.getWorkspaceIndexUri(hash), 'cleanup ownership summary');
-      if (!isRecord(raw) || typeof raw.workspaceKey !== 'string' || getWorkspaceHash(raw.workspaceKey) !== hash || !Array.isArray(raw.sessions)) continue;
-      for (const item of raw.sessions) {
-        if (!isRecord(item) || typeof item.id !== 'string') continue;
-        const owner = ownership.get(item.id);
-        if (owner && owner !== raw.workspaceKey) collisions.add(item.id);
-        else ownership.set(item.id, raw.workspaceKey);
+    } catch (error) {
+      if (!isFileNotFoundError(error)) {
+        result.ownershipComplete = false;
+        result.diagnostics.push(this.cleanupDiagnostic(error, 'ownership'));
       }
     }
-    for (const entry of entries) if (collisions.has(entry.id)) entry.unknownReason = 'duplicate_session_identity';
-    return { entries, unknown };
+    return result;
   }
-  private async hasOtherSessionOwner(workspaceKey: string, sessionId: string): Promise<boolean> {
-    for (const hash of await this.listCleanupWorkspaceHashes()) {
-      if (hash === getWorkspaceHash(workspaceKey)) continue;
-      const raw = await this.readCleanupJson(this.getWorkspaceIndexUri(hash), 'cleanup target ownership');
-      if (!isRecord(raw) || typeof raw.workspaceKey !== 'string' || !Array.isArray(raw.sessions)) continue;
-      if (raw.sessions.some(item => isRecord(item) && item.id === sessionId)) return true;
-    }
-    return false;
+
+  private cleanupDiagnostic(error: unknown, phase: HistoryCleanupPhase, workspaceHash?: string): HistoryCleanupCatalogDiagnostic {
+    if (error instanceof HistoryCleanupFailure) return { code: error.code, phase: error.phase, retryable: error.retryable, workspaceHash };
+    const code = isRecord(error) && typeof error.code === 'string' ? error.code : '';
+    const message = error instanceof Error ? error.message : '';
+    if (code === 'EACCES' || code === 'EPERM' || code === 'NoPermissions') return { code: 'permission_denied', phase, retryable: false, workspaceHash };
+    if (error instanceof SyntaxError || /encoded data|encoding.*valid/iu.test(message)) return { code: 'corrupt_index', phase, retryable: false, workspaceHash };
+    if (/symbolic-link|escaped.*root/iu.test(message)) return { code: 'unsafe_storage_path', phase, retryable: false, workspaceHash };
+    return { code: 'storage_io', phase, retryable: true, workspaceHash };
   }
   private cleanupEntry(workspaceKey: string, raw: unknown): HistoryCleanupCatalogEntry | undefined {
-    if (!isRecord(raw) || typeof raw.id !== 'string' || !raw.id || raw.id.length > 4096
+    if (!isRecord(raw) || typeof raw.id !== 'string' || !raw.id || raw.id.length > 4096 || raw.id.includes('\0')
       || (raw.workspaceKey !== undefined && raw.workspaceKey !== workspaceKey)
       || (raw.storageFile !== undefined && raw.storageFile !== getSessionStorageFile(raw.id))) return undefined;
     const count = raw.messageCount;
@@ -826,11 +914,11 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
       ...(typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0 ? { unknownReason: 'invalid_history_summary' } : {}) };
   }
   public async revalidateHistoryCleanupTarget(target: HistoryCleanupCatalogEntry): Promise<boolean> {
-    const raw = await this.readCleanupJson(this.getWorkspaceIndexUri(getWorkspaceHash(target.workspaceKey)), 'cleanup target index');
-    if (!isRecord(raw) || raw.version !== 2 || raw.workspaceKey !== target.workspaceKey || !Array.isArray(raw.sessions)) return false;
-    const actual = this.cleanupEntry(target.workspaceKey, raw.sessions.find(item => isRecord(item) && item.id === target.id));
-    return actual?.version === target.version && !await this.hasOtherSessionOwner(target.workspaceKey, target.id)
-      && !await this.isSessionDeleted(target.workspaceKey, target.id)
+    const snapshot = await this.readCleanupIndexSnapshot(target.workspaceKey);
+    if (!snapshot.ownershipComplete || snapshot.collisions.has(target.id)) return false;
+    const workspace = snapshot.workspaces.get(getWorkspaceHash(target.workspaceKey));
+    const actual = workspace?.workspaceKey === target.workspaceKey ? workspace.entries.find(item => item.id === target.id) : undefined;
+    return actual?.version === target.version && !await this.isSessionDeleted(target.workspaceKey, target.id)
       && !await this.deletionAuthority.inspectUse(target.workspaceKey, target.id);
   }
   public async recoverHistoryCleanupTarget(target: HistoryCleanupCatalogEntry, operationId: string): Promise<HistoryCleanupTargetResult | undefined> {
@@ -930,7 +1018,8 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     try {
       await assertManagedStoragePath(this.globalStorageUri, this.workspacesUri);
       return (await vscode.workspace.fs.readDirectory(this.workspacesUri))
-        .filter(([name, type]) => type === vscode.FileType.Directory && /^[a-f0-9]{32}$/u.test(name)).map(([name]) => name);
+        .filter(([name, type]) => (type === vscode.FileType.Directory || (type & vscode.FileType.SymbolicLink) !== 0)
+          && /^[a-f0-9]{32}$/u.test(name)).map(([name]) => name);
     } catch (error) { if (isFileNotFoundError(error)) return []; throw error; }
   }
   private async listCleanupShardFiles(hash: string): Promise<string[]> {

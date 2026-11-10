@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { test } from 'node:test';
 import {
   ChatSessionStore,
+  HISTORY_SESSION_LOAD_TIMEOUT_MS,
   getVisibleMessages,
   normalizeStoredSessions,
   type ChatSessionStorageAdapter,
@@ -483,6 +484,138 @@ test('loading a corrupt history truncation journal fails closed instead of dropp
   assert.throws(() => normalizeStoredSessions({ sessions: [{ ...source,
     pendingHistoryTruncation: { version: 1, sessionId: 'another-session' } }] }, scope), /journal scope/);
 });
+
+for (const blockedStage of ['deletion-check', 'session-body'] as const) {
+  test(`bounded selection times out during ${blockedStage} without caching or committing a late body`, async t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { store, storage, adapter, active, target } = await boundedSelectionFixture();
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    adapter.isSessionDeleted = async () => {
+      if (blockedStage === 'deletion-check') { entered(); await gate; }
+      return false;
+    };
+    adapter.loadSession = async (_workspaceKey, _sessionId, options) => {
+      assert.equal(options?.readOnly, true, 'bounded reads must not reconcile or rewrite storage');
+      if (blockedStage === 'session-body') { entered(); await gate; }
+      return target;
+    };
+    let saving = 0;
+    const pending = store.selectSessionBounded(target.id, { timeoutMs: 20, onSaving: () => { saving += 1; } });
+    await started;
+    t.mock.timers.tick(20);
+    assert.deepEqual(await pending, { status: 'timeout' });
+    assert.equal(store.activeSessionId, active.id);
+    assert.equal(store.getSessionById(target.id), undefined);
+    assert.equal(saving, 0);
+    assert.equal(storage.saved, undefined);
+
+    release();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(store.activeSessionId, active.id);
+    assert.equal(store.getSessionById(target.id), undefined, 'late reads must not enter the resident session set');
+    assert.equal(saving, 0);
+    assert.equal(storage.saved, undefined);
+    await store.persist();
+    const saved = storage.saved as StoredWorkspaceSessionState | undefined;
+    assert.equal(saved?.activeSessionId, active.id);
+    assert.equal(saved?.sessions.some(session => session.id === target.id), false);
+  });
+}
+
+test('legacy selection uses the same default bounded read and retains its undefined timeout result', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { store, adapter, active, target } = await boundedSelectionFixture();
+  adapter.isSessionDeleted = async () => new Promise<boolean>(() => {});
+  const pending = store.selectSession(target.id);
+  t.mock.timers.tick(HISTORY_SESSION_LOAD_TIMEOUT_MS);
+  assert.equal(await pending, undefined);
+  assert.equal(store.activeSessionId, active.id);
+});
+
+test('bounded selection and legacy wrapper preserve the same fields, mode normalization and save ordering', async t => {
+  t.mock.timers.enable({ apis: ['Date'] });
+  for (const executionMode of ['plan', 'invalid'] as const) {
+    const bounded = await boundedSelectionFixture();
+    const legacy = await boundedSelectionFixture();
+    for (const fixture of [bounded, legacy]) {
+      fixture.target.approvalMode = 'ask';
+      fixture.target.executionMode = executionMode as ChatSession['executionMode'];
+      await fixture.store.setApprovalMode('delegate');
+    }
+    const before = new Date().toISOString();
+    const saving: string[] = [];
+    const result = await bounded.store.selectSessionBounded(bounded.target.id, { onSaving: id => {
+      assert.equal(bounded.store.activeSessionId, id);
+      assert.equal(bounded.store.getActiveSession().updatedAt, before);
+      saving.push(id);
+    } });
+    const legacyResult = await legacy.store.selectSession(legacy.target.id);
+    assert.equal(result.status, 'selected');
+    assert.equal(legacyResult?.updatedAt, before);
+    if (result.status !== 'selected') throw new Error('expected selected session');
+    assert.deepEqual(result.session, legacyResult);
+    assert.equal(result.session.approvalMode, 'delegate');
+    assert.equal(result.session.executionMode, executionMode === 'plan' ? 'plan' : 'normal');
+    assert.deepEqual(saving, [bounded.target.id]);
+    assert.equal(bounded.storage.saved?.activeSessionId, bounded.target.id);
+  }
+});
+
+test('a selected body commits through the persistence barrier even after the read deadline passes', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { store, storage, target } = await boundedSelectionFixture();
+  const originalSave = storage.saveWorkspace.bind(storage);
+  let release!: () => void;
+  let entered!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  storage.saveWorkspace = async (scope, state) => { entered(); await gate; await originalSave(scope, state); };
+  let completed = false;
+  const pending = store.selectSessionBounded(target.id, { timeoutMs: 20 }).then(result => { completed = true; return result; });
+  await started;
+  t.mock.timers.tick(100);
+  await Promise.resolve();
+  assert.equal(completed, false);
+  assert.equal(store.activeSessionId, target.id);
+  release();
+  assert.equal((await pending).status, 'selected');
+  assert.equal(storage.saved?.activeSessionId, target.id);
+});
+
+test('bounded selection returns missing without saving and rethrows original deletion/body I/O errors', async () => {
+  const { store, storage, adapter, active, target } = await boundedSelectionFixture();
+  assert.deepEqual(await store.selectSessionBounded('missing'), { status: 'missing' });
+  assert.equal(storage.saved, undefined);
+  const failure = new Error('original storage failure');
+  adapter.isSessionDeleted = async () => { throw failure; };
+  await assert.rejects(store.selectSessionBounded(target.id), error => error === failure);
+  adapter.isSessionDeleted = async () => false;
+  adapter.loadSession = async () => { throw failure; };
+  await assert.rejects(store.selectSessionBounded(target.id), error => error === failure);
+  assert.equal(store.activeSessionId, active.id);
+  assert.equal(store.getSessionById(target.id), undefined);
+  assert.equal(storage.saved, undefined);
+});
+
+async function boundedSelectionFixture() {
+  const scope = { key: 'workspace:bounded-selection', name: 'Bounded Selection', folderUris: [] };
+  const active = createSession('bounded-active', [createMessage(0)], scope);
+  const target = createSession('bounded-target', [createMessage(1)], scope);
+  const storage = new MemorySessionStorage({ activeSessionId: active.id, sessions: [active] });
+  storage.loadWorkspace = async () => ({ activeSessionId: active.id, sessions: [active],
+    sessionSummaries: [active, target].map(session => ({
+      id: session.id, title: session.title, createdAt: session.createdAt, updatedAt: session.updatedAt,
+      workspaceKey: scope.key, workspaceName: scope.name, messageCount: session.messages.length, isFavorite: false
+    })) });
+  const adapter: ChatSessionStorageAdapter = storage;
+  adapter.loadSession = async () => target;
+  const store = new ChatSessionStore(adapter, 'en', scope);
+  await store.initialize();
+  return { store, storage, adapter, active, target };
+}
 
 class MemorySessionStorage implements ChatSessionStorageAdapter {
   public saved: StoredWorkspaceSessionState | undefined;

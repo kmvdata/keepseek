@@ -7,13 +7,19 @@ import { ChatSessionStore, type ChatSessionStorageAdapter, type StoredWorkspaceS
 import { SessionHistoryCleanupService, type HistoryCleanupCatalogEntry, type HistoryCleanupPreview, type HistoryCleanupState, type HistoryCleanupTarget } from '../src/sessions/sessionHistoryCleanup';
 import type { ChatSession } from '../src/shared/types';
 import type { WebviewMessage } from '../src/provider/webviewMessages';
+import type { HistoryCleanupIssue } from '../src/sessions/historyCleanupErrors';
 
 interface CleanupHost {
+  approvalDataReady: boolean;
   handleMessage(message: WebviewMessage, webviewId?: string): Promise<void>;
   removeHistoryCleanupLocalState(target: HistoryCleanupTarget): Promise<void>;
   publishHistoryCleanupState(operation: HistoryCleanupState): void;
   sessionRecoveryReady: boolean;
   runContextReadiness: string;
+  sessionReady: boolean;
+  sessionInitialization: Promise<void>;
+  historyCleanupInitializationFailed?: boolean;
+  getHistoryCleanupDiagnostics(): { storageScheme: string; lastIssue?: HistoryCleanupIssue };
 }
 function deferred() {
   let resolve!: () => void;
@@ -144,11 +150,113 @@ test('Host rejects invalid options and another Webview token without confirming 
   let confirmations = 0;
   Object.assign(vscode.window, { showWarningMessage: async () => { confirmations++; return undefined; } });
   await f.host.handleMessage({ type: 'previewHistoryCleanup', requestId: 'invalid', scope: 'all', mode: 'olderThan', days: 8 }, 'view');
-  assert.equal(f.posts.at(-1)?.error, 'Invalid cleanup options.');
+  assert.equal((f.posts.at(-1)?.error as HistoryCleanupIssue).code, 'invalid_options');
+  assert.equal((f.posts.at(-1)?.error as HistoryCleanupIssue).message, 'Invalid cleanup options.');
   const preview = await f.preview();
   await f.host.handleMessage({ type: 'requestHistoryCleanup', requestId: 'wrong-window', previewToken: preview.previewToken }, 'another-view');
-  assert.match(String(f.posts.at(-1)?.error), /Preview again/);
+  assert.equal((f.posts.at(-1)?.error as HistoryCleanupIssue).code, 'invalid_preview');
+  assert.match((f.posts.at(-1)?.error as HistoryCleanupIssue).message ?? '', /Preview again/);
   assert.equal(confirmations, 0);
+  assert.deepEqual(f.metrics(), { saves: 0, journalWrites: 0, deleteCalls: 0 });
+});
+
+test('opening cleanup restores its last result through a readonly query without physical recovery', async t => {
+  const f = await fixture(t);
+  let recoveries = 0;
+  f.service.recover = async () => { recoveries++; throw new Error('must not perform physical recovery'); };
+  await f.host.handleMessage({ type: 'getHistoryCleanupState', requestId: 'state-readonly' }, 'view');
+  assert.equal(recoveries, 0);
+  assert.equal(f.posts.at(-1)?.type, 'historyCleanupState');
+  assert.equal(f.posts.at(-1)?.requestId, 'state-readonly');
+  assert.equal(f.posts.at(-1)?.operation, null);
+  assert.deepEqual(f.metrics(), { saves: 0, journalWrites: 0, deleteCalls: 0 });
+});
+
+test('a damaged saved cleanup result is reported separately and does not prevent a new valid preview', async t => {
+  const f = await fixture(t);
+  let recoveries = 0;
+  f.service.recover = async () => { recoveries++; return undefined; };
+  f.service.inspectCurrentOperation = async () => { throw new SyntaxError('old private-path result'); };
+  await f.host.handleMessage({ type: 'getHistoryCleanupState', requestId: 'state-damaged' }, 'view');
+  const response = f.posts.at(-1)!;
+  assert.equal(response.operation, null);
+  assert.equal(response.allowPreview, true);
+  assert.equal((response.error as HistoryCleanupIssue).code, 'journal_corrupt');
+  assert.equal((response.error as HistoryCleanupIssue).phase, 'state');
+  assert.doesNotMatch(JSON.stringify(response.error), /private-path/u);
+  const preview = await f.preview();
+  assert.equal(preview.candidateCount, 2);
+  assert.ok(preview.previewToken);
+  assert.equal(recoveries, 0);
+  assert.deepEqual(f.metrics(), { saves: 0, journalWrites: 0, deleteCalls: 0 });
+});
+
+test('cleanup answers not-ready immediately rather than awaiting a hanging session initialization', async t => {
+  const f = await fixture(t);
+  f.host.sessionReady = false;
+  f.host.sessionInitialization = new Promise<void>(() => {});
+  let settled = false;
+  const request = f.host.handleMessage({ type: 'previewHistoryCleanup', requestId: 'still-starting', scope: 'current', mode: 'all' }, 'view')
+    .then(() => { settled = true; });
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(settled, true, 'a pending initialization must not retain the preview request indefinitely');
+  await request;
+  const response = f.posts.at(-1)!;
+  assert.equal(response.requestId, 'still-starting');
+  assert.equal((response.error as HistoryCleanupIssue).code, 'loading_sessions');
+  assert.equal((response.error as HistoryCleanupIssue).retryable, true);
+  assert.equal(response.previewToken, undefined);
+  assert.deepEqual(f.metrics(), { saves: 0, journalWrites: 0, deleteCalls: 0 });
+});
+
+test('cleanup summaries can preview without a configured model and reports initialization failure precisely', async t => {
+  const f = await fixture(t);
+  assert.equal(f.host.sessionRecoveryReady, false);
+  assert.equal((await f.preview()).candidateCount, 2);
+  f.host.historyCleanupInitializationFailed = true;
+  await f.host.handleMessage({ type: 'previewHistoryCleanup', requestId: 'startup-failed', scope: 'current', mode: 'all' }, 'view');
+  const issue = f.posts.at(-1)?.error as HistoryCleanupIssue;
+  assert.equal(issue.code, 'initialization_failed');
+  assert.equal(issue.phase, 'initialization');
+  assert.equal(issue.retryable, false);
+  assert.deepEqual(f.metrics(), { saves: 0, journalWrites: 0, deleteCalls: 0 });
+});
+
+test('Host exposes a safe diagnostic cause for a failing preview instead of declaring storage still loading', async t => {
+  const f = await fixture(t);
+  f.service.preview = async () => { throw Object.assign(new Error('EACCES /private/history/index.json confidential-text'), { code: 'EACCES' }); };
+  await f.host.handleMessage({ type: 'previewHistoryCleanup', requestId: 'permission-denied', scope: 'all', mode: 'all' }, 'view');
+  const issue = f.posts.at(-1)?.error as HistoryCleanupIssue;
+  assert.equal(issue.code, 'permission_denied');
+  assert.equal(issue.systemCode, 'EACCES');
+  assert.equal(issue.phase, 'preview');
+  assert.equal(issue.retryable, false);
+  assert.doesNotMatch(JSON.stringify(issue), /private|index\.json|confidential/u);
+  const diagnostics = f.host.getHistoryCleanupDiagnostics();
+  assert.equal(diagnostics.storageScheme, 'unknown');
+  assert.equal(diagnostics.lastIssue?.code, 'permission_denied');
+  assert.doesNotMatch(JSON.stringify(diagnostics), /private|index\.json|confidential/u);
+  assert.deepEqual(f.metrics(), { saves: 0, journalWrites: 0, deleteCalls: 0 });
+});
+
+test('a preview retains its original protection-readiness fact when safety settles during its catalog read', async t => {
+  const f = await fixture(t);
+  const entered = deferred(), release = deferred();
+  const original = f.service.preview.bind(f.service);
+  f.host.approvalDataReady = false;
+  f.service.preview = async (...args) => {
+    entered.resolve(); await release.promise;
+    const preview = await original(...args);
+    return { ...preview, candidateCount: 0, protectedCount: 2 };
+  };
+  const pending = f.host.handleMessage({ type: 'previewHistoryCleanup', requestId: 'protection-race', scope: 'current', mode: 'all' }, 'view');
+  await entered.promise;
+  f.host.approvalDataReady = true;
+  release.resolve(); await pending;
+  const response = f.posts.at(-1)!;
+  assert.equal(response.protectionReady, false, 'a stale protected count must retain the readiness fact that requires refreshing');
+  assert.equal(response.protectedCount, 2);
+  assert.equal(response.requestId, 'protection-race');
   assert.deepEqual(f.metrics(), { saves: 0, journalWrites: 0, deleteCalls: 0 });
 });
 

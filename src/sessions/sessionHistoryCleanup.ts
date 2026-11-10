@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { deleteStorageUri, writeJsonAtomic } from '../shared/atomicStorage';
 import { assertManagedStoragePath, withAssociatedStoreGate } from './sessionAssociatedPersistence';
+import type { HistoryCleanupIssueCode, HistoryCleanupPhase } from './historyCleanupErrors';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const TOKEN_TTL_MS = 5 * 60 * 1000;
@@ -33,6 +34,12 @@ export interface HistoryCleanupTargetResult {
   reason?: string;
   inaccessibleLegacySource?: boolean;
 }
+export interface HistoryCleanupCatalogDiagnostic {
+  code: HistoryCleanupIssueCode;
+  phase: HistoryCleanupPhase;
+  workspaceHash?: string;
+  retryable?: boolean;
+}
 export interface HistoryCleanupPreview {
   requestId: string;
   previewToken: string;
@@ -45,6 +52,7 @@ export interface HistoryCleanupPreview {
   protectedCount: number;
   unknownCount: number;
   includesCurrentSession: boolean;
+  diagnostics?: HistoryCleanupCatalogDiagnostic[];
 }
 export interface HistoryCleanupState {
   requestId: string;
@@ -68,7 +76,9 @@ export interface HistoryCleanupState {
   error?: string;
 }
 export interface HistoryCleanupAdapter {
-  readCatalog(scope: 'current' | 'all', currentWorkspaceKey: string): Promise<{ entries: HistoryCleanupCatalogEntry[]; unknown: number }>;
+  readCatalog(scope: 'current' | 'all', currentWorkspaceKey: string): Promise<{
+    entries: HistoryCleanupCatalogEntry[]; unknown: number; diagnostics?: HistoryCleanupCatalogDiagnostic[];
+  }>;
   revalidateTarget(target: HistoryCleanupTarget): Promise<boolean>;
   /** Must compare version and protection under the same cross-process gate as tombstone commit. */
   deleteTarget(target: HistoryCleanupTarget, operationId: string): Promise<HistoryCleanupTargetResult>;
@@ -113,7 +123,7 @@ export class FileHistoryCleanupJournal implements HistoryCleanupJournal {
     } catch (error) {
       const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
       if (code === 'ENOENT' || code === 'FileNotFound') return undefined;
-      throw new HistoryCleanupError('journal_unavailable');
+      throw journalReadError(error);
     }
   }
   private async write(uri: vscode.Uri, value: unknown): Promise<void> {
@@ -142,7 +152,7 @@ export class FileHistoryCleanupJournal implements HistoryCleanupJournal {
     const resultsUri = this.file(operationId, '.results');
     let entries: [string, vscode.FileType][] = [];
     try { await assertManagedStoragePath(this.globalStorageUri, resultsUri); entries = await vscode.workspace.fs.readDirectory(resultsUri); }
-    catch (error) { if (!isMissingJournalFile(error)) throw new HistoryCleanupError('journal_unavailable'); }
+    catch (error) { if (!isMissingJournalFile(error)) throw journalReadError(error); }
     for (const [name, type] of entries) {
       // A process may die after writing a same-directory atomic temporary file. It is not a committed delta.
       if (type === vscode.FileType.File && /^\.keepseek-[a-f0-9-]+\.tmp$/u.test(name)) continue;
@@ -160,6 +170,7 @@ export class FileHistoryCleanupJournal implements HistoryCleanupJournal {
     const pointer = await this.readJson(this.uri);
     let legacy = normalizeHistoryCleanupJournal(pointer);
     let selected = legacy?.state.operationId ?? (isRecord(pointer) && pointer.version === 2 && validIdentity(pointer.operationId) ? pointer.operationId : undefined);
+    if (pointer !== undefined && !selected) throw new HistoryCleanupError('journal_corrupt');
     let selectedTime = legacy?.confirmedAt ?? legacy?.state.now ?? (isRecord(pointer) && typeof pointer.confirmedAt === 'number' ? pointer.confirmedAt : -Infinity);
     for (const metadata of await this.metadata()) {
       const time = metadata.confirmedAt ?? metadata.state.now;
@@ -213,7 +224,7 @@ export class FileHistoryCleanupJournal implements HistoryCleanupJournal {
   private async metadata(): Promise<Array<{ state: HistoryCleanupState; confirmedAt?: number; ownerPid?: number }>> {
     let entries: [string, vscode.FileType][];
     try { await assertManagedStoragePath(this.globalStorageUri, this.operationsUri); entries = await vscode.workspace.fs.readDirectory(this.operationsUri); }
-    catch (error) { if (isMissingJournalFile(error)) return []; throw new HistoryCleanupError('journal_unavailable'); }
+    catch (error) { if (isMissingJournalFile(error)) return []; throw journalReadError(error); }
     const result: Array<{ state: HistoryCleanupState; confirmedAt?: number; ownerPid?: number }> = [];
     for (const [name, type] of entries) {
       if (type !== vscode.FileType.File || !/^[a-f0-9]{64}\.json$/u.test(name)) continue;
@@ -244,7 +255,16 @@ export class FileHistoryCleanupJournal implements HistoryCleanupJournal {
 }
 
 export class HistoryCleanupError extends Error {
-  public constructor(public readonly code: string) { super(code); this.name = 'HistoryCleanupError'; }
+  public constructor(public readonly code: string, options?: { cause?: unknown }) {
+    super(code, options); this.name = 'HistoryCleanupError';
+  }
+}
+
+/** Corrupt JSON is distinct from denied access, unsupported URI or unsafe paths.
+ * Keep the original error for the Host's sanitized diagnostic classification. */
+function journalReadError(error: unknown): HistoryCleanupError {
+  if (error instanceof HistoryCleanupError) return error;
+  return new HistoryCleanupError(error instanceof SyntaxError ? 'journal_corrupt' : 'journal_unavailable', { cause: error });
 }
 
 export function validateHistoryCleanupOptions(value: unknown): HistoryCleanupOptions {
@@ -318,6 +338,16 @@ export class SessionHistoryCleanupService {
 
   public hasLocalOwner(): boolean { return !!this.owner || this.recoveryRunning; }
   public getCurrentOperation(): HistoryCleanupState | undefined { return this.current ? structuredClone(this.current) : undefined; }
+
+  /** Opening the dialog only inspects a result. It never claims a recovery
+   * owner, saves a journal, or starts physical recycling. Runtime recovery is a
+   * separate background operation, and a late disk read cannot replace it. */
+  public async inspectCurrentOperation(): Promise<HistoryCleanupState | undefined> {
+    if (this.hasLocalOwner() && this.current) return this.getCurrentOperation();
+    const record = await this.config.journal?.load();
+    if (this.hasLocalOwner() && this.current) return this.getCurrentOperation();
+    return record ? structuredClone(record.state) : this.getCurrentOperation();
+  }
   public invalidate(webviewId: string): void {
     this.generations.set(webviewId, (this.generations.get(webviewId) ?? 0) + 1);
     for (const [token, plan] of this.plans) if (plan.webviewId === webviewId) this.plans.delete(token);
@@ -338,7 +368,12 @@ export class SessionHistoryCleanupService {
       expiresAt: now + (this.config.tokenTtlMs ?? TOKEN_TTL_MS), candidateCount: selected.targets.length,
       favoriteCount: selected.targets.filter(target => target.isFavorite).length,
       protectedCount: selected.protectedCount, unknownCount: selected.unknownCount,
-      includesCurrentSession: selected.targets.some(target => target.workspaceKey === currentWorkspaceKey && target.id === this.config.currentSessionId?.())
+      includesCurrentSession: selected.targets.some(target => target.workspaceKey === currentWorkspaceKey && target.id === this.config.currentSessionId?.()),
+      ...(catalog.diagnostics?.length ? { diagnostics: catalog.diagnostics.slice(0, 32).map(issue => ({
+        code: issue.code, phase: issue.phase,
+        ...(typeof issue.retryable === 'boolean' ? { retryable: issue.retryable } : {}),
+        ...(issue.workspaceHash && /^[a-f0-9]{12,64}$/u.test(issue.workspaceHash) ? { workspaceHash: issue.workspaceHash } : {})
+      })) } : {})
     };
     this.plans.set(preview.previewToken, { preview, webviewId, targets: selected.targets, generation });
     return structuredClone(preview);

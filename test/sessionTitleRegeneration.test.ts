@@ -158,6 +158,9 @@ async function fixture(t: TestContext, options: { legacy?: boolean; customTitle?
     requests.requestSessionTitle = originalRequest;
     provider.dispose();
     await Promise.all([host.changeSets.flush(), host.draftRuns.flush()]);
+    // A main response can finish before its display-only ledger migration.
+    // Wait for the owned writes rather than racing rm against a new bucket.
+    while (host.usageLedgerFlushes.size) await Promise.all([...host.usageLedgerFlushes.values()]);
     Object.assign(vscode.window, previousWindow);
     if (previousStatusBarFactory === undefined) delete (vscode.window as unknown as { createStatusBarItem?: unknown }).createStatusBarItem;
     if (previousAlignment === undefined) delete (vscode as unknown as { StatusBarAlignment?: unknown }).StatusBarAlignment;

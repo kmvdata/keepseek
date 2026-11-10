@@ -3,6 +3,7 @@ import { GlobalSessionStorage } from '../sessions/globalSessionStorage';
 import { SessionAssociatedDataCleanup } from '../sessions/sessionAssociatedDataCleanup';
 import { FileHistoryCleanupJournal, SessionHistoryCleanupService, type HistoryCleanupTarget, type HistoryCleanupTargetResult } from '../sessions/sessionHistoryCleanup';
 import { SESSION_STORAGE_KEY } from '../sessions/chatSessionStore';
+import { HistoryCleanupFailure } from '../sessions/historyCleanupErrors';
 
 /** Store ownership and local UI bookkeeping are callbacks, never disk paths
  * supplied by the Webview. The storage gate performs the final destructive check. */
@@ -49,6 +50,10 @@ export function createHistoryCleanupController(storageUri: vscode.Uri, workspace
   };
   return new SessionHistoryCleanupService({
     readCatalog: async (scope, current) => {
+      // A broken old result is independent of preview. The durable deletion
+      // authority remains a mandatory read-only safety boundary.
+      try { await storage.deletionAuthority.listPending(); }
+      catch (error) { throw new HistoryCleanupFailure('deletion_authority_unavailable', 'preview', false, { cause: error }); }
       const catalog = await storage.readHistoryCleanupCatalog(scope === 'current' ? current : undefined);
       for (const target of catalog.entries) {
         if (!target.hasHistory) {

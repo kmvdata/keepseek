@@ -168,7 +168,7 @@ test('reopening an already migrated workspace reclaims only tombstoned legacy Me
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('unreadable cleanup index reports an error instead of zero candidates or successful removal', async () => {
+test('unreadable cleanup index reports an explicit diagnostic and never authorizes removal', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-cleanup-read-denied-'));
   const original = vscode.workspace.fs.readFile;
   try {
@@ -178,7 +178,10 @@ test('unreadable cleanup index reports an error instead of zero candidates or su
       if (uri.path.endsWith('/index.json')) throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
       return original(uri);
     };
-    await assert.rejects(storage.readHistoryCleanupCatalog(value.workspaceKey), /permission denied/);
+    const catalog = await storage.readHistoryCleanupCatalog(value.workspaceKey);
+    assert.ok(catalog.diagnostics.some(issue => issue.code === 'permission_denied'));
+    assert.ok(catalog.unknown > 0);
+    assert.equal(catalog.entries.filter(entry => !entry.unknownReason && !entry.protectedReason).length, 0);
     assert.deepEqual(await storage.deletionAuthority.listPending(), []);
   } finally { vscode.workspace.fs.readFile = original; await rm(root, { recursive: true, force: true }); }
 });

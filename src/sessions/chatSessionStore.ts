@@ -38,6 +38,7 @@ import {
 } from '../agent/providerRequestProjection';
 import { getConfiguredKeepseekLanguage, localize, type KeepseekLanguage } from '../shared/i18n';
 import { isRecord } from '../shared/errors';
+import { boundedWait } from '../shared/boundedWait';
 import { normalizeContextUsageEstimateValue } from '../agent/contextUsage';
 import { normalizeSubagentSessionUsageStatsValue } from '../agent/subagentUsageStats';
 import {
@@ -52,7 +53,12 @@ import { cloneSessionTitleMetadata, lockSessionTitleMetadata, normalizeSessionTi
 
 export const SESSION_STORAGE_KEY = 'keepseek.chatSessions';
 export const SESSION_STORAGE_VERSION = 2;
+export const HISTORY_SESSION_LOAD_TIMEOUT_MS = 15_000;
 const MAX_STORED_SESSIONS = 50;
+export type BoundedSessionSelection =
+  | { status: 'selected'; session: ChatSession }
+  | { status: 'missing' }
+  | { status: 'timeout' };
 export interface StoredSessionState {
   version: number;
   activeSessionId: string;
@@ -78,7 +84,8 @@ export interface ChatSessionStorageAdapter {
   saveWorkspace(workspaceScope: WorkspaceSessionScope, state: StoredWorkspaceSessionState): Promise<void>;
   listAllWorkspaceSummaries(): Promise<WorkspaceSummary[]>;
   loadWorkspaceSessions(workspaceKey: string): Promise<ChatSession[]>;
-  loadSession?(workspaceKey: string, sessionId: string): Promise<ChatSession | undefined>;
+  /** Detached selection reads must not reconcile or rewrite the stored active selection. */
+  loadSession?(workspaceKey: string, sessionId: string, options?: { readOnly?: boolean }): Promise<ChatSession | undefined>;
   listWorkspaceSessionSummaries?(workspaceKey: string): Promise<ChatSessionSummary[]>;
   deleteWorkspaceSessions(workspaceKey: string, sessionIds: string[]): Promise<void>;
   deleteEntireWorkspace(workspaceKey: string): Promise<void>;
@@ -384,18 +391,40 @@ export class ChatSessionStore {
   }
 
   public async selectSession(sessionId: string, onSaving?: (sessionId: string) => void): Promise<ChatSession | undefined> {
-    const session = await measureSessionSelection('session-body', sessionId, () => this.loadSessionById(sessionId));
-    if (!session) {
-      return undefined;
-    }
+    const result = await this.selectSessionBounded(sessionId, { onSaving });
+    return result.status === 'selected' ? result.session : undefined;
+  }
 
+  public async selectSessionBounded(sessionId: string, options: {
+    timeoutMs?: number;
+    onSaving?: (sessionId: string) => void;
+  } = {}): Promise<BoundedSessionSelection> {
+    const workspaceKey = this.workspaceScope.key;
+    // Reading must remain detached: after timeout the underlying storage Promise
+    // may still settle, but it must never cache a body or commit this selection.
+    const result = await measureSessionSelection('session-body', sessionId, async () => {
+      const loaded = await boundedWait(this.loadSessionById(sessionId, false),
+        options.timeoutMs ?? HISTORY_SESSION_LOAD_TIMEOUT_MS);
+      if (loaded.status === 'failed') throw loaded.error;
+      return loaded;
+    });
+    if (result.status === 'timeout') return { status: 'timeout' };
+    if (!result.value || workspaceKey !== this.workspaceScope.key
+      || this.deletedSessionKeys.has(this.sessionIdentity(sessionId))) return { status: 'missing' };
+
+    const session = this.getSessionById(sessionId) ?? result.value;
+    if (!this.getSessionById(sessionId)) this.sessions.push(session);
+
+    // The commit is deliberately outside the read deadline. Once memory active
+    // has switched, reversing it during persist would create an uncertain state
+    // between memory and disk; that is more dangerous than a slow save barrier.
     session.updatedAt = new Date().toISOString();
     session.approvalMode = this.approvalModeValue;
     session.executionMode = normalizeExecutionMode(session.executionMode);
     this.setActiveSessionId(session.id);
-    onSaving?.(session.id);
+    options.onSaving?.(session.id);
     await measureSessionSelection('active-selection-save', session.id, () => this.persist());
-    return session;
+    return { status: 'selected', session };
   }
 
   public async copyOtherWorkspaceSession(workspaceKey: string, sessionId: string): Promise<ChatSession | undefined> {
@@ -951,7 +980,7 @@ export class ChatSessionStore {
     this.setActiveSessionId(activeSession.id);
   }
 
-  private async loadSessionById(sessionId: string): Promise<ChatSession | undefined> {
+  private async loadSessionById(sessionId: string, cacheLoadedSession = true): Promise<ChatSession | undefined> {
     const workspaceKey = this.workspaceScope.key;
     if (this.deletedSessionKeys.has(this.sessionIdentity(sessionId))
       || await this.sessionStorage.isSessionDeleted?.(workspaceKey, sessionId)) return undefined;
@@ -963,14 +992,15 @@ export class ChatSessionStore {
     if (!this.sessionSummaries.has(sessionId) || !this.sessionStorage.loadSession) {
       return undefined;
     }
-    const session = await this.sessionStorage.loadSession(workspaceKey, sessionId);
+    const session = await this.sessionStorage.loadSession(workspaceKey, sessionId,
+      cacheLoadedSession ? undefined : { readOnly: true });
     if (!session || session.id !== sessionId || workspaceKey !== this.workspaceScope.key
       || !this.sessionSummaries.has(sessionId) || !this.isInCurrentWorkspace(session)) {
       return undefined;
     }
     const current = this.getSessionById(sessionId);
     if (current) return current;
-    this.sessions.push(session);
+    if (cacheLoadedSession) this.sessions.push(session);
     return session;
   }
 

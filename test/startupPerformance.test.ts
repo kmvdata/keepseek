@@ -466,6 +466,7 @@ test('command settings become ready without waiting for project context or the f
   const settingsReadySignal = new Promise<void>((resolve) => { settingsReady = resolve; });
   let fullStatePosts = 0;
   const patches: Array<Record<string, string>> = [];
+  const cleanupReadiness: Array<Record<string, unknown>> = [];
   const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
     sessionInitialization: Promise.resolve(),
     sessionReady: false,
@@ -486,6 +487,7 @@ test('command settings become ready without waiting for project context or the f
     },
     syncConfiguredState: () => {},
     postLightweightState: () => {},
+    postToWebview: (message: Record<string, unknown>) => { if (message.type === 'historyCleanupReady') cleanupReadiness.push(message); },
     postStartupSettingsPatch() {
       const snapshot = { ...this.commandSettingsReadiness } as Record<string, string>;
       patches.push(snapshot);
@@ -504,6 +506,8 @@ test('command settings become ready without waiting for project context or the f
   assert.equal(fullStatePosts, 0);
   assert.equal(host.approvalDataReady, true);
   assert.equal(host.requestContextReady, false);
+  assert.deepEqual(cleanupReadiness, [{ type: 'historyCleanupReady', available: true },
+    { type: 'historyCleanupReady', available: true, phase: 'protection' }]);
   assert.ok(patches.some((snapshot) => snapshot.mainModel === 'ready'));
   assert.ok(patches.some((snapshot) => snapshot.subagentModel === 'ready'));
   assert.ok(patches.some((snapshot) => snapshot.approvalMode === 'ready'));

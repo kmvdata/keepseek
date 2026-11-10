@@ -1424,7 +1424,7 @@ ${conversationsMenuDismissFragment.source}
         if (window.keepseekInputControls && window.keepseekInputControls.onHistorySettingsSaved) {
           window.keepseekInputControls.onHistorySettingsSaved(message);
         }
-      } else if (message.type === 'historyCleanupPreview' || message.type === 'historyCleanupState') {
+      } else if (message.type === 'historyCleanupPreview' || message.type === 'historyCleanupState' || message.type === 'historyCleanupReady') {
         if (window.keepseekInputControls && window.keepseekInputControls.onHistoryCleanupMessage) {
           window.keepseekInputControls.onHistoryCleanupMessage(message);
         }
