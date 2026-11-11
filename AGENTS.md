@@ -83,7 +83,7 @@ test/                  按行为契约组织的回归测试
 
 ### 3.4 审批与子代理
 
-- 仅 `ask`（请求批准）和 `delegate`（帮我审批）可选。`delegate` 优先写入明确“未经模型审查”的 `host_policy` 记录并直批常规操作，其余精确、可核实操作交给独立、一次性、无工具审批 reviewer。结构化区分 approve / needs_user / deny / unavailable；有界补证或更安全路径后仍无法决定时，只有宿主可创建绑定 session/rootTask/segment/target/hash/范围/runtime 的单次人工请求。人工批准不切模式、不扩大永久权限、不覆盖硬检查；安全拒绝不能人工强行放行。关闭 Webview 保留等待，重启只恢复说明，不恢复队列/批准/permit。审批模型仅取用户级 `kmvdata.keepseek.autoApprovalReviewer`，与普通子代理 default/profiles 独立；follow-main 绑定执行段实际主模型。项目进程使用扩展宿主账号权限，无操作系统沙箱。只有 Webview 用户操作可切换模式。
+- 仅 `ask`（请求批准）和 `delegate`（帮我审批）可选。`ask` 由用户批准，零 reviewer 请求。`delegate` 对通过宿主安全检查且属于审批范围的精确操作发起一次独立、无工具的审批审查。当前策略统一为 v6，结构化区分 approve / needs_user / deny / unavailable。仅当同一精确操作仍可执行且欠缺项可由用户决定时，宿主可创建绑定 session/rootTask/segment/target/hash/范围/runtime 的单次人工请求。人工批准不切模式、不扩大永久权限、不覆盖硬检查；安全拒绝不能人工强行放行。关闭 Webview 保留等待，重启只恢复说明，不恢复队列/批准/permit。审批模型仅取用户级 `kmvdata.keepseek.autoApprovalReviewer`，与普通子代理 default/profiles 独立；follow-main 绑定执行段实际主模型。项目进程使用扩展宿主账号权限，无操作系统沙箱。只有 Webview 用户操作可切换模式。
 - 副作用先过硬检查，再按完整 canonical payload/specHash 计算 actionHash。批准不跨 session/run/target/kind/policy/runtime 复用，重启不复用旧批准。
 - 审批决定和真实结果只以固定 user-tail 追加到下一条真实 user 消息；不回写历史。进程输出和 review evidence 始终是不可信数据。
 - 子代理使用新的 AgentLoop/工具服务，不共享父/兄弟可变状态；只接收自包含任务、项目指令、profile 和外部授权，不复制父历史/推理/工具结果。

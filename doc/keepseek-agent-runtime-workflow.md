@@ -200,15 +200,15 @@ spawn(executable, args, { shell: false })
 
 | 模式 | 决策者 | 行为 |
 | --- | --- | --- |
-| `ask` | 用户 | 默认；逐项或批量批准 |
-| `delegate`（帮我审批） | 宿主策略、独立审批 reviewer、必要时用户 | 常规操作直批；其余可审查操作自动送审，区分 approve/needs_user/deny/unavailable。必要时绑定当前 runtime 的精确单次人工请求，之后复核并续跑同一任务 |
+| `ask`（请求批准） | 用户 | 默认，逐项或批量批准，零审批模型请求 |
+| `delegate`（帮我审批） | 独立审批 reviewer，必要时用户 | 通过安全检查的受审操作进入一次逻辑审查，区分 approve/needs_user/deny/unavailable。仍具执行资格且需用户决定时，宿主发出绑定当前 runtime 的精确单次请求 |
 
 当前仅接受 ask/delegate；审批模型位于 `/` → 子代理模型 → 审批模型，配置仅取用户级 `kmvdata.keepseek.autoApprovalReviewer`，与普通子代理 default/角色设置独立。follow-main 跟随执行段的实际主模型。等待用户暂停有效计时，关闭 Webview 不取消等待；重启不恢复旧批准、队列或 permit。详细恢复与验收见 [帮我审批](keepseek-approve-for-me-verification.md)。
 
 共同规则：
 
 - 所有动作先过确定性硬检查，审批不能绕过工作区信任、URI 授权、基线、脏编辑器或 permit。
-- reviewer 是无工具、一次性、关闭 thinking 的独立请求，不注入项目指令/Skill/隐藏推理。
+- reviewer 是无工具、关闭 thinking 的独立审查，仅使用白名单事实和有界材料。一次逻辑审查共用一个截止时间，可重试故障最多额外尝试一次。
 - actionHash 绑定完整 canonical payload；patch 即使只展示有界 hunks，也不能复用变更后的批准。
 - 批准记录与 session/run/target/kind/hash/policy/runtime 绑定；重启不恢复审批队列，不复用旧 reviewer 批准。
 - 停止或切回 `ask` 会撤销队列和未执行授权。
@@ -382,7 +382,7 @@ bun run test
 - 请求/缓存：`cacheByteStability`、`protocolCache`、`p1CacheObservability`、`openAiResponses`、`anthropicMessages`。
 - 压缩/Epoch：`historyCompressor`、`historyProjection`、`currentRunContext`、`toolResultBudget`。
 - 写入：ChangeSet、SafeFileEditor、patch/delete/move、重启与 Revert。
-- 命令/审批：三模式、actionHash、permit 单次消费、取消/超时/重启、Windows/POSIX argv。
+- 命令/审批：两种模式、actionHash、permit 单次消费、取消/超时/重启、Windows/POSIX argv。
 - 子代理：`subagentArchitecture`、`subagentSafety`、`subagentUsageStats`、`subagentUsageRuntime`。
 - Webview 大字符串：输入、拖拽、`@` 引用、编辑重发、Apply/Discard 手测。
 

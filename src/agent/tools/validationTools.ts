@@ -119,6 +119,7 @@ export class ValidationToolService implements ValidationToolAdapter {
     try {
       const snapshot = await inspectValidationSnapshot(workspaceFolder, input.script);
       if (!vscode.workspace.isTrusted || input.signal?.aborted || !vscode.workspace.workspaceFolders?.includes(workspaceFolder)
+        || !snapshot.evidenceComplete
         || (input.expectedSnapshot && input.expectedSnapshot !== snapshot.fingerprint)
         || (input.authorization.approvalReview && !input.expectedSnapshot)) {
         throw new Error(localizeValidation(input.language, 'snapshotChanged'));
@@ -214,7 +215,7 @@ async function readNpmScripts(workspaceFolder: vscode.WorkspaceFolder): Promise<
 export type ValidationPreflightResult =
   | { status: 'ready'; script: SafeNpmScript; workspaceRootId: string; snapshot: ValidationSnapshot }
   | { status: 'unavailable'; script: SafeNpmScript; error: string }
-  | { status: 'blocked'; error: string };
+  | { status: 'blocked'; error: string; failureCode?: 'insufficient_launch_evidence' };
 
 /** Hard checks that must pass before a validation request reaches a model reviewer. */
 export async function preflightSafeValidation(input: {
@@ -234,6 +235,9 @@ export async function preflightSafeValidation(input: {
   }
   try {
     const snapshot = await inspectValidationSnapshot(workspaceFolder, input.script);
+    if (!snapshot.evidenceComplete) return { status: 'blocked', failureCode: 'insufficient_launch_evidence',
+      error: input.language === 'en' ? 'The fixed validation launch is missing required evidence. Nothing executed.'
+        : '固定验证的启动证据不足，尚未执行。' };
     const index = (vscode.workspace.workspaceFolders ?? []).findIndex(folder => folder.uri.toString() === workspaceFolder.uri.toString());
     return { status: 'ready', script: input.script, workspaceRootId: `root-${index + 1}:${workspaceFolder.name}`, snapshot };
   } catch (error) {

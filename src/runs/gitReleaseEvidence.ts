@@ -153,7 +153,7 @@ async function peelLocalTag(object: string, read: (args: string[]) => Promise<st
 
 export async function prepareGitRelease(input: {
   run: DraftRun; scope: CommandScope; intent: GitReleaseIntent; remote?: GitRemoteLaunch;
-  prior: DraftRun[]; needsCommit: boolean; signal: AbortSignal;
+  prior: DraftRun[]; needsCommit: boolean; signal: AbortSignal; probeRemote?: boolean;
 }): Promise<ReleaseVerification | undefined> {
   const { run, scope, intent, remote, prior, needsCommit, signal } = input;
   const semantics = analyzeCommand(run.spec);
@@ -242,6 +242,19 @@ export async function prepareGitRelease(input: {
     }
     return current;
   }));
+  const beforeLaunch = async () => {
+    const current = await Promise.all(command.refs.map(localRef));
+    if (!sameRefs(current.filter(ref => ref !== undefined), expected)) {
+      throw new Error('Local refs changed before push. / 推送前本地引用已变化。');
+    }
+  };
+  // The proposed destination is known before consent. Verify local refs at
+  // that stage, and leave destination probes to the authorized preparation.
+  if (input.probeRemote === false) {
+    return { beforeLaunch, verify: async () => {
+      throw new Error('Remote verification requires an authorized destination. / 远端核验需要已授权的目的地。');
+    } };
+  }
   const readRemote = async () => parseGitRefOutput(await readGit(remote.executable, remote.cwd, remote.env,
     ['ls-remote', '--', remote.destination, ...command.refs.flatMap(ref => ref.startsWith('refs/tags/') ? [ref, ref + '^{}'] : [ref])], signal), command.refs);
   const initial = await readRemote();
@@ -263,12 +276,7 @@ export async function prepareGitRelease(input: {
   })) {
     throw new Error('A prior push has an unresolved result for this reference. / 该引用的先前推送结果尚未核实。');
   }
-  return { completed, pushAttempt: { repositoryUri, destinationHash, refs: command.refs }, beforeLaunch: async () => {
-    const current = await Promise.all(command.refs.map(localRef));
-    if (current.some(ref => !ref) || !sameRefs(current as GitReleaseRefEvidence[], expected)) {
-      throw new Error('Local refs changed before push. / 推送前本地引用已变化。');
-    }
-  }, verify: async result => {
+  return { completed, pushAttempt: { repositoryUri, destinationHash, refs: command.refs }, beforeLaunch, verify: async result => {
     const actual = await readRemote();
     if (!sameRefs(actual, expected)) {
       throw new Error(result.exitCode === 0

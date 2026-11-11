@@ -13,6 +13,11 @@ export class ApprovalCircuitBreaker {
     const history = [...(this.outcomes.get(rootTaskId) ?? []), outcome].slice(-50);
     this.outcomes.set(rootTaskId, history);
     if (outcome !== 'deny') return { tripped: false };
+    return this.current(rootTaskId);
+  }
+
+  public current(rootTaskId: string): { tripped: boolean; reason?: 'consecutive_denials' | 'recent_denials' } {
+    const history = this.outcomes.get(rootTaskId) ?? [];
     const consecutive = countTrailingDenials(history);
     if (consecutive >= 3) return { tripped: true, reason: 'consecutive_denials' };
     if (history.filter((item) => item === 'deny').length >= 10) return { tripped: true, reason: 'recent_denials' };

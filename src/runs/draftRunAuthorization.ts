@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { DraftRun, ExecutionPermit } from '../shared/types';
 import type { ApprovalRecordMatch } from '../approvals/approvalReviewTypes';
+import { hashDraftRunEffect } from '../approvals/approvalReviewHash';
 import type { ApprovalReviewStore } from '../approvals/approvalReviewStore';
 import { assertValidGitCommitArguments } from '../approvals/authorization/executionBoundary';
 
@@ -33,7 +34,9 @@ export class DraftRunAuthorizationService {
   public createUserClickPermit(draftRun: DraftRun): ExecutionPermit {
     if (draftRun.historyInvalidationId || draftRun.historyOriginUnverified) throw new Error('DraftRun was detached by editing its source history.');
     assertValidGitCommitArguments(draftRun.spec);
-    const denial = this.approvalReviews?.findHardRunDenial(draftRun.sessionId, draftRun.specHash)
+    const denial = this.approvalReviews?.findSafetyDenial({
+      sessionId: draftRun.sessionId, actionKind: 'draft_run_execute', actionHash: draftRun.specHash, effectHash: hashDraftRunEffect(draftRun)
+    })
       ?? (draftRun.spec.restricted && this.approvalReviews?.findHardRunDenial(draftRun.sessionId, draftRun.spec.restricted.originalSpecHash));
     if (denial) throw new Error(denial.rationale);
     return {

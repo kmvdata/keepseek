@@ -39,8 +39,11 @@ export interface CommandScope {
   fingerprint: string;
 }
 
-export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectRemote = false,
-  tagSnapshot?: { ref: string; signal: AbortSignal }): Promise<CommandScope> {
+/** Metadata mode binds an exact Git destination without opening its config. */
+export type CommandRemoteInspection = boolean | 'metadata';
+
+export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectRemote: CommandRemoteInspection = false,
+  tagSnapshot?: { ref: string; signal: AbortSignal }, allowUnresolvedLauncher = false): Promise<CommandScope> {
   const parsed = analyzeCommand(run.spec);
   const diagnostics = [...parsed.reasons];
   const roots = await Promise.all((vscode.workspace.workspaceFolders ?? []).filter(f => f.uri.scheme === 'file')
@@ -161,7 +164,7 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectR
     && !external.size && (!parsed.gitRemote || inspectRemote)) {
     const git = await inspectLocalGitScope({ executable: executable.path, cwd, roots, cwdChanges: gitCommand.cwdChanges,
       subcommand: gitCommand.value, env, commitAll: parsed.gitCommit?.all,
-      refMutation: parsed.gitRefMutation, remote: parsed.gitRemote,
+      refMutation: parsed.gitRefMutation, remote: parsed.gitRemote, remoteMetadataOnly: inspectRemote === 'metadata',
       tagSnapshotRef: tagSnapshot?.ref.startsWith('refs/tags/') && isGitReleaseRef(tagSnapshot.ref) ? tagSnapshot.ref : undefined,
       signal: tagSnapshot?.signal,
       noOptionalLocks: parsed.arguments.some(argument => argument.index < gitCommand.index && argument.value === '--no-optional-locks'),
@@ -213,7 +216,9 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectR
   // Python uses the launcher path to discover virtual environments and its
   // installation prefix. Keep that spelling after verifying its real target.
   const projectScriptLaunchPath = trustedProjectScript && /^python\d*$/u.test(parsed.program) ? executable?.launchPath : undefined;
-  if (!executable && process.platform !== 'win32') throw new Error('Executable cannot be resolved. Nothing executed. / 无法解析实际程序，尚未执行。');
+  if (!executable && process.platform !== 'win32' && !allowUnresolvedLauncher) {
+    throw new Error('Executable cannot be resolved. Nothing executed. / 无法解析实际程序，尚未执行。');
+  }
   const fingerprint = createHash('sha256').update(JSON.stringify({
     version: 1, executable, env, roots, paths, pathIdentities, gitFingerprint, gitCwd, externalUris, diagnostics, trustedProjectScript
   })).digest('hex');

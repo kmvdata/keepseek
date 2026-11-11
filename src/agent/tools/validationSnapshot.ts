@@ -11,7 +11,6 @@ import { hasValidationBlockingRisk } from './validationRisk';
 
 const MAX_CONFIG_BYTES = 1_000_000;
 const VALIDATION_CONFIG = /^(?:tsconfig(?:\.[\w.-]+)?\.json|jsconfig\.json|(?:eslint|vitest|vite|jest|babel|webpack|playwright|rollup|mocha)\.config\.[\w.-]+|\.(?:eslintrc|babelrc|mocharc)(?:\.[\w.-]+)?|bunfig\.toml)$/u;
-const CONVENTIONAL_ENTRY = /^(?:tsc|eslint|node|vitest|jest|bun|ts-node|tsx|mocha)(?:[ \t]+[\w./:=,@%+-]+)*$/u;
 
 export class ValidationUnavailableError extends Error {
   public constructor(public readonly reason: 'manifest_missing' | 'script_missing') {
@@ -81,16 +80,9 @@ export async function inspectValidationSnapshot(folder: vscode.WorkspaceFolder, 
     throw new Error('Cannot establish the npm and Node launch identity. / 无法确认 npm 和 Node 的启动身份。');
   }
   const configNames = (await readdir(cwd)).filter(name => VALIDATION_CONFIG.test(name)).sort();
-  const definition = selected.trim();
-  const args = definition.split(/\s+/u);
-  let conventional = CONVENTIONAL_ENTRY.test(definition)
-    && !args.some(arg => /(?:^|=)(?:\/|[a-z]:)|(?:^|\/)\.\.(?:\/|$)/iu.test(arg));
-  if (args[0] === 'node') {
-    const testLauncher = args[1] === 'out-test/test/runTests.js' && args.length === 2;
-    if (testLauncher && await lstat(path.join(cwd, 'test/runTests.ts')).catch(() => undefined)) configNames.push('test/runTests.ts');
-    conventional &&= (args[1] === '--test' && !args.slice(2).some(arg => arg.startsWith('-'))) || testLauncher;
-  } else if (args[0] === 'bun') conventional &&= args[1] === 'test';
-  else if (args[0] === 'ts-node' || args[0] === 'tsx') conventional = false;
+  const args = selected.trim().split(/\s+/u);
+  if (args.length === 2 && args[0] === 'node' && args[1] === 'out-test/test/runTests.js'
+    && await lstat(path.join(cwd, 'test/runTests.ts')).catch(() => undefined)) configNames.push('test/runTests.ts');
   for (let i = 1; i < args.length; i++) {
     const arg = args[i];
     const namedConfig = /^(?:--project|--config)=(.+)$/u.exec(arg)?.[1];
@@ -129,8 +121,6 @@ export async function inspectValidationSnapshot(folder: vscode.WorkspaceFolder, 
   const fingerprint = hashApprovalValue({ cwdUri, configFingerprint, npm, node, argv, env, cliIdentity: cliInfo && [cliInfo.dev, cliInfo.ino, cliInfo.size, cliInfo.mtimeMs, cliInfo.ctimeMs] });
   return {
     cwd, cwdUri, executable, argv, env, fingerprint,
-    hostEligible: !npmrc && entries.length === 1 && evidenceComplete
-      && conventional,
     evidenceComplete: evidenceComplete && !npmrc,
     evidence: { ...evidence, truncated: !evidenceComplete },
     configNames
@@ -138,21 +128,3 @@ export async function inspectValidationSnapshot(folder: vscode.WorkspaceFolder, 
 }
 
 export type ValidationSnapshot = Awaited<ReturnType<typeof inspectValidationSnapshot>>;
-
-export async function captureValidationBaseline(): Promise<ReadonlyMap<string, string>> {
-  const baseline = new Map<string, string>();
-  if (!vscode.workspace.isTrusted) return baseline;
-  await Promise.all((vscode.workspace.workspaceFolders ?? []).flatMap(folder =>
-    (['compile', 'lint', 'test'] as const).map(async script => {
-      try {
-        const snapshot = await inspectValidationSnapshot(folder, script);
-        baseline.set(validationBaselineKey(snapshot.cwdUri, script), snapshot.fingerprint);
-      } catch { /* Missing or unreadable launch configuration is never trusted by default. */ }
-    })
-  ));
-  return baseline;
-}
-
-export function validationBaselineKey(uri: string, script: SafeNpmScript): string {
-  return JSON.stringify([uri, script]);
-}

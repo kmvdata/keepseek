@@ -8,8 +8,50 @@ import { normalizeRunDetailsDelegation } from '../src/agent/logging/subagentDeta
 import { normalizeStoredSessions } from '../src/sessions/chatSessionStore';
 import { WEBVIEW_TRANSLATIONS } from '../src/shared/i18n';
 import { getScript } from '../src/webview/script';
+import { createWebviewDomHarness } from './webviewDomHarness';
 
 describe('RunDetailsBuilder', () => {
+  it('restores audit snapshots and renders approval provenance and interruption in both languages', () => {
+    const builder = new RunDetailsBuilder({ runId: 'review-run', modelId: 'main-model', thinkingEnabled: false });
+    const timestamp = '2026-11-11T00:00:00.000Z';
+    const baseReview = { sessionId: 'A', rootTaskId: 'task', agentRunId: 'review-run', targetId: 'exact-target',
+      actionKind: 'draft_run_execute', createdAt: timestamp, risk: 'low', rationale: 'Fixture rationale', decision: 'approve' };
+    const session = normalizeStoredSessions({ sessions: [{ id: 'A', title: 'Audit', createdAt: timestamp,
+      messages: [{ id: 'assistant', role: 'assistant', content: '', createdAt: timestamp, runDetails: { ...builder.build(),
+        authorizations: [{ toolName: 'coarse-source', allowed: true, riskLevel: 'low', scope: 'validation', source: 'delegated_approver' }],
+        approvalReviews: [
+          { ...baseReview, reviewId: 'historical-host', approvalSource: 'host_policy', policyVersion: 2 },
+          { ...baseReview, reviewId: 'historical-model', approvalSource: 'auto_approval_review', policyVersion: 5, reviewerModelId: 'older-reviewer' },
+          { ...baseReview, reviewId: 'historical-user', approvalSource: 'user_click', policyVersion: 2 },
+          { ...baseReview, reviewId: 'new-review', approvalSource: 'auto_approval_review', policyVersion: 6,
+            reviewerSourceId: 'review-source', reviewerModelId: 'actual-reviewer', decision: 'needs_user', risk: 'critical' },
+          { ...baseReview, reviewId: 'invalid-config', approvalSource: 'auto_approval_review', policyVersion: 6,
+            reviewerModelId: 'never-requested', decision: 'unavailable', reviewState: 'configuration_unavailable' },
+          { ...baseReview, reviewId: 'interrupted', approvalSource: 'auto_approval_review', policyVersion: 6,
+            decision: 'unavailable', reviewState: 'in_progress', exactAction: { secret: 'never-display' } }
+        ] } }]
+    }] }, { key: 'workspace:ui', name: 'UI', folderUris: [] })[0];
+    const reviews = session.messages[0].runDetails?.approvalReviews;
+    assert.deepEqual(reviews?.map(review => review.policyVersion), [2, 5, 2, 6, 6, 6]);
+    assert.equal(reviews?.at(-1)?.reviewState, 'interrupted');
+    assert.doesNotMatch(JSON.stringify(reviews), /never-display/u);
+    for (const language of ['zh-CN', 'en'] as const) {
+      const view = createWebviewDomHarness();
+      view.receive({ type: 'state', revision: 1, state: { activeSessionId: session.id, language, messages: session.messages,
+        startup: { interactiveReady: true, sideEffectsReady: true } } });
+      const details = view.element('transcript').querySelector('.run-details');
+      assert.ok(details);
+      const labels = WEBVIEW_TRANSLATIONS[language];
+      for (const label of [labels.approvalSourceHost, labels.approvalSourceDelegatedExecution, labels.approvalNeedsUser,
+        labels.approvalRiskCritical, labels.approvalReviewState_configuration_unavailable, labels.approvalReviewState_interrupted]) {
+        assert.ok(details.textContent.includes(label), label);
+      }
+      assert.match(details.textContent, /review-source \/ actual-reviewer/u);
+      assert.doesNotMatch(details.textContent, /never-requested|never-display/u);
+      assert.equal(details.textContent.split(labels.approvalSourceHost).length - 1, 1);
+    }
+  });
+
   it('keeps lifecycle, partial completion, parent acceptance and unavailable detail distinct without private content', () => {
     const builder = new RunDetailsBuilder({ runId: 'run-child', modelId: 'model', thinkingEnabled: false });
     builder.recordToolResult('child', 'keepseek_delegate_task', JSON.stringify({

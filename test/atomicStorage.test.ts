@@ -127,8 +127,12 @@ test('POSIX can move and revert a read-only file without requiring file write ac
     const open = fs.open;
     t.mock.method(fs, 'open', async (...[path, flags, mode]: Parameters<typeof fs.open>) => {
       const metadata = await fs.stat(path);
+      // O_NOFOLLOW and O_NONBLOCK may accompany a numeric read-only open.
+      const writable = typeof flags === 'number'
+        ? (flags & (fs.constants.O_WRONLY | fs.constants.O_RDWR)) !== 0
+        : flags !== 'r';
       // Enforce POSIX mode semantics even if the test runner has elevated access.
-      if (metadata.isFile() && (metadata.mode & 0o222) === 0 && flags !== 'r') {
+      if (metadata.isFile() && (metadata.mode & 0o222) === 0 && writable) {
         throw Object.assign(new Error('read-only file'), { code: 'EACCES' });
       }
       return open(path, flags, mode);

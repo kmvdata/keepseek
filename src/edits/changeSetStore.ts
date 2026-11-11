@@ -419,6 +419,12 @@ export class ChangeSetStore {
       && origin.contextMeta.isProtected === true && !origin.runDetails && !origin.runState && !origin.runCheckpoint && !origin.runCheckpointArchive;
   }
 
+  /** Full current-format payloads retained for checking older refusal records. */
+  public findEditEffects(sessionId: string, matches: (edit: DraftEdit) => boolean): DraftEdit[] {
+    return [...this.changeSets.values()].filter(set => set.sessionId === sessionId && hasActiveHistory(set))
+      .flatMap(set => set.files.filter(matches).map(edit => structuredClone(edit)));
+  }
+
   public getPendingEdit(editId: string): { edit: DraftEdit; runId: string; sessionId: string; skillScaffold?: boolean } | undefined {
     const found = this.findEdit(editId);
     if (!found || !isApplicable(found.edit)) return undefined;
@@ -460,6 +466,13 @@ export class ChangeSetStore {
     if (!found || !isApplicable(found.edit)) throw new Error('Pending DraftEdit was not found.');
     if (found.changeSet.sessionId) await new SessionDeletionAuthority(this.globalStorageUri).assertSessionIdWritable(found.changeSet.sessionId);
     return await this.safeFileEditor.preflightDraftEdit(found.edit, approval);
+  }
+
+  public async preflightEditOutput(editId: string, scanSensitive = false): Promise<void> {
+    const found = this.findEdit(editId);
+    if (!found || !isApplicable(found.edit)) throw new Error('Pending DraftEdit was not found.');
+    if (found.changeSet.sessionId) await new SessionDeletionAuthority(this.globalStorageUri).assertSessionIdWritable(found.changeSet.sessionId);
+    await this.safeFileEditor.preflightDraftEditOutput(found.edit, scanSensitive);
   }
 
   public attachApprovalReview(editId: string, record: ApprovalReviewRecord): boolean {

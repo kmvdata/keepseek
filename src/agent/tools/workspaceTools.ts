@@ -178,9 +178,7 @@ export interface WorkspaceToolAdapter {
   getLabel(uri: vscode.Uri): string;
   /** 设置本轮 Agent run 中用户显式引用、已授权的外部文件/目录 URI 集合（uri.toString()）。 */
   setAuthorizedExternalReferenceUris(uris?: Iterable<string>): void;
-  setDelegatedFileAuthorization?(enabled: boolean): void;
   inspectExternalRead?(rawPath: string): Promise<ExternalReadScope | undefined>;
-  authorizeReviewedExternalUri?(uri: string): void;
   grantUserExternalReadOnce?(uri: string): void;
   revokeUserExternalReadOnce?(): void;
 }
@@ -193,10 +191,6 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
   public revokeUserExternalReadOnce(): void { this.userReadOnce = undefined; }
 
   private readonly authorizedExternalReferenceUris = new Set<string>();
-
-  public setDelegatedFileAuthorization(enabled: boolean): void {
-    void enabled; // Approval mode cannot grant external filesystem access.
-  }
 
   public setAuthorizedExternalReferenceUris(uris?: Iterable<string>): void {
     this.userReadOnce = undefined;
@@ -245,11 +239,6 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
     if ((scope && !scope.authorized) || (expectedScope && (!vscode.workspace.isTrusted || scope?.fingerprint !== expectedScope))) {
       throw new Error('Exact external read authorization is missing or changed. / 缺少精确外部读取授权或授权已变化。');
     }
-  }
-
-  public authorizeReviewedExternalUri(uri: string): void {
-    void uri;
-    throw new Error('External access requires explicit user authorization; a reviewer cannot grant it.');
   }
 
   public async listWorkspaceFiles(language: KeepseekLanguage): Promise<string> {
@@ -531,7 +520,7 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
     try {
       await this.assertReadScope(input.path, expectedScope);
       const uri = this.resolveWorkspacePathUri(input.path);
-      const range = this.normalizeRangeInput(input.startLine, input.endLine, input.maxBytes);
+      const range = normalizeWorkspaceReadRange(input.startLine, input.endLine, input.maxBytes);
       const data = await this.readWorkspaceFileRangeData(
         uri,
         range.startLine,
@@ -937,33 +926,6 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
     }
   }
 
-  private normalizeRangeInput(startLine: number, endLine: number, maxBytes: number | undefined): {
-    startLine: number;
-    endLine: number;
-    maxBytes: number;
-    lineRangeTruncated: boolean;
-  } {
-    if (!Number.isFinite(startLine) || !Number.isFinite(endLine)) {
-      throw new Error('startLine and endLine must be finite numbers.');
-    }
-    const normalizedStartLine = Math.floor(startLine);
-    const requestedEndLine = Math.floor(endLine);
-    if (normalizedStartLine < 1) {
-      throw new Error('startLine must be greater than or equal to 1.');
-    }
-    if (requestedEndLine < normalizedStartLine) {
-      throw new Error('endLine must be greater than or equal to startLine.');
-    }
-
-    const effectiveEndLine = Math.min(requestedEndLine, normalizedStartLine + MAX_RANGE_READ_LINES - 1);
-    return {
-      startLine: normalizedStartLine,
-      endLine: effectiveEndLine,
-      maxBytes: normalizeRangeReadMaxBytes(maxBytes),
-      lineRangeTruncated: effectiveEndLine < requestedEndLine
-    };
-  }
-
   private async readWorkspaceFileRangeData(
     uri: vscode.Uri,
     startLine: number,
@@ -1168,6 +1130,33 @@ function normalizeSearchResultLimit(value: number | undefined): number {
     return DEFAULT_SEARCH_RESULT_LIMIT;
   }
   return Math.min(Math.max(Math.floor(value), 1), MAX_SEARCH_RESULT_LIMIT);
+}
+
+export function normalizeWorkspaceReadRange(startLine: number, endLine: number, maxBytes: number | undefined): {
+  startLine: number;
+  endLine: number;
+  maxBytes: number;
+  lineRangeTruncated: boolean;
+} {
+  if (!Number.isFinite(startLine) || !Number.isFinite(endLine)) {
+    throw new Error('startLine and endLine must be finite numbers.');
+  }
+  const normalizedStartLine = Math.floor(startLine);
+  const requestedEndLine = Math.floor(endLine);
+  if (normalizedStartLine < 1) {
+    throw new Error('startLine must be greater than or equal to 1.');
+  }
+  if (requestedEndLine < normalizedStartLine) {
+    throw new Error('endLine must be greater than or equal to startLine.');
+  }
+
+  const effectiveEndLine = Math.min(requestedEndLine, normalizedStartLine + MAX_RANGE_READ_LINES - 1);
+  return {
+    startLine: normalizedStartLine,
+    endLine: effectiveEndLine,
+    maxBytes: normalizeRangeReadMaxBytes(maxBytes),
+    lineRangeTruncated: effectiveEndLine < requestedEndLine
+  };
 }
 
 function normalizeRangeReadMaxBytes(value: number | undefined): number {

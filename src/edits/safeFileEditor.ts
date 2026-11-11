@@ -6,8 +6,9 @@ import * as vscode from 'vscode';
 import { getConfiguredPatchSettings } from '../shared/config';
 import { formatBytes } from '../shared/format';
 import { decodeRollbackSafeUtf8Text } from '../shared/safeTextSnapshot';
+import { findSensitiveEvidence } from '../approvals/approvalPolicy';
 import { assertOperationPath } from '../approvals/authorization/protectedTargets';
-import { canonicalPath } from '../approvals/authorization/pathScope';
+import { assertCleanDraftEditTarget, findDraftEditTargetTabs, inspectDraftEditTarget } from '../approvals/authorization/editTargets';
 import { shouldSkipTextUri } from '../shared/textFileGuards';
 import type { ChangeCheckpoint, DraftEdit, FileContentIdentity, TextPatchV1 } from '../shared/types';
 import { ChangeArtifactStore } from './changeArtifactStore';
@@ -61,13 +62,16 @@ export class SafeFileEditor {
     this.artifactStore = store;
   }
 
+  /** Validate the immutable proposed output without reading the target. */
+  public async preflightDraftEditOutput(edit: DraftEdit, scanSensitive = false): Promise<void> {
+    await this.assertSafeDraftOutput(edit, scanSensitive);
+  }
+
   /** Deterministic hard checks used before a model review. No write occurs. */
   public async preflightDraftEdit(edit: DraftEdit, approval?: DelegatedEditApproval): Promise<DraftEditPreflight> {
     const uri = vscode.Uri.parse(edit.uri);
     await this.assertCommonPreconditions(uri, edit, approval);
     if (edit.kind === 'text_patch_v1') {
-      validateCanonicalTextPatch(edit.patch, configuredTextPatchLimits());
-      if (edit.patch.targetUri !== edit.uri) throw new Error('Patch target URI does not match its DraftEdit.');
       const current = await this.readIdentity(uri, edit.patch.base.sizeBytes, true);
       this.assertByteIdentity(edit.patch.base, current, edit.label);
       return { originalText: '', originalTextHash: edit.patch.base.sha256, originalSize: edit.patch.base.sizeBytes };
@@ -92,6 +96,7 @@ export class SafeFileEditor {
     let checkpoint: ChangeCheckpoint | undefined;
     let mutationStarted = false;
     try {
+      await approval?.verifyScope?.();
       await this.assertCommonPreconditions(uri, edit, approval);
       const snapshot = edit.kind === 'text_patch_v1'
         ? await this.readPatchSnapshot(uri, edit)
@@ -134,7 +139,6 @@ export class SafeFileEditor {
   public async revertCheckpoint(checkpoint: ChangeCheckpoint, journal?: ChangeCheckpointJournal, skillScaffold = false): Promise<ChangeCheckpoint> {
     const uri = vscode.Uri.parse(checkpoint.uri);
     await this.assertCheckpointTarget(uri, checkpoint, skillScaffold && !checkpoint.originalExists);
-    this.assertNoDirtyOpenEditor(uri, checkpoint.label);
     const state = await this.classifyCheckpoint(checkpoint);
     if (state !== 'result') throw new Error(this.t('cannotRevertChangedAgentFile', { label: checkpoint.label }));
 
@@ -217,24 +221,26 @@ export class SafeFileEditor {
     if (edit.kind === 'move_v1') {
       const target = vscode.Uri.parse(edit.targetUri);
       this.assertWorkspaceTarget(target, edit.label, approval?.authorizedUris?.includes(target.toString()) ? target.toString() : undefined);
-      this.assertNoDirtyOpenEditor(target, edit.label);
-      if ((await this.readIdentity(target)).exists) throw new Error(this.t('cannotApplyCreatedFileExists', { label: edit.label }));
+      const metadata = await inspectDraftEditTarget(target, true);
+      this.assertNoDirtyOpenEditor(target, edit.label, metadata.canonical);
+      const exists = target.scheme === 'file' ? !!metadata.fileIdentity : (await this.readIdentity(target)).exists;
+      if (exists) throw new Error(this.t('cannotApplyCreatedFileExists', { label: edit.label }));
     }
-    await this.assertNoSymlinkEscape(uri, edit.action === 'create', skillScaffold);
-    if (edit.kind === 'move_v1') await this.assertNoSymlinkEscape(vscode.Uri.parse(edit.targetUri), true);
-    this.assertNoDirtyOpenEditor(uri, edit.label);
+    const metadata = await inspectDraftEditTarget(uri, edit.action === 'create', skillScaffold);
+    this.assertNoDirtyOpenEditor(uri, edit.label, metadata.canonical);
     await this.assertSafeDraftOutput(edit);
   }
 
   private async assertCheckpointTarget(uri: vscode.Uri, checkpoint: ChangeCheckpoint, skillScaffold: boolean): Promise<void> {
     if (!vscode.workspace.isTrusted) throw new Error('DraftEdit revert requires a trusted workspace.');
     this.assertWorkspaceTarget(uri, checkpoint.label, checkpoint.authorizedExternalUri, skillScaffold);
-    await this.assertNoSymlinkEscape(uri, true, skillScaffold);
+    const source = await inspectDraftEditTarget(uri, true, skillScaffold);
+    this.assertNoDirtyOpenEditor(uri, checkpoint.label, source.canonical);
     if (checkpoint.targetUri) {
       const target = vscode.Uri.parse(checkpoint.targetUri);
       this.assertWorkspaceTarget(target, checkpoint.label, checkpoint.authorizedExternalUri);
-      await this.assertNoSymlinkEscape(target, true);
-      this.assertNoDirtyOpenEditor(target, checkpoint.label);
+      const metadata = await inspectDraftEditTarget(target, true);
+      this.assertNoDirtyOpenEditor(target, checkpoint.label, metadata.canonical);
     }
   }
 
@@ -245,8 +251,6 @@ export class SafeFileEditor {
   }
 
   private async readPatchSnapshot(uri: vscode.Uri, edit: Extract<DraftEdit, { kind: 'text_patch_v1' }>): Promise<FileSnapshot> {
-    validateCanonicalTextPatch(edit.patch, configuredTextPatchLimits());
-    if (edit.patch.targetUri !== edit.uri) throw new Error('Patch target URI does not match its DraftEdit.');
     const current = await this.readIdentity(uri, edit.patch.base.sizeBytes, true);
     return { exists: current.exists, byteIdentity: current.identity };
   }
@@ -294,12 +298,20 @@ export class SafeFileEditor {
     }
   }
 
-  private async assertSafeDraftOutput(edit: DraftEdit): Promise<void> {
+  private async assertSafeDraftOutput(edit: DraftEdit, scanSensitive = false): Promise<void> {
     if (edit.kind === 'text_patch_v1') {
       validateCanonicalTextPatch(edit.patch, configuredTextPatchLimits());
+      if (edit.patch.targetUri !== edit.uri) throw new Error('Patch target URI does not match its DraftEdit.');
+      if (scanSensitive && edit.patch.hunks.some(hunk => findSensitiveEvidence(hunk.oldText) || findSensitiveEvidence(hunk.newText))) {
+        throw new Error('The proposed edit contains suspected credential material. / 草稿编辑包含疑似凭据材料。');
+      }
       return;
     }
-    if (edit.action === 'delete' || edit.kind === 'move_v1') return;
+    if (edit.kind === 'move_v1') {
+      if (edit.sourceUri !== edit.uri || edit.targetUri === edit.uri) throw new Error('DraftEdit move endpoints do not match the proposed operation.');
+      return;
+    }
+    if (edit.action === 'delete') return;
     const bytes = await this.resolveDraftOutputBytes(edit);
     const text = decodeRollbackSafeUtf8Text(bytes);
     if (text === undefined) throw new Error(this.t('cannotWriteUnreadableFile', { label: edit.label }));
@@ -308,6 +320,9 @@ export class SafeFileEditor {
     const result = getDraftEditResult(edit);
     if (result && (result.sizeBytes !== bytes.byteLength || result.sha256 !== hashBytes(bytes))) {
       throw new Error('Full-text DraftEdit result hash does not match its content.');
+    }
+    if (scanSensitive && findSensitiveEvidence(text)) {
+      throw new Error('The proposed edit contains suspected credential material. / 草稿编辑包含疑似凭据材料。');
     }
   }
 
@@ -540,10 +555,8 @@ export class SafeFileEditor {
   }
 
 
-  private assertNoDirtyOpenEditor(uri: vscode.Uri, label: string): void {
-    const dirtyDocument = vscode.workspace.textDocuments.some((document) => this.isSameUri(document.uri, uri) && document.isDirty);
-    const dirtyTab = this.findOpenTabs(uri).some((tab) => tab.isDirty);
-    if (dirtyDocument || dirtyTab) throw new Error(this.t('cannotApplyDirtyDraftEdit', { label }));
+  private assertNoDirtyOpenEditor(uri: vscode.Uri, label: string, canonical?: string): void {
+    assertCleanDraftEditTarget(uri, this.t('cannotApplyDirtyDraftEdit', { label }), canonical);
   }
 
   private assertWorkspaceTarget(uri: vscode.Uri, label: string, authorizedUri?: string, skillScaffold = false): void {
@@ -551,27 +564,6 @@ export class SafeFileEditor {
     if (authorizedUri === uri.toString() && vscode.workspace.isTrusted) return;
     if (vscode.workspace.getWorkspaceFolder(uri)) return;
     throw new Error(this.t('cannotApplyOutsideWorkspace', { label }));
-  }
-
-  private async assertNoSymlinkEscape(uri: vscode.Uri, allowMissing: boolean, skillScaffold = false): Promise<void> {
-    if (uri.scheme !== 'file') return;
-    assertOperationPath(await canonicalPath(uri.fsPath), true, skillScaffold);
-    const folder = vscode.workspace.getWorkspaceFolder(uri);
-    let targetReal: string;
-    try {
-      const info = await fs.lstat(uri.fsPath);
-      if (info.isSymbolicLink()) throw new Error('DraftEdit targets cannot be symbolic links.');
-      targetReal = await fs.realpath(uri.fsPath);
-    } catch (error) {
-      if (!allowMissing || !isFileNotFoundError(error)) throw error;
-      targetReal = await resolveMissingRealPath(uri.fsPath);
-    }
-    if (!folder) return;
-    const rootReal = await fs.realpath(folder.uri.fsPath);
-    const relative = path.relative(rootReal, targetReal);
-    if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-      throw new Error('DraftEdit target escapes the workspace through a symbolic link.');
-    }
   }
 
   private findOpenTextTabs(uri: vscode.Uri): vscode.Tab[] {
@@ -591,35 +583,17 @@ export class SafeFileEditor {
   }
 
   private findOpenTabs(uri: vscode.Uri): vscode.Tab[] {
-    const tabs: vscode.Tab[] = [];
-    for (const group of vscode.window.tabGroups.all) for (const tab of group.tabs) {
-      if (this.tabReferencesUri(tab, uri)) tabs.push(tab);
-    }
-    return tabs;
-  }
-
-  private tabReferencesUri(tab: vscode.Tab, uri: vscode.Uri): boolean {
-    const input = tab.input;
-    if (input instanceof vscode.TabInputText || input instanceof vscode.TabInputCustom || input instanceof vscode.TabInputNotebook) {
-      return this.isSameUri(input.uri, uri);
-    }
-    if (input instanceof vscode.TabInputTextDiff || input instanceof vscode.TabInputNotebookDiff) {
-      return this.isSameUri(input.original, uri) || this.isSameUri(input.modified, uri);
-    }
-    return false;
-  }
-
-  private isSameUri(left: vscode.Uri, right: vscode.Uri): boolean {
-    return left.toString() === right.toString();
+    return findDraftEditTargetTabs(target => target.toString() === uri.toString());
   }
 }
 
 async function hashLocalFile(filePath: string): Promise<FileContentIdentity> {
-  const handle = await fs.open(filePath, 'r');
+  const handle = await fs.open(filePath, fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK ?? 0) | (fsConstants.O_NOFOLLOW ?? 0));
   const hash = createHash('sha256');
   let sizeBytes = 0;
   const buffer = Buffer.allocUnsafe(256 * 1024);
   try {
+    if (!(await handle.stat()).isFile()) throw new Error('DraftEdit target is not a regular file.');
     for (;;) {
       const { bytesRead } = await handle.read(buffer, 0, buffer.byteLength, null);
       if (!bytesRead) break;
@@ -687,23 +661,6 @@ function configuredTextPatchLimits() {
     maxInlineBytes: settings.maxInlineBytes
   };
 }
-
-async function resolveMissingRealPath(filePath: string): Promise<string> {
-  const missing: string[] = [];
-  let cursor = filePath;
-  for (;;) {
-    try {
-      return path.join(await fs.realpath(cursor), ...missing.reverse());
-    } catch (error) {
-      if (!isFileNotFoundError(error)) throw error;
-      const parent = path.dirname(cursor);
-      if (parent === cursor) throw error;
-      missing.push(path.basename(cursor));
-      cursor = parent;
-    }
-  }
-}
-
 
 function isFileNotFoundError(error: unknown): boolean {
   if (error instanceof vscode.FileSystemError) return error.code === 'FileNotFound';

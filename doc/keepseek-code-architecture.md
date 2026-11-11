@@ -97,7 +97,7 @@ Webview 是字符串生成的页面，不是独立前端应用。`input/composer
 | [approvalMode.ts](../src/agent/approvalMode.ts) | ask/delegate 归一化、稳定 user-tail、易失性 `DelegatedApprovalQueue` |
 | [approvalReviewTypes.ts](../src/approvals/approvalReviewTypes.ts)、[approvalReviewHash.ts](../src/approvals/approvalReviewHash.ts)、[approvalReviewSurface.ts](../src/approvals/approvalReviewSurface.ts) | 精确 action、完整 canonical hash、有界 review 面 |
 | [authorization/](../src/approvals/authorization/index.ts) | 信任、外部精确范围、实际程序/环境身份、command effects、实时 preflight 和最终复核 |
-| [approvalPolicy.ts](../src/approvals/approvalPolicy.ts)、[approvalReviewer.ts](../src/approvals/approvalReviewer.ts)、[oneShotTextRequest.ts](../src/approvals/oneShotTextRequest.ts) | 宿主策略/独立无工具 reviewer、JSON 决定、来源解析与真实记录 |
+| [approvalPolicy.ts](../src/approvals/approvalPolicy.ts)、[approvalReviewer.ts](../src/approvals/approvalReviewer.ts)、[oneShotTextRequest.ts](../src/approvals/oneShotTextRequest.ts) | 独立无工具 reviewer、v6 决定、来源解析、占位认领与真实记录 |
 | [manualApproval.ts](../src/approvals/manualApproval.ts)、[approvalProcessing.ts](../src/approvals/approvalProcessing.ts) | runtime 绑定的单次人工生命周期；`createApprovalProcessing()` / `isCompletedApprovalBatch()` 管批次初始化与幂等判定、依赖及有界补规划状态 |
 | [approvalReviewStore.ts](../src/approvals/approvalReviewStore.ts)、[approvalCircuitBreaker.ts](../src/approvals/approvalCircuitBreaker.ts) | append-only 审计、消费绑定、拒绝熔断 |
 | [draftEdit.ts](../src/edits/draftEdit.ts)、[textPatch.ts](../src/edits/textPatch.ts) | 版本化 DraftEdit 与 canonical byte hunks；URI/base/result hash/size/encoding/EOL 是 Apply 权威 |
@@ -106,7 +106,7 @@ Webview 是字符串生成的页面，不是独立前端应用。`input/composer
 | [draftRunAuthorization.ts](../src/runs/draftRunAuthorization.ts)、[draftRunExecutor.ts](../src/runs/draftRunExecutor.ts) | draftRunId+specHash 绑定的短时单次 permit；`spawn(..., { shell:false })`、取消/超时 |
 | [gitReleaseBatch.ts](../src/runs/gitReleaseBatch.ts)、[gitReleaseAuthorization.ts](../src/runs/gitReleaseAuthorization.ts)、[localGitCommit.ts](../src/runs/localGitCommit.ts) | Git 本地提交/发布的精确任务意图、依赖批次、证据与范围；不成为另一条执行通道 |
 
-ask 由用户逐项/批量批准；delegate 对符合宿主规则的常规操作先写 `host_policy`，其余可核实动作自动交独立 reviewer。approve、needs_user、deny、unavailable 含义不同；有界补证后仍无法判断时，仅宿主创建绑定 session/root task/segment/target/hash/scope/runtime 的单次人工请求。安全拒绝不能被人工强行放行。人工批准保持模式，不扩大永久权限，执行前仍复核。
+ask 由用户逐项或批量批准，零审批模型请求。delegate 的受审文件操作、DraftRun、固定验证和外部读取先过宿主安全检查，再由独立 reviewer 审查精确操作。宿主可对仍有执行资格且需用户决定的操作创建单次请求，绑定 session/root task/segment/target/hash/scope/runtime。审批记录、外部范围授权和执行许可分别核验。历史 `host_policy` 仅用于审计展示。安全拒绝继续约束两种模式。
 
 所有路径保留信任、外部 URI/cwd、脏编辑器、hash/状态、取消等硬检查。进程使用扩展宿主账号权限，无操作系统沙箱。重启只恢复说明与可证明状态，不恢复队列、批准或 permit；关闭 Webview 保留人工等待。决定和真实结果只追加到下一条真实 user 的固定 tail。
 

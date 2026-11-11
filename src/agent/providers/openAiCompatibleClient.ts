@@ -91,7 +91,7 @@ export class OpenAICompatibleClient implements ProviderClient {
       lastResult = result;
       if (!result.ok) request.callbacks?.onAttemptReset?.();
       await request.onAttemptResult?.({ attemptIndex: localAttempt, result: finish(result) });
-      if (result.ok || !result.retryable) return finish(result);
+      if (result.ok || !result.retryable || (request.preserveRetryability && maxRetries === 0)) return finish(result);
       if (initialAttempts + physicalAttemptCount > maxRetries) break;
       const delayMs = Math.max(result.retryAfterMs ?? 0, Math.min(60_000,
         Math.max(0, frozenConfig.requestRetryBaseMs) * (2 ** absoluteAttempt) * (0.8 + Math.random() * 0.4)));

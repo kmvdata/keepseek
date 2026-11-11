@@ -39,6 +39,40 @@ function readyView(language = 'en') {
   return view;
 }
 
+test('exact approval presents combined scope, preserves focus, and posts one response across rerenders', () => {
+  const view = readyView('en');
+  const manual = { id: 'exact-approval', sessionId: 'A', label: 'Read reference.txt', reason: 'External scope required',
+    authorizationTargets: ['file:///outside/reference.txt'],
+    request: { exactAction: { kind: 'external_file_access', uri: 'file:///outside/reference.txt', access: 'read' } } };
+  view.receive({ type: 'state', revision: 2, state: { approvalMode: 'delegate', manualToolApproval: manual } });
+  const transcript = view.element('transcript');
+  const approveButton = () => transcript.querySelector('button[data-manual-approval-action="approve"]');
+  assert.equal(view.state.startup.interactiveReady, true);
+  assert.equal(approveButton()?.textContent, 'Authorize and run once');
+  assert.equal(transcript.querySelector('.approval-exact-scope li')?.textContent, manual.authorizationTargets[0]);
+  assert.match(transcript.querySelector('.approval-exact-payload')?.textContent ?? '', /"access": "read"/u);
+  approveButton()?.focus();
+  view.receive({ type: 'statePatch', sessionId: 'A', revision: 3, state: { language: 'zh-CN' } });
+  assert.equal(approveButton()?.textContent, '授权并仅执行一次');
+  assert.equal(view.document.activeElement, approveButton());
+  const originalButton = approveButton()!;
+  originalButton.click();
+  view.receive({ type: 'statePatch', sessionId: 'A', revision: 4, state: { isBusy: true } });
+  assert.equal(approveButton()?.disabled, true);
+  originalButton.dispatchEvent({ type: 'click' });
+  approveButton()?.click();
+  const responses = view.posted.filter(message => message.type === 'resolveValidationApproval');
+  assert.equal(responses.length, 1);
+  assert.equal(responses[0].id, manual.id);
+  assert.equal(responses[0].approve, true);
+
+  const restarted = readyView();
+  restarted.receive({ type: 'state', revision: 2, state: { pendingApproval: { status: 'interrupted', label: manual.label, reason: manual.reason } } });
+  assert.match(restarted.element('transcript').textContent, /Approval processing was interrupted/u);
+  assert.equal(restarted.element('transcript').querySelector('button[data-manual-approval-action]'), null);
+  assert.doesNotMatch(restarted.element('transcript').textContent, /file:\/\/\/outside/u);
+});
+
 for (const platform of ['Win32', 'Linux x86_64', 'MacIntel']) {
   test(`${platform} uses the same Emacs clipboard commands in both editors before host dispatch`, () => {
     const view = createWebviewDomHarness(platform);

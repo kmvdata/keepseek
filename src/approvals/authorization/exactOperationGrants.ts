@@ -21,6 +21,9 @@ export class ExactOperationGrants {
   public matches(identity: OperationIdentity, scope: OperationScope): boolean {
     return this.grants.get(identityKey(identity)) === scopeKey(scope);
   }
+  public revoke(identity: OperationIdentity, scope: OperationScope): void {
+    if (this.matches(identity, scope)) this.grants.delete(identityKey(identity));
+  }
   public clear(): void { this.grants.clear(); }
 }
 

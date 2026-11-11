@@ -40,6 +40,8 @@ export interface ProviderClientRequest {
   signal?: AbortSignal;
   callbacks?: AgentRunCallbacks;
   runDeadlineAt?: number;
+  /** The caller owns the one allowed retry and needs the transport classification. */
+  preserveRetryability?: boolean;
   trace?: AgentInteractionTrace;
   requestId?: string;
   /** Physical sends already dispatched for this logical model round. */

@@ -684,12 +684,18 @@ function normalizeNonNegativeNumber(value: unknown, fallback: number): number {
   return Number.isFinite(number) && number >= 0 ? number : fallback;
 }
 
+export class InvalidApprovalReviewerSettingError extends Error {
+  public constructor(public readonly setting: unknown) {
+    super('Invalid approval model settings. / 审批模型配置无效。');
+  }
+}
+
 /** User settings only. Project settings must not select a review destination. */
 export function getAutoApprovalReviewerSetting(): Pick<import('../agent/subagents/types').SubagentModelSetting, 'mode' | 'sourceId' | 'modelId'> {
   const setting = vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
     .inspect?.<{ mode?: unknown; sourceId?: unknown; modelId?: unknown }>('autoApprovalReviewer')?.globalValue;
   if (setting !== undefined && (!setting || (setting.mode !== 'follow-main' && setting.mode !== 'fixed'))) {
-    throw new Error('Invalid approval model settings. / 审批模型 配置无效。');
+    throw new InvalidApprovalReviewerSettingError(setting);
   }
   return {
     mode: setting?.mode === 'fixed' ? 'fixed' : 'follow-main',

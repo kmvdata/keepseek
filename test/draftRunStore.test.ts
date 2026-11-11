@@ -23,7 +23,7 @@ test('delegated DraftRun records its approval source and consumes a single immut
   await withDraftRunFixture(async ({ workspaceRoot, store, executor, approvalReviews }) => {
     const proposal = createProposal(workspaceRoot);
     store.addProposals({ proposals: [proposal], agentRunId: 'r', sessionId: 's' });
-    const approvalRecord = await addHostApproval(approvalReviews, proposal, 's', 'r');
+    const approvalRecord = await addReviewerApproval(approvalReviews, proposal, 's', 'r');
     await store.approveAndRun(proposal.id, new Set(), { delegatedApproval: () => true, approvalRecord });
     await store.approveAndRun(proposal.id, new Set(), { delegatedApproval: () => true, approvalRecord });
     assert.equal(executor.executeCount, 1);
@@ -36,7 +36,7 @@ test('revoking delegation while persisting approval prevents process creation', 
   await withDraftRunFixture(async ({ workspaceRoot, store, executor, approvalReviews }) => {
     const proposal = createProposal(workspaceRoot);
     store.addProposals({ proposals: [proposal], agentRunId: 'r', sessionId: 's' });
-    const approvalRecord = await addHostApproval(approvalReviews, proposal, 's', 'r');
+    const approvalRecord = await addReviewerApproval(approvalReviews, proposal, 's', 'r');
     let checks = 0;
     const result = await store.approveAndRun(proposal.id, new Set(), {
       delegatedApproval: () => ++checks < 3,
@@ -52,7 +52,7 @@ test('scope is rechecked after persisted approval consumption, before any proces
   await withDraftRunFixture(async ({ workspaceRoot, store, executor, approvalReviews }) => {
     const proposal = createProposal(workspaceRoot);
     store.addProposals({ proposals: [proposal], agentRunId: 'r', sessionId: 's' });
-    const approvalRecord = await addHostApproval(approvalReviews, proposal, 's', 'r');
+    const approvalRecord = await addReviewerApproval(approvalReviews, proposal, 's', 'r');
     let scopeValid = true;
     const consume = approvalReviews.consumeMatchingApproval.bind(approvalReviews);
     approvalReviews.consumeMatchingApproval = async (...args) => {
@@ -624,7 +624,7 @@ async function withDraftRunFixture(run: (fixture: {
   }
 }
 
-async function addHostApproval(
+async function addReviewerApproval(
   store: ApprovalReviewStore,
   proposal: DraftRunProposal,
   sessionId: string,
@@ -639,14 +639,16 @@ async function addHostApproval(
     actionHash: proposal.specHash,
     policyVersion: APPROVAL_POLICY_VERSION,
     approvalMode: 'delegate',
-    approvalSource: 'host_policy',
-    reviewerSourceId: '',
-    reviewerModelId: '',
-    reviewerProvider: 'host_policy',
+    scopeFingerprint: 'b'.repeat(64),
+    approvalSource: 'auto_approval_review',
+    reviewerConfigFingerprint: 'a'.repeat(64),
+    reviewerSourceId: 'test-source',
+    reviewerModelId: 'test-model',
+    reviewerProvider: 'openai-compatible',
     decision: 'approve',
-    risk: 'high',
-    rationale: 'Automatically approved without model review.',
-    policyRules: ['host_auto_approval']
+    risk: 'low',
+    rationale: 'Approved for this immutable test operation.',
+    policyRules: ['direct_user_goal']
   });
   return {
     reviewId: record.reviewId,
@@ -657,7 +659,9 @@ async function addHostApproval(
     actionKind: 'draft_run_execute',
     actionHash: proposal.specHash,
     policyVersion: APPROVAL_POLICY_VERSION,
-    expectedSource: 'host_policy',
+    expectedSource: 'auto_approval_review',
+    reviewerConfigFingerprint: record.reviewerConfigFingerprint,
+    scopeFingerprint: record.scopeFingerprint,
     approvalMode: 'delegate',
     workspaceTrusted: true
   };

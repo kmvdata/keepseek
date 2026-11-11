@@ -593,6 +593,7 @@ export function getScript(): string {
     const pendingDraftRunActions = new Set();
     let pendingDraftRunBatchSnapshot = '';
     let retainedDraftRunBatchFocus = null;
+    let pendingManualApprovalDecisionId = '';
     let settingsMenuOpen = false;
     let backgroundRunDialogOpen = false;
     let dismissedBackgroundRunId = '';
@@ -1595,6 +1596,7 @@ ${conversationsMenuDismissFragment.source}
       if (!focusedAction) return null;
       var sameTarget = function(button) {
         if (button.disabled) return false;
+        if (focusedAction.manualApprovalId) return button.dataset.manualApprovalId === focusedAction.manualApprovalId;
         // Batch controls must never fall back to a member card or a later approval.
         if (focusedAction.operationId) return button.dataset.operationId === focusedAction.operationId;
         if (focusedAction.batchSnapshotId) return button.dataset.batchSnapshotId === focusedAction.batchSnapshotId;
@@ -1604,7 +1606,7 @@ ${conversationsMenuDismissFragment.source}
         });
       };
       return buttons.find(function(button) {
-        return sameTarget(button) && ['draftRunAction', 'editAction', 'changeSetAction', 'planAction'].some(function(key) {
+        return sameTarget(button) && ['draftRunAction', 'editAction', 'changeSetAction', 'planAction', 'manualApprovalAction'].some(function(key) {
           return focusedAction[key] && button.dataset[key] === focusedAction[key];
         });
       }) || buttons.find(sameTarget) || null;
@@ -3102,7 +3104,8 @@ ${conversationsSessionListFragment.source}
       var externalAuthorized = !spec.externalCwd || (Array.isArray(state.authorizedExternalExecutionUris)
         && state.authorizedExternalExecutionUris.includes(String(spec.cwdUri || '')));
       var needsAuthorization = ['needs_authorization', 'external_authorization_required'].includes(target?.status);
-      var approvalBlocked = ['hard_blocked', 'identity_mismatch', 'missing'].includes(target?.status);
+      var approvalBlocked = ['hard_blocked', 'identity_mismatch', 'missing'].includes(target?.status)
+        || isApprovalSafetyDenied(draftRun.approvalReview);
       var recoveryOutcome = statusValue === 'needs_replan' && notDispatched ? draftRun.commandRecoveryOutcome : undefined;
       var recoveryLabel = recoveryOutcome?.kind === 'repeated' ? 'draftRunCorrectionStopped'
         : recoveryOutcome?.kind === 'git_tag_verified' ? 'draftRunTagTargetVerified' : undefined;
@@ -3152,8 +3155,8 @@ ${conversationsSessionListFragment.source}
       if (typeof draftRun.gitQueryResult?.predicate === 'boolean') {
         meta.textContent += ' · ' + t(draftRun.gitQueryResult.predicate ? 'draftRunPredicateTrue' : 'draftRunPredicateFalse');
       }
-      if (draftRun.authorizationSource === 'delegated_approver') {
-        meta.textContent += ' · ' + t('approvalSourceLabel') + ': ' + getApprovalSourceLabel(draftRun.approvalReview);
+      if (draftRun.authorizationSource === 'delegated_approver' && !draftRun.approvalReview) {
+        meta.textContent += ' · ' + t('approvalSourceLabel') + ': ' + t('approvalSourceDelegatedExecution');
       } else if (draftRun.authorizationSource === 'user_click') {
         meta.textContent += ' · ' + t('approvalSourceLabel') + ': ' + t('approvalSourceUser');
       }
@@ -3335,7 +3338,8 @@ ${conversationsSessionListFragment.source}
         var unauthorized = item.runs.filter(function(run) {
           return run?.spec?.externalCwd && !(state.authorizedExternalExecutionUris || []).includes(run.spec.cwdUri);
         });
-        approve.disabled = approve.disabled || Boolean(pendingDraftRunBatchSnapshot) || unauthorized.length > 0;
+        approve.disabled = approve.disabled || Boolean(pendingDraftRunBatchSnapshot) || unauthorized.length > 0
+          || item.runs.some(function(run) { return isApprovalSafetyDenied(run?.approvalReview); });
         var hint = document.createElement('div');
         hint.className = 'draft-run-batch-hint';
         hint.textContent = t('draftRunBatchHint') + (unauthorized.length
@@ -3415,7 +3419,9 @@ ${conversationsSessionListFragment.source}
         : recoverable ? 'approvalInterrupted' : 'approvalAutoWaiting';
       if (target?.dependency) appendApprovalStateNote(notices, formatApprovalDependency(target.dependency));
       if (!target?.dependency || target.reason) {
-        var reason = getApprovalDisplayReason(target?.reason) || (denied && review ? review.rationale : undefined);
+        var reason = getApprovalDisplayReason(target?.reason)
+          || (denied && review ? review.rationale : undefined)
+          || (review?.reviewState ? getApprovalDecisionLabel(review) : undefined);
         appendApprovalStateNote(notices, reason || t(fallback), !reason && !recoverable);
       }
       if (recoverable && !state.isBusy && !denied
@@ -3641,7 +3647,9 @@ ${conversationsSessionListFragment.source}
       setActions.className = 'change-set-actions';
       if (!historical) {
         if (applicableFiles.length >= 2 && state.approvalMode === 'ask') {
-          setActions.append(createChangeSetActionButton(t('changeSetApplyAll', { count: applicableFiles.length }), 'applyChangeSet', changeSet.id, false));
+          if (!applicableFiles.some(function(file) { return isApprovalSafetyDenied(file.approvalReview); })) {
+            setActions.append(createChangeSetActionButton(t('changeSetApplyAll', { count: applicableFiles.length }), 'applyChangeSet', changeSet.id, false));
+          }
           setActions.append(createChangeSetActionButton(t('changeSetDiscardAll'), 'discardChangeSet', changeSet.id, true));
         }
         if (revertibleFiles.length >= 2) {
@@ -3702,8 +3710,9 @@ ${conversationsSessionListFragment.source}
         actions.append(createEditActionButton(t('previewDiff'), 'openDraftDiff', edit.id, true));
       }
       if (allowActions && (edit.status === 'pending' || edit.status === 'apply_failed' || edit.status === 'interrupted')) {
-        if (state.approvalMode === 'ask') actions.append(createEditActionButton(t('apply'), 'applyDraftEdit', edit.id, false));
-        else appendAutomaticApprovalState(chip, actions, edit.id, edit.approvalReview);
+        if (state.approvalMode === 'ask') {
+          if (!isApprovalSafetyDenied(edit.approvalReview)) actions.append(createEditActionButton(t('apply'), 'applyDraftEdit', edit.id, false));
+        } else appendAutomaticApprovalState(chip, actions, edit.id, edit.approvalReview);
         actions.append(createEditActionButton(t('discard'), 'discardDraftEdit', edit.id, true));
       } else if (allowActions && (edit.status === 'applied' || edit.status === 'revert_failed')) {
         actions.append(createEditActionButton(t('revert'), 'revertDraftEdit', edit.id, true));
@@ -3714,19 +3723,29 @@ ${conversationsSessionListFragment.source}
 
     function createApprovalReviewSummary(review) {
       var summary = document.createElement('div');
-      summary.className = 'approval-review-summary approval-review-' + String(review.decision || 'unavailable');
-      var source = getApprovalSourceLabel(review);
-      summary.textContent = [
-        t('approvalSourceLabel') + ': ' + source,
-        review.reviewerModelId ? t('approvalReviewerModel') + ': ' + (review.reviewerSourceId || '') + ' / ' + review.reviewerModelId : '',
-        t('approvalReviewDecision') + ': ' + getApprovalDecisionLabel(review.decision, review.approvalSource),
-        t('approvalReviewRisk') + ': ' + getApprovalRiskLabel(review.risk),
+      var status = review.reviewState === 'in_progress' ? 'in-progress' : review.decision || 'unavailable';
+      summary.className = 'approval-review-summary approval-review-' + status;
+      summary.textContent = formatApprovalReviewDetails(review);
+      return summary;
+    }
+
+    function formatApprovalReviewDetails(review) {
+      var reviewerAttempted = review.decision !== 'unavailable' || !review.reviewState
+        || ['service_unavailable', 'timeout', 'invalid_response'].includes(review.reviewState);
+      var model = review.approvalSource === 'auto_approval_review' && reviewerAttempted && review.reviewerModelId
+        ? [review.reviewerSourceId, review.reviewerModelId].filter(Boolean).join(' / ') : '';
+      var risk = review.risk && review.decision !== 'unavailable' && !(review.approvalSource === 'local_policy' && review.reviewState)
+        ? getApprovalRiskLabel(review.risk) : '';
+      return [
+        t('approvalSourceLabel') + ': ' + getApprovalSourceLabel(review),
+        model ? t('approvalReviewerModel') + ': ' + model : '',
+        t('approvalReviewDecision') + ': ' + getApprovalDecisionLabel(review),
+        risk ? t('approvalReviewRisk') + ': ' + risk : '',
         t('approvalReviewReason') + ': ' + String(review.rationale || ''),
         Array.isArray(review.affectedTargets) && review.affectedTargets.length ? t('approvalAffectedTargets') + ': ' + review.affectedTargets.join(', ') : '',
         review.saferAlternative ? t('approvalSaferAlternative') + ': ' + review.saferAlternative : '',
         t('approvalReviewId') + ': ' + String(review.reviewId || '')
       ].filter(Boolean).join(' · ');
-      return summary;
     }
 
     function createApprovalSourceSummary(source) {
@@ -3737,10 +3756,17 @@ ${conversationsSessionListFragment.source}
     }
 
     function getApprovalSourceLabel(review) {
-      return review && review.approvalSource === 'host_policy'
-        ? t('approvalSourceHost')
-        : review && review.approvalSource === 'auto_approval_review' ? t('approvalSourceAutoReviewer')
-        : review && review.approvalSource === 'local_policy' ? t('approvalSourceSafety') : t('approvalSourceUser');
+      switch (review?.approvalSource) {
+        case 'host_policy': return t('approvalSourceHost');
+        case 'auto_approval_review': return t('approvalSourceAutoReviewer');
+        case 'local_policy': return t('approvalSourceSafety');
+        case 'user_click': return t('approvalSourceUser');
+        default: return t('approvalSourceUnspecified');
+      }
+    }
+
+    function isApprovalSafetyDenied(review) {
+      return review?.decision === 'deny' && ['auto_approval_review', 'local_policy'].includes(review.approvalSource);
     }
 
     function getAuthorizationSourceLabel(source) {
@@ -3749,7 +3775,7 @@ ${conversationsSessionListFragment.source}
         : source === 'model_reviewer'
           ? t('approvalSourceModel')
           : source === 'delegated_approver'
-            ? t('approvalSourceHost')
+            ? t('approvalSourceDelegatedExecution')
             : String(source || '');
     }
 
@@ -3757,19 +3783,23 @@ ${conversationsSessionListFragment.source}
       return source === 'model_reviewer'
         ? t('approvalSourceModel')
         : source === 'delegated_approver'
-          ? t('approvalSourceHost')
-          : t('approvalSourceUser');
+          ? t('approvalSourceDelegatedExecution')
+          : source === 'user_click' ? t('approvalSourceUser') : t('approvalSourceUnspecified');
     }
 
-    function getApprovalDecisionLabel(decision, source) {
-      if (decision === 'needs_user') return t('approvalNeedsUser');
-      return decision === 'approve'
-        ? t('approvalDecisionApprove')
-        : decision === 'deny'
-          ? t('approvalDecisionDeny')
-          : decision === 'unavailable'
-            ? t('approvalDecisionUnavailable')
-            : String(decision || '');
+    function getApprovalDecisionLabel(review) {
+      if (review.reviewState) {
+        var stateKey = 'approvalReviewState_' + review.reviewState;
+        var stateLabel = t(stateKey);
+        if (stateLabel !== stateKey) return stateLabel;
+      }
+      switch (review.decision) {
+        case 'needs_user': return t('approvalNeedsUser');
+        case 'approve': return t(review.approvalSource === 'auto_approval_review' ? 'approvalAutoReviewerApproved' : 'approvalDecisionApprove');
+        case 'deny': return t(review.approvalSource === 'auto_approval_review' ? 'approvalDecisionReviewerDenied'
+          : review.approvalSource === 'local_policy' ? 'approvalDecisionBlocked' : 'approvalDecisionDeny');
+        default: return t('approvalDecisionUnavailable');
+      }
     }
 
     function getApprovalRiskLabel(risk) {
@@ -4064,6 +4094,7 @@ ${conversationsSessionListFragment.source}
       transcript.append(unlinkedChangeSetRegion);
       var manual = state.manualToolApproval;
       if (manual && manual.sessionId === state.activeSessionId) {
+        var authorizationTargets = Array.isArray(manual.authorizationTargets) ? manual.authorizationTargets : [];
         var card = document.createElement('div');
         card.className = 'draft-run-card';
         var label = document.createElement('div');
@@ -4072,6 +4103,20 @@ ${conversationsSessionListFragment.source}
         card.setAttribute('role', 'region');
         card.setAttribute('aria-label', t('approvalNeedsUser'));
         card.append(label);
+        if (authorizationTargets.length) {
+          var scope = document.createElement('div');
+          scope.className = 'approval-exact-scope';
+          var scopeLabel = document.createElement('div');
+          scopeLabel.textContent = t('approvalExactAuthorizationTargets');
+          var targets = document.createElement('ul');
+          authorizationTargets.forEach(function(target) {
+            var item = document.createElement('li');
+            item.textContent = target;
+            targets.append(item);
+          });
+          scope.append(scopeLabel, targets);
+          card.append(scope);
+        }
         if (manual.request?.exactAction) {
           var exact = document.createElement('details');
           var title = document.createElement('summary'); title.textContent = t('approvalExactDetails');
@@ -4084,8 +4129,14 @@ ${conversationsSessionListFragment.source}
         [true, false].forEach(function(approve) {
           var button = document.createElement('button');
           button.type = 'button';
-          button.textContent = t(approve ? 'approvalConfirmOnce' : 'approvalCancelAction');
+          button.dataset.manualApprovalId = manual.id;
+          button.dataset.manualApprovalAction = approve ? 'approve' : 'reject';
+          button.disabled = pendingManualApprovalDecisionId === manual.id;
+          button.textContent = t(approve ? (authorizationTargets.length ? 'approvalAuthorizeAndApproveOnce' : 'approvalConfirmOnce') : 'approvalCancelAction');
           button.addEventListener('click', function() {
+            if (button.disabled || pendingManualApprovalDecisionId === manual.id
+              || state.manualToolApproval?.id !== manual.id || state.activeSessionId !== manual.sessionId) return;
+            pendingManualApprovalDecisionId = manual.id;
             for (var action of actions.querySelectorAll('button')) action.disabled = true;
             vscode.postMessage({ type: 'resolveValidationApproval', id: manual.id, approve: approve });
           });
@@ -4388,20 +4439,13 @@ ${conversationsSessionListFragment.source}
 
       if (Array.isArray(details.approvalReviews) && details.approvalReviews.length) {
         var reviews = details.approvalReviews.map(function(review) {
-          return [getApprovalActionLabel(review.actionKind), review.targetId, t('approvalSourceLabel') + ': ' + getApprovalSourceLabel(review),
-            review.reviewerModelId ? t('approvalReviewerModel') + ': ' + (review.reviewerSourceId || '') + ' / ' + review.reviewerModelId : '',
-            t('approvalReviewDecision') + ': ' + getApprovalDecisionLabel(review.decision, review.approvalSource),
-            t('approvalReviewRisk') + ': ' + getApprovalRiskLabel(review.risk),
-            t('approvalReviewReason') + ': ' + review.rationale,
-            Array.isArray(review.affectedTargets) && review.affectedTargets.length ? t('approvalAffectedTargets') + ': ' + review.affectedTargets.join(', ') : '',
-            review.saferAlternative ? t('approvalSaferAlternative') + ': ' + review.saferAlternative : '',
-            t('approvalReviewId') + ': ' + review.reviewId].filter(Boolean).join(' · ');
+          return [getApprovalActionLabel(review.actionKind), review.targetId, formatApprovalReviewDetails(review)].filter(Boolean).join(' · ');
         });
         body.append(createRunTextSection(t('runDetailsApprovalReviews'), reviews,
-          details.approvalReviews.some(function(review) { return review.decision === 'unavailable'; })
-            ? 'run-details-error'
-            : details.approvalReviews.some(function(review) { return review.decision === 'deny'; })
-              ? 'run-details-denied'
+          details.approvalReviews.some(function(review) { return review.decision === 'deny'; })
+            ? 'run-details-denied'
+            : details.approvalReviews.some(function(review) { return review.decision === 'unavailable' && review.reviewState !== 'in_progress'; })
+              ? 'run-details-error'
               : ''));
       }
 

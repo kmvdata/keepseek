@@ -86,6 +86,7 @@ export interface OneShotTextRequestInput {
   requestId?: string;
   maxOutputTokens?: number;
   timeoutMs?: number;
+  deadlineAt?: number;
   signal?: AbortSignal;
   globalStorageUri?: vscode.Uri;
   taskCostBudget?: AgentRequest['taskCostBudget'];
@@ -102,7 +103,8 @@ export interface OneShotTextRequestInput {
 export class OneShotTextRequestError extends Error {
   public constructor(public readonly reason: 'unavailable' | 'invalid' | 'timeout' | 'cancelled'
     | 'output_truncated' | 'budget_missing' | 'budget_exhausted' | 'unpriced_cost'
-    | 'source_identity_missing' | 'model_unavailable' | 'save_failed', message: string) {
+    | 'source_identity_missing' | 'model_unavailable' | 'save_failed', message: string,
+  public readonly retryable = false) {
     super(message);
     this.name = 'OneShotTextRequestError';
   }
@@ -162,15 +164,16 @@ export async function requestOneShotText(input: OneShotTextRequestInput): Promis
   let dispatchAccepted = false;
   const timeoutMs = isTitle ? Math.min(30_000, Math.max(1, input.timeoutMs ?? 30_000)) : input.timeoutMs;
   const deadlines = [input.taskRunBudget?.deadlineAt,
-    timeoutMs === undefined ? undefined : Date.now() + timeoutMs].filter((n): n is number => typeof n === 'number' && Number.isFinite(n));
+    input.deadlineAt, timeoutMs === undefined ? undefined : Date.now() + timeoutMs].filter((n): n is number => typeof n === 'number' && Number.isFinite(n));
   const runDeadlineAt = deadlines.length ? Math.min(...deadlines) : undefined;
   let response: import('./providers/types').ProviderClientResult | undefined;
+  let transportFailure: { error: unknown } | undefined;
   try {
     response = await createProviderClient(input.sourceConfig.provider).createModelResponse({
       apiKey: input.sourceConfig.apiKey, baseUrl: input.sourceConfig.baseUrl,
       streamIdleTimeoutMs: 0, maxRequestRetries: 0, requestRetryBaseMs: 250
     }, {
-      body, language: input.language, signal: input.signal, requestId, runDeadlineAt,
+      body, language: input.language, signal: input.signal, requestId, runDeadlineAt, preserveRetryability: !isTitle,
       callbacks: { beforeModelRequest: async () => {
         input.taskRunBudget?.assertCanDispatch();
         if (costBudget.limit > 0) {
@@ -182,7 +185,7 @@ export async function requestOneShotText(input: OneShotTextRequestInput): Promis
             * Math.max(price.inputRate ?? NaN, price.cacheHitRate ?? NaN, rates?.peakInputPrice ?? 0, rates?.peakCacheHitPrice ?? 0)
             + budget.actualMaxOutputTokens * Math.max(price.outputRate ?? NaN, rates?.peakOutputPrice ?? 0)) / 1_000_000;
           if (!price.supportsBilling || price.unavailableReason || !Number.isFinite(upperCost) || !price.currency) {
-            throw new OneShotTextRequestError(isTitle ? 'unpriced_cost' : 'unavailable', isTitle
+            throw new OneShotTextRequestError('unpriced_cost', isTitle
               ? 'Session title model cannot be priced under the task cost limit / 标题模型无法在任务费用上限内计价'
               : 'Approval reviewer cannot be priced under the configured task cost limit / 审批模型无法在任务费用上限内计价');
           }
@@ -203,28 +206,30 @@ export async function requestOneShotText(input: OneShotTextRequestInput): Promis
           provider: input.sourceConfig.provider, baseUrl: input.sourceConfig.baseUrl,
           body, taskId: input.taskId, runId: input.runId, requestProtocolVersion: 1
         });
-        if (isTitle) {
+        if (input.onUsageLedgerRecord) {
           // Durable dispatch intent survives a host crash. The final callback
           // upgrades this same request/attempt identity instead of adding a
           // second Provider attempt. A failed write prevents the POST.
           const attempt = createUsageLedgerRecords({ requestId, attempts: attemptSnapshots,
             source, cacheObservations: attemptCacheObservations })[attemptIndex];
-          try { await input.onUsageLedgerRecord?.({ ...attempt, requestBudget: budget, purpose: 'session_title' }); }
-          catch { throw new OneShotTextRequestError('save_failed', 'Title attempt persistence unavailable'); }
+          try { await input.onUsageLedgerRecord({ ...attempt, requestBudget: budget,
+            ...(isTitle ? { purpose: 'session_title' as const } : {}) }); }
+          catch { throw new OneShotTextRequestError('save_failed', isTitle
+            ? 'Title attempt persistence unavailable'
+            : 'Approval reviewer attempt could not be recorded. / 审批模型请求无法记账。'); }
         }
         dispatchAccepted = true;
       }
     });
   } catch (error) {
-    if (isTitle && error instanceof LogicalBudgetExceededError) {
-      throw new OneShotTextRequestError('budget_exhausted', error.message);
-    }
-    throw error;
-  } finally {
+    transportFailure = { error: isTitle && error instanceof LogicalBudgetExceededError
+      ? new OneShotTextRequestError('budget_exhausted', error.message) : error };
+  }
+  {
     // Cleanup/settlement is independent of a late stale result or a ledger write
     // failure. No missing Provider counters are synthesized from response text.
     const usage = normalizeDeepSeekUsage(response?.usage);
-    const undispatched = isTitle && !dispatchAccepted;
+    const undispatched = !dispatchAccepted;
     const records = createUsageLedgerRecords({
       requestId, attempts: undispatched ? [] : attemptSnapshots, usage, source,
       observedUsage: response?.usage ? { promptTokens: response.usage.prompt_tokens,
@@ -252,19 +257,28 @@ export async function requestOneShotText(input: OneShotTextRequestInput): Promis
         sourceId: input.sourceConfig.sourceId, modelId: input.model.id,
         provider: input.sourceConfig.provider, protocol, requestId, source
       }), ...(isTitle ? { purpose: 'session_title' as const } : {}) });
+    } catch (error) {
+      if (!isTitle) throw new OneShotTextRequestError('save_failed', 'Approval reviewer usage could not be recorded. / 审批模型用量无法保存。');
+      throw error;
     } finally { await input.onBudgetChanged?.(); }
   }
-  const hasTools = Boolean((isTitle && response.finishReason === 'tool_calls') || response.message?.tool_calls?.length
+  if (transportFailure) throw transportFailure.error;
+  if (!response) throw new Error('One-shot text request returned no transport result.');
+  const hasTools = Boolean(response.finishReason === 'tool_calls' || response.message?.tool_calls?.length
     || response.nativeOutputItems?.some(item => item.type === 'function_call')
     || response.nativeAnthropicContentBlocks?.some(block => block.type === 'tool_use'));
   if (!response.ok || response.finishReason === 'length' || hasTools || !response.message?.content?.trim()) {
+    if (!isTitle && response.failureKind === 'run_time_limit' && input.taskRunBudget?.deadlineAt === runDeadlineAt) {
+      throw new LogicalBudgetExceededError('run_time_budget_exhausted');
+    }
     const reason = input.signal?.aborted ? 'cancelled'
       : response.failureKind === 'run_time_limit' || response.failureKind === 'request_timeout' ? 'timeout'
         : isTitle && response.finishReason === 'length' ? 'output_truncated'
-          : response.ok || (isTitle && response.failureKind === 'protocol') ? 'invalid' : 'unavailable';
+          : response.ok || response.failureKind === 'protocol' ? 'invalid' : 'unavailable';
     throw new OneShotTextRequestError(reason, isTitle
       ? 'Session title returned no usable response / 会话标题未返回可用响应'
-      : response.error ?? (input.language === 'en' ? 'Approval reviewer returned no usable response.' : '审批模型未返回可用响应。'));
+      : response.error ?? (input.language === 'en' ? 'Approval reviewer returned no usable response.' : '审批模型未返回可用响应。'),
+    response.retryable);
   }
   // Provider reasoning is intentionally ignored and never leaves this call.
   return response.message.content.trim();

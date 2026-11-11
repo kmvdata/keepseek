@@ -1,6 +1,7 @@
 import { normalizeProviderReplay } from './providerReplayNormalization';
 import { normalizePendingHistoryTruncation } from './historyTruncation';
 import { normalizeManualApproval } from '../approvals/manualApproval';
+import { normalizeApprovalReviewState } from '../approvals/approvalReviewTypes';
 import { normalizeUserTaskBudgets } from './userTaskBudget';
 import { normalizeApprovalProcessing } from '../approvals/approvalProcessing';
 import { normalizeUserTask } from './userTask';
@@ -1287,7 +1288,7 @@ function normalizeStoredMessage(value: unknown): ChatMessage | undefined {
     usedSkills: normalizeMessageUsedSkills(value.usedSkills),
     runCheckpoint: normalizeRunCheckpoint(value.runCheckpoint),
     runCheckpointArchive: normalizeCheckpointArchive(value.runCheckpointArchive),
-    runDetails: normalizeRunDetails(value.runDetails),
+    runDetails: normalizeRunDetails(value.runDetails, true),
     toolRounds: normalizeAgentToolRounds(value.toolRounds),
     providerReplay: normalizeProviderReplay(value.providerReplay)
   };
@@ -1428,7 +1429,7 @@ function normalizeAgentToolResult(value: unknown): AgentToolResult | undefined {
   };
 }
 
-function normalizeRunDetails(value: unknown): ChatMessage['runDetails'] {
+function normalizeRunDetails(value: unknown, restoring = false): ChatMessage['runDetails'] {
   if (!isRecord(value) || typeof value.runId !== 'string' || typeof value.modelId !== 'string') {
     return undefined;
   }
@@ -1505,6 +1506,7 @@ function normalizeRunDetails(value: unknown): ChatMessage['runDetails'] {
           reviewerModelId: typeof review.reviewerModelId === 'string' ? review.reviewerModelId : '',
           reviewerProvider: typeof review.reviewerProvider === 'string' ? review.reviewerProvider : '',
           decision: (review.decision === 'approve' || review.decision === 'needs_user' || review.decision === 'deny' ? review.decision : 'unavailable') as import('../approvals/approvalReviewTypes').ApprovalReviewDisplay['decision'],
+          reviewState: restoring && review.reviewState === 'in_progress' ? 'interrupted' as const : normalizeApprovalReviewState(review.reviewState),
           risk: (review.risk === 'low' || review.risk === 'medium' || review.risk === 'critical' ? review.risk : 'high') as import('../approvals/approvalReviewTypes').ApprovalReviewRisk,
           rationale: typeof review.rationale === 'string' ? review.rationale.slice(0, 800) : '',
           affectedTargets: Array.isArray(review.affectedTargets)

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { test, type TestContext } from 'node:test';
@@ -314,7 +314,8 @@ test('bare Git log refs retain protected path checks for real worktree/index mat
   for (const operand of ['0.5.0', '0.5.0..HEAD', '0.5.0^{commit}']) {
     const authorization = await inspectAutomaticRunAuthorization(await createRun('/usr/bin/git', ['log', '--oneline', operand]), grants, 'delegate');
     assert.equal(authorization.allowed, true, operand);
-    assert.equal(authorization.route, 'host_policy', operand);
+    assert.equal(authorization.reviewable, true, operand);
+    assert.ok(authorization.scope.verifiedLauncher, operand);
     assert.equal(authorization.scope.paths.some(target => target.role === 'read_path'), false, 'a genuine revision is not a virtual filesystem target');
   }
   const ordinaryPath = await inspectAutomaticRunAuthorization(await createRun('/usr/bin/git', ['log', '--oneline', 'README.md']), grants, 'delegate');
@@ -329,6 +330,7 @@ test('missing Git repository evidence is recoverable diagnosis while the origina
   const grants = new ExactOperationGrants();
   const decision = await inspectAutomaticRunAuthorization(run, grants, 'delegate');
   assert.equal(decision.allowed, false);
+  assert.equal(decision.reviewable, false);
   assert.equal(decision.refusal?.code, 'insufficient_launch_evidence');
   assert.match(decision.refusal.reason, /No Git repository/u);
   assert.equal(decision.scope.gitCwd, undefined);
@@ -356,6 +358,60 @@ test('missing Git evidence never downgrades explicit configuration or helper res
     assert.equal(decision.scope.gitCwd, undefined);
     assert.ok(decision.scope.diagnostics.some(item => ['git_configuration', 'external_helper'].includes(item.code)));
   }
+});
+
+test('an unresolved executable stays outside reviewer and exact-consent eligibility', async t => {
+  if (process.platform === 'win32') return t.skip('POSIX launcher fixture');
+  const { workspace, createRun } = await projectScriptFixture(t);
+  const run = await createRun(path.join(workspace, 'does-not-exist'), []);
+  const grants = new ExactOperationGrants();
+  const decision = await inspectAutomaticRunAuthorization(run, grants, 'delegate');
+  assert.equal(decision.refusal?.code, 'insufficient_launch_evidence');
+  assert.equal(decision.reviewable, false);
+  assert.equal(decision.allowed, false);
+  await assert.rejects(assertAutomaticRunAuthorization(run, grants, decision.scope.fingerprint, 'delegate'), /Nothing executed/u);
+});
+
+test('exact network consent binds a command even when there are no external filesystem targets', async t => {
+  if (process.platform === 'win32' || !await access('/usr/bin/curl').then(() => true, () => false)) return t.skip('System curl fixture');
+  const { createRun } = await projectScriptFixture(t);
+  const grants = new ExactOperationGrants();
+  const run = await createRun('/usr/bin/curl', ['-q', '--fail', 'https://example.invalid']);
+  const missing = await inspectAutomaticRunAuthorization(run, grants, 'delegate');
+  assert.equal(missing.refusal?.code, 'external_authorization_required');
+  assert.equal(missing.reviewable, true);
+  assert.equal(missing.requiresExactGrant, true);
+  assert.deepEqual(missing.scope.externalUris, []);
+  grants.grant(draftRunIdentity(run), missing.scope);
+  assert.equal((await inspectAutomaticRunAuthorization(run, grants, 'delegate')).allowed, true);
+  const other = await createRun('/usr/bin/curl', ['-q', '--fail', 'https://another.example.invalid']);
+  assert.equal((await inspectAutomaticRunAuthorization(other, grants, 'delegate')).allowed, false);
+  grants.revoke(draftRunIdentity(run), missing.scope);
+  assert.equal((await inspectAutomaticRunAuthorization(run, grants, 'delegate')).allowed, false);
+  const loopback = await createRun('/usr/bin/curl', ['-q', '--fail', 'http://127.0.0.1:65535/health']);
+  assert.equal((await inspectAutomaticRunAuthorization(loopback, grants, 'delegate')).requiresExactGrant, false);
+});
+
+test('Git remote pregrant inspection binds local metadata and leaves bare config validation for authorized inspection', async t => {
+  if (process.platform === 'win32') return t.skip('POSIX Git fixture');
+  const { root, workspace, createRun } = await projectScriptFixture(t);
+  const remote = path.join(root, 'remote.git');
+  const env = createControlledEnvironment([]);
+  const git = (...args: string[]) => execFileSync('/usr/bin/git', args, { cwd: workspace, env, stdio: 'pipe' });
+  git('init', '-q');
+  git('init', '--bare', '-q', remote);
+  git('remote', 'add', 'origin', remote);
+  const run = await createRun('/usr/bin/git', ['ls-remote', '--tags', 'origin']);
+  const grants = new ExactOperationGrants();
+  git('--git-dir', remote, 'config', 'core.bare', 'false');
+  const metadata = await inspectAutomaticRunAuthorization(run, grants, 'delegate', 'metadata');
+  assert.equal(metadata.reviewable, true);
+  assert.equal(metadata.scope.gitRemote?.destination, remote);
+  await assert.rejects(inspectAutomaticRunAuthorization(run, grants, 'delegate', true), /destination configuration/u);
+  git('--git-dir', remote, 'config', 'core.bare', 'true');
+  const currentMetadata = await inspectAutomaticRunAuthorization(run, grants, 'delegate', 'metadata');
+  assert.notEqual(currentMetadata.scope.fingerprint, metadata.scope.fingerprint);
+  await assertAutomaticRunAuthorization(run, grants, currentMetadata.scope.fingerprint, 'delegate', true);
 });
 
 test('Git remote argv only recognizes bounded reads and non-forced explicit push refs', () => {
@@ -591,14 +647,14 @@ test('scripts and unknown programs stay conservative regardless of their reason 
     .reasons.some(reason => reason.code === 'environment_override'));
 });
 
-test('auto approval binds a verified project script to its current identity and exact external operands', async t => {
+test('command preflight binds a verified project script to its current identity and exact external operands', async t => {
   if (process.platform === 'win32') return t.skip('POSIX system shell verification required');
   const { root, workspace, shell, script, relativeScript, createRun } = await projectScriptFixture(t);
   const grants = new ExactOperationGrants();
   const run = await createRun(shell, [relativeScript]);
-  const approval = await inspectAutomaticRunAuthorization(run, grants);
+  const approval = await inspectAutomaticRunAuthorization(run, grants, 'delegate');
   assert.equal(approval.allowed, true);
-  assert.equal(approval.route, 'host_policy', approval.reason);
+  assert.equal(approval.reviewable, true);
   assert.equal(approval.scope.trustedProjectScript, true);
   assert.equal(approval.scope.executable, await realpath(shell));
   assert.ok(run.effectAssessment.effects.includes('arbitrary_code'), 'project code can still have runtime effects');
@@ -607,26 +663,31 @@ test('auto approval binds a verified project script to its current identity and 
   await writeFile(configPath, 'outside data\n');
   const configUri = vscode.Uri.file(configPath).toString();
   const withConfig = await createRun(shell, [relativeScript, `--config=${configPath}`]);
-  const outside = await inspectAutomaticRunAuthorization(withConfig, grants);
+  const outside = await inspectAutomaticRunAuthorization(withConfig, grants, 'delegate');
   assert.equal(outside.allowed, false);
+  assert.equal(outside.reviewable, true);
+  assert.equal(outside.requiresExactGrant, true);
+  assert.deepEqual([...outside.authorizedUris], []);
+  assert.deepEqual([...outside.scopeUris], [configUri]);
   assert.deepEqual(outside.scope.externalUris, [configUri]);
   grants.grant(draftRunIdentity(withConfig), outside.scope);
-  const granted = await inspectAutomaticRunAuthorization(withConfig, grants);
+  const granted = await inspectAutomaticRunAuthorization(withConfig, grants, 'delegate');
   assert.equal(granted.allowed, true);
-  assert.notEqual(granted.route, 'host_policy');
   assert.deepEqual([...granted.authorizedUris], [configUri]);
 
   assert.equal(approval.scope.cwd, vscode.Uri.file(workspace).toString());
-  await assertAutomaticRunAuthorization(run, grants, approval.scope.fingerprint);
+  await assertAutomaticRunAuthorization(run, grants, approval.scope.fingerprint, 'delegate');
   await writeFile(script, '#!/bin/sh\nprintf "%s\\n" "new version"\n');
-  const changed = await inspectAutomaticRunAuthorization(run, grants);
-  assert.equal(changed.route, 'host_policy');
+  const changed = await inspectAutomaticRunAuthorization(run, grants, 'delegate');
+  assert.equal(changed.reviewable, true);
   assert.notEqual(changed.scope.fingerprint, approval.scope.fingerprint);
-  await assert.rejects(assertAutomaticRunAuthorization(run, grants, approval.scope.fingerprint), /scope or launch identity changed/u);
-  assert.equal((await inspectAutomaticRunAuthorization(withConfig, grants)).allowed, false, 'the grant is bound to the inspected script');
+  await assert.rejects(assertAutomaticRunAuthorization(run, grants, approval.scope.fingerprint, 'delegate'), /scope or launch identity changed/u);
+  assert.equal((await inspectAutomaticRunAuthorization(withConfig, grants, 'delegate')).allowed, false, 'the grant is bound to the inspected script');
+  grants.revoke(draftRunIdentity(withConfig), granted.scope);
+  assert.equal(grants.matches(draftRunIdentity(withConfig), granted.scope), false);
 });
 
-test('host policy approval executes a project script once and preserves its literal argv', async t => {
+test('independent review executes a project script once and preserves its literal argv', async t => {
   if (process.platform === 'win32') return t.skip('POSIX system shell verification required');
   const { root, shell, script, relativeScript, createRun } = await projectScriptFixture(t);
   await writeFile(script, '#!/bin/sh\nprintf "%s\\n" "$1"\n');
@@ -634,27 +695,40 @@ test('host policy approval executes a project script once and preserves its lite
   const proposal = await createRun(shell, [relativeScript, value]);
   const globalStorageUri = vscode.Uri.file(root) as never;
   const reviews = new ApprovalReviewStore(globalStorageUri);
+  await reviews.initialize();
+  let reviewCalls = 0;
   const reviewer = new ApprovalReviewerService({ globalStorageUri, workspaceKey: 'project',
     sourceStore: new ModelSourceStore(globalStorageUri), store: reviews,
-    requestText: async () => assert.fail('host policy must not request a model review') });
+    getAutoSetting: () => ({ mode: 'follow-main' }),
+    requestText: async () => {
+      reviewCalls++;
+      return JSON.stringify({ decision: 'approve', risk: 'medium', reason: 'Exact project script.',
+        policyRules: ['bounded_project_script'], saferAlternative: '', affectedTargets: [script] });
+    } });
   const runs = new DraftRunStore(globalStorageUri, new SpawnDraftRunExecutor(), new DraftRunAuthorizationService(reviews));
   try {
     const [run] = runs.addProposals({ proposals: [proposal], sessionId: proposal.sessionId, agentRunId: proposal.agentRunId });
     const grants = new ExactOperationGrants();
-    const { route, scope, authorizedUris } = await inspectAutomaticRunAuthorization(run, grants);
-    assert.equal(route, 'host_policy');
-    const { record } = await reviewer.createHostPolicyApproval({
+    const { allowed, scope, authorizedUris } = await inspectAutomaticRunAuthorization(run, grants, 'delegate');
+    assert.equal(allowed, true);
+    const { record } = await reviewer.review({
       ...createDraftRunReviewRequest({ draftRun: run, scope, history: [], language: 'en' }),
-      approvalMode: 'delegate', scopeFingerprint: scope.fingerprint
+      approvalMode: 'delegate', scopeFingerprint: scope.fingerprint,
+      originalGoalSummary: 'Run this project script with the exact literal argument.'
+    }, {
+      model: { id: 'fixture-model', label: 'Fixture', provider: 'openai-responses', sourceId: 'fixture-source',
+        contextWindowTokens: 64_000, maxOutputTokens: 2_000 },
+      sourceConfig: { sourceId: 'fixture-source', provider: 'openai-responses', apiKey: 'fixture-key',
+        baseUrl: 'https://example.invalid/v1', supportsBilling: false }
     });
-    assert.equal(record.approvalSource, 'host_policy');
+    assert.equal(reviewCalls, 1);
+    assert.equal(record.approvalSource, 'auto_approval_review');
     assert.equal(record.decision, 'approve', record.rationale);
     assert.equal(record.risk, 'medium');
-    assert.ok(record.policyRules.includes('trusted_project_script'));
     const result = await runs.approveAndRun(run.id, authorizedUris, {
       delegatedApproval: () => true,
-      verifyScope: () => assertAutomaticRunAuthorization(run, grants, scope.fingerprint),
-      approvalRecord: { ...record, expectedSource: route, workspaceTrusted: vscode.workspace.isTrusted }
+      verifyScope: () => assertAutomaticRunAuthorization(run, grants, scope.fingerprint, 'delegate'),
+      approvalRecord: { ...record, expectedSource: 'auto_approval_review', workspaceTrusted: vscode.workspace.isTrusted }
     });
     assert.equal(result?.status, 'done', result?.error);
     assert.equal(result.exitCode, 0);
@@ -667,7 +741,7 @@ test('host policy approval executes a project script once and preserves its lite
   }
 });
 
-test('inline shell, PATH shims and external scripts do not inherit project script approval', async t => {
+test('inline shell, PATH shims and external scripts do not inherit verified project launch evidence', async t => {
   if (process.platform === 'win32') return t.skip('POSIX system shell and symlinks required');
   const { root, workspace, shell, relativeScript, createRun } = await projectScriptFixture(t);
   const grants = new ExactOperationGrants();
@@ -686,7 +760,6 @@ test('inline shell, PATH shims and external scripts do not inherit project scrip
     await createRun(shell, ['./missing.sh'])
   ]) {
     const approval = await inspectAutomaticRunAuthorization(run, grants);
-    assert.equal(approval.route, 'user_click', JSON.stringify(run.spec));
     assert.notEqual(approval.scope.trustedProjectScript, true);
   }
 

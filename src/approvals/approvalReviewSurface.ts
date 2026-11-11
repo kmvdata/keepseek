@@ -23,6 +23,8 @@ export function createDraftEditReviewRequest(input: {
   const base = getDraftEditBase(input.edit);
   const result = getDraftEditResult(input.edit);
   const originalTextHash = base?.sha256 ?? hashApprovalText(input.originalText);
+  const contentUnavailable = !input.metadataOnly && input.edit.kind === 'full_text_v1'
+    && !!input.edit.contentBlobHash && getDraftEditFullText(input.edit) === undefined;
   // External authorization grants the operation, while reviewers receive
   // metadata only. Deletion review never transmits the file being removed.
   const change = input.edit.kind === 'move_v1'
@@ -30,8 +32,7 @@ export function createDraftEditReviewRequest(input: {
     : input.metadataOnly || input.edit.action === 'delete' ? ''
       : input.edit.kind === 'text_patch_v1' ? renderPatchReview(input.edit.patch)
         : getDraftEditFullText(input.edit)
-          ?? (input.edit.kind === 'full_text_v1' && input.edit.contentBlobHash
-            ? `[content-addressed blob sha256 ${input.edit.contentBlobHash}; ${input.edit.result.sizeBytes} bytes]` : '');
+          ?? (contentUnavailable ? '[Proposed content was unavailable in the bounded review surface.]' : '');
   return createBaseRequest({
     sessionId: input.sessionId,
     rootTaskId: input.rootTaskId ?? input.agentRunId,
@@ -39,6 +40,8 @@ export function createDraftEditReviewRequest(input: {
     actionKind: kind,
     targetId: input.edit.id,
     actionHash: hashDraftEditAction(input.edit),
+    evidenceIncomplete: contentUnavailable,
+    hideToolResultBodies: input.metadataOnly || input.edit.action === 'delete',
     history: input.history,
     purpose: input.edit.reason,
     staticRiskAnalysis: [
@@ -46,12 +49,15 @@ export function createDraftEditReviewRequest(input: {
       input.edit.action === 'delete' ? 'destructive_delete' : 'workspace_write',
       base?.sha256 ? 'baseline_hash_present' : 'baseline_hash_absent',
       `payload_version:${getDraftEditKind(input.edit)}`,
-      ...(input.metadataOnly ? ['Exact external scope requires separate user permission; content intentionally withheld.'] : [])
+      ...(input.metadataOnly ? ['External file content is withheld. Check the exact authorization facts supplied by the host.'] : [])
     ],
     exactAction: {
       kind,
       action: input.edit.action,
       uri: input.edit.uri,
+      sourceUri: input.edit.kind === 'move_v1' ? input.edit.sourceUri : undefined,
+      targetUri: input.edit.kind === 'move_v1' ? input.edit.targetUri : undefined,
+      metadataOnly: input.metadataOnly || input.edit.action === 'delete',
       proposedChange: createBoundedReviewText(change),
       payloadVersion: getDraftEditKind(input.edit),
       canonicalPayloadHash: input.edit.kind === 'text_patch_v1' ? input.edit.patch.canonicalHash : undefined,
@@ -90,7 +96,7 @@ export function createDraftRunReviewRequest(input: {
       ...assessment.evidence,
       ...(plan ? ['Host-constrained fixed parser, one UTF-8 snapshot via stdin, empty environment, bounded input and timeout.'] : []),
       ...(input.scope?.trustedProjectScript ? ['trusted_project_script', 'Runs verified project code with extension-host privileges.'] : []),
-      'Exact external scope, when present, requires separate user authorization.'
+      'The host checks exact external authorization independently.'
     ],
     exactAction: {
       kind: 'draft_run_execute',
@@ -155,20 +161,33 @@ export function createExternalFileReviewRequest(input: {
   access: 'read' | 'write' | 'delete';
   fingerprint?: string;
   purpose: string;
+  readLimits?: { maxBytes: number; startLine?: number; endLine?: number };
+  requiresExactAuthorization?: boolean;
 }): ApprovalReviewRequest {
-  return createBaseRequest({
+  const effect = { uri: input.uri, access: input.access };
+  const previousIdentity = { ...effect, fingerprint: input.fingerprint, purpose: input.purpose };
+  const historicalActionHashes = [hashApprovalValue(previousIdentity),
+    hashApprovalValue({ ...previousIdentity, fingerprint: hashApprovalValue(effect) })];
+  const { readLimits } = input;
+  const review = createBaseRequest({
     sessionId: input.request?.sessionId ?? input.sessionId ?? '',
     rootTaskId: input.request?.approvalRootTaskId ?? input.request?.checkpoint?.taskId ?? input.rootTaskId ?? input.agentRunId,
     agentRunId: input.agentRunId,
     actionKind: 'external_file_access',
     targetId: input.targetId,
-    actionHash: hashApprovalValue({ uri: input.uri, access: input.access, fingerprint: input.fingerprint, purpose: input.purpose }),
+    actionHash: hashApprovalValue({ ...effect, fingerprint: input.fingerprint, readLimits }),
+    effectHash: hashApprovalValue(effect),
+    historicalActionHashes,
+    hideToolResultBodies: true,
     history: input.request?.history ?? input.history ?? [],
-    purpose: input.purpose,
+    purpose: readLimits?.startLine !== undefined
+      ? `Read lines ${readLimits.startLine}-${readLimits.endLine} of the explicitly referenced external text file.`
+      : input.purpose,
     staticRiskAnalysis: ['external_exact_uri', `access:${input.access}`, 'Exact read permission is checked separately; no directory wildcard. File contents are excluded from this review.'],
-    exactAction: { kind: 'external_file_access', uri: input.uri, access: input.access },
+    exactAction: { kind: 'external_file_access', ...effect, readLimits },
     language: input.request?.language ?? input.language ?? 'en'
   });
+  return { ...review, externalAuthorization: { required: input.requiresExactAuthorization === true, targets: [input.uri] } };
 }
 
 function createBaseRequest(input: {
@@ -178,6 +197,10 @@ function createBaseRequest(input: {
   actionKind: ApprovalReviewRequest['actionKind'];
   targetId: string;
   actionHash: string;
+  effectHash?: string;
+  historicalActionHashes?: readonly string[];
+  evidenceIncomplete?: boolean;
+  hideToolResultBodies?: boolean;
   history: readonly ChatMessage[];
   purpose: string;
   staticRiskAnalysis: string[];
@@ -193,10 +216,12 @@ function createBaseRequest(input: {
     actionKind: input.actionKind,
     targetId: input.targetId,
     actionHash: input.actionHash,
+    effectHash: input.effectHash,
+    historicalActionHashes: input.historicalActionHashes,
     originalGoalSummary: compact(redactSensitiveReviewText(firstUser), 1_200),
-    evidenceIncomplete: firstUser !== redactSensitiveReviewText(firstUser) || input.purpose.length > 1_200
+    evidenceIncomplete: input.evidenceIncomplete === true || firstUser !== redactSensitiveReviewText(firstUser) || input.purpose.length > 1_200
       || input.staticRiskAnalysis.some(item => item.length > 1_000),
-    visibleSessionEvidence: boundedTaskEvidence(input.history, input.rootTaskId, input.targetId),
+    visibleSessionEvidence: boundedTaskEvidence(input.history, input.rootTaskId, input.targetId, input.hideToolResultBodies),
     workspaceTrusted: vscode.workspace.isTrusted,
     workspaceRootIds: (vscode.workspace.workspaceFolders ?? []).map((folder, index) => `root-${index + 1}:${folder.name}`),
     purpose: compact(input.purpose, 1_200),
@@ -207,7 +232,7 @@ function createBaseRequest(input: {
 }
 
 /** Public user constraints and host-produced results only; never reasoning or another task. */
-export function boundedTaskEvidence(history: readonly ChatMessage[], rootTaskId: string, targetId: string): string[] {
+export function boundedTaskEvidence(history: readonly ChatMessage[], rootTaskId: string, targetId: string, hideToolResultBodies = false): string[] {
   const items: string[] = [];
   for (const message of history.filter(item => item.userTask?.id === rootTaskId)) {
     if (message.role === 'user' && message.userTask?.reason === 'user') {
@@ -216,12 +241,13 @@ export function boundedTaskEvidence(history: readonly ChatMessage[], rootTaskId:
     for (const review of message.runDetails?.approvalReviews ?? []) {
       if (review.targetId === targetId || review.decision !== 'approve') items.push(JSON.stringify({
         type: 'prior_approval', targetId: review.targetId, decision: review.decision,
-        reason: redactSensitiveReviewText(review.rationale, 600), alternative: review.saferAlternative
+        reason: hideToolResultBodies ? undefined : redactSensitiveReviewText(review.rationale, 600),
+        alternative: hideToolResultBodies || !review.saferAlternative ? undefined : redactSensitiveReviewText(review.saferAlternative, 600)
       }));
     }
     for (const tool of (message.runDetails?.toolCalls ?? []).slice(-4)) {
       items.push(JSON.stringify({ type: 'actual_tool_result', name: tool.name, status: tool.status,
-        result: redactSensitiveReviewText(tool.resultSummary ?? '', 600) }));
+        result: hideToolResultBodies ? undefined : redactSensitiveReviewText(tool.resultSummary ?? '', 600) }));
     }
   }
   const selected = items.slice(-8);

@@ -1,8 +1,8 @@
 # KeepSeek 自动批准与模型审批验收
 
-> 历史报告：2026-11-05 起的当前合同与现场步骤见 [帮我审批统一验收](keepseek-approve-for-me-verification.md)。当前仅 ask / delegate 两模式；旧版“全程不转人工”及独立 model_review 合同已被替代。以下内容保留原版本验收背景，不作为当前功能说明。
+> 历史报告：2026-11-11 的当前合同与现场步骤见 [帮我审批统一验收](keepseek-approve-for-me-verification.md)。当前仅 ask / delegate 两模式；旧版“全程不转人工”及独立 model_review 合同已被替代。以下内容保留原版本验收背景，不作为当前功能说明。
 
-本报告保留以 6721cf5 为基线的首轮历史验收。当前自动审批行为和现场操作见 [全自动审批验收](keepseek-zero-click-approval-verification.md)。普通本地 Git 的后续自动批准规则见 [架构文档](keepseek-code-architecture.md)。以下弹窗和 reviewer 次数按单个动作计算，人工点击、范围授权、审批结果及实际执行分别记录。
+本报告保留以 6721cf5 为基线的首轮历史验收。同期全自动审批证据见 [历史验收](keepseek-zero-click-approval-verification.md)。以下弹窗和 reviewer 次数按单个动作计算，人工点击、范围授权、审批结果及实际执行分别记录。
 
 | 场景 | 实施前 | 实施后 |
 | --- | --- | --- |

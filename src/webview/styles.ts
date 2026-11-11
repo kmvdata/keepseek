@@ -1162,6 +1162,16 @@ ${conversationsStylesFragment.source}
       font-size: 11px;
     }
 
+    .approval-exact-scope {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .approval-exact-scope ul {
+      margin: 4px 0;
+      padding-inline-start: 18px;
+    }
+
     .approval-state-note {
       min-width: 0;
       max-width: 100%;

@@ -45,10 +45,22 @@ test('bounded Git queries preserve literal argv through real delegate and explic
   git('branch', 'v0.5.3', 'HEAD');
   const storage = vscode.Uri.file(path.join(root, 'storage')) as never;
   const reviews = new ApprovalReviewStore(storage);
+  await reviews.initialize();
+  const sourceStore = new ModelSourceStore(storage);
+  await sourceStore.createSource({ id: 'query-source', provider: 'openai-compatible', name: 'Query source',
+    apiKey: 'fixture-only', models: [{ id: 'query-model' }] });
+  const modelContext = { model: { id: 'query-model', sourceId: 'query-source', provider: 'openai-compatible' as const,
+    label: 'Query model', contextWindowTokens: 32768, maxOutputTokens: 4096 } };
   let reviewerCalls = 0;
   const reviewer = new ApprovalReviewerService({ globalStorageUri: storage, workspaceKey: 'query-fixture',
-    sourceStore: new ModelSourceStore(storage), store: reviews,
-    requestText: async () => { reviewerCalls++; assert.fail('finite verified local queries use host policy'); } });
+    sourceStore, store: reviews, getAutoSetting: () => ({ mode: 'follow-main' }),
+    requestText: async input => {
+      reviewerCalls++;
+      assert.equal(input.model.id, modelContext.model.id);
+      const { exactAction } = JSON.parse(input.userPrompt.split('\n')[2]);
+      return JSON.stringify({ decision: 'approve', risk: 'low', reason: 'Finite verified query.', policyRules: ['direct_user_goal'],
+        saferAlternative: '', affectedTargets: [exactAction.cwdUri] });
+    } });
   const executor = new SpawnDraftRunExecutor();
   const spawn = t.mock.method(childProcess, 'spawn');
   const launches = () => spawn.mock.calls.map(({ arguments: [, argv, options] }) => {
@@ -106,18 +118,19 @@ test('bounded Git queries preserve literal argv through real delegate and explic
     const grants = new ExactOperationGrants();
     const decision = await inspectAutomaticRunAuthorization(run, grants, mode);
     assert.equal(decision.allowed, true, decision.refusal?.reason);
-    assert.equal(decision.route, 'host_policy', JSON.stringify(decision.scope.diagnostics));
+    assert.equal(decision.reviewable, true, JSON.stringify(decision.scope.diagnostics));
     let result: DraftRun | undefined;
     if (mode === 'delegate') {
-      const { record } = await reviewer.createHostPolicyApproval({
-        ...createDraftRunReviewRequest({ draftRun: run, scope: decision.scope, rootTaskId: 'same-root', history: [], language: 'en' }),
+      const { record } = await reviewer.review({
+        ...createDraftRunReviewRequest({ draftRun: run, scope: decision.scope, rootTaskId: 'same-root', language: 'en',
+          history: [{ id: 'query-user', role: 'user', content: 'Inspect the requested repository objects.', createdAt: new Date().toISOString() }] }),
         approvalMode: 'delegate', scopeFingerprint: decision.scope.fingerprint
-      });
+      }, modelContext);
       assert.equal(record.decision, 'approve', record.rationale);
       result = await runs.approveAndRun(run.id, decision.authorizedUris, {
         delegatedApproval: () => true,
         verifyScope: () => assertAutomaticRunAuthorization(run, grants, decision.scope.fingerprint, 'delegate'),
-        approvalRecord: { ...record, expectedSource: 'host_policy', workspaceTrusted: true }
+        approvalRecord: { ...record, expectedSource: 'auto_approval_review', workspaceTrusted: true }
       });
     } else {
       assert.equal(runs.get(run.id)?.status, 'pending', 'scope verification is not user approval');
@@ -259,7 +272,10 @@ test('bounded Git queries preserve literal argv through real delegate and explic
   const external = path.join(root, 'external');
   await mkdir(external);
   const [outside] = runs.addProposals({ proposals: [await proposalFor(historicalArgs, external)], ...ownership });
-  assert.equal((await inspectAutomaticRunAuthorization(outside, new ExactOperationGrants(), 'delegate')).refusal?.code, 'external_authorization_required');
+  const outsideAuthorization = await inspectAutomaticRunAuthorization(outside, new ExactOperationGrants(), 'delegate');
+  assert.equal(outsideAuthorization.requiresExactGrant, true);
+  assert.equal(outsideAuthorization.reviewable, false);
+  assert.equal(outsideAuthorization.refusal?.code, 'insufficient_launch_evidence');
   assert.equal((await runs.approveAndRun(outside.id, new Set()))?.executionStarted, false);
   const [untrusted, cancelled, unverified] = runs.addProposals({ proposals: await Promise.all([
     proposalFor(historicalArgs), proposalFor(historicalArgs), proposalFor(historicalArgs)
@@ -293,9 +309,9 @@ test('bounded Git queries preserve literal argv through real delegate and explic
   assert.deepEqual(await readFile(indexFile), indexBefore);
   assert.deepEqual(await readFile(path.join(workspace, 'tracked.txt')), worktreeBefore);
   assert.equal(git('--no-optional-locks', 'status', '--porcelain'), '');
-  assert.equal(reviewerCalls, 0);
+  assert.equal(reviewerCalls, 20);
   assert.equal(launches().length, 21, 'historical and refused commands add no launch to the 21 approved queries');
-  t.diagnostic('21 real DraftRun launches (20 delegate, 1 explicit ask), 9 verify launches, 0 reviewer calls and 0 historical launches.');
+  t.diagnostic('21 real DraftRun launches (20 delegate reviews, 1 explicit ask), 9 verify launches and 0 historical launches.');
 });
 
 test('verify output must be one full SHA-1 or SHA-256 object ID', () => {

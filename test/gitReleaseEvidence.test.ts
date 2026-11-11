@@ -1,15 +1,18 @@
 import './registerVscodeStub';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, realpath, rename, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { test } from 'node:test';
 import { inspectDraftRunScope } from '../src/approvals/authorization/commandScope';
 import { createDraftRunProposal } from '../src/runs/draftRunProposal';
 import { missingGitTaskOutcome } from '../src/runs/gitReleaseBatch';
+import { authorizeGitRemote } from '../src/runs/gitReleaseAuthorization';
 import { normalizeGitReleaseEvidence, prepareGitRelease, verifyBlockedGitTag } from '../src/runs/gitReleaseEvidence';
 import { gitReleaseIntent } from '../src/runs/gitTaskIntent';
+import { assertLocalGitCommitSnapshot, normalizeLocalGitCommitPlan, prepareLocalGitCommit } from '../src/runs/localGitCommit';
+import { analyzeCommand } from '../src/approvals/authorization/commandSemantics';
 import type { DraftRun, DraftRunProposal } from '../src/shared/types';
 import * as vscode from './stubs/vscode';
 
@@ -132,4 +135,68 @@ test('release tag proof matches the exact current ref and the same repository an
   assert.equal(await verify([commit, tag]), undefined, 'a different object does not prove the original release tag even if it peels to the same commit');
   assert.deepEqual((await verify([commit]))?.refs, [{ ref, object: head }], 'a lightweight tag binds directly to the commit');
   t.diagnostic('Git exact-ref/OID verification performed through fixed host probes; business DraftRun launches 0, model continuations 0');
+});
+
+test('Git launch proofs reject changed local content and defer the remote push probe until scope consent', async t => {
+  const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'keepseek-release-review-')));
+  const repo = path.join(fixture, 'project');
+  const bare = path.join(fixture, 'destination.git');
+  const previousWorkspace = { workspaceFolders: vscode.workspace.workspaceFolders, isTrusted: vscode.workspace.isTrusted };
+  t.after(async () => {
+    Object.assign(vscode.workspace, previousWorkspace);
+    await rm(fixture, { recursive: true, force: true });
+  });
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: fixture, encoding: 'utf8', stdio: 'pipe' }).trim();
+  git('init', '-b', 'main', repo);
+  git('init', '--bare', bare);
+  git('-C', repo, 'config', 'user.name', 'KeepSeek Release Fixture');
+  git('-C', repo, 'config', 'user.email', 'release@example.invalid');
+  git('-C', repo, 'config', 'commit.gpgsign', 'false');
+  git('-C', repo, 'config', 'core.hooksPath', '.git/hooks');
+  git('-C', repo, 'remote', 'add', 'origin', bare);
+  const tracked = path.join(repo, 'tracked.txt');
+  await writeFile(tracked, 'initial\n');
+  git('-C', repo, 'add', 'tracked.txt');
+  git('-C', repo, 'commit', '-m', 'initial');
+  const initialHead = git('-C', repo, 'rev-parse', 'HEAD');
+  vscode.workspace.workspaceFolders = [{ name: 'fixture', uri: vscode.Uri.file(repo) }];
+  vscode.workspace.isTrusted = true;
+  const run = async (args: string[]): Promise<DraftRun> => ({
+    ...await createDraftRunProposal({ executable: 'git', args, reason: 'Git release approval fixture' }),
+    status: 'pending', sessionId: 'fixture-session', agentRunId: 'fixture-segment', messageId: 'fixture-message',
+    createdAt: '', updatedAt: '', outputHead: '', outputTail: '', outputBytes: 0, outputTruncated: false, omittedOutputBytes: 0
+  });
+  const signal = new AbortController().signal;
+  const commit = await run(['commit', '-a', '-m', 'update']);
+  await writeFile(tracked, 'version A\n');
+  const commitScope = await inspectDraftRunScope(commit);
+  const preparedCommit = await prepareLocalGitCommit(commit, commitScope, 'fixture-task', signal);
+  assert.equal(preparedCommit?.outcome, 'ready', commitScope.reasons.join('\n'));
+  if (preparedCommit?.outcome !== 'ready') return;
+  assert.deepEqual(normalizeLocalGitCommitPlan(preparedCommit.snapshot), preparedCommit.snapshot);
+  await assertLocalGitCommitSnapshot(commit, preparedCommit.snapshot, signal);
+  await writeFile(tracked, 'version B\n');
+  await assert.rejects(assertLocalGitCommitSnapshot(commit, preparedCommit.snapshot, signal), /scope changed before launch/u);
+  assert.equal(git('-C', repo, 'rev-parse', 'HEAD'), initialHead);
+
+  const push = await run(['push', 'origin', 'refs/heads/main']);
+  const pushScope = await inspectDraftRunScope(push, true);
+  const pushCommand = analyzeCommand(push.spec).gitRemote;
+  assert.ok(pushCommand && pushScope.gitRemote, pushScope.reasons.join('\n'));
+  const intent = gitReleaseIntent('Push the current branch to origin.');
+  const remote = await authorizeGitRemote(pushScope, pushCommand, intent, undefined,
+    { repository: repo, destination: pushScope.gitRemote.destination, read: ['refs/heads/main'], push: ['refs/heads/main'] });
+  assert.ok(remote);
+  const input = { run: push, scope: pushScope, intent, remote: { ...remote, executable: path.join(fixture, 'unavailable-git') },
+    prior: [], needsCommit: false, signal };
+  const pending = await prepareGitRelease({ ...input, probeRemote: false });
+  assert.ok(pending);
+  assert.equal(pending.pushAttempt, undefined);
+  await pending.beforeLaunch();
+  await assert.rejects(pending.verify(push), /authorized destination/u);
+  await assert.rejects(prepareGitRelease(input));
+  assert.equal(git('-C', bare, 'for-each-ref'), '', 'the destination receives no ref');
+
+  git('-C', repo, 'commit', '-a', '-m', 'update');
+  await assert.rejects(pending.beforeLaunch(), /Local refs changed before push/u);
 });

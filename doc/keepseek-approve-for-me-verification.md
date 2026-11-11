@@ -1,8 +1,125 @@
 # KeepSeek「帮我审批」统一合同与验收
 
+## 2026-11-11 当前合同
+
+实施基线为 `1ea43329d48e5300d9fc6700d31d9858b20e5331`，KeepSeek 0.5.3，Asia/Shanghai。审批策略和 reviewer ruleset 统一为 v6，`approval-reviews.json` 容器仍为 v1。父会话请求和工具 schema 仍为 v15，审批交付仍为 v13。主模型的中英文 system 更新了审批规则句，既有会话历史和用户尾部已保存字节继续使用原文。
+
+### 调用链和副作用边界
+
+```mermaid
+flowchart TD
+  A["确定精确动作与当前范围"] --> B{"宿主安全检查"}
+  B -->|阻断或需补证| C["保留诊断，未执行"]
+  B -->|通过| D{"审批模式"}
+  D -->|请求批准| F["用户决定"]
+  D -->|帮我审批| E{"独立审批审查"}
+  E -->|安全拒绝| C
+  E -->|需要用户决定且具备执行资格| F
+  E -->|批准且权限齐备| G["实时复核与一次性消费"]
+  F -->|同意且实时复核| G
+  G --> H["原执行器与真实结果"]
+```
+
+| 环节 | 证据与结果 |
+| --- | --- |
+| 准入 | 宿主先检查信任、精确身份、受保护目标、基线、启动材料及已有安全拒绝。能提前判定的硬阻断零 reviewer 请求、零人工放行、零副作用。静态能力和启动证据缺口保留 `needs_replan` 或 `insufficient_launch_evidence`，按原恢复预算处理。 |
+| 受审动作 | delegate 的文件新增、修改、移动、删除、DraftRun（含用户自拟只读命令）、固定 compile/lint/test 和原有受审外部读取均走独立 reviewer。工作区普通只读入口、原生只读 Git、草稿准备、静态预检和宿主已核验结果保持原边界。ask 零 reviewer 请求。 |
+| 审查 | 先持久化审查占位，再解析实际执行段的主模型或用户级固定审批模型。一次逻辑审查共用现有截止时间和根任务预算，最多两次上游尝试。仅传白名单 FACTS 与有界、脱敏的 UNTRUSTED_EVIDENCE，总量上限为 32 KiB。外部编辑使用元数据，删除审查省略原文件内容。项目进程使用扩展宿主账号权限。 |
+| 决定 | 合规 approve 且证据和授权齐备时可进入实时复核。严格结构合规的 high/critical approve 改为 needs_user，保留风险和宿主规则码。有效 deny 进入安全拒绝审计。配置、服务、超时和最终无效响应各有真实分类，预算、取消、熔断、审计写入失败和未知副作用按各自原因停止。 |
+| 单次人工请求 | 仅对同一精确操作仍活跃、宿主可执行且欠缺项可由用户决定的情况发出一次请求。必要时同一点击显式授权列出的范围，并允许所列操作执行一次。已有精确授权时复用该授权。审批、外部范围授权和 permit 分别核验。 |
+| 消费与执行 | 记录绑定 session/rootTask/segment/target/kind/hash/scope/runtime。实时核对配置、信任、基线和启动身份后，文件走 SafeFileEditor 的 journal、原子替换和 read-back，命令走 30 秒单次 permit 和固定 executable/argv。验证保留 npm/Node、脚本、lifecycle、argv 与 env 的启动指纹。 |
+| 记录与恢复 | 新授权记录区分 `auto_approval_review` 与 `user_click`。`local_policy` 记录宿主硬拒绝和停止。历史记录保留原审计和适用拒绝，明确的历史 `host_policy` 显示「宿主自动批准（历史） / Host policy approval (historical)」。关闭 Webview 可保留宿主等待，重启仅恢复展示和中断说明。 |
+| 批次与 Git | 局部失败后按依赖和精确边界识别独立操作。安全拒绝不能通过切换模式、替换草稿 ID 或等价提案规避。Git 的远端权限绑定真实仓库、destination、传输和精确 refs，已核验证据可供原任务收尾。受限 Python 替代需要独立 reviewer 的自动批准。 |
+
+外部目标未获准时，预检只使用允许探测的元数据。用户同意后重新核对 canonical target、scope、Git 远端和 ref、启动配置及文件基线，范围变化时撤销临时授权。外部读取的单次批准绑定精确 URI、实际行范围和读取上限。同一精确 URI 的读取安全拒绝也约束该文件的其他范围。编辑重发保留原审计并撤销被截断操作的活动授权。已完成及副作用未知的操作恢复时保持已有状态。
+
+### F5 现场步骤 / F5 acceptance
+
+开发仓库运行 `bun run compile` 并按 F5 启动扩展开发宿主。在临时目录建立夹具，从开发宿主打开其 `project`。/ Run `bun run compile` in the development repo and launch the Extension Development Host with F5. Open the fixture’s `project` there.
+
+```bash
+acceptance_root=$(mktemp -d)
+cd "$acceptance_root"
+acceptance_root=$(pwd -P)
+mkdir project outside
+printf 'external reference\n' > outside/reference.txt
+cd project
+git init
+git config user.name 'KeepSeek Acceptance'
+git config user.email 'acceptance@example.invalid'
+git config commit.gpgsign false
+printf 'initial\n' > sample.txt
+printf 'remove this fixture\n' > disposable.txt
+printf '{"scripts":{"compile":"node --version","lint":"node --version","test":"node --version"}}\n' > package.json
+git add sample.txt disposable.txt package.json
+git commit -m 'acceptance fixture'
+git init --bare "$acceptance_root/remote.git"
+git remote add origin "$acceptance_root/remote.git"
+```
+
+| 中文验收 | English acceptance |
+| --- | --- |
+| 信任临时工作区，确认首次 ready。打开 `/`，切换中英文，确认审批模式只有「请求批准」「帮我审批」。用方向键选择审批模型，确认「跟随主模型」与固定账号模型的选择和焦点，普通子代理设置各自独立。 | Trust the temporary workspace and verify first ready. In `/`, switch languages and check **Ask for approval** and **Approve for me**. Use the arrow keys to select **Follow main model** or a fixed approval model and verify focus and independent subagent settings. |
+| 在「请求批准」下准备两个文件变更和一个只读 DraftRun，核对点击前零副作用。分别测试单项 Apply、批量 Apply、Discard 和 Run，确认零 reviewer 请求。 | In **Ask for approval**, prepare two file changes and one read-only DraftRun. Check for zero effects before the click. Exercise single Apply, batch Apply, Discard, and Run and verify zero reviewer requests. |
+| 在「帮我审批」下分别创建、移动和删除临时文件，执行精确 Git 对象查询及 compile/lint/test。每个受审操作核对一次逻辑审查和一次实际结果。工作区只读工具和原生 Git status/diff 核对零 reviewer 请求。在 Run Details 对照真实审批模型、风险和执行结果。 | In **Approve for me**, create, move, and delete fixture files, execute an exact Git object query, and run compile/lint/test. Verify one logical review and one actual outcome for each reviewed action. Verify zero reviewer requests for ordinary workspace reads and native Git status/diff. Compare the actual model, risk, and execution result in Run Details. |
+| 读取未提前授权的 `../outside/reference.txt`，再准备写入该目录的新文件。逐次核对授权范围和精确动作，点击「授权并仅执行一次」，验证重复点击和改目标无法借用批准。另测拒绝。可用临时裸远端重复核对 Git 精确 destination/ref。 | Read `../outside/reference.txt` without pre-granting it, then propose a separate write in that directory. For each request, inspect the exact scope and action, choose **Authorize and run once**, and verify repeat clicks and changed targets cannot reuse it. Exercise rejection. Use the local bare remote to check exact Git destination and refs. |
+| 用户级审批模型暂设不存在的固定 sourceId/modelId，核对配置不可用、零网络请求和一次精确人工请求。等待期间修改启动脚本、文件基线或审批模型设置，旧批准应失效。恢复有效配置。服务故障、超时、无效 JSON、确定性 high/critical 和 deny 使用下方受控用例注入。 | Set the user-level fixed approval model to a nonexistent sourceId/modelId. Verify a configuration error, zero network requests, and one exact manual request. While waiting, change the script, file baseline, or reviewer setting and check that the old approval expires. Restore the setting. Use the controlled tests below to inject service failures, timeouts, malformed JSON, high/critical risk, and denials. |
+| 等待期间关闭再重开 Webview，确认当前请求仍可操作且 Tab 焦点正常。分别测试 Stop、切换模式和重载窗口，核对旧按钮不可执行，重启只显示中断说明。打开历史宿主审批记录并核对中英文历史标签，粗粒度来源显示中性标签。 | Close and reopen the Webview during a pending request. Verify it can still be answered and can be reached with Tab. Exercise Stop, a mode change, and Reload Window. Old controls must remain inert and restart must show the interrupted explanation. Check bilingual historical host approval and the neutral label for coarse execution provenance. |
+
+### 本次验收记录 / Verification
+
+本地夹具已在 macOS x86_64、Node v24.15.0 和 Bun 1.3.12 下复现。临时项目与裸远端均初始化，远端路径和初始文件核验通过，三个 npm 夹具脚本均退出 0。文档中的本地相对链接已检查。
+
+| 当前与基线逐字节对照 | 实测 |
+| --- | --- |
+| 英文主模型 system | 11,057 → 11,064 UTF-8 字节，仅第 26 个段落变化 |
+| 中文主模型 system | 9,589 → 9,601 UTF-8 字节，仅第 26 个段落变化 |
+| 工具定义与顺序 | JSON 序列化均为 26,375 字节，逐字节一致，SHA-256 `5eedfab6cb618ad1c27c9491247b50c65a2932ad1db4b8499deecea4493450d5` |
+
+对照使用 `git show 1ea4332:src/agent/protocol.ts` 与当前同路径文件，经相同 TypeScript 编译选项加载。对两种语言分别调用 `getAgentSystemPrompt({ language })`，以两个换行符分段比较，并比较 `JSON.stringify(getAgentTools())`。
+
+行为回归通过真实临时工作区执行文件新增、修改、移动和删除，以及固定 npm 验证和 Git 对象查询。Git 测试使用本地裸仓库检查精确 destination/ref、远端拒绝后的本地独立步骤、推送后对象核验和未知结果保护。审批模型由可计数的受控响应驱动，覆盖有效拒绝、高风险禁批、无效响应、超时、配置变更、审计写入失败与一次性消费。
+
+| 验证 | 退出码 | 实测 |
+| --- | --- | --- |
+| `bun run compile` | 0 | 最终工作树编译通过 |
+| `bun run lint` | 0 | 最终工作树静态检查通过 |
+| `bun run build:test` | 0 | 最终工作树测试构建通过 |
+| `bun run test` | 1 | 修正只读文件夹具前共 1,609 项，1,606 通过、1 跳过、2 失败。16 个真实临时 Git 发布场景全部通过。跳过项需要本地故障服务器端口，当前环境禁止绑定。 |
+| 文件与持久化定向复测 | 0 | `atomicStorage`、`safeFileEditor`、`textPatch` 共 36 项通过。夹具按 POSIX 访问位识别只读打开，覆盖保留权限的只读文件移动与恢复。 |
+| 审批专项 | 0 | `approvalReviewer` 共 24 项通过，受控 HTTP 验证单次重试、请求前用量落账及落账失败时零发送。 |
+| `git diff --check` | 0 | 补丁格式检查通过 |
+
+10,000 条账本基准的断言门槛为 15 秒。全量测得 19.753 秒，当前工作树的两次独立复测为 16.843、18.077 秒，均超门槛。起始提交的两次独立运行均通过，外层用例耗时分别为 15.037、14.227 秒。两份构建的基准测试、账本读写、用量聚合、缓存观测、原子存储及会话删除门闩 JavaScript 文件逐字节相同。以隔离的起始提交目录为工作目录运行当前构建的同一测试也通过，外层耗时为 14.571 秒。工作目录与耗时差异的具体原因尚未定位。
+
+线上审批模型、原生 F5、Windows/Linux 实机待验。开发宿主的 KeepSeek 存储根由扩展按宿主原生目录决定，VS Code CLI 独立 profile 不隔离该目录。本轮图形验证使用生成 Webview 脚本的 DOM 回归。
+
+可复现的构建及回归命令：
+
+```bash
+bun run compile
+bun run lint
+bun run build:test
+bun run test
+git diff --check
+```
+
+受控 reviewer 故障与真实临时执行的定向入口：
+
+```bash
+node --require ./out-test/test/registerVscodeStub.js --test \
+  out-test/test/approvalReviewer.test.js out-test/test/taskApprovalIntegration.test.js \
+  out-test/test/draftRunBatch.test.js out-test/test/runDetails.test.js \
+  out-test/test/inputComposition.test.js out-test/test/cacheByteStability.test.js
+```
+
+## 2026-11-05 历史记录
+
+以下保留当时的合同、夹具、计数和验证边界。
+
 版本：2026-11-05。开发基线：`3bd161c`。本文件替代旧“delegate 全程不转人工”和独立 model_review 的活动合同；旧验收报告保留历史事实。
 
-## 不变式与路由
+### 不变式与路由
 
 | 条件 | 路由与真实结果 |
 | --- | --- |
@@ -18,7 +135,7 @@
 
 进程使用扩展宿主账号权限，没有 OS 沙箱。`shell:false`、绑定 launcher/cwd/env、静态目标检查和 reviewer 均不等于操作系统隔离。
 
-## 模式、模型与迁移
+### 模式、模型与迁移
 
 - 仅提供 **请求批准 / Ask for approval**、**帮我审批 / Approve for me**。内部保留 ask / delegate。伪造 `setApprovalMode:model_review` 无效。
 - 旧 model_review 当前设置降为 ask，提示旧模式已合并；历史审批来源仍标记“旧版模型审批”，历史消息不重写。已有 delegate 继续使用帮我审批。
@@ -28,7 +145,7 @@
 - 普通子代理 default 及 research/review/proposal 原配置均保留；review 显示为“代码审查 / Code review”。只读与仅提案权限不变。审批用量仍为 approval reviewer，不计普通 child 调用。
 - 新模式尾注只追加到新 user 消息。新会话和明确启用 delegate 时使用协议/工具描述版本 13；版本 1–12 的 system、工具和已有历史字节保留。三协议仍使用同一 projection 与 native replay。
 
-## 单次人工请求与恢复
+### 单次人工请求与恢复
 
 请求以随机宿主 token 关联 session、rootTask、segment、target、action kind、actionHash/specHash、范围指纹、必要启动快照与 runtime；Webview 消息不携带可自行解释为授权的命令。宿主同时比对活请求和保存快照，先消费回调，再持久化决定；重复、跨任务、跨会话、旧 runtime 或失配消息无效。
 
@@ -40,7 +157,7 @@
 
 `pendingApproval` v1 只用于解释和恢复；normalize 删除 runtime、完整活请求与回调，并将 waiting 标为 interrupted。`approvalProcessing` v2 的等待恢复为 blocked，经用户主动恢复才重建预检/审查与新请求，不自动消费旧批准。旧 v1 delegate 的中断/等待记录继续转为 stopped，旧 model_review 批次没有恢复执行入口。成功或副作用未知的操作不会因重启重放。
 
-## 可复制现场步骤
+### 可复制现场步骤
 
 以下仅在可丢弃目录执行。开发仓库的提交、标签、远端及用户 SSH 配置均不参与验证。
 
@@ -73,7 +190,7 @@ printf '{"scripts":{"compile":"node --version","lint":"node --version","test":"n
 9. 在临时仓库更改 sample.txt，原始回归输入保持：**对当前代码进行一个 git commit 提交，然后发布一个 v0.5.1的tag**。先核对原文的本地与远端意图；未明确远端范围不默认发布。查看分离的 stage/commit/tag 及真实 HEAD/tag 核验，已有目标不能重复创建。再明确要求向临时 origin 推送该精确 tag，测试缺少预授权时的单次同意/拒绝，以及已配置精确 gitReleaseGrants 时的自动非强制推送。查询临时裸远端核对 object/peeled refs；不要使用真实远端。
 10. 调用 research、代码审查和 proposal，确认原有模型继承、只读与提案权限及用量来源；proposal 不能自行批准、Apply 或执行。
 
-## 关键代码
+### 关键代码
 
 | 文件 | 改动 |
 | --- | --- |
@@ -85,7 +202,7 @@ printf '{"scripts":{"compile":"node --version","lint":"node --version","test":"n
 | `src/webview/input/commandMenu/approval.ts`、`commandMenu/models.ts`、`webview/script.ts`、i18n | 两模式、子代理菜单中的独立审批模型、真实等待和审计来源 |
 | `test/approval*.test.ts`、`taskApprovalIntegration.test.ts` 及相邻测试 | 回归与真实临时工作区/仓库/远端验证 |
 
-## 验证边界与记录
+### 验证边界与记录
 
 自动化使用真实 Provider/Runner/审批存储、SafeFileEditor、DraftRun 执行器和临时 Git 仓库/裸远端；reviewer 网络响应可注入。验证旧审计读取、模式/菜单/脚本、真实文件副作用、Git 发布、拒绝、故障、计时、一次性消费、取消和恢复。测试真实执行不等于真实模型或 F5 图形验收。
 

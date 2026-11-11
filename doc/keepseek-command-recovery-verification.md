@@ -2,7 +2,7 @@
 
 ## 2026-11-11 当前合同
 
-实施基线为 `07d4351fa741bdaf1c9472abc2c6871329801ae9`，KeepSeek 0.5.3，Asia/Shanghai。存储沿用 0.5.2 初始基线。静态能力版本保持 v1，冻结的 Provider 工具和静态前缀沿用当前协议。
+命令纠错实施基线为 `07d4351fa741bdaf1c9472abc2c6871329801ae9`，KeepSeek 0.5.3，Asia/Shanghai。存储沿用 0.5.2 初始基线，静态能力版本为 v1。合法且可审查的 DraftRun 由当前审批模式授权，见[独立审批审查合同](keepseek-approve-for-me-verification.md)。
 
 ### 纠错与恢复
 
@@ -22,7 +22,7 @@
 
 Git 可以把裸的完整 OID 原样返回，也可在同名引用歧义或全名回退时返回一个对象。需要对象存在或提交类型时分别检查 `^{object}` 或 `^{commit}`。标签证明另外从宿主只读快照精确匹配完整 `refs/tags/...`，以该 ref 读取的对象 ID 解引用。已有同仓库、同任务提交和当前对象匹配的证据复用 `peeled ?? object`。缺少或不匹配时执行有界固定补证并核对快照。普通查询可以用无通配的 `git tag --list <name>` 后精确比较返回的标签名。参考 [git-rev-parse](https://git-scm.com/docs/git-rev-parse) 和 [gitrevisions](https://git-scm.com/docs/gitrevisions)。
 
-### 本地验证记录
+### 本地验证记录（命令纠错实施基线）
 
 环境为 macOS x86_64、Apple Git 2.50.1、Node 24.15.0、Bun 1.3.12。真实 Git 写入和 ref 变化均在隔离的临时仓库构造。下表的进程计数为业务 DraftRun 启动，宿主执行身份与 ref 快照的固定只读探针独立计量。
 
@@ -43,7 +43,7 @@ macOS 隔离 VS Code 开发宿主未能启动。原生 F5 和 Windows、Linux �
 ### 现场验收步骤
 
 1. F5 启动扩展开发宿主并使用专用临时仓库。创建两个提交、一个 annotated tag 和一个 lightweight tag，记录 `show-ref`、索引和工作区状态。用新的会话依次选择 ask 与 delegate。
-2. 准备 `['rev-parse', '--verify', '--quiet', '--end-of-options', 'v0.5.3^{commit}']`，核对 ask 等待当前批准、delegate 记录 `host_policy`，原 argv 字面传入且 stdout 仅一行完整 ID。查询一个不存在的标签，核对 exit 1、`exited` 及无成功事实。Windows、macOS、Linux 各记录一次实际 argv。
+2. 准备 `['rev-parse', '--verify', '--quiet', '--end-of-options', 'v0.5.3^{commit}']`，核对 ask 等待当前批准，delegate 审查通过后记录 `auto_approval_review`，原 argv 字面传入且 stdout 仅一行完整 ID。查询一个不存在的标签，核对 exit 1、`exited` 及无成功事实。Windows、macOS、Linux 各记录一次实际 argv。
 3. 用 `--unknown-fixture` 触发预检，核对原卡保留诊断且进程未启动。用受控模型在收到诊断后换草稿 ID、理由和选项附值，并在同轮准备独立只读查询，核对重复提示只出现在对应卡，独立查询完成，依赖写操作保持阻塞。
 4. 在同一任务中取得提交和标签证据，使用隔离测试数据打开历史 `--verify` 终态，核对标签结果的复用、移动标签后的补证，以及重开与点击时的执行计数。另准备新合法草稿并核对新的审批记录。检查仓库的 refs、索引及工作区无额外变化。
 

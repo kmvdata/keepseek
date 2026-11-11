@@ -33,6 +33,8 @@ export interface LocalGitCommitPlan {
   files: string[];
   messages: string[];
   treeHash?: string;
+  scopeFingerprint?: string;
+  indexHash?: string;
 }
 
 export interface LocalGitStageEvidence {
@@ -131,8 +133,10 @@ export async function prepareLocalGitCommit(run: DraftRun, scope: CommandScope, 
   }
   if (!files.length) return { outcome: 'no_changes', evidence: { rootTaskId, repositoryUri: location.repositoryUri,
     previousHead, branchRef, remainingStatus: await readRemainingStatus(read), outcome: 'no_changes', executed: false } };
-  const treeHash = !command.all || stage ? hashTreeEntries(await read(['ls-files', '--stage', '-z']), 'index') : undefined;
-  return { outcome: 'ready', snapshot: { ...location, rootTaskId, previousHead, branchRef, files, messages: command.messages, treeHash } };
+  const index = await read(['ls-files', '--stage', '-z']);
+  const treeHash = !command.all || stage ? hashTreeEntries(index, 'index') : undefined;
+  return { outcome: 'ready', snapshot: { ...location, rootTaskId, previousHead, branchRef, files, messages: command.messages,
+    treeHash, scopeFingerprint: scope.fingerprint, indexHash: hashIndex(index) } };
 }
 
 function getScopedGitLocation(scope: CommandScope): Pick<LocalGitCommitPlan, 'repositoryUri' | 'executable'> | undefined {
@@ -145,7 +149,26 @@ async function readStageState(read: (args: string[]) => Promise<string>): Promis
   const head = await readHead(read);
   const branchRef = await readBranchRef(read, head);
   const index = await read(['ls-files', '--stage', '-z']);
-  return { head, branchRef, indexHash: createHash('sha256').update(index).digest('hex') };
+  return { head, branchRef, indexHash: hashIndex(index) };
+}
+
+function hashIndex(index: string): string {
+  return createHash('sha256').update(index).digest('hex');
+}
+
+/** Recheck the repository scope and the exact staged index entries. */
+export async function assertLocalGitCommitSnapshot(run: DraftRun, snapshot: LocalGitCommitPlan,
+  signal?: AbortSignal, liveScope?: CommandScope): Promise<void> {
+  checkDraftRunApprovalIdentity(run);
+  const current = liveScope ?? await inspectDraftRunScope(run);
+  const location = getScopedGitLocation(current);
+  const mismatch = () => new Error('Git commit scope changed before launch. Nothing executed. / Git 提交范围在启动前已变化，尚未执行。');
+  if (signal?.aborted || !snapshot.scopeFingerprint || current.fingerprint !== snapshot.scopeFingerprint
+    || !location || location.repositoryUri !== snapshot.repositoryUri || location.executable !== snapshot.executable) {
+    throw mismatch();
+  }
+  const index = await readGit(run, location, ['ls-files', '--stage', '-z'], signal);
+  if (signal?.aborted || !snapshot.indexHash || hashIndex(index) !== snapshot.indexHash) throw mismatch();
 }
 
 export async function verifyLocalGitCommit(run: DraftRun, snapshot: LocalGitCommitPlan, rootTaskId: string,
@@ -212,10 +235,14 @@ export function normalizeLocalGitCommitPlan(value: unknown): LocalGitCommitPlan 
     || !v.repositoryUri.startsWith('file:') || typeof v.executable !== 'string' || !isAbsolute(v.executable)
     || (v.previousHead !== null && !(typeof v.previousHead === 'string' && objectId.test(v.previousHead)))
     || (v.treeHash !== undefined && !/^[a-f0-9]{64}$/u.test(v.treeHash))
+    || (v.scopeFingerprint !== undefined && !/^[a-f0-9]{64}$/u.test(v.scopeFingerprint))
+    || (v.indexHash !== undefined && !/^[a-f0-9]{64}$/u.test(v.indexHash))
     || normalizeBranch(v.branchRef) === undefined || !normalizePaths(v.files)
     || !Array.isArray(v.messages) || !v.messages.every(message => typeof message === 'string')) return undefined;
   return { rootTaskId: v.rootTaskId, repositoryUri: v.repositoryUri, executable: v.executable, previousHead: v.previousHead,
-    branchRef: v.branchRef!, files: [...v.files!], messages: [...v.messages], treeHash: v.treeHash };
+    branchRef: v.branchRef!, files: [...v.files!], messages: [...v.messages], treeHash: v.treeHash,
+    ...(v.scopeFingerprint === undefined ? {} : { scopeFingerprint: v.scopeFingerprint }),
+    ...(v.indexHash === undefined ? {} : { indexHash: v.indexHash }) };
 }
 
 function hashTreeEntries(output: string, source: 'index' | 'tree'): string {

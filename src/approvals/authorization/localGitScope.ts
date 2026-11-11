@@ -53,6 +53,7 @@ export async function inspectLocalGitScope(input: {
    * worktree/index matches become path candidates; refs are never invented files. */
   ambiguousRevisionOperands?: readonly string[];
   remote?: GitRemoteCommand;
+  remoteMetadataOnly?: boolean;
   refMutation?: { name: string; action: 'create' | 'delete' | 'force' };
   tagSnapshotRef?: string;
   signal?: AbortSignal;
@@ -304,7 +305,8 @@ export async function inspectLocalGitScope(input: {
     }
     let remote: GitRemoteScope | undefined;
     if (input.remote && !executableHook) {
-      try { remote = await inspectGitRemoteScope({ command: input.remote, executable: input.executable, cwd, env: input.env, config: configEntries }); }
+      try { remote = await inspectGitRemoteScope({ command: input.remote, executable: input.executable, cwd, env: input.env,
+        config: configEntries, metadataOnly: input.remoteMetadataOnly }); }
       catch (error) {
         // execFile errors can embed configuration values. Only return our own diagnostics.
         return { reason: error instanceof Error && !('code' in error) ? error.message

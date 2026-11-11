@@ -609,7 +609,7 @@ function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: '
     'appendApprovalStateNote', 'appendApprovalResumeAction', 'createDraftRunCard', 'appendDraftRunBatchControls', 'appendDraftRunActions', 'createDraftRunActionButton',
     'isDraftRunBatchActive', 'getDraftRunBatchMembers', 'createDraftRunTimelineItem', 'renderDraftRunItems',
     'captureDraftRunActionFocus', 'findDraftRunActionFocus', 'renderTranscript', 'handleDraftRunActionClick', 'handleChangeSetActionClick',
-    'createApprovalReviewSummary', 'getApprovalSourceLabel', 'getApprovalDecisionLabel', 'getApprovalRiskLabel',
+    'createApprovalReviewSummary', 'formatApprovalReviewDetails', 'getApprovalSourceLabel', 'getApprovalDecisionLabel', 'getApprovalRiskLabel', 'isApprovalSafetyDenied',
     'getDraftRunTitle', 'appendDraftRunField', 'createDraftRunPreflightDetails', 'formatShellCommand', 'formatShellWord', 'getDraftRunStatusLabel', 'getDraftRunEffectLabel',
     'createChangeSetCard', 'createChangeSetFileRow', 'createEditActionButton', 'createEditOpenFileButton',
     'createChangeSetActionButton', 'getChangeSetStatusLabel', 'getChangeFileStatusLabel', 'isChangeSetActionable',
@@ -634,7 +634,7 @@ function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: '
   const composer = { text: '' };
   const context = { state, translations: WEBVIEW_TRANSLATIONS,
     document: { createElement: () => new UiElement() }, Element: UiElement, HTMLElement: UiElement,
-    pendingDraftRunBatchSnapshot: '', pendingDraftRunActions: new Set(), pendingDraftRunApprovals: new Set(), pendingChangeActions: new Map(),
+    pendingDraftRunBatchSnapshot: '', pendingManualApprovalDecisionId: '', pendingDraftRunActions: new Set(), pendingDraftRunApprovals: new Set(), pendingChangeActions: new Map(),
     changeActionRequestSequence: 0,
     isPromptEmpty: () => !composer.text, getPromptEndRange: () => composer.text.length,
     setPromptSelectionRange: (end: number) => assert.equal(end, composer.text.length), savePromptSelection: () => {},

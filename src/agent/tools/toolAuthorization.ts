@@ -120,6 +120,19 @@ export class ToolAuthorizationService implements ToolAuthorizationAdapter {
         input.language === 'en' ? 'The workspace is not trusted. Nothing executed.' : '工作区不受信任，尚未执行。');
     }
 
+    // The Runner owns the precise review and one-time approval of these tools.
+    // A generic authorization policy cannot stand in for that decision.
+    if (input.policy.approvalMode === 'delegate'
+      && (metadata.riskLevel === 'medium' || HIGH_RISK_TOOLS.has(input.toolName))) {
+      return {
+        ...createDecision(input.toolName, metadata, false, 'user_denied', false,
+          input.language === 'en'
+            ? 'An exact approval decision is required. Nothing executed.'
+            : '需要本次精确操作的审批决定，尚未执行。'),
+        failureCode: 'approval_review_required'
+      };
+    }
+
     if (metadata.riskLevel === 'high') {
       // 未知工具：不在 LOW_RISK_TOOLS / HIGH_RISK_TOOLS 中，schema 未注册、handleToolCall 无法路由
       // （default 返回 Unsupported tool），确认弹窗没有意义（确认后也无法执行）。直接静默拒绝并返回
@@ -136,14 +149,7 @@ export class ToolAuthorizationService implements ToolAuthorizationAdapter {
             : `工具“${input.toolName}”未在当前工具 schema 中注册，无法执行，已直接拒绝（不再弹确认窗）。请使用 schema 中的精确工具名。`
         );
       }
-      if (input.policy.approvalMode === 'delegate' && vscode.workspace.isTrusted) {
-        return createDecision(input.toolName, metadata, true, 'delegated_approver', false);
-      }
       return await this.confirmHighRiskTool(input.toolName, metadata, input.args, input.language);
-    }
-
-    if (input.policy.approvalMode === 'delegate' && vscode.workspace.isTrusted) {
-      return createDecision(input.toolName, metadata, true, 'delegated_approver', false);
     }
 
     if (input.policy.approvalMode !== 'ask' && input.policy.authorizedScopes.includes(metadata.scope)) {

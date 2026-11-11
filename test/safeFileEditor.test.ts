@@ -6,6 +6,7 @@ import * as path from 'node:path';
 import { test } from 'node:test';
 import { DEFAULT_PATCH_MAX_BACKUP_BYTES } from '../src/shared/config';
 import { SafeFileEditor } from '../src/edits/safeFileEditor';
+import { ExactOperationGrants, inspectAutomaticEditAuthorization } from '../src/approvals/authorization';
 import type { DraftEdit, FullTextDraftEditV1, DeleteDraftEditV1, ChangeCheckpoint } from '../src/shared/types';
 import { createFullTextDraftEdit } from '../src/edits/draftEdit';
 import * as vscode from './stubs/vscode';
@@ -35,6 +36,36 @@ test('delegated external edit requires the exact URI and retains a usable revert
   assert.equal(await fs.readFile(outside, 'utf8'), 'changed');
   await editor.revertCheckpoint(checkpoint);
   assert.equal(await fs.readFile(outside, 'utf8'), 'original');
+});
+
+test('external edit metadata checks never read the target and revoke eligibility when its identity changes', async t => {
+  const root = await configureWorkspace(t, 'keepseek-external-edit-metadata-');
+  const workspace = path.join(root, 'workspace');
+  await fs.mkdir(workspace);
+  vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file(workspace), name: 'workspace' }];
+  const outside = path.join(root, 'external.txt');
+  await fs.writeFile(outside, 'original');
+  const edit = createModifyEdit(outside, 'changed');
+  const proposal = { sessionId: 'session', runId: 'segment', edit };
+  const grants = new ExactOperationGrants();
+  const originalRead = vscode.workspace.fs.readFile;
+  vscode.workspace.fs.readFile = async () => assert.fail('external edit target bytes were requested before authorization');
+  t.after(() => { vscode.workspace.fs.readFile = originalRead; });
+  const editor = new SafeFileEditor();
+  await editor.preflightDraftEditOutput(edit, true);
+  const credentialDraft = createModifyEdit(outside, 'api_key=syntheticTestCredentialValue');
+  await editor.preflightDraftEditOutput(credentialDraft);
+  await assert.rejects(editor.preflightDraftEditOutput(credentialDraft, true), /suspected credential material/u);
+  const initial = await inspectAutomaticEditAuthorization(proposal, grants);
+  assert.equal(initial.allowed, false);
+  assert.deepEqual(initial.scope.externalUris, [edit.uri]);
+  grants.grant(initial.identity, initial.scope);
+  assert.equal((await inspectAutomaticEditAuthorization(proposal, grants)).allowed, true);
+  await fs.writeFile(outside, 'replacement');
+  assert.equal((await inspectAutomaticEditAuthorization(proposal, grants)).allowed, false);
+  vscode.workspace.textDocuments.push({ uri: vscode.Uri.file(outside), isDirty: true } as vscode.TextDocument);
+  await assert.rejects(inspectAutomaticEditAuthorization(proposal, grants), /dirty editor/u);
+  await assert.rejects(inspectAutomaticEditAuthorization({ ...proposal, edit: createModifyEdit(root) }, grants), /not a regular file/u);
 });
 
 test('deletes a bounded UTF-8 text file and restores its exact bytes from the checkpoint', async (t) => {

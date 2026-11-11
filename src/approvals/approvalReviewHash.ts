@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { DraftEdit, DraftRun } from '../shared/types';
 import type { BoundedReviewText } from './approvalReviewTypes';
 import { canonicalPatchPayload } from '../edits/textPatch';
+import { getDraftEditBase, getDraftEditResult } from '../edits/draftEdit';
 
 export const MAX_REVIEW_CHANGE_CHARS = 48_000;
 
@@ -47,6 +48,24 @@ export function hashDraftEditAction(edit: DraftEdit): string {
     });
   }
   throw new Error('Unsupported KeepSeek draft edit payload.');
+}
+
+/** An equivalent re-proposal must not erase a safety refusal. Execution
+ * remains bound to the separately validated complete action hash. */
+export function hashDraftEditEffect(edit: DraftEdit): string {
+  const base = getDraftEditBase(edit);
+  const result = getDraftEditResult(edit);
+  return hashApprovalValue([edit.action, edit.uri, edit.kind === 'move_v1' ? edit.targetUri : null,
+    base?.sha256, base?.sizeBytes, result?.sha256, result?.sizeBytes]);
+}
+
+export function hashDraftRunEffect(draftRun: Pick<DraftRun, 'spec'>): string {
+  const { executable, args, cwdUri, env, restricted } = draftRun.spec;
+  const environment = env.map(({ name, value }) => ({
+    name: process.platform === 'win32' ? name.toUpperCase() : name,
+    value
+  })).sort((left, right) => left.name.localeCompare(right.name, 'en'));
+  return hashApprovalValue([executable, args, cwdUri, environment, restricted]);
 }
 
 export function hashDraftRunAction(draftRun: Pick<DraftRun, 'specHash'>): string {

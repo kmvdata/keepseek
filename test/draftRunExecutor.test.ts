@@ -1,6 +1,8 @@
 import './registerVscodeStub';
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
 import * as os from 'node:os';
+import * as path from 'node:path';
 import { test } from 'node:test';
 import * as vscode from 'vscode';
 import { analyzeDraftRunEffects } from '../src/approvals/authorization';
@@ -8,28 +10,38 @@ import { DraftRunAuthorizationService } from '../src/runs/draftRunAuthorization'
 import { SpawnDraftRunExecutor } from '../src/runs/draftRunExecutor';
 import { hashDraftRunSpec } from '../src/runs/draftRunProposal';
 import type { DraftRun, DraftRunSpec } from '../src/shared/types';
-import type { ApprovalRecordMatch } from '../src/approvals/approvalReviewTypes';
-import type { ApprovalReviewStore } from '../src/approvals/approvalReviewStore';
+import { APPROVAL_POLICY_VERSION, type ApprovalRecordMatch } from '../src/approvals/approvalReviewTypes';
+import { ApprovalReviewStore } from '../src/approvals/approvalReviewStore';
 import { clearCreatedTerminals, createdTerminals } from './stubs/vscode';
 
-test('delegated execution requires its matching approval record and remains single-use', async () => {
+test('delegated execution requires its matching approval record and remains single-use', async t => {
+  const storage = await mkdtemp(path.join(os.tmpdir(), 'keepseek-executor-approval-'));
   const executor = new SpawnDraftRunExecutor();
+  t.after(async () => { executor.dispose(); await rm(storage, { recursive: true, force: true }); });
   const draftRun = createDraftRun(['-e', 'process.stdout.write("delegated")']);
-  const approvalStore = { consumeMatchingApproval: async () => ({}), findHardRunDenial: () => undefined } as unknown as ApprovalReviewStore;
+  const approvalStore = new ApprovalReviewStore(vscode.Uri.file(storage) as never);
+  await approvalStore.initialize();
   const authorization = new DraftRunAuthorizationService(approvalStore);
-  const match: ApprovalRecordMatch = {
-    reviewId: 'review', sessionId: draftRun.sessionId, rootTaskId: draftRun.agentRunId, agentRunId: draftRun.agentRunId,
+  const record = await approvalStore.add({
+    sessionId: draftRun.sessionId, rootTaskId: draftRun.agentRunId, agentRunId: draftRun.agentRunId,
     targetId: draftRun.id, actionKind: 'draft_run_execute', actionHash: draftRun.specHash,
-    policyVersion: 1, expectedSource: 'auto_approval_review', approvalMode: 'delegate', workspaceTrusted: true
+    policyVersion: APPROVAL_POLICY_VERSION, approvalSource: 'auto_approval_review', approvalMode: 'delegate',
+    scopeFingerprint: 'b'.repeat(64),
+    reviewerConfigFingerprint: 'a'.repeat(64), reviewerProvider: 'openai-compatible', reviewerModelId: 'fixture-model',
+    reviewerSourceId: 'fixture-source', decision: 'approve', risk: 'low', rationale: 'Exact fixture approval.', policyRules: ['direct_user_goal']
+  });
+  const match: ApprovalRecordMatch = {
+    ...record, expectedSource: 'auto_approval_review', workspaceTrusted: true
   };
   await assert.rejects(authorization.createDelegatedPermit(draftRun, () => false, match), /no longer authorized/u);
+  await assert.rejects(authorization.createDelegatedPermit(draftRun, () => true, { ...match, policyVersion: 5 }), /matching approval/u);
   const permit = await authorization.createDelegatedPermit(draftRun, () => true, match);
+  await assert.rejects(authorization.createDelegatedPermit(draftRun, () => true, match), /matching approval/u);
   await assert.rejects(executor.execute({ draftRun, permit, onOutput: () => {} }), /approval record/u);
   draftRun.authorizationSource = 'delegated_approver';
   const result = await executor.execute({ draftRun, permit, onOutput: () => {} });
   assert.equal(result.exitCode, 0);
   await assert.rejects(executor.execute({ draftRun, permit, onOutput: () => {} }), /already consumed/u);
-  executor.dispose();
 });
 
 test('SpawnDraftRunExecutor passes a literal argv with shell disabled and consumes the permit once', async () => {

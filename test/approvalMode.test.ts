@@ -28,6 +28,7 @@ import type { ApprovalMode, ChatMessage, ChatSession } from '../src/shared/types
 import * as vscode from './stubs/vscode';
 import { normalizeStoredSessions } from '../src/sessions/chatSessionStore';
 import { invalidateApprovalStateForHistory, normalizeApprovalProcessing } from '../src/approvals/approvalProcessing';
+import { APPROVAL_POLICY_VERSION } from '../src/approvals/approvalReviewTypes';
 import type { HistoryTruncationScope } from '../src/sessions/historyTruncation';
 
 test('draft receipt and host authorization text describe the actual mode without claiming execution', () => {
@@ -344,13 +345,14 @@ class ApprovalMenuElement {
   }
 }
 
-test('delegated validation is authorized without a dialog; unknown tools remain denied', async () => {
+test('generic delegate authorization cannot bypass exact validation review; unknown tools remain denied', async () => {
   vscode.workspace.isTrusted = true;
   const service = new ToolAuthorizationService();
   const policy = { ...service.createRunPolicy('r'), approvalMode: 'delegate' as const, mediumRiskPolicy: 'ask' as const };
-  const approved = await service.authorize({ policy, toolName: RUN_VALIDATION_TOOL_NAME, args: { script: 'test' }, language: 'en' });
-  assert.equal(approved.allowed, true);
-  assert.equal(approved.source, 'delegated_approver');
+  const decision = await service.authorize({ policy, toolName: RUN_VALIDATION_TOOL_NAME, args: { script: 'test' }, language: 'en' });
+  assert.equal(decision.allowed, false);
+  assert.equal(decision.failureCode, 'approval_review_required');
+  assert.equal(decision.requiresExplicitConfirmation, false);
   const unknown = await service.authorize({ policy, toolName: 'unknown', args: {}, language: 'en' });
   assert.equal(unknown.allowed, false);
 });
@@ -374,7 +376,7 @@ test('ask mode requests approval for each validation even with prior grants and 
   }
 });
 
-test('delegation does not grant external file access, even in trusted runs', () => {
+test('an external target requires an exact URI authorization even in a trusted workspace', () => {
   const folders = vscode.workspace.workspaceFolders;
   const trusted = vscode.workspace.isTrusted;
   try {
@@ -382,12 +384,8 @@ test('delegation does not grant external file access, even in trusted runs', () 
     vscode.workspace.isTrusted = true;
     const service = new WorkspaceToolService();
     assert.throws(() => service.resolveTargetUri('/external/file.txt'), /inside/u);
-    service.setDelegatedFileAuthorization(true);
-    assert.throws(() => service.resolveTargetUri('/external/file.txt'), /inside/u);
     service.setAuthorizedExternalReferenceUris([]);
-    service.setDelegatedFileAuthorization(false);
     assert.throws(() => service.resolveTargetUri('/external/file.txt'), /inside/u);
-    service.setDelegatedFileAuthorization(true);
     vscode.workspace.isTrusted = false;
     assert.throws(() => service.resolveTargetUri('/external/file.txt'), /inside/u);
   } finally {
@@ -396,7 +394,7 @@ test('delegation does not grant external file access, even in trusted runs', () 
   }
 });
 
-test('reviewer cannot grant external access; explicit reference grants only the exact URI', async () => {
+test('an explicit external reference grants only the exact URI', async () => {
   const folders = vscode.workspace.workspaceFolders;
   const trusted = vscode.workspace.isTrusted;
   try {
@@ -407,7 +405,6 @@ test('reviewer cannot grant external access; explicit reference grants only the 
     assert.equal(external?.authorized, false);
     const reviewed = external?.uri;
     assert.equal(reviewed, vscode.Uri.file('/external/reviewed.txt').toString());
-    assert.throws(() => service.authorizeReviewedExternalUri(reviewed!), /explicit user/u);
     service.setAuthorizedExternalReferenceUris([reviewed!]);
     assert.equal(service.resolveTargetUri('/external/reviewed.txt').toString(), reviewed);
     assert.throws(() => service.resolveTargetUri('/external/sibling.txt'), /inside/u);
@@ -485,7 +482,7 @@ test('ask mode retires malformed argv without treating independent later checks 
   }
 });
 
-test('model denial leaves a DraftEdit pending and records guidance without another model call', async () => {
+test('model denial records why a DraftEdit did not run without another model call', async () => {
   const fixture = workflowFixture({ mode: 'delegate', denyTarget: 'e1' });
   await fixture.run();
   assert.deepEqual(fixture.effects, ['stopped']);
@@ -584,6 +581,7 @@ test('model denial of a deletion leaves the exact file unchanged', async () => {
     });
     await fixture.run();
     assert.deepEqual(fixture.effects, ['stopped']);
+    assert.equal(fixture.session.approvalProcessing?.targets[0].status, 'denied');
     assert.equal(await readFile(target, 'utf8'), 'preserve these bytes\n');
   } finally {
     vscode.workspace.workspaceFolders = folders;
@@ -627,11 +625,13 @@ function workflowFixture(options: {
       targetId: request.targetId,
       actionKind: request.actionKind,
       actionHash: request.actionHash,
-      policyVersion: 1,
-      approvalSource: Boolean(options.denyTarget) ? 'auto_approval_review' : 'host_policy',
-      reviewerSourceId: Boolean(options.denyTarget) ? 'review-source' : '',
-      reviewerModelId: Boolean(options.denyTarget) ? 'review-model' : '',
-      reviewerProvider: Boolean(options.denyTarget) ? 'openai-responses' : 'host_policy',
+      policyVersion: APPROVAL_POLICY_VERSION,
+      scopeFingerprint: request.scopeFingerprint,
+      approvalMode: request.approvalMode,
+      approvalSource: 'auto_approval_review',
+      reviewerSourceId: 'review-source',
+      reviewerModelId: 'review-model',
+      reviewerProvider: 'openai-responses',
       decision: request.targetId === options.denyTarget ? 'deny' : 'approve',
       risk: request.targetId === options.denyTarget ? 'high' : 'low',
       rationale: request.targetId === options.denyTarget
@@ -668,15 +668,17 @@ function workflowFixture(options: {
     language: 'en', delegatedApprovals: queue, repairLoopsBySession: new Map(), externalEffectGrants: new ExactOperationGrants(),
     approvalCircuitBreaker: { record: () => ({ tripped: false }) },
     approvalReviews: {
+      runtimeId: 'runtime',
       flush: async () => {},
       get: (id: string) => reviews.get(id),
       getLatestForTarget: () => undefined,
       findDenialForAction: () => undefined,
+      findSafetyDenial: () => undefined,
       findHardRunDenial: () => undefined
     },
     approvalReviewer: {
-      createHostPolicyApproval: async (request: Record<string, unknown>) => ({ status: 'reviewed', record: makeReview(request) }),
       review: async (request: Record<string, unknown>) => ({ status: 'reviewed', record: makeReview(request) }),
+      assertReviewerConfiguration: async () => {},
       consumeApproval: async (record: Record<string, unknown>) => {
         const consumed = { ...record, consumedAt: new Date().toISOString() };
         reviews.set(String(record.reviewId), consumed);
@@ -691,6 +693,7 @@ function workflowFixture(options: {
       flush: async () => {},
       toWebviewState: () => [{ runId: 'r', files: ['e1', 'e2'].map((id) => ({ id, uri: 'file:///workspace/' + id, label: id, status: 'pending' })) }],
       getPendingEdit: (id: string) => ({ edit: edit(id), runId: 'r', sessionId: 's' }),
+      preflightEditOutput: async (_id: string, scanSensitive: boolean) => { assert.equal(scanSensitive, true); },
       preflightEdit: async () => ({ originalText: '' }),
       attachApprovalReview: () => true,
       discardEdit: () => true,
@@ -735,7 +738,7 @@ function workflowFixture(options: {
       approvalStopReason: options.unavailableBeforeEffects ? 'reviewer unavailable' : undefined,
       approvalReviews: options.unavailableBeforeEffects ? [{
         reviewId: 'review-unavailable', sessionId: 's', rootTaskId: 'r', agentRunId: 'r', targetId: 'validation',
-        actionKind: 'validation_run', policyVersion: 1, approvalSource: 'auto_approval_review', reviewerSourceId: '',
+        actionKind: 'validation_run', policyVersion: APPROVAL_POLICY_VERSION, approvalSource: 'auto_approval_review', reviewerSourceId: '',
         reviewerModelId: '', reviewerProvider: '', decision: 'unavailable', risk: 'high', rationale: 'reviewer unavailable',
         createdAt: new Date().toISOString()
       }] : undefined
