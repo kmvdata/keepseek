@@ -87,6 +87,8 @@ test('title budget delta keeps newer task fields and permits its own reservation
   reserved.runBudget!.treeUpstreamTokens += 2_000; reserved.usedCostByCurrency = { USD: 1.2 };
   const current = structuredClone(before);
   current.commandRecoveryKeys = ['a'.repeat(64)];
+  current.commandRecoveryObservations = [{ rootTaskId: 'root', key: 'a'.repeat(64), draftRunId: 'proposal',
+    specHash: 'b'.repeat(64), observedResponseId: 'c'.repeat(64), deliveredResponseId: 'd'.repeat(64) }];
   current.runBudget!.toolCalls = 7;
   const merged = mergeSessionTitleTaskBudget(current, before, reserved);
   const later = structuredClone(merged); later.runBudget!.modelRequests++;
@@ -101,6 +103,7 @@ test('title budget delta keeps newer task fields and permits its own reservation
   assert.equal(result.usedMs, 510);
   assert.ok(Math.abs(result.usedCostByCurrency!.USD - 1.05) < 0.00001);
   assert.deepEqual(result.commandRecoveryKeys, current.commandRecoveryKeys);
+  assert.deepEqual(result.commandRecoveryObservations, current.commandRecoveryObservations);
 });
 
 test('title follow-main freezes the completed source and records usage against the owning root allowance', async () => {

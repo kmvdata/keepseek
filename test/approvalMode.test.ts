@@ -533,6 +533,7 @@ test('an interrupted Git correction stays stopped without replaying a restored d
     store.addProposals({ proposals: [first], agentRunId: 'r', sessionId: 's' });
     const original = workflowFixture({ editIds: [], draftRunIds: [first.id], workspacePath: workspace.fsPath, runStore: store });
     original.session.messages[0].content = 'Create a local git commit.';
+    Object.assign(original.provider, { loadTaskBudget: async () => ({ version: 1, usedMs: 0, maxExecutionMs: 0 }) });
     let interruptedState: ChatSession['approvalProcessing'];
     original.provider.sendPrompt = async () => {
       interruptedState = structuredClone(original.session.approvalProcessing);
@@ -552,7 +553,10 @@ test('an interrupted Git correction stays stopped without replaying a restored d
     assert.ok(restarted.queue.take('s'), 'explicit recovery only queues fresh preflight; it cannot execute by itself');
     assert.equal(restarted.effects.filter(effect => effect === 'continue').length, 0);
     assert.equal(restarted.session.approvalProcessing?.status, 'blocked');
-    assert.equal(restarted.session.approvalProcessing?.replanKeys?.length, 1);
+    assert.equal(restarted.session.approvalProcessing?.replanKeys?.length, 0);
+    const budget = (original.session as unknown as ChatSession).userTaskBudgets?.r;
+    assert.equal(budget?.commandRecoveryObservations?.[0]?.draftRunId, first.id);
+    assert.equal(budget?.commandRecoveryObservations?.[0]?.deliveredResponseId, undefined);
     assert.equal(reloaded.get(first.id)?.replan?.executed, false);
     assert.equal(launches, 0);
   } finally {

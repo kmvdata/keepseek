@@ -485,7 +485,9 @@ export class ChatSessionStore {
       if (sourceTaskId.startsWith('session_title_manual_')) continue;
       const taskId = copiedIds.get(sourceTaskId) ?? randomUUID();
       copiedIds.set(sourceTaskId, taskId);
-      copiedBudgets[taskId] = budget;
+      // Proposal and response identities belong to the original session. Keep
+      // its spent budget and historical stops without making that work resumable.
+      copiedBudgets[taskId] = { ...budget, commandRecoveryObservations: undefined };
     }
     copied.userTaskBudgets = copiedBudgets;
     copied.autoTitle = cloneSessionTitleMetadata(source.autoTitle, source.customTitle, copiedIds, copied.messages);

@@ -52,7 +52,7 @@ export function prepareAgentTaskBudget(input: {
   persist?: () => Promise<void>;
 }): PreparedAgentTaskBudget {
   if (!input.sessionId || !input.rootTaskId) throw new Error('Prepared task budget identity is missing');
-  const previous = input.priorBudget && normalizeUserTaskBudgets({ prior: input.priorBudget }).prior;
+  const previous = input.priorBudget && normalizeUserTaskBudgets({ [input.rootTaskId]: input.priorBudget })[input.rootTaskId];
   if (input.priorBudget && (!previous?.runBudget || !previous.budgetLimits)) throw new Error('Original task budget is unavailable');
   const limits = resolveAgentLogicalBudgetLimits({ executionLimits: input.executionLimits });
   if (previous?.budgetLimits) for (const key of Object.keys(limits) as Array<keyof LogicalRunBudgetLimits>) {
@@ -70,6 +70,8 @@ export function prepareAgentTaskBudget(input: {
   const base: UserTaskBudget = { version: 1, usedMs: previous?.usedMs ?? 0, maxExecutionMs, maxCost,
     usedCostByCurrency: previous?.usedCostByCurrency ?? {},
     commandRecoveryKeys: previous?.commandRecoveryKeys, commandRecoveryExhausted: previous?.commandRecoveryExhausted,
+    commandRecoveryObservations: previous?.commandRecoveryObservations,
+    commandRecoveryObservationsInvalid: previous?.commandRecoveryObservationsInvalid,
     delegationBudget: previous?.delegationBudget };
   return {
     sessionId: input.sessionId, rootTaskId: input.rootTaskId, maxExecutionMs, run, cost,

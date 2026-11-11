@@ -1,6 +1,7 @@
-import { normalizeCommandCapabilityDiagnostic } from '../approvals/authorization/commandCapability';
+import { analyzeCommandCapability, normalizeCommandCapabilityDiagnostic } from '../approvals/authorization/commandCapability';
 import { CommandCapabilityError } from '../approvals/authorization/executionBoundary';
-import { normalizeDraftRunPlan } from './draftRunProposal';
+import { hashDraftRunSpec, normalizeDraftRunPlan } from './draftRunProposal';
+import { normalizeCommandRecoveryResponse } from './commandRecovery';
 import { inspectDraftRunDependencies, inspectDraftRunDependencyFacts, inspectGitAncestorPrerequisite } from './draftRunDependencies';
 import { isSuccessfulDraftRunOutcome, normalizeGitQueryResult } from './gitQueryResult';
 import { writeJsonAtomic } from '../shared/atomicStorage';
@@ -53,7 +54,7 @@ const ANSI_CSI_PATTERN = new RegExp('\\x1B\\[[0-?]*[ -/]*[@-~]', 'gu');
 // eslint-disable-next-line no-control-regex
 const UNSAFE_CONTROL_CHARACTER_PATTERN = new RegExp('[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1A\\x1C-\\x1F\\x7F]', 'gu');
 
-export type WebviewDraftRun = Omit<DraftRun, 'outputHead' | 'outputTail' | 'gitCommitPlan' | 'gitPushAttempt'> & {
+export type WebviewDraftRun = Omit<DraftRun, 'outputHead' | 'outputTail' | 'gitCommitPlan' | 'gitPushAttempt' | 'commandRecoveryResponse'> & {
   output: string;
 };
 
@@ -139,6 +140,18 @@ export class DraftRunStore {
         this.draftRuns.set(draftRun.id, draftRun);
         this.knownDraftRunIds.add(draftRun.id);
       }
+      for (const draftRun of this.draftRuns.values()) {
+        const replacement = draftRun.replacementDraftRunId && this.draftRuns.get(draftRun.replacementDraftRunId);
+        // Older builds could link two blocked proposals. Keep the new proposal's
+        // source pointer for audit, but leave the original eligible for correction.
+        if (replacement && replacement.sessionId === draftRun.sessionId && replacement.spec.replacesDraftRun?.draftRunId === draftRun.id
+          && replacement.spec.replacesDraftRun.specHash === draftRun.specHash && replacement.status === 'needs_replan'
+          && replacement.executionStarted === false && replacement.executionPhase === 'not_dispatched'
+          && (replacement.capabilityDiagnostic?.blocking || replacement.replan)) {
+          draftRun.replacementDraftRunId = undefined;
+          repairedInterruptedRun = true;
+        }
+      }
       const displays = Array.isArray(parsed.batchDisplays) ? parsed.batchDisplays : [];
       for (const display of displays) if (display && typeof display === 'object' && typeof (display as DraftRunBatchDisplay).operationId === 'string') this.knownDisplayIds.add((display as DraftRunBatchDisplay).operationId);
       const repeatedOperationIds = repeatedDisplayIds(displays, 'operationId');
@@ -188,14 +201,26 @@ export class DraftRunStore {
     for (const draftRun of added) {
       const replacement = draftRun.spec.replacesDraftRun;
       if (replacement) {
+        if (draftRun.status === 'pending') {
+          const diagnostic = analyzeCommandCapability(draftRun.spec).diagnostics.find(item => item.blocking);
+          if (diagnostic) {
+            draftRun.status = 'needs_replan'; draftRun.capabilityDiagnostic = diagnostic; draftRun.finishedAt = now;
+          }
+        }
         const original = this.draftRuns.get(replacement.draftRunId);
         const valid = original && !isHistoryInactive(original) && original.sessionId === draftRun.sessionId
           && (original.agentRunId === draftRun.agentRunId || input.rootTaskRunIds?.has(original.id))
-          && original.specHash === replacement.specHash && original.executionStarted === false
+          && original.specHash === replacement.specHash && hashDraftRunSpec(original.spec) === original.specHash
+          && draftRun.id !== original.id && hashDraftRunSpec(draftRun.spec) === draftRun.specHash
+          && original.executionStarted === false && original.executionPhase === 'not_dispatched' && !original.startedAt
           && original.status === 'needs_replan' && !original.replacementDraftRunId
           && JSON.stringify(original.spec.prerequisites ?? []) === JSON.stringify(draftRun.spec.prerequisites ?? []);
-        if (valid) { original.replacementDraftRunId = draftRun.id; original.updatedAt = now; this.emitState(original); }
-        else { draftRun.status = 'failed'; draftRun.error = 'Replacement identity or prerequisites changed. / 替代来源身份或前置条件已变化。'; }
+        if (valid && draftRun.status === 'pending') {
+          original.replacementDraftRunId = draftRun.id; original.updatedAt = now; this.emitState(original);
+        }
+        else if (!valid && draftRun.status === 'pending') {
+          draftRun.status = 'failed'; draftRun.error = 'Replacement identity or prerequisites changed. / 替代来源身份或前置条件已变化。';
+        }
       }
       this.draftRuns.set(draftRun.id, draftRun);
       this.knownDraftRunIds.add(draftRun.id);
@@ -444,6 +469,8 @@ export class DraftRunStore {
     const replan = normalizeDraftRunReplan(result.replan, id, draft.agentRunId, draft.specHash);
     const dependency = normalizeApprovalDependency(result.dependency);
     if (!replan && !dependency && !result.reason) return false;
+    if (draft.status === 'needs_replan' && replan && draft.error === result.reason
+      && JSON.stringify(draft.replan) === JSON.stringify(replan) && JSON.stringify(draft.dependency) === JSON.stringify(dependency)) return true;
     draft.status = replan ? 'needs_replan' : dependency ? 'cancelled' : 'failed';
     draft.executionStarted = false;
     draft.executionPhase = 'not_dispatched';
@@ -451,8 +478,9 @@ export class DraftRunStore {
     draft.replan = replan;
     draft.dependency = dependency;
     draft.error = result.reason;
-    draft.finishedAt = new Date().toISOString();
-    draft.updatedAt = draft.finishedAt;
+    draft.updatedAt = new Date().toISOString();
+    draft.finishedAt ??= draft.updatedAt;
+    if (replan) this.releaseUnstartedReplacement(draft);
     this.emitState(draft);
     this.schedulePersist();
     return true;
@@ -466,6 +494,34 @@ export class DraftRunStore {
     this.emitState(draft);
     this.schedulePersist();
     return true;
+  }
+
+  /** Annotates a historical proposal without altering its execution or approval state. */
+  public recordCommandRecoveryOutcome(id: string, specHash: string, outcome: NonNullable<DraftRun['commandRecoveryOutcome']>): boolean {
+    const draft = this.draftRuns.get(id);
+    if (!draft || isHistoryInactive(draft) || draft.specHash !== specHash || this.approving.has(id)) return false;
+    const normalized = normalizeCommandRecoveryOutcome({ ...draft, commandRecoveryOutcome: outcome });
+    if (!normalized) return false;
+    if (draft.commandRecoveryOutcome?.kind === 'git_tag_verified') {
+      return normalized.kind === 'git_tag_verified' && draft.commandRecoveryOutcome.ref === normalized.ref
+        && draft.commandRecoveryOutcome.commit === normalized.commit;
+    }
+    if (draft.commandRecoveryOutcome?.kind === normalized.kind) return true;
+    draft.commandRecoveryOutcome = normalized;
+    draft.updatedAt = new Date().toISOString();
+    this.emitState(draft);
+    this.schedulePersist();
+    return true;
+  }
+
+  private releaseUnstartedReplacement(draft: DraftRun): void {
+    const link = draft.spec.replacesDraftRun;
+    const original = link && this.draftRuns.get(link.draftRunId);
+    if (!original || isHistoryInactive(original) || original.sessionId !== draft.sessionId || original.specHash !== link.specHash
+      || original.replacementDraftRunId !== draft.id) return;
+    original.replacementDraftRunId = undefined;
+    original.updatedAt = draft.updatedAt;
+    this.emitState(original);
   }
 
   /** Reusable hard checks that run before model review and again before execution. */
@@ -653,6 +709,7 @@ export class DraftRunStore {
           draftRun.capabilityDiagnostic = error.diagnostic;
           draftRun.error = error.message;
           draftRun.startedAt = undefined;
+          this.releaseUnstartedReplacement(draftRun);
         } else if (options.userApproval && options.signal?.aborted && !executionStarted) {
           // A revoked batch click does not turn a never-started command into a
           // failure or rejection. A future click must authorize it anew.
@@ -719,6 +776,7 @@ export class DraftRunStore {
       id: randomUUID(),
       status: 'pending',
       executionStarted: false, executionPhase: 'not_dispatched', gitQueryResult: undefined,
+      commandRecoveryResponse: undefined, commandRecoveryOutcome: undefined,
       authorizationSource: undefined,
       approvedAt: undefined,
       startedAt: undefined,
@@ -1091,11 +1149,13 @@ function getDraftRunOutput(draftRun: DraftRun): string {
 }
 
 function toWebviewDraftRun(draftRun: DraftRun): WebviewDraftRun {
-  const { outputHead: _head, outputTail: _tail, gitCommitPlan: _gitCommitPlan, gitPushAttempt: _gitPushAttempt, ...rest } = cloneDraftRun(draftRun);
+  const { outputHead: _head, outputTail: _tail, gitCommitPlan: _gitCommitPlan, gitPushAttempt: _gitPushAttempt,
+    commandRecoveryResponse: _commandRecoveryResponse, ...rest } = cloneDraftRun(draftRun);
   void _head;
   void _tail;
   void _gitCommitPlan;
   void _gitPushAttempt;
+  void _commandRecoveryResponse;
   return { ...rest,
     // Immutable specs and history stay fixed while pending presentation advice
     // is refreshed with the current parser.
@@ -1106,6 +1166,7 @@ function toWebviewDraftRun(draftRun: DraftRun): WebviewDraftRun {
 function cloneProposal(proposal: DraftRunProposal): DraftRunProposal {
   return {
     ...proposal,
+    commandRecoveryResponse: normalizeCommandRecoveryResponse(proposal.commandRecoveryResponse),
     spec: {
       ...proposal.spec,
       args: [...proposal.spec.args],
@@ -1123,6 +1184,7 @@ function cloneProposal(proposal: DraftRunProposal): DraftRunProposal {
 
 function cloneDraftRun(draftRun: DraftRun): DraftRun {
   return { ...draftRun, ...cloneProposal(draftRun),
+    commandRecoveryOutcome: normalizeCommandRecoveryOutcome(draftRun),
     replan: draftRun.replan ? { ...draftRun.replan, candidateArgs: draftRun.replan.candidateArgs?.slice() } : undefined,
     dependency: draftRun.dependency ? { ...draftRun.dependency } : undefined,
     capabilityDiagnostic: normalizeCommandCapabilityDiagnostic(draftRun.capabilityDiagnostic),
@@ -1132,6 +1194,22 @@ function cloneDraftRun(draftRun: DraftRun): DraftRun {
     gitPushAttempt: draftRun.gitPushAttempt ? structuredClone(draftRun.gitPushAttempt) : undefined,
     gitReleaseEvidence: draftRun.gitReleaseEvidence ? structuredClone(draftRun.gitReleaseEvidence) : undefined,
     gitStageEvidence: draftRun.gitStageEvidence ? structuredClone(draftRun.gitStageEvidence) : undefined };
+}
+
+function normalizeCommandRecoveryOutcome(run: Partial<DraftRun>): DraftRun['commandRecoveryOutcome'] {
+  const outcome = run.commandRecoveryOutcome;
+  if (!outcome || run.status !== 'needs_replan' || run.executionStarted !== false || run.startedAt
+    || run.executionPhase !== 'not_dispatched') return undefined;
+  if (outcome.kind === 'repeated' && outcome.priorDraftRunId !== run.id
+    && (run.capabilityDiagnostic?.blocking || run.replan)
+    && normalizeCommandRecoveryResponse(run.commandRecoveryResponse)?.deliveredDraftRunIds.includes(outcome.priorDraftRunId)) {
+    return { kind: 'repeated', priorDraftRunId: outcome.priorDraftRunId };
+  }
+  if (outcome.kind === 'git_tag_verified' && typeof outcome.ref === 'string' && /^refs\/tags\/[^\s]{1,250}$/u.test(outcome.ref)
+    && typeof outcome.commit === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(outcome.commit)) {
+    return { kind: 'git_tag_verified', ref: outcome.ref, commit: outcome.commit };
+  }
+  return undefined;
 }
 
 function repeatedDisplayIds(values: readonly unknown[], field: 'operationId' | 'snapshotId'): Set<string> {

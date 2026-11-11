@@ -18,7 +18,14 @@ const redirectedEntries = ['commondir', 'gitdir', 'objects/info/alternates', 'ob
 const inProgressEntries = ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply', 'sequencer'];
 const maxWorkingTreeBytes = 32 * 1024 * 1024;
 
-type GitScopeResult = { fingerprint: string; repository: string; cwd: string; branchRef?: string; remote?: GitRemoteScope; revisionPaths?: string[] }
+export interface GitTagSnapshot {
+  ref: string;
+  object?: string;
+  commit?: string;
+}
+
+type GitScopeResult = { fingerprint: string; repository: string; repositoryIdentity: string; cwd: string; branchRef?: string; remote?: GitRemoteScope;
+  revisionPaths?: string[]; tagSnapshot?: GitTagSnapshot }
   | { reason: string; externalPath?: string; binding?: string; hardBlocked?: boolean };
 
 async function inspectEntry(file: string) {
@@ -47,6 +54,8 @@ export async function inspectLocalGitScope(input: {
   ambiguousRevisionOperands?: readonly string[];
   remote?: GitRemoteCommand;
   refMutation?: { name: string; action: 'create' | 'delete' | 'force' };
+  tagSnapshotRef?: string;
+  signal?: AbortSignal;
 }): Promise<GitScopeResult> {
   try {
     const cwd = await realpath(joinUnresolvedPath(input.cwd, ...input.cwdChanges.filter(Boolean)));
@@ -115,7 +124,7 @@ export async function inspectLocalGitScope(input: {
 
     const { stdout } = await readGit(input.executable, ['--git-dir', metadata, '--work-tree', repository,
       'config', '--null', '--show-origin', '--no-includes', '--list'], {
-      cwd, env: input.env, timeout: 3000, maxBuffer: 256 * 1024, windowsHide: true
+      cwd, env: input.env, signal: input.signal, timeout: 3000, maxBuffer: 256 * 1024, windowsHide: true
     });
     const fields = stdout.split('\0');
     if (fields.pop() !== '' || fields.length % 2) throw new Error('Malformed Git config response.');
@@ -148,7 +157,7 @@ export async function inspectLocalGitScope(input: {
       }
     }
     const { stdout: discovered } = await readGit(input.executable, ['rev-parse', '--show-toplevel', '--absolute-git-dir'], {
-      cwd, env: input.env, timeout: 3000, maxBuffer: 32 * 1024, windowsHide: true
+      cwd, env: input.env, signal: input.signal, timeout: 3000, maxBuffer: 32 * 1024, windowsHide: true
     });
     const [foundRepository, foundMetadata, remainder] = discovered.trimEnd().split(/\r?\n/u);
     if (remainder !== undefined || !foundRepository || !foundMetadata
@@ -193,7 +202,7 @@ export async function inspectLocalGitScope(input: {
     const readSnapshot = async (args: string[], workingDirectory = repository): Promise<string> => {
       const { stdout: bytes } = await readGit(input.executable, ['--no-pager', '--no-optional-locks', ...args], {
         cwd: workingDirectory, env: { ...input.env, GIT_NO_LAZY_FETCH: '1' },
-        timeout: 3000, maxBuffer: 4 * 1024 * 1024, windowsHide: true, encoding: 'buffer'
+        signal: input.signal, timeout: 3000, maxBuffer: 4 * 1024 * 1024, windowsHide: true, encoding: 'buffer'
       });
       return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
     };
@@ -221,7 +230,19 @@ export async function inspectLocalGitScope(input: {
     // packed-refs file or the top refs directory. Bind their resolved objects
     // too so an old query predicate cannot authorize a write after a ref moves.
     // The fixed probe shares readSnapshot's finite output/timeout limits.
-    const localRefs = await readSnapshot(['for-each-ref', '--sort=refname', '--format=%(refname)%00%(objectname)']);
+    const tagRef = input.tagSnapshotRef;
+    if (tagRef) {
+      const target = path.join(metadata, tagRef);
+      const loose = await inspectEntry(target);
+      if (await hasSymlinkBelow(metadata, target) || (loose && (!loose.isFile() || loose.size > 4096
+        || !objectId.test((await readFile(target, 'utf8')).trim())))) {
+        return { reason: 'The tag uses unverified reference storage. / 标签引用的存储无法核实。', hardBlocked: true };
+      }
+    }
+    // Confirm that the currently recorded tag object and its peeled target
+    // exist in the same snapshot. Keep the ordinary query fingerprint format.
+    const refFormat = '--format=%(refname)%00%(objectname)' + (tagRef ? '%00%(objecttype)%00%(*objectname)%00%(*objecttype)' : '');
+    const localRefs = await readSnapshot(['for-each-ref', '--sort=refname', refFormat]);
 
     const committing = input.subcommand === 'commit';
     const staging = input.subcommand === 'add';
@@ -291,6 +312,17 @@ export async function inspectLocalGitScope(input: {
       }
     }
     const directory = await stat(metadata);
+    let tagSnapshot: GitTagSnapshot | undefined;
+    if (tagRef) {
+      const matches = localRefs.split(/\r?\n/u).map(line => line.split('\0')).filter(([ref]) => ref === tagRef);
+      const match = matches[0];
+      if (matches.length > 1 || match && (match.length !== 5 || !objectId.test(match[1])
+        || !['commit', 'tree', 'blob', 'tag'].includes(match[2]) || match[3] && (!objectId.test(match[3]) || match[3].length !== match[1].length))) {
+        throw new Error('Malformed exact Git tag snapshot.');
+      }
+      const commit = match?.[2] === 'commit' ? match[1] : match?.[4] === 'commit' && match[3] ? match[3] : undefined;
+      tagSnapshot = { ref: tagRef, object: match?.[1], commit };
+    }
     const fingerprint = createHash('sha256').update(JSON.stringify([
       repository, metadata, directory.dev, directory.ino, headText, headRefIdentity,
       entryIdentity(entries[1]), entryIdentity(entries[8]), stdout, hooksPath, hookIdentities,
@@ -301,7 +333,8 @@ export async function inspectLocalGitScope(input: {
       reason: `Git can execute a repository hook: ${executableHook}. / Git 可能执行仓库 hook：${executableHook}。`,
       binding: fingerprint
     };
-    return { fingerprint, repository, cwd, remote, ...(revisionPaths.length ? { revisionPaths } : {}),
+    const repositoryIdentity = createHash('sha256').update(JSON.stringify([repository, metadata, directory.dev, directory.ino])).digest('hex');
+    return { fingerprint, repository, repositoryIdentity, cwd, remote, tagSnapshot, ...(revisionPaths.length ? { revisionPaths } : {}),
       branchRef: headText.startsWith('ref: refs/heads/') ? headText.slice(5) : undefined };
   } catch {
     return { reason: 'Git repository settings could not be verified. / 无法核实 Git 仓库设置。' };

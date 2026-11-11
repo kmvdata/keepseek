@@ -13,7 +13,8 @@ import { normalizeExecutionMode } from './executionMode';
 import { createLogicalRunBudgetState, grantNextToolBudgetSegment, normalizeLogicalRunBudgetLimits, type LogicalRunBudgetState } from './executionPolicy';
 import { normalizeSubagentHostContext } from './subagents/contextCapsule';
 import { normalizeDelegationState } from './delegation';
-import { isCommandRecoveryKeyList } from '../runs/commandRecovery';
+import { isCommandRecoveryKeyList, mergeCommandRecoveryObservations, normalizeCommandRecoveryContinuation, normalizeCommandRecoveryObservations,
+  normalizeCommandRecoveryResponse, type CommandRecoveryObservation, type CommandRecoveryResponse } from '../runs/commandRecovery';
 import { normalizeCodexPluginSnapshot, normalizeCodexPluginTraversalState, type CodexPluginSnapshot,
   type CodexPluginTraversalState } from '../skills/codexPluginResources';
 
@@ -46,11 +47,14 @@ export interface RunCheckpoint {
   runBudget?: LogicalRunBudgetState;
   budgetLimits?: import('./executionPolicy').LogicalRunBudgetLimits;
   retries: number;
-  /** Root-cause deduplication ledger inherited by every segment and epoch in a task. */
+  /** Historical hash-only observations. They do not prove model delivery. */
   commandRecoveryKeys?: string[];
   commandRecoveryExhausted?: boolean;
-  /** Same response siblings count as one observation; persisted for interrupted delivery. */
+  /** Historical response batch; retained only for current-format audit. */
   commandRecoveryBatch?: { id: string; keys: string[] };
+  commandRecoveryObservations?: CommandRecoveryObservation[];
+  /** Spent budget was recovered, but an invalid correction ledger cannot be used. */
+  commandRecoveryObservationsInvalid?: true;
   lastNetworkAt?: string;
   lastEventAt?: string;
   lastContentAt?: string;
@@ -108,6 +112,8 @@ export interface RunCheckpoint {
       response: { message: DeepSeekAssistantMessage; finishReason?: string | null; usage?: DeepSeekUsage | null };
       results: Record<string, string>;
       executing?: { id: string; name: string; evidenceRef?: string };
+      dsmlToolCalls?: true;
+      commandRecoveryResponse?: CommandRecoveryResponse;
     };
   };
 }
@@ -187,6 +193,7 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
       const pending = cp.state.pending;
       if (!pending.response?.message || !pending.results || typeof pending.results !== 'object'
         || Array.isArray(pending.results) || !Object.values(pending.results).every((result) => typeof result === 'string')) return undefined;
+      if (pending.dsmlToolCalls !== undefined && (pending.dsmlToolCalls !== true || !pending.response.message.tool_calls?.length)) return undefined;
       for (const call of pending.response.message.tool_calls ?? []) {
         if (!call.id || !call.function?.name || typeof call.function.arguments !== 'string') return undefined;
         const args: unknown = JSON.parse(call.function.arguments);
@@ -197,6 +204,23 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
     if (cp.commandRecoveryBatch !== undefined && (!cp.commandRecoveryBatch || !/^[a-f0-9]{64}$/u.test(cp.commandRecoveryBatch.id)
       || !isCommandRecoveryKeyList(cp.commandRecoveryBatch.keys))) return undefined;
     if (cp.commandRecoveryExhausted !== undefined && typeof cp.commandRecoveryExhausted !== 'boolean') return undefined;
+    const recoveryRoot = cp.request.approvalRootTaskId ?? cp.taskId;
+    const recoveryContinuation = normalizeCommandRecoveryContinuation(cp.request.commandRecoveryContinuation);
+    if (cp.request.commandRecoveryContinuation !== undefined && (!cp.request.approvalRootTaskId || !recoveryContinuation)) return undefined;
+    const observations = normalizeCommandRecoveryObservations(cp.commandRecoveryObservations, recoveryRoot);
+    if (cp.commandRecoveryObservations !== undefined && !observations
+      || cp.commandRecoveryObservationsInvalid !== undefined && cp.commandRecoveryObservationsInvalid !== true) return undefined;
+    const observedDrafts = new Map(observations?.map(item => [item.draftRunId, item]));
+    const normalizeResponseProof = (value: unknown): CommandRecoveryResponse | undefined => {
+      const response = normalizeCommandRecoveryResponse(value);
+      if (!response || response.deliveredDraftRunIds.some(id => {
+        const item = observedDrafts.get(id);
+        return !item?.deliveredResponseId || item.observedResponseId === response.id;
+      })) return undefined;
+      return response;
+    };
+    const recoveryResponse = normalizeResponseProof(cp.state?.pending?.commandRecoveryResponse);
+    if (cp.state?.pending?.commandRecoveryResponse !== undefined && !recoveryResponse) return undefined;
     if (cp.exactRecoveryBlocked !== undefined && typeof cp.exactRecoveryBlocked !== 'boolean') return undefined;
     if (cp.outputBudgetPolicyVersion !== undefined && cp.outputBudgetPolicyVersion !== OUTPUT_BUDGET_POLICY_VERSION) return undefined;
     if (cp.lastRequestBudget && !normalizeRequestBudget(cp.lastRequestBudget)) return undefined;
@@ -218,6 +242,19 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
         || ![m.oldOutputTokens, m.newOutputTokens].every((n) => Number.isSafeInteger(n) && n > 0)))) return undefined;
     if (cp.state?.epoch && !validEpochProgressState(cp.state.epoch)) return undefined;
     const copy = checkpointCopy(cp);
+    if (recoveryContinuation) copy.request.commandRecoveryContinuation = recoveryContinuation;
+    if (observations) copy.commandRecoveryObservations = observations;
+    if (copy.state?.pending && recoveryResponse) copy.state.pending.commandRecoveryResponse = recoveryResponse;
+    for (const proposals of [copy.state?.draftRuns, copy.finalResponse?.draftRuns]) {
+      if (proposals === undefined) continue;
+      if (!Array.isArray(proposals)) return undefined;
+      for (const proposal of proposals) {
+        if (proposal?.commandRecoveryResponse === undefined) continue;
+        const proof = normalizeResponseProof(proposal.commandRecoveryResponse);
+        if (!proof) return undefined;
+        proposal.commandRecoveryResponse = proof;
+      }
+    }
     if (!normalizeCheckpointPluginSkills(copy)) return undefined;
     copy.budgetLimits = normalizeLogicalRunBudgetLimits(copy.budgetLimits);
     if (copy.request.subagentHostContext !== undefined) {
@@ -430,6 +467,9 @@ export function grantCheckpointToolBudgetSegment(cp: RunCheckpoint): RunCheckpoi
 export function inheritTaskBudget(cp: RunCheckpoint, budget: import('../sessions/userTaskBudget').UserTaskBudget): void {
   cp.commandRecoveryKeys = budget.commandRecoveryKeys?.slice();
   cp.commandRecoveryExhausted = budget.commandRecoveryExhausted;
+  cp.commandRecoveryObservations = mergeCommandRecoveryObservations(cp.request.approvalRootTaskId ?? cp.taskId,
+    cp.commandRecoveryObservations, budget.commandRecoveryObservations);
+  cp.commandRecoveryObservationsInvalid ||= budget.commandRecoveryObservationsInvalid;
   cp.usedMs = budget.usedMs;
   cp.maxExecutionMs = budget.maxExecutionMs;
   cp.maxCost = budget.maxCost;

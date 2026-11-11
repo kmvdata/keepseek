@@ -8,8 +8,8 @@ import { createControlledEnvironment } from '../../runs/executionEnvironment';
 import { findSensitiveEvidence } from '../approvalPolicy';
 import { assertOperationPath, isGitProjectSkillPath, isProtectedOperationPath } from './protectedTargets';
 import type { GitRemoteScope } from './gitRemoteScope';
-import { inspectLocalGitScope } from './localGitScope';
-import { analyzeCommand } from './commandSemantics';
+import { inspectLocalGitScope, type GitTagSnapshot } from './localGitScope';
+import { analyzeCommand, isGitReleaseRef } from './commandSemantics';
 import { canonicalPath, isPathInside, joinUnresolvedPath } from './pathScope';
 import { authorizationReason, type AuthorizationReason } from './reasons';
 import { assertCommandTarget, inspectVisibleCommandTargets } from './visibleCommandTargets';
@@ -21,6 +21,8 @@ export interface CommandScope {
   gitCwd?: string;
   gitBranchRef?: string;
   gitRemote?: GitRemoteScope;
+  gitRepositoryIdentity?: string;
+  gitTagSnapshot?: GitTagSnapshot;
   executable?: string;
   verifiedLauncher?: string;
   boundLauncher?: string;
@@ -37,7 +39,8 @@ export interface CommandScope {
   fingerprint: string;
 }
 
-export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectRemote = false): Promise<CommandScope> {
+export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectRemote = false,
+  tagSnapshot?: { ref: string; signal: AbortSignal }): Promise<CommandScope> {
   const parsed = analyzeCommand(run.spec);
   const diagnostics = [...parsed.reasons];
   const roots = await Promise.all((vscode.workspace.workspaceFolders ?? []).filter(f => f.uri.scheme === 'file')
@@ -148,6 +151,8 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectR
   let gitCwd: string | undefined;
   let gitBranchRef: string | undefined;
   let gitRemote: GitRemoteScope | undefined;
+  let gitRepositoryIdentity: string | undefined;
+  let gitTagSnapshot: GitTagSnapshot | undefined;
   const gitRuntime = diagnostics.findIndex(item => item.code === 'git_runtime');
   const boundedGitOptions = gitCommand && ['status', 'diff', 'log', 'show'].includes(gitCommand.value);
   if (executable?.trusted && !roots.some(root => isPathInside(root, executable.path)) && gitCommand && gitRuntime >= 0
@@ -157,6 +162,8 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectR
     const git = await inspectLocalGitScope({ executable: executable.path, cwd, roots, cwdChanges: gitCommand.cwdChanges,
       subcommand: gitCommand.value, env, commitAll: parsed.gitCommit?.all,
       refMutation: parsed.gitRefMutation, remote: parsed.gitRemote,
+      tagSnapshotRef: tagSnapshot?.ref.startsWith('refs/tags/') && isGitReleaseRef(tagSnapshot.ref) ? tagSnapshot.ref : undefined,
+      signal: tagSnapshot?.signal,
       noOptionalLocks: parsed.arguments.some(argument => argument.index < gitCommand.index && argument.value === '--no-optional-locks'),
       noIndexRefresh: gitCommand.value === 'diff' && parsed.arguments.some(argument => argument.role === 'option'
         && argument.index > gitCommand.index && ['--cached', '--staged'].includes(argument.value)),
@@ -179,6 +186,8 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectR
         }
         gitFingerprint = git.fingerprint;
         gitRemote = git.remote;
+        gitRepositoryIdentity = git.repositoryIdentity;
+        gitTagSnapshot = git.tagSnapshot;
         gitBranchRef = git.branchRef;
         gitCwd = vscode.Uri.file(git.cwd).toString();
         diagnostics.splice(gitRuntime, 1);
@@ -208,7 +217,8 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectR
   const fingerprint = createHash('sha256').update(JSON.stringify({
     version: 1, executable, env, roots, paths, pathIdentities, gitFingerprint, gitCwd, externalUris, diagnostics, trustedProjectScript
   })).digest('hex');
-  return { externalUris, paths, cwd: paths[0]?.uri ?? run.spec.cwdUri, gitCwd, gitBranchRef, gitRemote, executable: executable?.path, verifiedLauncher: executable?.trusted ? executable.launchPath : undefined,
+  return { externalUris, paths, cwd: paths[0]?.uri ?? run.spec.cwdUri, gitCwd, gitBranchRef, gitRemote, gitRepositoryIdentity, gitTagSnapshot,
+    executable: executable?.path, verifiedLauncher: executable?.trusted ? executable.launchPath : undefined,
     boundLauncher: executable?.launchPath, environment: env, environmentNames: Object.keys(env).sort(),
     trustedProjectScript, projectScriptLaunchPath, uncertain: diagnostics.length > 0, diagnostics,
     reasons: diagnostics.map(reason => reason.message), fingerprint };

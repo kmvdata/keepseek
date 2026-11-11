@@ -57,7 +57,7 @@ export interface ApprovalProcessingState {
     dependency?: ApprovalDependency; replan?: DraftRunReplanResult }>;
   reason?: string;
   canResume?: boolean;
-  /** Persist distinct root causes across execution segments; no correction quota. */
+  /** Legacy preflight audit and separate permission or failed-read recovery guards. */
   replanKeys?: string[];
   localGitCompletionRetried?: boolean;
   updatedAt: string;

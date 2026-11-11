@@ -81,6 +81,7 @@ export interface ContextEpochState {
   }>;
   failures: Array<{ toolName: string; toolCallId: string; contentHash: string; errorType?: string }>;
   idempotency: ToolWorkFingerprint[];
+  commandRecoveryDsmlResultHashes?: string[];
   noProgress?: { fingerprint: string; repeats: number; strategyWarningIssued: boolean; recent?: string[] };
   calibration: ContextWindowCalibrationState;
 }
@@ -280,7 +281,10 @@ export function validEpochProgressState(epoch: ContextEpochState): boolean {
     && (!compression || (/^[a-f0-9]{64}$/u.test(compression.fingerprint)
       && [compression.beforeTokens, compression.afterTokens, compression.durationMs, compression.summaryInputTokens, compression.summaryOutputTokens].every(x => Number.isFinite(x) && x >= 0)
       && compression.netReleasedTokens === compression.beforeTokens - compression.afterTokens && typeof compression.costKnown === 'boolean'))
-    && (epoch.baseHistoryEvidenceRef === undefined || typeof epoch.baseHistoryEvidenceRef === 'string');
+    && (epoch.baseHistoryEvidenceRef === undefined || typeof epoch.baseHistoryEvidenceRef === 'string')
+    && (epoch.commandRecoveryDsmlResultHashes === undefined || (Array.isArray(epoch.commandRecoveryDsmlResultHashes)
+      && epoch.commandRecoveryDsmlResultHashes.length <= 4_096
+      && epoch.commandRecoveryDsmlResultHashes.every(hash => typeof hash === 'string' && /^[a-f0-9]{64}$/u.test(hash))));
 }
 
 /** Information actually delivered, independent of evidence IDs, query spelling
@@ -309,7 +313,9 @@ export function visibleProgressFingerprint(toolName: string, content: string): s
       // piece of evidence. Only newly delivered semantic bytes count here.
       return createHash('sha256').update(stableStringify(visible)).digest('hex');
     }
-    if (record.completeInline === false && !record.inlineContent && !(Array.isArray(record.inlineItems) && record.inlineItems.length)) return undefined;
+    const commandDiagnostic = toolName === 'keepseek_run_draft' && record.status === 'needs_replan' && record.bodyDelivered === true;
+    if (!commandDiagnostic && record.completeInline === false && !record.inlineContent
+      && !(Array.isArray(record.inlineItems) && record.inlineItems.length)) return undefined;
   }
   const normalize = (item: unknown): unknown => {
     if (Array.isArray(item)) return item.map(normalize);

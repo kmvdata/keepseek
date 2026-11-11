@@ -41,6 +41,8 @@ export interface DelegatedApprovalBatch {
   }>;
   approvalStopReason?: string;
   localGitCompletionCheck?: boolean;
+  /** The response has no other unfinished plan steps or pending child results. */
+  allowVerifiedGitCompletion?: boolean;
 }
 
 /** Volatile queue: reloading the extension must never execute restored drafts. */

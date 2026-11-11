@@ -87,6 +87,72 @@ test('finite Git queries distinguish revisions, ranges, peeling and explicit pat
   assert.equal(analyzeCommand(createSpec('git', ['show', '0.5.0^{commit}'])).arguments.at(-1)?.role, 'revision');
 });
 
+test('rev-parse accepts only the bounded revision and ordered verify forms', () => {
+  const revision = 'v0.5.3^{commit}';
+  const plain = Array.from({ length: 16 }, () => 'HEAD');
+  for (const [args, revisions] of [
+    [['rev-parse', 'HEAD'], ['HEAD']],
+    [['rev-parse', ...plain], plain],
+    [['rev-parse', '--verify', revision], [revision]],
+    [['rev-parse', '--verify', '--quiet', 'HEAD^{object}'], ['HEAD^{object}']],
+    [['rev-parse', '--verify', '--end-of-options', 'HEAD^{tree}'], ['HEAD^{tree}']],
+    [['-C', '.', 'rev-parse', '--verify', '--quiet', '--end-of-options', revision], [revision]]
+  ]) {
+    const spec = createSpec('git', args);
+    const bytes = JSON.stringify(spec);
+    const analysis = analyzeCommandCapability(spec);
+    assert.equal(analysis.version, 1);
+    assert.equal(analysis.supported, true, JSON.stringify(args));
+    assert.deepEqual(analysis.semantics.gitLocalQuery, { kind: 'revision_parse', revisions });
+    assert.deepEqual(analysis.semantics.effects, ['workspace_read']);
+    assert.deepEqual(analysis.semantics.arguments.filter(arg => arg.role === 'revision').map(arg => arg.value), revisions);
+    assert.deepEqual(analysis.supportedForms, ['git rev-parse <revision>... (1-16 revisions)',
+      'git rev-parse --verify [--quiet] [--end-of-options] <revision>']);
+    assert.equal(JSON.stringify(spec), bytes);
+  }
+
+  for (const [args, code, index] of [
+    [['rev-parse'], 'host_invalid_argv', undefined],
+    [['rev-parse', ...plain, 'HEAD'], 'host_invalid_argv', 17],
+    [['rev-parse', '--verify'], 'host_invalid_argv', undefined],
+    [['rev-parse', '--verify', '--quiet', '--end-of-options'], 'host_invalid_argv', undefined],
+    [['rev-parse', '--verify', revision, 'HEAD'], 'host_invalid_argv', 3],
+    [['rev-parse', '--verify', 'HEAD:README.md'], 'host_invalid_argv', 2],
+    [['rev-parse', '--verify', 'HEAD@{1}'], 'host_invalid_argv', 2],
+    [['rev-parse', '--verify', 'HEAD^{blob}'], 'host_invalid_argv', 2],
+    [['rev-parse', '--verify', 'A..B'], 'host_invalid_argv', 2],
+    [['rev-parse', '--quiet', 'HEAD'], 'host_invalid_argv', 1],
+    [['rev-parse', '--end-of-options', 'HEAD'], 'host_invalid_argv', 1],
+    [['rev-parse', '--verify', '--quiet', '--quiet', 'HEAD'], 'host_invalid_argv', 3],
+    [['rev-parse', '--verify', '--verify', 'HEAD'], 'host_invalid_argv', 2],
+    [['rev-parse', '--verify', '--end-of-options', '--end-of-options', 'HEAD'], 'host_invalid_argv', 3],
+    [['rev-parse', '--verify', '--end-of-options', '--quiet', 'HEAD'], 'host_invalid_argv', 3],
+    [['rev-parse', '--verify', '--end-of-options', '-HEAD'], 'host_invalid_argv', 3],
+    [['rev-parse', '--verify', 'HEAD', '--quiet'], 'host_invalid_argv', 3],
+    [['rev-parse', 'HEAD', '--verify'], 'host_invalid_argv', 2],
+    [['rev-parse', '--verify=HEAD'], 'host_invalid_argv', 1],
+    [['rev-parse', '--verify', '--quiet=true', 'HEAD'], 'host_invalid_argv', 2],
+    [['rev-parse', '--verify', '-q', 'HEAD'], 'host_unsupported_option', 2],
+    [['rev-parse', '--verify', '--', 'HEAD'], 'host_unsupported_option', 2],
+    [['rev-parse', '--verify', '--Quiet', 'HEAD'], 'host_unsupported_option', 2],
+    [['-C', '.', 'rev-parse', '--verify', '--short=7', 'HEAD'], 'host_unsupported_option', 4],
+    [['-C', '.', 'rev-parse', '--verify', revision, '--verify'], 'host_invalid_argv', 5]
+  ] as Array<[string[], string, number | undefined]>) {
+    const spec = createSpec('git', args);
+    const bytes = JSON.stringify(spec);
+    const analysis = analyzeCommandCapability(spec);
+    const diagnostic = analysis.diagnostics.find(item => item.blocking);
+    assert.equal(analysis.supported, false, JSON.stringify(args));
+    assert.equal(analysis.semantics.gitLocalQuery, undefined);
+    assert.equal(diagnostic?.code, code, JSON.stringify(args));
+    assert.equal(diagnostic?.argumentIndex, index, JSON.stringify(args));
+    assert.equal(diagnostic?.token, index === undefined ? undefined : args[index]);
+    assert.equal(diagnostic?.started, false);
+    assert.equal(diagnostic?.candidateArgs, undefined);
+    assert.equal(JSON.stringify(spec), bytes);
+  }
+});
+
 test('Git log pickaxe keeps bounded patterns out of path and revision scope', () => {
   for (const patternArgs of [
     ['-S', 'trace.enabled'], ['-Strace.enabled'], ['-G', 'trace[.]enabled'], ['-Gtrace[.]enabled'],

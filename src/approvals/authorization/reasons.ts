@@ -8,6 +8,11 @@ export interface AuthorizationReason {
   message: string;
   /** Zero-based position in the immutable argv, when a concrete token caused the diagnosis. */
   argumentIndex?: number;
+  /** Bounded parser classification for command recovery, independent of user text. */
+  invalidArgvKind?: 'missing_revision' | 'too_many_revisions' | 'invalid_revision'
+    | 'missing_required_option' | 'misplaced_option' | 'option_value';
+  /** Canonical option recognized by the parser, without its value. */
+  optionIdentity?: string;
 }
 
 export function authorizationReason(code: AuthorizationReason['code'], detail: string, en: string, zh: string): AuthorizationReason {

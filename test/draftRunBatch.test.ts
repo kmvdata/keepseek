@@ -464,6 +464,49 @@ test('clone after preflight refusal copies editable argv only and leaves the ori
   assert.equal(states.sends, 0);
 }));
 
+test('historical rev-parse preflight cards reopen as terminal and copy exact argv without executing', async () => fixture(async f => {
+  const args = ['rev-parse', '--verify', 'v0.5.3^{commit}'];
+  const proposal = f.proposal('legacy-verify', { executable: 'git', args, env: [] });
+  const capabilityDiagnostic: NonNullable<DraftRunProposal['capabilityDiagnostic']> = {
+    code: 'host_unsupported_option', phase: 'capability', category: 'capability', blocking: true, started: false,
+    argumentIndex: 1, token: '--verify', capabilityVersion: 1, reason: 'Historical host grammar rejected --verify.'
+  };
+  f.store.addProposals({ proposals: [{ ...proposal, capabilityDiagnostic }], sessionId: 's', agentRunId: 'r' });
+  await f.store.flush();
+  const restored = new DraftRunStore(f.storage as unknown as import('vscode').Uri, f.executor);
+  try {
+    await restored.initialize();
+    const historical = restored.toWebviewState('s')[0];
+    assert.equal(historical.status, 'needs_replan');
+    assert.deepEqual(historical.spec.args, args);
+    assert.equal(historical.capabilityDiagnostic?.code, 'host_unsupported_option');
+    assert.equal(historical.capabilityDiagnostic?.started, false);
+    const { host, states } = hostFixture({ ...f, store: restored });
+    const { api, messages, state } = renderHarness({ ...f, store: restored }, 'en');
+    state.activeSessionId = 's';
+    const cards = () => elements([api.createDraftRunCard(restored.toWebviewState('s')[0])]);
+    assert.ok(cards().some(node => node.textContent === 'Preflight blocked · Command did not start'));
+    const actions = cards().filter(node => node.type === 'button');
+    assert.deepEqual(actions.map(node => node.dataset.draftRunAction), ['cloneDraftRun']);
+    api.handleDraftRunActionClick({ target: actions[0] });
+    const action = messages.shift();
+    assert.deepEqual(JSON.parse(JSON.stringify(action)), { type: 'cloneDraftRun', id: historical.id });
+    const feedback: unknown[] = [];
+    Object.assign(host, { postToWebview: (message: unknown) => feedback.push(message) });
+    await host.handleMessage(action);
+    assert.deepEqual(feedback, [{
+      type: 'draftRunCloneFeedback', sourceDraftRunId: historical.id, sessionId: 's', success: true,
+      correction: { executable: 'git', args, cwdUri: proposal.spec.cwdUri, reason: proposal.spec.reason }
+    }]);
+    await host.handleMessage({ type: 'approveDraftRun', id: historical.id, specHash: historical.specHash, autoContinue: false });
+    assert.equal(restored.get(historical.id)?.status, 'needs_replan');
+    assert.equal(f.executor.calls.length, 0);
+    assert.equal(states.sends, 0);
+  } finally {
+    restored.dispose();
+  }
+}));
+
 test('Provider holds the batch lock across all commands and blocks duplicate messages, single approval and models', async () => fixture(async (f) => {
   f.add(['A', 'B', 'C']); const { host, states } = hostFixture(f);
   const immediateMembership: string[][] = [];
@@ -562,12 +605,12 @@ class UiElement {
 }
 function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: 'en' | 'zh-CN') {
   const source = getScript();
-  const names = ['appendAutomaticApprovalState', 'getApprovalTarget', 'isHeldDraftRunApproval', 'formatApprovalDependency',
+  const names = ['appendAutomaticApprovalState', 'getApprovalTarget', 'isHeldDraftRunApproval', 'getApprovalDisplayReason', 'formatApprovalDependency',
     'appendApprovalStateNote', 'appendApprovalResumeAction', 'createDraftRunCard', 'appendDraftRunBatchControls', 'appendDraftRunActions', 'createDraftRunActionButton',
     'isDraftRunBatchActive', 'getDraftRunBatchMembers', 'createDraftRunTimelineItem', 'renderDraftRunItems',
     'captureDraftRunActionFocus', 'findDraftRunActionFocus', 'renderTranscript', 'handleDraftRunActionClick', 'handleChangeSetActionClick',
     'createApprovalReviewSummary', 'getApprovalSourceLabel', 'getApprovalDecisionLabel', 'getApprovalRiskLabel',
-    'getDraftRunTitle', 'appendDraftRunField', 'formatShellCommand', 'formatShellWord', 'getDraftRunStatusLabel', 'getDraftRunEffectLabel',
+    'getDraftRunTitle', 'appendDraftRunField', 'createDraftRunPreflightDetails', 'formatShellCommand', 'formatShellWord', 'getDraftRunStatusLabel', 'getDraftRunEffectLabel',
     'createChangeSetCard', 'createChangeSetFileRow', 'createEditActionButton', 'createEditOpenFileButton',
     'createChangeSetActionButton', 'getChangeSetStatusLabel', 'getChangeFileStatusLabel', 'isChangeSetActionable',
     'renderUnlinkedChangeSets', 'buildDraftRunTimelineProjection', 'handleDraftRunCloneFeedback'];
@@ -589,7 +632,8 @@ function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: '
   const unlinkedRegion = new UiElement(); unlinkedRegion.append(unlinked);
   const messages: unknown[] = [];
   const composer = { text: '' };
-  const context = { state, document: { createElement: () => new UiElement() }, Element: UiElement, HTMLElement: UiElement,
+  const context = { state, translations: WEBVIEW_TRANSLATIONS,
+    document: { createElement: () => new UiElement() }, Element: UiElement, HTMLElement: UiElement,
     pendingDraftRunBatchSnapshot: '', pendingDraftRunActions: new Set(), pendingDraftRunApprovals: new Set(), pendingChangeActions: new Map(),
     changeActionRequestSequence: 0,
     isPromptEmpty: () => !composer.text, getPromptEndRange: () => composer.text.length,
@@ -737,8 +781,8 @@ test('Git draft cards bind diagnostics and expose only explicit current processi
       const statusCard = render(first);
       const commitCard = render(second);
       assert.ok(statusCard.some(node => node.textContent === labels.draftRunTitleNeedsReplan));
-      assert.ok(commitCard.some(node => node.textContent === labels.draftRunTitleBlocked));
-      assert.deepEqual(texts(statusCard), [labels.approvalCommandReplanReason.replace('{reason}', statusReason)]);
+      assert.ok(commitCard.some(node => node.textContent === labels.draftRunTitleDependencyBlocked));
+      assert.deepEqual(texts(statusCard), [labels.approvalCommandReplanReason.replace('{reason}', statusReason), labels.draftRunCorrectionNextStep]);
       assert.deepEqual(texts(commitCard), [labels.approvalCommandDependency.replace('{target}', `git status (${status.id})`) + ' · ' + statusReason,
         labels.approvalCommandReplanReason.replace('{reason}', commitReason)]);
       const buttons = [...statusCard, ...commitCard].filter(node => node.type === 'button');
@@ -773,10 +817,22 @@ test('Git draft cards bind diagnostics and expose only explicit current processi
     resume[0].click();
     assert.deepEqual(JSON.parse(JSON.stringify(ui.messages)), [{ type: 'resumeApprovalProcessing' }]);
     processing.canResume = false;
-    processing.targets[0].reason = labels.approvalReplanRepeated;
-    const stopped = render(first);
+    processing.targets[0].reason = WEBVIEW_TRANSLATIONS[language === 'en' ? 'zh-CN' : 'en'].approvalReplanRepeated;
+    const historical = render(first);
+    assert.ok(!historical.some(node => node.textContent === labels.draftRunCorrectionStopped));
+    assert.deepEqual(texts(historical), [labels.approvalCommandReplanReason.replace('{reason}', statusReason),
+      labels.draftRunCorrectionNextStep, labels.approvalReplanHistoricalStop]);
+    const stopped = render({ ...first, commandRecoveryOutcome: { kind: 'repeated', priorDraftRunId: 'previous' } });
     assert.ok(!stopped.some(node => node.type === 'button'));
-    assert.deepEqual(texts(stopped), [labels.approvalCommandReplanReason.replace('{reason}', statusReason), labels.approvalReplanRepeated]);
+    assert.ok(stopped.some(node => node.textContent === labels.draftRunCorrectionStopped));
+    assert.deepEqual(texts(stopped), [labels.approvalCommandReplanReason.replace('{reason}', statusReason)]);
+    assert.ok(!render({ ...second, dependency: { ...second.dependency, reason: labels.draftRunCorrectionStopped } })
+      .some(node => node.textContent.includes(labels.draftRunCorrectionStopped)));
+    const verifiedCommit = 'a'.repeat(40);
+    const tagVerified = render({ ...first, commandRecoveryOutcome: { kind: 'git_tag_verified', ref: 'refs/tags/v0.5.3', commit: verifiedCommit } });
+    assert.ok(tagVerified.some(node => node.textContent === labels.draftRunTagTargetVerified));
+    assert.ok(tagVerified.some(node => node.textContent === 'refs/tags/v0.5.3 → ' + verifiedCommit));
+    assert.ok(!tagVerified.some(node => node.type === 'button' || node.textContent === labels.draftRunCorrectionNextStep));
     ui.state.approvalProcessing = undefined;
     const waiting = render(status);
     assert.ok(waiting.some(node => node.textContent === labels.draftRunTitleBlocked));
@@ -789,6 +845,8 @@ test('Git draft cards bind diagnostics and expose only explicit current processi
     const head = '0123456789012345678901234567890123456789';
     const verified = render({ ...commit, status: 'done', gitCommitEvidence: { outcome: 'verified', head } });
     assert.ok(verified.some(node => node.textContent === labels.draftRunVerifiedGitHead.replace('{head}', head.slice(0, 12)) && node.title === head));
+    assert.ok(verified.some(node => node.textContent === labels.draftRunTitleDone));
+    assert.ok(!verified.some(node => node.textContent === labels.draftRunCorrectionStopped || node.textContent === labels.draftRunTagTargetVerified));
   }
 }));
 
@@ -832,14 +890,25 @@ test('command cards distinguish launch facts, capability corrections and predica
     const capability = { code: 'host_unsupported_option', phase: 'capability', started: false, category: 'capability',
       blocking: true, argumentIndex: 2, token: '-S', capabilityVersion: 1,
       reason: '<script>Literal diagnostic</script>', candidateArgs: ['--version'] };
-    const correction = { ...draft, status: 'needs_replan', executionStarted: false, executionPhase: 'not_dispatched', capabilityDiagnostic: capability };
+    const args = ['log', 'v0.5.3^{commit}', '-S', '<script>literal argv</script>'];
+    const correction = { ...draft, spec: { ...draft.spec, args }, status: 'needs_replan',
+      executionStarted: false, executionPhase: 'not_dispatched', capabilityDiagnostic: capability };
     const correctedNodes = nodesFor(correction);
+    assert.equal(labels.draftRunTitleNeedsReplan, language === 'en'
+      ? 'Preflight blocked · Command did not start' : '预检拦截 · 命令未启动');
+    assert.ok(correctedNodes.some(node => node.className === 'draft-run-title' && node.textContent === labels.draftRunTitleNeedsReplan));
     assert.ok(correctedNodes.some(node => node.className === 'draft-run-meta' && node.textContent.startsWith(labels.draftRunStatusNeedsReplan)));
     assert.ok(correctedNodes.some(node => node.className === 'draft-run-not-dispatched-badge' && node.textContent === labels.draftRunNotDispatchedBadge));
     assert.ok(correctedNodes.some(node => node.textContent === labels.draftRunPreflightNoEffects));
     assert.ok(!correctedNodes.some(node => node.className.startsWith('draft-run-risk') || node.className === 'draft-run-output'));
-    assert.ok(correctedNodes.some(node => node.textContent === labels.draftRunCapabilityVersion.replace('{version}', '1')
-      + ' · host_unsupported_option · args[2] · -S'));
+    const details = correctedNodes.find(node => node.className.includes('draft-run-preflight-details'))!;
+    const detailRows = elements(details.children).filter(node => node.className === 'draft-run-field');
+    assert.deepEqual(detailRows.map(row => row.children.map(node => node.textContent)), [
+      [labels.draftRunOriginalArgv, JSON.stringify(args)], ['capabilityVersion', '1'], ['code', 'host_unsupported_option'],
+      ['phase', 'capability'], ['started', 'false'], ['blocking', 'true'], ['argumentIndex', '2'], ['token', '"-S"'],
+      [labels.draftRunOriginalDiagnostic, capability.reason]
+    ]);
+    assert.ok(detailRows.every(row => row.children[1].childElementCount === 0), 'untrusted diagnostic values stay literal text');
     assert.ok(correctedNodes.some(node => node.textContent === labels.approvalCommandReplanReason.replace('{reason}', capability.reason)));
     assert.ok(correctedNodes.some(node => node.textContent.startsWith(labels.draftRunCorrectionCandidate.split('{command}')[0])));
     assert.deepEqual(correctedNodes.filter(node => node.type === 'button').map(node => node.dataset.draftRunAction),
@@ -858,6 +927,13 @@ test('command cards distinguish launch facts, capability corrections and predica
     const pendingNodes = nodesFor(draft);
     assert.ok(!pendingNodes.some(node => node.className === 'draft-run-not-dispatched-badge'), 'a pending draft is not terminal');
     assert.ok(pendingNodes.some(node => node.className.startsWith('draft-run-risk')), 'pending drafts still show the risks of approving them');
+    const external = { ...draft, spec: { ...draft.spec, externalCwd: true } };
+    const unauthorized = nodesFor(external);
+    assert.ok(unauthorized.some(node => node.className === 'draft-run-title' && node.textContent === labels.draftRunTitleNeedsAuthorization));
+    assert.deepEqual(unauthorized.filter(node => node.type === 'button').map(node => node.dataset.draftRunAction),
+      ['authorizeDraftRunCwd', 'rejectDraftRun']);
+    const uncertainLaunch = nodesFor({ ...correction, executionStarted: undefined, executionPhase: undefined, capabilityDiagnostic: undefined });
+    assert.ok(uncertainLaunch.some(node => node.className === 'draft-run-title' && node.textContent === labels.draftRunTitleCorrectionNeeded));
   }
 }));
 

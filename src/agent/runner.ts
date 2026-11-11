@@ -206,7 +206,8 @@ import { DelegationTracker } from './delegation';
 import { createChangeSet } from '../edits/changeSet';
 import { RepairLoopTracker, RunValidationStateTracker } from './repairLoop';
 import { RunDetailsBuilder } from './logging/runDetails';
-import { commandCapabilityReplan, commandRecoveryKey, MAX_COMMAND_RECOVERY_KEYS } from '../runs/commandRecovery';
+import { commandCapabilityReplan, commandRecoveryKey, findCommandRecoveryObservation, MAX_COMMAND_RECOVERY_KEYS, mergeCommandRecoveryObservations,
+  observeCommandRecovery, recordCommandRecoveryDelivery, type CommandRecoveryResponse } from '../runs/commandRecovery';
 import { analyzeCommandCapability } from '../approvals/authorization/commandCapability';
 import { normalizeDraftRunPlan } from '../runs/draftRunProposal';
 import { createDraftRunProposal } from '../runs/draftRunProposal';
@@ -218,6 +219,8 @@ import {
 import { ToolEvidencePersistenceError, ToolEvidenceStore } from './evidence/store';
 import { prepareEvidenceEnvelope, stableStringify } from './evidence/shaping';
 import type { ToolEvidence } from './evidence/types';
+import { getCommandRecoveryDeliveries } from './evidence/commandRecoveryDelivery';
+import type { ProviderClientRequest } from './providers/types';
 import { isContextTooLongError, ToolResultAdmissionController } from './toolResultAdmission';
 import { ContextWindowCalibrationStore } from './contextWindowCalibrationStore';
 import {
@@ -458,6 +461,9 @@ export class AgentLoop {
       const previous = prepared.snapshot();
       cp.commandRecoveryKeys ??= previous.commandRecoveryKeys;
       cp.commandRecoveryExhausted ??= previous.commandRecoveryExhausted;
+      cp.commandRecoveryObservationsInvalid ||= previous.commandRecoveryObservationsInvalid;
+      cp.commandRecoveryObservations = mergeCommandRecoveryObservations(rootTaskId ?? cp.taskId,
+        cp.commandRecoveryObservations, previous.commandRecoveryObservations);
       cp.delegationBudget ??= previous.delegationBudget;
       if (limit > 0) {
         const deadline = Date.now() + Math.max(0, limit - cp.usedMs);
@@ -504,7 +510,9 @@ export class AgentLoop {
       return structuredClone({ version: 1, usedMs, maxExecutionMs: limit, maxCost: taskCostBudget.limit,
         usedCostByCurrency: taskCostBudget.snapshot(), runBudget: activeRunBudget.state,
         budgetLimits: activeRunBudget.limits, delegationBudget: cp.delegationBudget,
-        commandRecoveryKeys: cp.commandRecoveryKeys, commandRecoveryExhausted: cp.commandRecoveryExhausted });
+        commandRecoveryKeys: cp.commandRecoveryKeys, commandRecoveryExhausted: cp.commandRecoveryExhausted,
+        commandRecoveryObservations: cp.commandRecoveryObservations,
+        commandRecoveryObservationsInvalid: cp.commandRecoveryObservationsInvalid });
     };
     let firstModelRequestAdmitted = false;
     resumeClock();
@@ -1435,6 +1443,7 @@ export class AgentLoop {
       epoch.status = 'active';
       epoch.pendingRollover = undefined;
       epoch.seed = seed;
+      epoch.commandRecoveryDsmlResultHashes = undefined;
       // This is the explicit cache boundary. The full base lives in immutable
       // evidence; subsequent epochs cannot reload it from the original request.
       providerProjection = buildCurrentProviderProjection(new Set([
@@ -1543,7 +1552,8 @@ export class AgentLoop {
       // The schema is frozen for the whole session/run. When tool calls are no
       // longer allowed, keep the identical tools array and switch tool_choice to
       // none instead of removing the cached schema prefix.
-      const toolBudgetExhausted = runtimeConfig.toolsEnabled && logicalBudget.isToolBudgetExhausted();
+      const resumingAcceptedToolRound = pending?.commandRecoveryResponse && pending.response.message.tool_calls?.length;
+      const toolBudgetExhausted = runtimeConfig.toolsEnabled && !resumingAcceptedToolRound && logicalBudget.isToolBudgetExhausted();
       const isBudgetFinalization = toolBudgetExhausted;
       if (isBudgetFinalization && !pending) {
         if (!logicalBudget.beginFinalization()) {
@@ -1593,9 +1603,11 @@ export class AgentLoop {
         phase: allowToolCalls ? 'tool' : 'final',
         remainingBatchResults: 1
       });
+      let acceptedRequest: { serializedBody: string; id: string } | undefined;
+      let evidenceForRequest: ToolEvidence[] = [];
       try {
-        const deliveryRecords = await this.getPendingEvidenceDeliveryRecords(evidenceStore, evidenceSessionId, checkpoint.taskId, epoch.evidenceRefs);
-        for (const record of deliveryRecords) await evidenceStore.markSending(record);
+        if (!pending) evidenceForRequest = await this.getPendingEvidenceDeliveryRecords(evidenceStore, evidenceSessionId, checkpoint.taskId, epoch.evidenceRefs);
+        for (const record of evidenceForRequest) await evidenceStore.markSending(record);
         response = pending?.response ?? await this.createModelResponse(
           request,
           { ...runtimeConfig,
@@ -1613,10 +1625,11 @@ export class AgentLoop {
           toolChoice: allowToolCalls ? 'auto' : 'none',
           providerRunState,
           contextEpochIndex: epoch.index,
-          historyCompacted: projection.metadata.usedSummary
+          historyCompacted: projection.metadata.usedSummary,
+          onAcceptedRequest: (serializedBody, id) => { acceptedRequest = { serializedBody, id }; }
           }
         );
-        for (const record of deliveryRecords) await evidenceStore.markDelivered(record);
+        for (const record of evidenceForRequest) await evidenceStore.markDelivered(record);
         const actualInput = response.usage?.prompt_tokens;
         const successfulAdjustment = !pending
           ? admission.recordSuccessfulRequest(actualInput)
@@ -1664,11 +1677,43 @@ export class AgentLoop {
         allowToolCalls || allowTerminalDraftEdit,
         runtimeConfig.provider !== 'anthropic-compatible'
       );
+      if (pending?.dsmlToolCalls) normalizedAssistant.source = 'dsml';
       const assistant = normalizedAssistant.assistant;
       if (!assistant) {
         throw new Error(request.language === 'en'
           ? 'The provider API did not return a usable assistant message.'
           : 'Provider API 没有返回可用的 assistant message。');
+      }
+      if (!pending && acceptedRequest && normalizedAssistant.source === 'dsml') {
+        for (const call of assistant.tool_calls ?? []) {
+          if ([RUN_DRAFT_TOOL_NAME, READ_EVIDENCE_TOOL_NAME].includes(call.function.name)) {
+            // Emulated call IDs are positional within one response. Scope
+            // their intents to this accepted response before checkpointing.
+            call.id = `${acceptedRequest.id}:${call.id}`;
+          }
+        }
+      }
+      let commandRecoveryResponse = pending?.commandRecoveryResponse;
+      if (acceptedRequest && !checkpoint.commandRecoveryObservationsInvalid) {
+        const rootTaskId = request.approvalRootTaskId ?? checkpoint.taskId;
+        const id = acceptedRequest.id;
+        const observations = checkpoint.commandRecoveryObservations;
+        const deliveredDraftRunIds = observations?.length ? await getCommandRecoveryDeliveries({
+          body: JSON.parse(acceptedRequest.serializedBody) as ProviderClientRequest['body'],
+          observations,
+          rootTaskId,
+          continuation: request.commandRecoveryContinuation
+            && { prompt: request.prompt.trim(), targetIds: request.commandRecoveryContinuation.targetIds },
+          findEvidence: ref => evidenceStore.findByRef(ref, evidenceSessionId, checkpoint.taskId),
+          emulatedResultHashes: epoch.commandRecoveryDsmlResultHashes,
+          findEmulatedEvidence: async () => {
+            const records = await Promise.all(epoch.evidenceRefs.filter(ref => [RUN_DRAFT_TOOL_NAME, READ_EVIDENCE_TOOL_NAME].includes(ref.toolName))
+              .map(ref => evidenceStore.findByRef(ref.evidenceRef, evidenceSessionId, checkpoint.taskId)));
+            return records.filter((record): record is ToolEvidence => Boolean(record));
+          }
+        }) : [];
+        recordCommandRecoveryDelivery(checkpoint.commandRecoveryObservations, rootTaskId, id, deliveredDraftRunIds);
+        commandRecoveryResponse = { id, deliveredDraftRunIds };
       }
 
       if (normalizedAssistant.displayReasoningContent && !pending) {
@@ -1754,7 +1799,7 @@ export class AgentLoop {
       }
       if (!toolCalls.length) {
         if (!pending) this.commitModelRequestRecovery(checkpoint);
-        pending ??= { response: { message: assistant, finishReason: response.finishReason, usage: response.usage }, results: {} };
+        pending ??= { response: { message: assistant, finishReason: response.finishReason, usage: response.usage }, results: {}, commandRecoveryResponse };
         committedProvider = structuredClone(providerRunState);
         await saveStep();
         if (isBudgetFinalization) {
@@ -1846,10 +1891,13 @@ export class AgentLoop {
         }, { finishReason: finalFinishReason });
       }
 
-      if (!pending) this.commitModelRequestRecovery(checkpoint);
-      pending ??= { response: { message: assistant, finishReason: response.finishReason, usage: response.usage }, results: {} };
+      if (!pending) {
+        this.commitModelRequestRecovery(checkpoint);
+        pending = { response: { message: assistant, finishReason: response.finishReason, usage: response.usage }, results: {},
+          commandRecoveryResponse, dsmlToolCalls: normalizedAssistant.source === 'dsml' ? true : undefined };
+        logicalBudget.recordToolRound();
+      }
       committedProvider = structuredClone(providerRunState);
-      logicalBudget.recordToolRound();
       await saveStep();
       emitStatus({ base: 'thinking', phase: 'planning_tool' });
 
@@ -1857,9 +1905,6 @@ export class AgentLoop {
       const anthropicToolResults: AnthropicUserContentBlock[] = [];
       const acceptedEmulatedHandoffs: Array<{ toolCallId: string; toolName: string }> = [];
       const batchWorkFingerprints: string[] = [];
-      const commandRecoveryBatchId = createHash('sha256').update(JSON.stringify([
-        turn, assistant.tool_calls?.map(call => call.id) ?? []
-      ])).digest('hex');
       let rolloverAfterBatchReason: ContextEpochRolloverReason | undefined;
       let strategyWarningAfterBatch = false;
       let noProgressStopAfterBatch = false;
@@ -1931,7 +1976,9 @@ export class AgentLoop {
             evidenceRef: evidenceRecord.evidenceRef, contentHash: evidenceRecord.contentHash });
           return evidenceRecord.providerEnvelope!;
         }
-        if (!logicalBudget.tryRecordToolCall()) {
+        const blockedDraftId = toolCall.function.name === RUN_DRAFT_TOOL_NAME ? `preflight-${evidenceRecord.id}` : undefined;
+        const resumingBlockedProposal = blockedDraftId && draftRuns.some(run => run.id === blockedDraftId && run.capabilityDiagnostic?.blocking);
+        if (!resumingBlockedProposal && !logicalBudget.tryRecordToolCall()) {
           return JSON.stringify({
             ok: false,
             errorType: 'tool_call_budget_exhausted',
@@ -1939,7 +1986,7 @@ export class AgentLoop {
           });
         }
         toolCallCount = logicalBudget.state.toolCalls;
-        epoch.toolCallsInEpoch += 1;
+        if (!resumingBlockedProposal) epoch.toolCallsInEpoch += 1;
         taskPlan.startTool(toolCall.function.name);
         emitStatus({
           base: 'executing',
@@ -2113,7 +2160,8 @@ export class AgentLoop {
                 historyArchive: request.historyArchive,
                 parentRequest: request,
                 commandRecovery: checkpoint,
-                commandRecoveryBatchId,
+                commandRecoveryResponse,
+                blockedDraftId,
                 parentRunId: trace.runId,
                 onUsage: runCallbacks.onUsage,
                 onUsageLedgerRecord: runCallbacks.onUsageLedgerRecord,
@@ -2151,6 +2199,13 @@ export class AgentLoop {
         }
         rawToolResult = this.normalizeToolResultFeedback(toolCall.function.name, rawToolResult);
         rawToolResult = delegation?.attachScopeNotice(rawToolResult) ?? rawToolResult;
+        if (toolCall.function.name === RUN_DRAFT_TOOL_NAME && this.parseToolResultObject(rawToolResult)?.status === 'needs_replan') {
+          // An already-completed journal entry is never replayed. First make
+          // the blocked audit proposal and its observation durable so recovery
+          // can reuse either side of the evidence completion boundary.
+          await saveStep!();
+          this.throwIfAborted(request.signal, request.language);
+        }
         evidenceRecord = await evidenceStore.complete(evidenceRecord, rawToolResult, { pluginSkillProgress });
         if (pluginSkillProgress) restorePluginSkillProgress(checkpoint, pluginSkillProgress);
         if (this.isToolResultError(rawToolResult)) {
@@ -2477,10 +2532,11 @@ export class AgentLoop {
           });
         }
 
-        const emulatedToolResultMessage: DeepSeekMessage = {
-          role: 'user',
-          content: this.formatEmulatedDsmlToolResults(emulatedResults, request.language)
-        };
+        const emulatedContent = this.formatEmulatedDsmlToolResults(emulatedResults, request.language);
+        const emulatedToolResultMessage: DeepSeekMessage = { role: 'user', content: emulatedContent };
+        if (emulatedResults.some(result => [RUN_DRAFT_TOOL_NAME, READ_EVIDENCE_TOOL_NAME].includes(result.toolCall.function.name))) {
+          epoch.commandRecoveryDsmlResultHashes = [...(epoch.commandRecoveryDsmlResultHashes ?? []), hashText(emulatedContent)].slice(-4_096);
+        }
         messages.push(emulatedToolResultMessage);
         if (acceptedEmulatedHandoffs.length && !request.subagentContext) {
           const acceptedIds = new Set(acceptedEmulatedHandoffs.map((item) => item.toolCallId));
@@ -2538,9 +2594,6 @@ export class AgentLoop {
       committedProvider = structuredClone(providerRunState);
       checkpoint.lastStepAt = new Date().toISOString();
       await saveStep();
-      if (checkpoint.commandRecoveryExhausted) {
-        throw new AgentInterruptedError('no_progress_loop', 'Command correction stopped: the same root cause repeated. Diagnostics and successful work are saved. / 命令纠错已停止：同根因重复，诊断及已完成工作已保存。');
-      }
       if (noProgressStopAfterBatch) {
         throw new AgentInterruptedError('no_progress_loop', request.language === 'en'
           ? 'The task stopped because the same tool work and unchanged result repeated after a strategy-change warning.'
@@ -2662,6 +2715,7 @@ export class AgentLoop {
       contextEpochIndex?: number;
       historyCompacted?: boolean;
       protocolMigration?: boolean;
+      onAcceptedRequest?: (serializedBody: string, id: string) => void;
     } = {}
   ): Promise<DeepSeekStreamResult> {
     const trace = options.trace ?? createNoopInteractionTrace();
@@ -3023,6 +3077,7 @@ export class AgentLoop {
     }
     const usageEvent = finalUsageEvent;
     if (response.ok && response.message) {
+      options.onAcceptedRequest?.(serializedBody, upstreamRequestId);
       if (usageEvent) {
         callbacks.onUsageEstimate?.(calibrateContextUsageEstimate(createRequestBudgetUsage(budget), usageEvent.usage.promptTokens));
       }
@@ -3792,7 +3847,8 @@ ${launch.evidence.content}`;
       exposedToolNames?: ReadonlySet<string>;
       onPluginSkillRead?: (progress: PluginSkillProgress) => void;
       commandRecovery?: RunCheckpoint;
-      commandRecoveryBatchId?: string;
+      commandRecoveryResponse?: CommandRecoveryResponse;
+      blockedDraftId?: string;
       delegation?: DelegationTracker;
     } = {}
   ): Promise<string> {
@@ -3974,7 +4030,8 @@ ${launch.evidence.content}`;
             expectedSnapshot: options.authorization.executionSnapshot
           });
         case RUN_DRAFT_TOOL_NAME:
-          return await this.createDraftRun(args, draftRuns, options.parentRequest?.approvalMode, language, options.commandRecovery, options.parentRequest, options.commandRecoveryBatchId);
+          return await this.createDraftRun(args, draftRuns, options.parentRequest?.approvalMode, language,
+            options.commandRecovery, options.parentRequest, options.commandRecoveryResponse, options.blockedDraftId);
         case CREATE_DRAFT_EDIT_TOOL_NAME:
           return await this.createDraftEdit(args, draftEdits, language);
         case CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME:
@@ -4094,7 +4151,8 @@ ${launch.evidence.content}`;
     language: KeepseekLanguage,
     commandRecovery?: RunCheckpoint,
     parentRequest?: AgentRequest,
-    commandRecoveryBatchId?: string
+    commandRecoveryResponse?: CommandRecoveryResponse,
+    blockedDraftId?: string
   ): Promise<string> {
     const rawArgs = args.args;
     if (!Array.isArray(rawArgs) || !rawArgs.every((value) => typeof value === 'string')) {
@@ -4113,7 +4171,8 @@ ${launch.evidence.content}`;
         return { name: value.name, value: value.value };
       });
     }
-    const draftRun = await createDraftRunProposal({
+    const replayed = blockedDraftId ? draftRuns.find(run => run.id === blockedDraftId && run.capabilityDiagnostic?.blocking) : undefined;
+    const draftRun = replayed ?? await createDraftRunProposal({
       executable: this.readRequiredString(args, 'executable'),
       args: rawArgs,
       reason: this.readRequiredString(args, 'reason'),
@@ -4123,41 +4182,40 @@ ${launch.evidence.content}`;
       env,
       ...normalizeDraftRunPlan(args)
     });
-    const persistProposal = true;
-    draftRuns.push(draftRun);
+    if (!replayed) {
+      if (blockedDraftId && draftRun.capabilityDiagnostic?.blocking) draftRun.id = blockedDraftId;
+      if (commandRecoveryResponse?.deliveredDraftRunIds.length) draftRun.commandRecoveryResponse = commandRecoveryResponse;
+      draftRuns.push(draftRun);
+    }
     if (draftRun.capabilityDiagnostic?.blocking) {
       const rootTaskId = parentRequest?.approvalRootTaskId ?? commandRecovery?.taskId ?? 'current-tool-loop';
-      const run = { ...draftRun, agentRunId: commandRecovery?.taskId ?? '', status: 'pending',
+      const run = { ...draftRun, agentRunId: commandRecovery?.taskId ?? '', status: replayed ? 'needs_replan' : 'pending',
         executionStarted: false, executionPhase: 'not_dispatched' } as import('../shared/types').DraftRun;
       const diagnosis = commandCapabilityReplan(run, rootTaskId)!;
-      const keys = commandRecovery?.commandRecoveryKeys ?? [];
-      const key = commandRecoveryKey(run, diagnosis);
-      const recoveryBatch = commandRecovery?.commandRecoveryBatch;
-      const sameBatch = recoveryBatch && recoveryBatch.id === commandRecoveryBatchId ? recoveryBatch.keys : [];
-      const observed = sameBatch.includes(key);
-      // Deduplicate root causes across model responses; time, cost and request
-      // budgets govern how long distinct corrections may continue.
-      const exhausted = !observed && keys.includes(key);
-      if (commandRecovery) {
-        if (!exhausted && !observed) {
-          if (keys.length >= MAX_COMMAND_RECOVERY_KEYS) {
-            throw new AgentInterruptedError('resource_limit', 'Command correction ledger resource limit / 命令纠错记录超过存储上限');
-          }
-          keys.push(key);
-          sameBatch.push(key);
+      const ledgerUnverified = commandRecovery?.commandRecoveryObservationsInvalid === true;
+      let repeated = false;
+      if (commandRecovery && !ledgerUnverified) {
+        const observations = commandRecovery.commandRecoveryObservations ??= [];
+        const existing = replayed && findCommandRecoveryObservation(observations, rootTaskId, draftRun.id, draftRun.specHash);
+        if (!existing && observations.length >= MAX_COMMAND_RECOVERY_KEYS) {
+          throw new AgentInterruptedError('resource_limit', 'Command correction ledger resource limit / 命令纠错记录超过存储上限');
         }
-        if (commandRecoveryBatchId) commandRecovery.commandRecoveryBatch = { id: commandRecoveryBatchId, keys: sameBatch };
-        commandRecovery.commandRecoveryKeys = keys;
-        // A different root cause later in the same response cannot clear a stop.
-        commandRecovery.commandRecoveryExhausted = commandRecovery.commandRecoveryExhausted || exhausted || undefined;
+        const observation = existing ?? observeCommandRecovery(observations, {
+          key: commandRecoveryKey(run, diagnosis), rootTaskId, draftRunId: draftRun.id,
+          specHash: draftRun.specHash, observedResponseId: commandRecoveryResponse?.id
+        }, commandRecoveryResponse?.deliveredDraftRunIds);
+        repeated = Boolean(observation.repeatedOf);
       }
+      const allowed = !repeated && !ledgerUnverified;
       return JSON.stringify({ ok: false, status: 'needs_replan', executed: false, started: false,
-        draftRunId: draftRun.id, specHash: draftRun.specHash, proposalPersisted: persistProposal, diagnostic: draftRun.capabilityDiagnostic,
-        recovery: { allowed: !exhausted, reason: exhausted ? 'command_recovery_repeated' : 'fresh_proposal_required' },
+        draftRunId: draftRun.id, specHash: draftRun.specHash, proposalPersisted: true, diagnostic: draftRun.capabilityDiagnostic,
+        recovery: { allowed, reason: repeated ? 'command_recovery_repeated' : ledgerUnverified ? 'command_recovery_unverified' : 'fresh_proposal_required' },
         capability: { version: draftRun.capabilityDiagnostic.capabilityVersion,
           supportedForms: analyzeCommandCapability(draftRun.spec).supportedForms,
           scope: 'Finite host argv grammar; dynamic executable, repository, scope and authorization checks still apply.' },
-        message: 'Nothing dispatched. Preserve the original goal and all prerequisites; prepare a fresh proposal with a new identity. Candidate argv are suggestions requiring fresh checks and approval. Do not remove unknown options blindly or bypass a safety denial. / 尚未启动。保留原目标及所有前置条件，准备新身份草稿；候选需重新检查审批，勿盲删未知参数或绕过安全拒绝。'
+        message: allowed
+          ? 'Nothing dispatched. Preserve the original goal and all prerequisites; prepare a fresh proposal with a new identity. Candidate argv are suggestions requiring fresh checks and approval. Do not remove unknown options blindly or bypass a safety denial. / 尚未启动。保留原目标及所有前置条件，准备新身份草稿；候选需重新检查审批，勿盲删未知参数或绕过安全拒绝。'
+          : 'Nothing dispatched. This command has no further automatic correction. Continue independent authorized work or explain the remaining blocker. / 尚未启动。此命令不会再自动修正。请继续独立且已获准的工作，或说明剩余阻塞。'
       });
     }
     return JSON.stringify({

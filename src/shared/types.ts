@@ -623,6 +623,8 @@ export interface DraftRunEffectAssessment {
 
 export interface DraftRunProposal {
   capabilityDiagnostic?: import('../approvals/authorization/commandCapability').CommandCapabilityDiagnostic;
+  /** Host-only identity for a diagnostic discovered after the tool loop. */
+  commandRecoveryResponse?: import('../runs/commandRecovery').CommandRecoveryResponse;
   id: string;
   spec: DraftRunSpec;
   specHash: string;
@@ -684,6 +686,8 @@ export interface DraftRun extends DraftRunProposal {
   authorizationSource?: ExecutionPermit['source'];
   approvalReview?: import('../approvals/approvalReviewTypes').ApprovalReviewDisplay;
   replacementDraftRunId?: string;
+  /** Host-verified explanation for a terminal, never-dispatched command. */
+  commandRecoveryOutcome?: { kind: 'repeated'; priorDraftRunId: string } | { kind: 'git_tag_verified'; ref: string; commit: string };
   replan?: import('../approvals/approvalProcessing').DraftRunReplanResult;
   dependency?: import('../approvals/approvalProcessing').ApprovalDependency;
   gitCommitPlan?: import('../runs/localGitCommit').LocalGitCommitPlan;
@@ -1568,8 +1572,10 @@ export interface AgentRequest {
   approvalMode?: ApprovalMode;
   /** Frozen for the whole logical turn. ApprovalMode remains an independent axis. */
   executionMode?: ExecutionMode;
-  /** Runtime root used only for model-approval refusal-fuse accounting. */
+  /** Root of approval and command-correction accounting. */
   approvalRootTaskId?: string;
+  /** Host-selected targets with concrete diagnostics in the approval continuation. */
+  commandRecoveryContinuation?: { targetIds: string[] };
   checkpoint?: import('../agent/runCheckpoint').RunCheckpoint;
   taskClock?: import('../agent/executionPolicy').ExecutionClock;
   /** Runtime-only shared cost ledger; excluded from persisted request bytes. */

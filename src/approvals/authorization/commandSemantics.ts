@@ -34,6 +34,8 @@ export interface GitLocalQuery {
   revisions: string[];
 }
 
+const revParseVerifyOptions = ['--verify', '--quiet', '--end-of-options'];
+
 /** Local refs, bounded ancestry suffixes and explicit object peeling; no reflog,
  * path lookup (revision:path), command substitution or revision-set shortcuts. */
 export function isLocalGitRevision(value: string): boolean {
@@ -158,15 +160,20 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
   const reason = (code: AuthorizationReason['code'], detail: string, en: string, zh: string) => {
     result.reasons.push(authorizationReason(code, detail, en, zh));
   };
-  const unsupported = (value: string, argumentIndex?: number) => {
+  const unsupported = (value: string, argumentIndex?: number, optionIdentity?: string) => {
     reason('unsupported_option', value, 'This argument or behavior is outside the host command grammar.',
       '该参数或行为不在宿主命令语法内。');
-    if (argumentIndex !== undefined) result.reasons.at(-1)!.argumentIndex = argumentIndex;
+    const item = result.reasons.at(-1)!;
+    if (argumentIndex !== undefined) item.argumentIndex = argumentIndex;
+    if (optionIdentity) item.optionIdentity = optionIdentity;
   };
-  const invalid = (detail: string, argumentIndex?: number) => {
-    reason('invalid_argv', detail, 'Invalid or incomplete arguments for this supported query.',
-      '此受支持查询的参数无效或不完整。');
-    if (argumentIndex !== undefined) result.reasons.at(-1)!.argumentIndex = argumentIndex;
+  const invalid = (kind: NonNullable<AuthorizationReason['invalidArgvKind']>, detail: string, argumentIndex?: number,
+    en = 'Invalid or incomplete arguments for this supported query.', zh = '此受支持查询的参数无效或不完整。', optionIdentity?: string) => {
+    reason('invalid_argv', detail, en, zh);
+    const item = result.reasons.at(-1)!;
+    item.invalidArgvKind = kind;
+    if (argumentIndex !== undefined) item.argumentIndex = argumentIndex;
+    if (optionIdentity) item.optionIdentity = optionIdentity;
   };
   const valueAfter = (index: number, role: ArgumentRole, stopAtSeparator = false): number => {
     arg(index, 'option');
@@ -247,22 +254,51 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
     const localQuery = ['merge-base', 'rev-parse', 'rev-list'].includes(subcommand);
     if (!viewing && !staging && !committing && !status && !listingTags && !boundedRef && !result.gitRemote && !localQuery) unsupported(subcommand ?? 'missing Git subcommand', subcommand ? subcommandIndex : undefined);
     let query: GitLocalQuery | undefined;
-    if (localQuery) {
-      const revisions = subcommand === 'rev-parse' ? operands : operands.slice(1);
-      const valid = subcommand === 'merge-base'
-        ? operands[0] === '--is-ancestor' && revisions.length === 2 && revisions.every(isLocalGitRevision)
-        : subcommand === 'rev-list'
-          ? operands[0] === '--count' && revisions.length === 1
-            && (isLocalGitRevision(revisions[0]) || isLocalGitRevisionRange(revisions[0]))
-          : revisions.length >= 1 && revisions.length <= 16 && revisions.every(isLocalGitRevision);
-      if (valid) query = { kind: subcommand === 'merge-base' ? 'ancestor' : subcommand === 'rev-list' ? 'revision_count' : 'revision_parse', revisions };
-      else {
-        const option = subcommand === 'merge-base' ? '--is-ancestor' : subcommand === 'rev-list' ? '--count' : undefined;
-        const bad = operands.findIndex((token, offset) => option && offset === 0 ? token !== option
-          : !(isLocalGitRevision(token) || subcommand === 'rev-list' && isLocalGitRevisionRange(token)));
+    if (subcommand === 'rev-parse') {
+      const verify = operands[0] === '--verify';
+      let firstRevision = verify ? 1 : 0;
+      if (verify && operands[firstRevision] === '--quiet') firstRevision++;
+      const literal = verify && operands[firstRevision] === '--end-of-options';
+      if (literal) firstRevision++;
+      const revisions = operands.slice(firstRevision);
+      const maximum = verify ? 1 : 16;
+      const bad = revisions.findIndex(token => !isLocalGitRevision(token));
+      if (bad >= 0) {
+        const token = revisions[bad];
+        const index = i + firstRevision + bad;
+        const option = token.split('=', 1)[0];
+        if (!literal && revParseVerifyOptions.includes(option) && option === token) {
+          invalid('misplaced_option', option, index,
+            'Use this option once in the supported --verify option order, before the revision.',
+            '请在修订参数之前，按受支持的 --verify 选项顺序使用此选项一次。', option);
+        } else if (!literal && revParseVerifyOptions.includes(option)) {
+          invalid('option_value', option, index, 'This rev-parse option takes no value.', '此 rev-parse 选项不接受附值。', option);
+        } else if (!literal && token.startsWith('-')) unsupported(token, index);
+        else invalid('invalid_revision', '', index, 'This argument must be a supported local Git revision.', '此参数必须是受支持的本地 Git 修订。');
+      } else if (!revisions.length || revisions.length > maximum) {
+        invalid(revisions.length ? 'too_many_revisions' : 'missing_revision', '',
+          revisions.length ? i + firstRevision + maximum : undefined,
+          verify ? 'rev-parse --verify requires exactly one local revision.' : 'rev-parse requires one to sixteen local revisions.',
+          verify ? 'rev-parse --verify 要求恰好一个本地修订。' : 'rev-parse 要求一到十六个本地修订。');
+      } else query = { kind: 'revision_parse', revisions };
+    } else if (localQuery) {
+      const ancestor = subcommand === 'merge-base';
+      const revisions = operands.slice(1);
+      const option = ancestor ? '--is-ancestor' : '--count';
+      const arity = ancestor ? 2 : 1;
+      const validRevision = (token: string) => isLocalGitRevision(token) || !ancestor && isLocalGitRevisionRange(token);
+      if (operands[0] === option && revisions.length === arity && revisions.every(validRevision)) {
+        query = { kind: ancestor ? 'ancestor' : 'revision_count', revisions };
+      } else {
+        const bad = operands.findIndex((token, offset) => offset === 0 ? token !== option : !validRevision(token));
         if (bad >= 0 && operands[bad].startsWith('-')) unsupported(operands[bad], i + bad);
-        else invalid(bad >= 0 ? operands[bad] : `${subcommand} requires ${subcommand === 'merge-base' ? '--is-ancestor and two revisions' : subcommand === 'rev-list' ? '--count and one revision or A..B range' : 'one to sixteen local revisions'}`,
-          bad >= 0 ? i + bad : undefined);
+        else {
+          const kind = operands[0] !== option ? 'missing_required_option' : bad >= 0 ? 'invalid_revision'
+            : revisions.length < arity ? 'missing_revision' : 'too_many_revisions';
+          const detail = bad >= 0 ? operands[bad]
+            : `${subcommand} requires ${ancestor ? '--is-ancestor and two revisions' : '--count and one revision or A..B range'}`;
+          invalid(kind, detail, bad >= 0 ? i + bad : undefined);
+        }
       }
     }
     const commitMessages: string[] = [];
@@ -309,7 +345,7 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
           commitPathspecPositions.push(i + 1);
         } else {
           unsupportedCommitOption = true;
-          unsupported(token, i);
+          unsupported(token, i, /^-[Ft]/u.test(token) ? token.slice(0, 2) : undefined);
           if (['-F', '--file', '-t', '--template', '--pathspec-from-file'].includes(token)) {
             i = valueAfter(i, 'read_path');
           } else if (/^(?:--(?:file|template|pathspec-from-file)=|-[Ft].)/su.test(token)) {
@@ -335,7 +371,7 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
         if (token.startsWith(':') || /[*?[]/u.test(token)) reason('unsupported_pathspec', token,
           'Git pathspec expansion is not resolved by this preflight.', '此预检不解析 Git pathspec 展开范围。');
       } else if (token === '--output' || token.startsWith('--output=')) {
-        effects.add('workspace_write'); unsupported(token, i);
+        effects.add('workspace_write'); unsupported(token, i, '--output');
         if (token === '--output') i = valueAfter(i, 'write_path');
         else arg(i, 'write_path', token.slice('--output='.length));
       } else if (['--ext-diff', '--textconv', '--show-signature'].includes(token)) {
@@ -343,7 +379,7 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
       } else if (token === '--remerge-diff' || /^--diff-merges=(?:remerge|r)$/u.test(token)) {
         arg(i, 'option'); effects.add('workspace_write'); unsupported(token, i);
       } else if (token === '-O' || token.startsWith('-O')) {
-        unsupported(token, i);
+        unsupported(token, i, '-O');
         if (token === '-O') i = valueAfter(i, 'read_path');
         else arg(i, 'read_path', token.slice(2));
       } else if (subcommand === 'log' && (token.startsWith('-S') || token.startsWith('-G'))) {
@@ -360,13 +396,14 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
               'Git pickaxe requires a nonblank pattern of at most 4096 UTF-8 bytes without NUL.',
               'Git pickaxe 的模式不能为空白、不能含 NUL，且不能超过 4096 个 UTF-8 字节。');
             result.reasons.at(-1)!.argumentIndex = i;
+            result.reasons.at(-1)!.invalidArgvKind = 'option_value';
           }
         }
       } else if (subcommand === 'log' && token === '--pickaxe-regex') {
         arg(i, 'option');
       } else if (['-n', '--max-count', '-U', '--unified'].includes(token)) {
         i = valueAfter(i, 'option_value');
-        if (!/^\d+$/u.test(args[i])) invalid(args[i] ?? token, i);
+        if (!/^\d+$/u.test(args[i])) invalid('option_value', args[i] ?? token, i);
       } else if (/^(?:--(?:format|pretty|date|encoding|grep|author|committer)=)/u.test(token)) {
         const value = token.slice(token.indexOf('=') + 1);
         arg(i, 'text', value);
@@ -450,7 +487,7 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
       if (!paths && token.startsWith('-') && token !== '-') {
         if (['head', 'tail'].includes(program) && ['-n', '-c', '--lines', '--bytes'].includes(token)) {
           i = valueAfter(i, 'option_value');
-          if (!/^[+-]?\d+$/u.test(args[i])) invalid(args[i] ?? token, i);
+          if (!/^[+-]?\d+$/u.test(args[i])) invalid('option_value', args[i] ?? token, i);
         } else if (['head', 'tail'].includes(program) && /^(?:-[nc][+-]?\d+|--(?:lines|bytes)=[+-]?\d+)$/u.test(token)) {
           arg(i, 'option');
         } else if (['grep', 'rg'].includes(program) && ['-e', '--regexp', '-f', '--file'].includes(token)) {

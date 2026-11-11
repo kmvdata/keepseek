@@ -1,4 +1,5 @@
 import { estimateTokenCount } from '../tokenEstimate';
+import { RUN_DRAFT_TOOL_NAME } from '../protocol';
 import { prepareSubagentResultPage } from './subagentPage';
 import { MIN_EVIDENCE_ENVELOPE_TOKENS, type ToolEvidence, type ToolEvidenceContentType, type ToolEvidenceSource } from './types';
 
@@ -38,6 +39,10 @@ export function prepareEvidenceEnvelope(input: {
   }
 
   const parsed = parseJson(input.rawContent);
+  if (input.record.toolName === RUN_DRAFT_TOOL_NAME && isRecord(parsed) && parsed.status === 'needs_replan') {
+    const content = shapeCommandPreflight(parsed, input.record, allowedChars, allowedTokens);
+    return { content, completeInline: false, inlineChars: content.length, inlineTokens: estimateTokenCount(content), contentType, source };
+  }
   if (isSubagentHandoff(parsed)) {
     const content = shapeSubagentHandoff(parsed, input.record.evidenceRef, allowedChars, allowedTokens);
     return {
@@ -98,6 +103,41 @@ export function prepareEvidenceEnvelope(input: {
     contentType,
     source
   };
+}
+
+function shapeCommandPreflight(
+  result: Record<string, unknown>, record: ToolEvidence, allowedChars: number, allowedTokens: number
+): string {
+  const base = {
+    ok: false, status: 'needs_replan', started: false, executed: false,
+    draftRunId: typeof result.draftRunId === 'string' ? result.draftRunId.slice(0, 64) : undefined,
+    specHash: typeof result.specHash === 'string' ? result.specHash.slice(0, 64) : undefined,
+    completeInline: false, evidenceRef: record.evidenceRef, contentHash: record.contentHash
+  };
+  const diagnostic = result.diagnostic;
+  if (!isRecord(diagnostic)) return stableStringify({ ...base, bodyDelivered: false });
+  const fields = {
+    code: typeof diagnostic.code === 'string' ? diagnostic.code.slice(0, 128) : undefined,
+    phase: diagnostic.phase, started: diagnostic.started, blocking: diagnostic.blocking,
+    category: diagnostic.category, capabilityVersion: diagnostic.capabilityVersion,
+    argumentIndex: Number.isSafeInteger(diagnostic.argumentIndex) ? diagnostic.argumentIndex : undefined
+  };
+  const reason = typeof diagnostic.reason === 'string' ? diagnostic.reason.slice(0, 200) : undefined;
+  const token = typeof diagnostic.token === 'string' ? diagnostic.token : undefined;
+  const recovery = isRecord(result.recovery) ? { allowed: result.recovery.allowed, reason: result.recovery.reason } : undefined;
+  const fits = (content: string) => content.length <= Math.max(allowedChars, 1_024)
+    && estimateTokenCount(content) <= Math.max(allowedTokens, MIN_EVIDENCE_ENVELOPE_TOKENS);
+  if (token === undefined || token.length <= 96) {
+    const suggestions = isRecord(result.capability) && Array.isArray(result.capability.supportedForms)
+      ? result.capability.supportedForms.filter(form => typeof form === 'string' && form.length <= 200).slice(0, 2)
+      : [];
+    const concrete = { ...base, bodyDelivered: true, diagnostic: { ...fields, token, reason }, recovery };
+    const withSuggestions = stableStringify({ ...concrete, capability: { version: fields.capabilityVersion, supportedForms: suggestions } });
+    if (suggestions.length && fits(withSuggestions)) return withSuggestions;
+    const content = stableStringify(concrete);
+    if (fits(content)) return content;
+  }
+  return stableStringify({ ...base, bodyDelivered: false, diagnostic: fields, recovery, read: { tool: 'keepseek_read_evidence' } });
 }
 
 /** A reader result keeps the ROOT identity and advances only over delivered

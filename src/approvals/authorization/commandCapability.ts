@@ -1,9 +1,8 @@
 import type { DraftRunSpec } from '../../shared/types';
 import { analyzeCommand, type CommandSemantics } from './commandSemantics';
 
-/** Change only when the deterministic host grammar/diagnostic contract changes.
- * Pickaxe extends accepted syntax only: diagnostic shape and blocking decisions
- * for existing diagnostics stay unchanged, so retain v1 and its persisted detail.
+/** Version of the persisted deterministic host diagnostic contract.
+ * Bounded syntax additions keep the v1 shape and existing persisted detail.
  * This is not the tool protocol or an authorization-policy version. */
 export const COMMAND_CAPABILITY_VERSION = 1 as const;
 
@@ -101,7 +100,10 @@ export function analyzeCommandCapability(spec: DraftRunSpec): CommandCapabilityA
     ],
     'git/tag': ['git tag --list [pattern]', 'git tag --list --sort=version:refname [pattern]'],
     'git/merge-base': ['git merge-base --is-ancestor commit commit'],
-    'git/rev-parse': ['git rev-parse revision[^{commit}|^{tree}] ... (1-16 objects)'],
+    'git/rev-parse': [
+      'git rev-parse <revision>... (1-16 revisions)',
+      'git rev-parse --verify [--quiet] [--end-of-options] <revision>'
+    ],
     'git/rev-list': ['git rev-list --count revision|A..B'],
     head: ['head [-n N] [--] path...'], cat: ['cat [--] path...']
   };

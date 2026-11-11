@@ -3,11 +3,11 @@ import { promisify } from 'node:util';
 import * as vscode from 'vscode';
 import { analyzeCommand, isGitReleaseRef } from '../approvals/authorization/commandSemantics';
 import { findSensitiveEvidence } from '../approvals/approvalPolicy';
-import type { CommandScope } from '../approvals/authorization/commandScope';
+import { inspectDraftRunScope, type CommandScope } from '../approvals/authorization/commandScope';
+import { checkDraftRunApprovalIdentity } from '../approvals/authorization/executionBoundary';
 import type { DraftRun } from '../shared/types';
 import type { GitRemoteLaunch } from './gitReleaseAuthorization';
-import type { GitReleaseIntent } from './gitTaskIntent';
-import { taskNamesGitRef } from './gitTaskIntent';
+import { gitReleaseIntent, gitTaskText, isGitInstructionQuotedOrExplanatory, taskNamesGitRef, type GitReleaseIntent } from './gitTaskIntent';
 
 const git = promisify(execFile);
 const oid = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
@@ -20,6 +20,8 @@ export interface GitReleaseRefEvidence {
 export interface GitReleaseEvidence {
   kind: 'tag' | 'query' | 'push';
   repositoryUri: string;
+  /** Binds new local tag evidence to the inspected metadata directory. */
+  repositoryIdentity?: string;
   /** The transport binding is an opaque hash, not a credential or URL. */
   destinationHash?: string;
   refs: GitReleaseRefEvidence[];
@@ -32,12 +34,16 @@ export function normalizeGitReleaseEvidence(value: unknown): GitReleaseEvidence 
   const v = value as Partial<GitReleaseEvidence> | undefined;
   if (!v || !['tag', 'query', 'push'].includes(v.kind ?? '') || typeof v.executed !== 'boolean'
     || typeof v.repositoryUri !== 'string' || !v.repositoryUri.startsWith('file:')
+    || (v.repositoryIdentity !== undefined && (v.kind !== 'tag' || typeof v.repositoryIdentity !== 'string'
+      || !/^[a-f0-9]{64}$/u.test(v.repositoryIdentity)))
     || (v.kind === 'tag' ? v.destinationHash !== undefined : !/^[a-f0-9]{64}$/u.test(v.destinationHash ?? ''))
     || !Array.isArray(v.refs) || v.refs.length > 2048 || !v.refs.every(ref => ref && typeof ref.ref === 'string'
-      && isGitReleaseRef(ref.ref) && oid.test(ref.object) && (ref.peeled === undefined || oid.test(ref.peeled)))
+      && isGitReleaseRef(ref.ref) && typeof ref.object === 'string' && oid.test(ref.object)
+      && (ref.peeled === undefined || typeof ref.peeled === 'string' && oid.test(ref.peeled) && ref.peeled.length === ref.object.length))
     || !Array.isArray(v.refsRequested) || v.refsRequested.length > 128 || !v.refsRequested.every(ref => typeof ref === 'string'
       && (isGitReleaseRef(ref) || ['refs/tags/*', 'refs/heads/*'].includes(ref)))) return undefined;
   return { kind: v.kind!, repositoryUri: v.repositoryUri, destinationHash: v.destinationHash, refsRequested: [...v.refsRequested],
+    ...(v.repositoryIdentity ? { repositoryIdentity: v.repositoryIdentity } : {}),
     ...(v.matchesPushDestination === true ? { matchesPushDestination: true } : {}),
     refs: v.refs.map(({ ref, object, peeled }) => peeled === undefined ? { ref, object } : { ref, object, peeled }), executed: v.executed };
 }
@@ -63,6 +69,88 @@ export interface ReleaseVerification {
   verify(result: DraftRun): Promise<GitReleaseEvidence>;
 }
 
+/** Establish the task fact independently of a legacy, terminal `--verify`
+ * proposal. The caller supplies the host-confirmed root-task run membership. */
+export async function verifyBlockedGitTag(input: {
+  run: DraftRun; prior: readonly DraftRun[]; rootTaskId: string; goal: string; signal: AbortSignal;
+}): Promise<GitReleaseEvidence | undefined> {
+  const { run, prior, rootTaskId, goal, signal } = input;
+  const replan = run.replan;
+  const diagnostic = run.capabilityDiagnostic ?? replan?.diagnostic;
+  if (signal.aborted || run.status !== 'needs_replan' || run.executionStarted !== false || run.executionPhase !== 'not_dispatched'
+    || run.startedAt || run.spec.restricted || run.historyInvalidationId || run.historyOriginUnverified
+    || run.dependency || run.spec.prerequisites?.length || run.replacementDraftRunId
+    || replan?.rootTaskId !== rootTaskId || replan.specHash !== run.specHash || replan.draftRunId !== run.id
+    || replan.executionSegmentId !== run.agentRunId || replan.code !== diagnostic?.code
+    || diagnostic?.code !== 'host_unsupported_option' || !diagnostic.blocking || diagnostic.started !== false
+    || diagnostic.token !== '--verify') return undefined;
+  const semantics = analyzeCommand(run.spec);
+  const subcommand = semantics.arguments.find(arg => arg.role === 'subcommand');
+  const query = semantics.gitLocalQuery;
+  const revision = query?.revisions[0];
+  if (subcommand?.value !== 'rev-parse' || query?.kind !== 'revision_parse' || query.revisions.length !== 1
+    || diagnostic.argumentIndex !== subcommand.index + 1 || run.spec.args[subcommand.index + 1] !== '--verify'
+    || !revision?.endsWith('^{commit}')) return undefined;
+  const name = revision.slice(0, -'^{commit}'.length);
+  if (/^(?:[a-f\d]{40}|[a-f\d]{64}|HEAD|FETCH_HEAD|ORIG_HEAD|MERGE_HEAD|CHERRY_PICK_HEAD)$/iu.test(name)
+    || name.startsWith('refs/') && !name.startsWith('refs/tags/')) return undefined;
+  const ref = name.startsWith('refs/tags/') ? name : `refs/tags/${name}`;
+  const taskText = gitTaskText(goal);
+  const intent = gitReleaseIntent(goal);
+  if (!isGitReleaseRef(ref) || isGitInstructionQuotedOrExplanatory(taskText)
+    || !taskNamesGitRef(intent, ref) && !intent.localTags.has(ref.slice('refs/tags/'.length))) return undefined;
+  const taskRuns = prior.filter(candidate => candidate.id !== run.id && candidate.sessionId === run.sessionId
+    && !candidate.historyInvalidationId && !candidate.historyOriginUnverified);
+  const commits = taskRuns.flatMap(candidate => {
+    const commit = candidate.gitCommitEvidence;
+    return ['done', 'failed'].includes(candidate.status) && commit?.rootTaskId === rootTaskId
+      && commit.outcome === 'verified' && oid.test(commit.head) ? [commit] : [];
+  });
+  if (!commits.length) return undefined;
+
+  try {
+    checkDraftRunApprovalIdentity(run);
+    const scope = await inspectDraftRunScope(run, false, { ref, signal });
+    const repositoryUri = scope.paths.find(target => target.role === 'repository' && !target.external)?.uri;
+    const object = scope.gitTagSnapshot?.object;
+    if (signal.aborted || scope.uncertain || scope.externalUris.length || !scope.verifiedLauncher || !scope.executable
+      || !repositoryUri || !scope.gitRepositoryIdentity || !object || scope.gitTagSnapshot?.ref !== ref) return undefined;
+    const heads = new Set(commits.filter(commit => commit.repositoryUri === repositoryUri).map(commit => commit.head));
+    if (heads.size !== 1) return undefined;
+    const [head] = heads;
+    const verifyIndependently = /(?:独立|重新|再次|单独)(?:地)?(?:核验|验证|核对|查询|检查)|\b(?:re-?verify|independently|(?:fresh|independent) (?:check|verification))\b/iu.test(taskText);
+    const recorded = taskRuns.filter(candidate => {
+      const evidence = candidate.gitReleaseEvidence;
+      return ['done', 'failed', 'no_changes'].includes(candidate.status) && evidence?.kind === 'tag' && evidence.repositoryUri === repositoryUri
+        && evidence.refs.length === 1 && evidence.refsRequested?.length === 1 && evidence.refsRequested[0] === ref
+        && evidence.refs[0].ref === ref && (evidence.refs[0].peeled ?? evidence.refs[0].object) === head;
+    }).map(candidate => candidate.gitReleaseEvidence!);
+    const sameObject = recorded.some(evidence => evidence.refs[0].object === object);
+    if (verifyIndependently || scope.gitTagSnapshot.commit !== head || !recorded.some(evidence => evidence.refs[0].object === object
+      && (!evidence.repositoryIdentity || evidence.repositoryIdentity === scope.gitRepositoryIdentity))) {
+      checkDraftRunApprovalIdentity(run);
+      const peeled = await peelLocalTag(object, args => readGit(scope.executable!, vscode.Uri.parse(repositoryUri).fsPath,
+        { ...scope.environment, GIT_NO_LAZY_FETCH: '1' }, args, signal));
+      if (peeled !== head || signal.aborted || recorded.length && !sameObject) return undefined;
+      const current = await inspectDraftRunScope(run, false, { ref, signal });
+      if (current.fingerprint !== scope.fingerprint || current.gitTagSnapshot?.object !== object
+        || current.gitRepositoryIdentity !== scope.gitRepositoryIdentity) return undefined;
+    }
+    checkDraftRunApprovalIdentity(run);
+    if (signal.aborted) return undefined;
+    return { kind: 'tag', repositoryUri, repositoryIdentity: scope.gitRepositoryIdentity, refsRequested: [ref],
+      refs: [head === object ? { ref, object } : { ref, object, peeled: head }], executed: false };
+  } catch {
+    return undefined;
+  }
+}
+
+async function peelLocalTag(object: string, read: (args: string[]) => Promise<string>): Promise<string> {
+  const peeled = (await read(['--no-replace-objects', 'rev-parse', '--verify', '--end-of-options', object + '^{commit}'])).trim();
+  if (!oid.test(peeled)) throw new Error('The tag does not resolve to a commit. / 标签未解引用到提交。');
+  return peeled;
+}
+
 export async function prepareGitRelease(input: {
   run: DraftRun; scope: CommandScope; intent: GitReleaseIntent; remote?: GitRemoteLaunch;
   prior: DraftRun[]; needsCommit: boolean; signal: AbortSignal;
@@ -77,15 +165,17 @@ export async function prepareGitRelease(input: {
   const commit = prior.find(candidate => candidate.gitCommitEvidence?.repositoryUri === repositoryUri
     && candidate.gitCommitEvidence.outcome === 'verified')?.gitCommitEvidence;
   const commitHead = commit?.outcome === 'verified' ? commit.head : undefined;
-  const localRead = (args: string[]) => readGit(scope.executable!, vscode.Uri.parse(repositoryUri).fsPath, scope.environment, args, signal);
+  const localRead = (args: string[]) => readGit(scope.executable!, vscode.Uri.parse(repositoryUri).fsPath,
+    { ...scope.environment, GIT_NO_LAZY_FETCH: '1' }, args, signal);
   const readRef = async (ref: string) => parseGitRefOutput(await localRead(
     ['for-each-ref', '--format=%(objectname)%09%(refname)', '--', ref]), [ref])[0];
-  const tagCommit = async (ref: string) => (await localRead(['rev-parse', '--verify', ref + '^{commit}'])).trim();
   const localRef = async (ref: string): Promise<GitReleaseRefEvidence | undefined> => {
     const current = await readRef(ref);
     if (!current || !ref.startsWith('refs/tags/')) return current;
-    const peeled = await tagCommit(ref);
-    if (!oid.test(peeled)) throw new Error('The tag does not resolve to a commit. / 标签未解引用到提交。');
+    const peeled = await peelLocalTag(current.object, localRead);
+    if ((await readRef(ref))?.object !== current.object) {
+      throw new Error('The local tag changed during verification. / 核验过程中本地标签已变化。');
+    }
     return peeled === current.object ? current : { ...current, peeled };
   };
   const assertCommit = () => {
@@ -108,7 +198,8 @@ export async function prepareGitRelease(input: {
       if ((current.peeled ?? current.object) !== target) {
         throw new Error('The local tag already points to a different commit. / 本地标签已指向另一个提交。');
       }
-      return { kind: 'tag' as const, repositoryUri, refsRequested: [tag.ref], refs: [current], executed };
+      return { kind: 'tag' as const, repositoryUri, repositoryIdentity: scope.gitRepositoryIdentity,
+        refsRequested: [tag.ref], refs: [current], executed };
     };
     const completed = await verifyTag(false);
     if (!completed && prior.some(candidate => candidate.startedAt && analyzeCommand(candidate.spec).gitTagCreate?.ref === tag.ref)) {
@@ -145,6 +236,7 @@ export async function prepareGitRelease(input: {
     if (!current || (commitHead && (current.peeled ?? current.object) !== commitHead)
       || (intent.tag && ref.startsWith('refs/tags/') && !prior.some(candidate => candidate.gitReleaseEvidence?.kind === 'tag'
         && candidate.gitReleaseEvidence.repositoryUri === repositoryUri
+        && (!candidate.gitReleaseEvidence.repositoryIdentity || candidate.gitReleaseEvidence.repositoryIdentity === scope.gitRepositoryIdentity)
         && sameRefs(candidate.gitReleaseEvidence.refs, [current])))) {
       throw new Error('A requested local ref is missing or differs from the verified release object. / 待推送本地引用缺失或与已核验发布对象不一致。');
     }

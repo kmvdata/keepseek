@@ -1,6 +1,7 @@
 import { analyzeCommand } from '../approvals/authorization/commandSemantics';
 import { gitReleaseIntent, taskNamesGitRef, type GitReleaseIntent } from './gitTaskIntent';
 import { isExplicitLocalCommitGoal } from './localGitCommit';
+import type { GitReleaseEvidence } from './gitReleaseEvidence';
 import type { DraftRun } from '../shared/types';
 
 export function gitBatchKind(run: DraftRun | undefined) {
@@ -8,7 +9,8 @@ export function gitBatchKind(run: DraftRun | undefined) {
   const semantics = analyzeCommand(run.spec);
   if (semantics.program !== 'git') return undefined;
   if (semantics.gitRemote) return semantics.gitRemote.kind === 'query' ? 'remote_read' : 'push';
-  if (semantics.gitTagQuery || semantics.gitTagQueryNeedsSort) return 'read';
+  if (semantics.gitTagQuery || semantics.gitTagQueryNeedsSort
+    || semantics.gitLocalQuery && semantics.gitLocalQuery.kind !== 'log') return 'read';
   if (semantics.gitStage) return 'stage';
   if (semantics.gitCommit || semantics.gitReplan && semantics.gitReplan.code !== 'git_status_pager_override') return 'commit';
   if (semantics.gitTagCreate) return 'tag';
@@ -52,17 +54,25 @@ export function orderGitReleaseBatch(ids: readonly string[], get: (id: string) =
   return result;
 }
 
-export function missingGitTaskOutcome(goal: string, getRuns: () => DraftRun[], rootTaskId: string): 'commit' | 'tag' | 'push' | undefined {
+export function missingGitTaskOutcome(goal: string, getRuns: () => DraftRun[], rootTaskId: string,
+  verifiedThisBatch: readonly GitReleaseEvidence[] = []): 'commit' | 'tag' | 'push' | undefined {
   const intent = gitReleaseIntent(goal);
   const needsCommit = isExplicitLocalCommitGoal(goal);
   if (!needsCommit && !intent.tag && !intent.push) return undefined;
   const runs = getRuns();
-  const commit = runs.find(run => run.gitCommitEvidence?.rootTaskId === rootTaskId)?.gitCommitEvidence;
+  const commits = runs.flatMap(run => run.gitCommitEvidence?.rootTaskId === rootTaskId ? [run.gitCommitEvidence] : []);
+  const commit = commits.filter(item => item.outcome === 'verified').at(-1) ?? commits.at(-1);
   if (needsCommit && !commit) return 'commit';
   const repository = commit?.repositoryUri;
-  const evidence = runs.flatMap(run => run.gitReleaseEvidence && (!repository || run.gitReleaseEvidence.repositoryUri === repository)
-    ? [run.gitReleaseEvidence] : []);
-  if (intent.tag && !evidence.some(item => item.kind === 'tag' && item.refs.some(ref => taskNamesGitRef(intent, ref.ref)))) return 'tag';
+  const evidence = [...verifiedThisBatch, ...runs.flatMap(run => run.gitReleaseEvidence ? [run.gitReleaseEvidence] : [])]
+    .filter(item => !repository || item.repositoryUri === repository);
+  if (intent.tag) {
+    const tags = (verifiedThisBatch.length ? verifiedThisBatch : evidence).flatMap(item => item.kind === 'tag'
+      && (!repository || item.repositoryUri === repository) ? item.refs : [])
+      .filter(ref => commit?.outcome !== 'verified' || (ref.peeled ?? ref.object) === commit.head);
+    if (intent.localTags.size ? [...intent.localTags].some(name => !tags.some(ref => ref.ref === `refs/tags/${name}`))
+      : !tags.some(ref => taskNamesGitRef(intent, ref.ref))) return 'tag';
+  }
   if (intent.push) {
     const pushed = evidence.filter(item => item.kind === 'push').flatMap(item => item.refs);
     if (!pushed.length || (intent.tags.size && !pushed.some(ref => taskNamesGitRef(intent, ref.ref)))

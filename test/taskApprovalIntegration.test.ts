@@ -1,5 +1,7 @@
 import './registerVscodeStub';
 import { RunDetailsBuilder } from '../src/agent/logging/runDetails';
+import { AgentRunner } from '../src/agent/runner';
+import { RUN_DRAFT_TOOL_NAME } from '../src/agent/protocol';
 import assert from 'node:assert/strict';
 import { chmod, mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
@@ -29,6 +31,7 @@ import { normalizeApprovalProcessing } from '../src/approvals/approvalProcessing
 import type { WebviewMessage } from '../src/provider/webviewMessages';
 import { ApprovalReviewStore } from '../src/approvals/approvalReviewStore';
 import { ApprovalReviewerService } from '../src/approvals/approvalReviewer';
+import { createDraftRunReviewRequest } from '../src/approvals/approvalReviewSurface';
 import { ModelSourceStore } from '../src/accounts/accountStore';
 import { SubagentSettingsStore } from '../src/accounts/subagentSettingsStore';
 import { DelegatedApprovalQueue } from '../src/agent/approvalMode';
@@ -2131,80 +2134,269 @@ test('a non-Git capability gap returns a structured diagnostic and fresh approva
 });
 
 
-test('capability recovery keeps one root-cause limit across fresh IDs, argv variants and segments', async () => {
+test('a first preflight observed by the real Runner survives checkpoint handoff to delegate', async () => {
   await fixture('delegate', async f => {
-    const first = await createDraftRunProposal({ executable: 'head', args: ['--future-fixture-one'], reason: 'Read requested data' });
-    f.response.draftEdits = []; f.response.draftRuns = [first];
-    let turns = 0;
-    Object.assign(f.host, { hasActiveBackgroundRun: () => false, sendPrompt: async () => {
-      turns++;
-      const again = await createDraftRunProposal({ executable: 'head', args: ['--future-fixture-two'], reason: 'Different wording does not solve grammar',
-        replacesDraftRun: { draftRunId: first.id, specHash: first.specHash } });
-      const assistant: ChatMessage = { id: 'same-root-cause', role: 'assistant', content: '', createdAt: f.message.createdAt,
-        userTask: { ...f.message.userTask!, reason: 'approval' as const } };
-      f.session.messages.push(assistant);
-      const response: AgentResponse = { ...f.response, draftRuns: [again] };
-      const checkpoint = createRunCheckpoint(f.cp.request as AgentRequest, 0, 'same root', f.scope.folderUris);
-      checkpoint.status = 'completed'; checkpoint.finalResponse = response;
-      await f.host.saveAgentCheckpoint(f.session, assistant, checkpoint);
-      f.host.queueResponseApprovals(f.session, assistant, response);
-      return response;
-    } });
-    await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
-    f.host.queueResponseApprovals(f.session, f.message, f.response);
-    await f.host.maybeAutoContinueDraftRun();
-    assert.equal(turns, 1, JSON.stringify(f.session.approvalProcessing));
-    assert.equal(f.executions(), 0); assert.equal(f.reviews(), 0); assert.equal(f.manualRequests(), 0);
-    assert.equal(f.session.approvalProcessing?.status, 'stopped');
-    assert.equal(f.session.approvalProcessing?.replanKeys?.length, 1);
-    assert.match(f.session.approvalProcessing?.reason ?? '', /repeat|same kind|重复/iu);
-    assert.equal(f.session.approvalProcessing?.rootTaskId, f.message.userTask?.id);
+    const request: AgentRequest = { ...f.cp.request, approvalRootTaskId: f.message.userTask!.id,
+      sourceConfig: { sourceId: 'main', provider: 'openai-compatible', baseUrl: 'https://fixture.invalid/v1', apiKey: 'fixture', supportsBilling: false } };
+    const originalFetch = globalThis.fetch;
+    let requests = 0;
+    globalThis.fetch = (async (_url, init) => {
+      const first = ++requests === 1;
+      if (!first) assert.match(String(init?.body), /host_unsupported_option/u);
+      const delta = first ? { tool_calls: [{ index: 0, id: 'first-preflight', type: 'function', function: {
+        name: RUN_DRAFT_TOOL_NAME, arguments: JSON.stringify({ executable: 'git', args: ['rev-parse', '--unknown-fixture', 'HEAD'], reason: 'Resolve HEAD' })
+      } }] } : { content: 'The check has not run yet.' };
+      return new Response(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: first ? 'tool_calls' : 'stop' }] })}\n\ndata: [DONE]\n\n`,
+        { headers: { 'Content-Type': 'text/event-stream' } });
+    }) as typeof fetch;
+    try {
+      const runner = new AgentRunner(undefined, undefined, undefined, undefined, undefined, undefined,
+        vscode.Uri.file(path.join(f.root, 'runner-store')) as never);
+      const response = await runner.run(request, { onCheckpoint: cp => f.host.saveAgentCheckpoint(f.session, f.message, cp) });
+      const draft = response.draftRuns?.[0];
+      assert.ok(draft);
+      f.host.queueResponseApprovals(f.session, f.message, response);
+      await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+      assert.equal(requests, 2);
+      assert.equal(f.executions(), 0);
+      assert.equal(f.runs.get(draft.id)?.executionStarted, false);
+      assert.equal(f.runs.get(draft.id)?.capabilityDiagnostic?.token, '--unknown-fixture');
+      assert.equal(f.continuations(), 1, JSON.stringify(f.session.approvalProcessing));
+    } finally { globalThis.fetch = originalFetch; }
   });
 });
 
-test('distinct preflight root causes can continue the same task until a previously seen cause repeats', async () => {
+test('an accepted diagnostic can stop only a new repeated command, while an independent query still runs', async t => {
   await fixture('delegate', async f => {
-    const cases = [
-      { args: ['--future-fixture-one'], code: 'host_unsupported_option' },
-      { args: ['-n'], code: 'host_missing_option_value' },
-      { args: ['-n', 'not-a-count'], code: 'host_invalid_argv' },
-      { args: ['--future-fixture-two'], code: 'host_unsupported_option' },
-      { executable: 'cat', args: ['--future-sibling'], code: 'host_unsupported_option' }
-    ];
-    const proposals = await Promise.all(cases.map(({ executable = 'head', args }) =>
-      createDraftRunProposal({ executable, args, reason: 'Read requested data' })));
-    f.response.draftEdits = []; f.response.draftRuns = [proposals[0]];
-    let turns = 0;
-    Object.assign(f.host, { hasActiveBackgroundRun: () => false, sendPrompt: async () => {
-      assert.equal(f.session.approvalProcessing?.status, 'replanning');
-      assert.equal(f.session.approvalProcessing?.targets[0].replan?.code, cases[turns].code);
-      assert.equal(f.session.approvalProcessing?.replanKeys?.length, ++turns);
-      assert.ok(turns <= 3, 'a fresh sibling cannot hide the repeated first root');
-      const assistant: ChatMessage = { id: `root-cause-segment-${turns}`, role: 'assistant', content: '', createdAt: f.message.createdAt,
-        userTask: { ...f.message.userTask!, reason: 'approval' as const } };
+    await writeFile(path.join(f.workspace, 'input.txt'), 'independent\n');
+    const reviews = (f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews;
+    const spawn = new SpawnDraftRunExecutor();
+    const launched: string[][] = [];
+    const storageUri = vscode.Uri.file(path.join(f.root, 'repetition-store')) as never;
+    const runs = new DraftRunStore(storageUri, {
+      execute: input => { launched.push(input.draftRun.spec.args); return spawn.execute(input); },
+      cancel: id => spawn.cancel(id), showTerminal: id => spawn.showTerminal(id), dispose: () => spawn.dispose()
+    }, new DraftRunAuthorizationService(reviews));
+    Object.assign(f.host, { draftRuns: runs, hasActiveBackgroundRun: () => false });
+    const originalFetch = globalThis.fetch;
+    const originalUser = JSON.stringify(f.session.messages[0]);
+    const root = f.message.userTask!.id;
+    const requests: string[] = [];
+    const makeCall = (index: number, id: string, executable: string, args: string[], reason: string) =>
+      ({ index, id, type: 'function', function: { name: RUN_DRAFT_TOOL_NAME, arguments: JSON.stringify({ executable, args, reason }) } });
+    const request: AgentRequest = { ...f.cp.request, approvalRootTaskId: root,
+      sourceConfig: { sourceId: 'main', provider: 'openai-compatible', baseUrl: 'https://fixture.invalid/v1', apiKey: 'fixture', supportsBilling: false } };
+    const runner = () => new AgentRunner(undefined, undefined, undefined, undefined, undefined, undefined, storageUri);
+    let continuations = 0;
+    let repeated: AgentResponse | undefined;
+    globalThis.fetch = (async (_url, init) => {
+      requests.push(String(init?.body));
+      const turn = requests.length;
+      if (turn === 2 || turn === 4) assert.match(requests.at(-1)!, /host_unsupported_option/u);
+      if (turn === 3) assert.match(requests.at(-1)!, /keepseek-operation-results/u);
+      assert.ok(turn <= 4);
+      const tool_calls = turn === 1 ? [makeCall(0, 'original', 'head', ['--unknown-fixture=first'], 'Read requested input')]
+        : turn === 3 ? [makeCall(0, 'repeated', 'head', ['--unknown-fixture=another', 'input.txt'], 'A different reason'),
+          makeCall(1, 'independent', 'cat', ['input.txt'], 'Read the independent fixture')] : undefined;
+      const delta = tool_calls ? { tool_calls } : { content: 'Prepared the proposed checks.' };
+      return new Response(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: tool_calls ? 'tool_calls' : 'stop' }] })}\n\ndata: [DONE]\n\n`,
+        { headers: { 'Content-Type': 'text/event-stream' } });
+    }) as typeof fetch;
+    Object.assign(f.host, { sendPrompt: async (prompt: string, _source: string, _model: string, _settings: unknown,
+      options: { commandRecoveryContinuation?: AgentRequest['commandRecoveryContinuation'] }) => {
+      assert.equal(++continuations, 1);
+      const assistant: ChatMessage = { id: 'actual-runner-continuation', role: 'assistant', content: '', createdAt: f.message.createdAt,
+        userTask: { ...f.message.userTask!, reason: 'approval' } };
+      const next: AgentRequest = { ...request, prompt, assistantMessageId: assistant.id,
+        commandRecoveryContinuation: options.commandRecoveryContinuation };
+      const checkpoint = createRunCheckpoint(next, 0, 'same root correction', f.scope.folderUris);
+      inheritTaskBudget(checkpoint, f.session.userTaskBudgets![root]);
+      next.checkpoint = checkpoint;
       f.session.messages.push(assistant);
-      const response: AgentResponse = { ...f.response, draftRuns: turns === 3 ? proposals.slice(turns) : [proposals[turns]] };
-      const checkpoint = createRunCheckpoint(f.cp.request as AgentRequest, 0, 'same task, new segment', f.scope.folderUris);
+      repeated = await runner().run(next, { onCheckpoint: cp => f.host.saveAgentCheckpoint(f.session, assistant, cp) });
+      f.host.queueResponseApprovals(f.session, assistant, repeated);
+      return repeated;
+    } });
+    try {
+      const first = await runner().run(request, { onCheckpoint: cp => f.host.saveAgentCheckpoint(f.session, f.message, cp) });
+      f.host.queueResponseApprovals(f.session, f.message, first);
+      await f.host.maybeAutoContinueDraftRun();
+      assert.equal(continuations, 1);
+      assert.equal(requests.length, 4);
+      assert.deepEqual(launched, [['input.txt']]);
+      const [blocked, independent] = repeated?.draftRuns ?? [];
+      assert.ok(blocked && independent);
+      assert.equal(runs.get(first.draftRuns![0].id)?.commandRecoveryOutcome, undefined);
+      assert.deepEqual(runs.get(blocked.id)?.commandRecoveryOutcome, { kind: 'repeated', priorDraftRunId: first.draftRuns![0].id });
+      assert.equal(runs.get(blocked.id)?.executionStarted, false);
+      assert.equal(runs.get(independent.id)?.outputHead, 'independent\n');
+      assert.equal(f.session.approvalProcessing?.status, 'stopped');
+      assert.deepEqual(f.session.approvalProcessing?.targets.map(target => target.status), ['needs_replan', 'executed']);
+      assert.equal(f.session.approvalProcessing?.reason, localize('en', 'draftRunCorrectionStopped'));
+      assert.equal(f.session.userTaskBudgets?.[root].runBudget?.modelRequests, 4);
+      assert.equal(JSON.stringify(f.session.messages[0]), originalUser);
+      assert.equal(f.reviews(), 0); assert.equal(f.manualRequests(), 0);
+      t.diagnostic('Controlled model requests 4, host correction continuations 1, real independent process starts 1, blocked starts 0');
+    } finally { globalThis.fetch = originalFetch; await runs.flush(); runs.dispose(); }
+  });
+});
+
+test('a confirmed repetition in one segment does not reopen through the original draft in its final response', async () => {
+  await fixture('delegate', async f => {
+    const request: AgentRequest = { ...f.cp.request, approvalRootTaskId: f.message.userTask!.id,
+      sourceConfig: { sourceId: 'main', provider: 'openai-compatible', baseUrl: 'https://fixture.invalid/v1', apiKey: 'fixture', supportsBilling: false } };
+    const originalFetch = globalThis.fetch;
+    let requests = 0;
+    globalThis.fetch = (async (_url, init) => {
+      const turn = ++requests;
+      if (turn > 1) assert.match(String(init?.body), /host_unsupported_option/u);
+      const delta = turn < 3 ? { tool_calls: [{ index: 0, id: `preflight-${turn}`, type: 'function', function: {
+        name: RUN_DRAFT_TOOL_NAME, arguments: JSON.stringify({ executable: 'git', args: ['rev-parse', `--unknown-fixture=${turn}`, 'HEAD'], reason: 'Resolve HEAD' })
+      } }] } : { content: 'The check could not run.' };
+      return new Response(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: turn < 3 ? 'tool_calls' : 'stop' }] })}\n\ndata: [DONE]\n\n`,
+        { headers: { 'Content-Type': 'text/event-stream' } });
+    }) as typeof fetch;
+    try {
+      const runner = new AgentRunner(undefined, undefined, undefined, undefined, undefined, undefined,
+        vscode.Uri.file(path.join(f.root, 'same-segment-runner')) as never);
+      const response = await runner.run(request, { onCheckpoint: cp => f.host.saveAgentCheckpoint(f.session, f.message, cp) });
+      const [first, repeat] = response.draftRuns ?? [];
+      assert.ok(first && repeat);
+      f.host.queueResponseApprovals(f.session, f.message, response);
+      await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+      assert.equal(requests, 3);
+      assert.equal(f.continuations(), 0);
+      assert.equal(f.executions(), 0);
+      assert.equal(f.runs.get(first.id)?.commandRecoveryOutcome, undefined);
+      assert.deepEqual(f.runs.get(repeat.id)?.commandRecoveryOutcome, { kind: 'repeated', priorDraftRunId: first.id });
+      assert.equal(f.session.approvalProcessing?.status, 'stopped');
+    } finally { globalThis.fetch = originalFetch; }
+  });
+});
+
+test('an explicit user correction uses the stopped task budget, and an unrelated request starts a new task', async () => {
+  await fixture('delegate', async f => {
+    f.response.draftEdits = [];
+    f.cp.runBudget = createLogicalRunBudgetState({ modelRequests: 4 });
+    await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+    const root = f.message.userTask!.id;
+    const denied = f.runs.get(f.proposal.id)!;
+    const reviewer = (f.host as unknown as { approvalReviewer: ApprovalReviewerService }).approvalReviewer;
+    await reviewer.createUserRejection(createDraftRunReviewRequest({ draftRun: denied, rootTaskId: root,
+      history: f.session.messages, language: 'en' }), { userRequestId: 'explicit-rejection-fixture' });
+    f.runs.markNotExecuted(denied.id, denied.specHash, { reason: 'User rejected this operation.' });
+    f.session.approvalProcessing = { version: 2, rootTaskId: root, runId: f.cp.taskId, mode: 'delegate', status: 'stopped',
+      targets: [{ kind: 'command', id: 'blocked-fixture', status: 'needs_replan', failureCode: 'command_correction_repeated' }],
+      updatedAt: f.message.createdAt };
+    type Submit = { sendPrompt(prompt: string, source: string, model: string): Promise<unknown> };
+    const prototype = KeepseekChatViewProvider.prototype as unknown as Submit;
+    const tasks: Array<{ userTask: ChatMessage['userTask']; commandCorrectionUserTurn: boolean }> = [];
+    const host = Object.assign(f.host, {
+      hasActiveBackgroundRun: () => false, scheduleDraftRunAutoContinuation: () => {}, sendPrompt: prototype.sendPrompt,
+      sendPromptImpl: async (_prompt: string, _source: string, _model: string, _settings: unknown, options: typeof tasks[number]) => {
+        tasks.push(options);
+      }
+    });
+    await host.sendPrompt('Correct the previous command using the supported revision form.', 'main', 'main');
+    await host.sendPrompt('Review the new project configuration.', 'main', 'main');
+    assert.deepEqual(tasks[0]?.userTask, { ...f.message.userTask, reason: 'recovery' });
+    assert.equal(tasks[0]?.commandCorrectionUserTurn, true);
+    assert.notEqual(tasks[1]?.userTask?.id, root);
+    assert.equal(tasks[1]?.commandCorrectionUserTurn, false);
+    assert.equal(f.session.userTaskBudgets?.[root].runBudget?.modelRequests, 4);
+    assert.equal(f.session.approvalProcessing?.status, 'stopped');
+    const task = tasks[0].userTask!;
+    f.session.messages.push({ id: 'corrected-user', role: 'user', content: 'Correct the previous command.', createdAt: f.message.createdAt, userTask: task });
+    const assistant: ChatMessage = { id: 'correction-assistant', role: 'assistant', content: '', createdAt: f.message.createdAt, userTask: task };
+    f.session.messages.push(assistant);
+    const reproposed = await createDraftRunProposal({ executable: 'node', args: ['--version'], reason: 'Different wording for the rejected effect' });
+    const response = { ...f.response, draftRuns: [reproposed] };
+    const checkpoint = createRunCheckpoint({ ...f.cp.request, assistantMessageId: assistant.id }, 0, 'explicit correction fixture', f.scope.folderUris);
+    inheritTaskBudget(checkpoint, f.session.userTaskBudgets![root]);
+    checkpoint.status = 'completed'; checkpoint.finalResponse = response;
+    await f.host.saveAgentCheckpoint(f.session, assistant, checkpoint);
+    f.host.queueResponseApprovals(f.session, assistant, response);
+    await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+    assert.equal(f.executions(), 0);
+    assert.equal(f.session.approvalProcessing?.targets[0].status, 'hard_blocked');
+    assert.equal(f.runs.get(reproposed.id)?.approvalReview, undefined);
+  });
+});
+
+test('submitting the copied ask correction for the current task inherits its task identity', async () => {
+  await fixture('ask', async f => {
+    f.response.draftEdits = [];
+    f.response.draftRuns = [await createDraftRunProposal({ executable: 'head', args: ['-n'], reason: 'Preview the input' })];
+    await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+    type Submit = { sendPrompt(prompt: string, source: string, model: string): Promise<unknown> };
+    const prototype = KeepseekChatViewProvider.prototype as unknown as Submit;
+    let submitted = 0;
+    const host = Object.assign(f.host, {
+      hasActiveBackgroundRun: () => false, scheduleDraftRunAutoContinuation: () => {}, sendPrompt: prototype.sendPrompt,
+      sendPromptImpl: async (_prompt: string, _source: string, _model: string, _settings: unknown, options: { userTask: ChatMessage['userTask'] }) => {
+        submitted++;
+        assert.deepEqual(options.userTask, { ...f.message.userTask, reason: 'recovery' });
+      }
+    });
+    await host.sendPrompt('Preview one line.\n\n' + localize('en', 'draftRunCloneForCorrectionPrompt') + '\n["-n", "1", "input.txt"]', 'main', 'main');
+    assert.equal(submitted, 1);
+    assert.equal(f.executions(), 0);
+    assert.equal(f.runs.get(f.response.draftRuns[0].id)?.status, 'needs_replan');
+  });
+});
+
+for (const moved of [false, true]) test(`a historical tag check ${moved ? 'cannot reuse moved evidence' : 'finishes from verified host evidence'}`, async t => {
+  await fixture('delegate', async f => {
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: f.workspace, encoding: 'utf8', stdio: 'pipe' }).trim();
+    git('init', '-b', 'main');
+    git('config', 'user.name', 'KeepSeek Fixture'); git('config', 'user.email', 'fixture@example.invalid');
+    git('config', 'core.hooksPath', '.git/hooks'); git('config', 'commit.gpgsign', 'false'); git('config', 'tag.gpgsign', 'false');
+    git('commit', '--allow-empty', '-m', 'base');
+    const base = git('rev-parse', 'HEAD');
+    await writeFile(path.join(f.workspace, 'release.txt'), 'fixture\n');
+    f.session.messages[0].content = 'Stage and commit the current changes and create tag v0.5.3.';
+    const reviews = (f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews;
+    const spawn = new SpawnDraftRunExecutor();
+    const launches: string[][] = [];
+    const runs = new DraftRunStore(vscode.Uri.file(path.join(f.root, 'tag-recovery-store')) as never, {
+      execute: input => { launches.push(input.draftRun.spec.args); return spawn.execute(input); },
+      cancel: id => spawn.cancel(id), showTerminal: id => spawn.showTerminal(id), dispose: () => spawn.dispose()
+    }, new DraftRunAuthorizationService(reviews));
+    Object.assign(f.host, { draftRuns: runs });
+    try {
+      const argv = [['add', 'release.txt'], ['commit', '-m', 'Release fixture'], ['tag', '-a', 'v0.5.3', '-m', 'Release fixture']];
+      f.response.draftEdits = [];
+      f.response.draftRuns = await Promise.all(argv.map(args => createDraftRunProposal({ executable: 'git', args, reason: 'Fixture release' })));
+      await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+      f.host.queueResponseApprovals(f.session, f.message, f.response);
+      await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+      assert.deepEqual(launches, argv, JSON.stringify(f.session.approvalProcessing));
+      const ref = 'refs/tags/v0.5.3';
+      const head = git('rev-parse', 'HEAD');
+      assert.equal(runs.get(f.response.draftRuns[2].id)?.gitReleaseEvidence?.refs[0].peeled, head);
+      if (moved) git('tag', '-f', 'v0.5.3', base);
+      const snapshot = [git('show-ref'), git('ls-files', '--stage'), git('status', '--porcelain')];
+      const next = await createDraftRunProposal({ executable: 'git', args: ['rev-parse', '--verify', 'v0.5.3^{commit}'], reason: 'Verify tag target' });
+      next.capabilityDiagnostic = { capabilityVersion: 1, code: 'host_unsupported_option', phase: 'capability', started: false,
+        category: 'capability', argumentIndex: 1, token: '--verify', blocking: true, reason: 'Historical v1 grammar rejection' };
+      const assistant: ChatMessage = { id: 'legacy-tag-verification', role: 'assistant', content: '', createdAt: f.message.createdAt,
+        userTask: { ...f.message.userTask!, reason: 'approval' } };
+      f.session.messages.push(assistant);
+      const response = { ...f.response, draftRuns: [next] };
+      const checkpoint = createRunCheckpoint({ ...f.cp.request, assistantMessageId: assistant.id }, 0, 'legacy tag fixture', f.scope.folderUris);
       checkpoint.status = 'completed'; checkpoint.finalResponse = response;
       await f.host.saveAgentCheckpoint(f.session, assistant, checkpoint);
       f.host.queueResponseApprovals(f.session, assistant, response);
-      return response;
-    } });
-    await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
-    f.host.queueResponseApprovals(f.session, f.message, f.response);
-    await f.host.maybeAutoContinueDraftRun();
-    const processing = f.session.approvalProcessing;
-    assert.equal(turns, 3, JSON.stringify(processing));
-    assert.equal(processing?.rootTaskId, f.message.userTask?.id);
-    assert.equal(processing?.status, 'stopped');
-    assert.equal(processing?.replanKeys?.length, 3);
-    assert.equal(processing?.targets[0].replan?.code, cases[3].code);
-    assert.equal(processing?.reason, localize('en', 'approvalReplanRepeated'));
-    assert.equal(processing?.targets[0].reason, processing?.reason);
-    assert.equal(processing?.targets[1].id, proposals[4].id);
-    assert.notEqual(processing?.targets[1].reason, processing?.reason);
-    assert.equal(f.executions(), 0); assert.equal(f.reviews(), 0); assert.equal(f.manualRequests(), 0);
-    assert.ok(proposals.every(proposal => f.runs.get(proposal.id)?.status === 'needs_replan'));
+      const beforeContinuations = f.continuations();
+      await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+      assert.equal(f.continuations() - beforeContinuations, moved ? 1 : 0, JSON.stringify(f.session.approvalProcessing));
+      assert.equal(runs.get(next.id)?.status, 'needs_replan');
+      assert.equal(runs.get(next.id)?.executionStarted, false);
+      assert.deepEqual(runs.get(next.id)?.commandRecoveryOutcome, moved ? undefined : { kind: 'git_tag_verified', ref, commit: head });
+      assert.deepEqual(launches, argv, 'the blocked query and existing tag do not launch again');
+      assert.deepEqual([git('show-ref'), git('ls-files', '--stage'), git('status', '--porcelain')], snapshot);
+      t.diagnostic(`Verification batch: business process starts 0, host model continuations ${moved ? 1 : 0}`);
+    } finally { await runs.flush(); runs.dispose(); }
   });
 });
 

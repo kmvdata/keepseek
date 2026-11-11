@@ -3095,9 +3095,17 @@ ${conversationsSessionListFragment.source}
       var terminalNotDispatched = notDispatched && ['rejected', 'done', 'cancelled', 'failed', 'needs_replan', 'no_changes'].includes(statusValue);
       var spec = draftRun.spec || {};
       var target = getApprovalTarget(draftRun.id);
+      var targetReason = getApprovalDisplayReason(target?.reason);
       var dependency = draftRun.dependency || target?.dependency;
       var replan = draftRun.replan || target?.replan;
+      var capability = draftRun.capabilityDiagnostic || replan?.diagnostic;
+      var externalAuthorized = !spec.externalCwd || (Array.isArray(state.authorizedExternalExecutionUris)
+        && state.authorizedExternalExecutionUris.includes(String(spec.cwdUri || '')));
+      var needsAuthorization = ['needs_authorization', 'external_authorization_required'].includes(target?.status);
       var approvalBlocked = ['hard_blocked', 'identity_mismatch', 'missing'].includes(target?.status);
+      var recoveryOutcome = statusValue === 'needs_replan' && notDispatched ? draftRun.commandRecoveryOutcome : undefined;
+      var recoveryLabel = recoveryOutcome?.kind === 'repeated' ? 'draftRunCorrectionStopped'
+        : recoveryOutcome?.kind === 'git_tag_verified' ? 'draftRunTagTargetVerified' : undefined;
       var displayStatus = statusValue;
       if (draftRun.replacementDraftRunId && statusValue === 'needs_replan') {
         displayStatus = 'superseded';
@@ -3111,11 +3119,13 @@ ${conversationsSessionListFragment.source}
         } else if (draftRun.executionPhase !== 'exited' || draftRun.executionStarted !== true) {
           displayStatus = 'result_unknown';
         }
-      } else if (statusValue === 'pending' && state.approvalMode === 'delegate' && !state.isBusy) {
-        displayStatus = 'blocked';
       } else if (statusValue === 'needs_replan' || (statusValue === 'pending' && target?.status === 'needs_replan')) {
         displayStatus = 'needs_replan';
       } else if (statusValue === 'pending' && approvalBlocked) {
+        displayStatus = 'blocked';
+      } else if (statusValue === 'pending' && (needsAuthorization || !externalAuthorized)) {
+        displayStatus = 'needs_authorization';
+      } else if (statusValue === 'pending' && state.approvalMode === 'delegate' && !state.isBusy) {
         displayStatus = 'blocked';
       } else if (statusValue === 'pending' && state.approvalMode !== 'ask'
         && !['manual_required', 'denied', 'review_unavailable', 'needs_authorization'].includes(target?.status)) {
@@ -3134,10 +3144,11 @@ ${conversationsSessionListFragment.source}
       var release = draftRun.gitReleaseEvidence;
       var existingRelease = release && !release.executed;
       title.textContent = draftRun.gitReusedDraftRunId ? t('draftRunGitResultReused')
-        : existingRelease ? t('draftRunReleaseAlreadyVerified') : getDraftRunTitle(displayStatus);
+        : existingRelease ? t('draftRunReleaseAlreadyVerified') : getDraftRunTitle(displayStatus, notDispatched);
       var meta = document.createElement('div');
       meta.className = 'draft-run-meta';
-      meta.textContent = [existingRelease || draftRun.gitReusedDraftRunId ? '' : getDraftRunStatusLabel(displayStatus), spec.reason].filter(Boolean).join(' · ');
+      meta.textContent = [existingRelease || draftRun.gitReusedDraftRunId || recoveryLabel ? '' : getDraftRunStatusLabel(displayStatus),
+        spec.reason].filter(Boolean).join(' · ');
       if (typeof draftRun.gitQueryResult?.predicate === 'boolean') {
         meta.textContent += ' · ' + t(draftRun.gitQueryResult.predicate ? 'draftRunPredicateTrue' : 'draftRunPredicateFalse');
       }
@@ -3171,12 +3182,23 @@ ${conversationsSessionListFragment.source}
         }).join(String.fromCharCode(10));
         heading.append(verifiedRefs);
       }
+      if (recoveryLabel) {
+        var recovery = document.createElement('div');
+        recovery.className = 'draft-run-output-notice';
+        recovery.textContent = t(recoveryLabel);
+        heading.append(recovery);
+      }
+      if (recoveryOutcome?.kind === 'git_tag_verified') {
+        var verifiedTag = document.createElement('div');
+        verifiedTag.className = 'draft-run-meta';
+        verifiedTag.textContent = recoveryOutcome.ref + ' → ' + recoveryOutcome.commit;
+        heading.append(verifiedTag);
+      }
       var actions = document.createElement('div');
       actions.className = 'draft-run-actions';
       header.append(heading);
       if (draftRun.replacementDraftRunId) {
         appendApprovalStateNote(header, t('draftRunReplacement', { id: draftRun.replacementDraftRunId }));
-        if (target?.reason) appendApprovalStateNote(header, target.reason);
       } else if (spec.restricted?.originalDraftRunId) {
         appendApprovalStateNote(header, t('approvalRestrictedOriginal', { id: spec.restricted.originalDraftRunId }));
       } else if (spec.replacesDraftRun?.draftRunId) {
@@ -3187,27 +3209,24 @@ ${conversationsSessionListFragment.source}
       } else if (target?.status === 'dependency_blocked') {
         appendApprovalStateNote(header, t('approvalDependencyBlocked'));
       }
-      var capability = draftRun.capabilityDiagnostic || replan?.diagnostic;
-      var diagnostic = replan?.reason || capability?.reason || (target?.status === 'needs_replan' ? target.reason : undefined);
+      var diagnostic = replan?.reason || capability?.reason
+        || (target?.status === 'needs_replan' && targetReason !== t('approvalReplanHistoricalStop') ? targetReason : undefined);
       if (diagnostic) appendApprovalStateNote(header, t('approvalCommandReplanReason', { reason: diagnostic }));
-      if (capability) {
-        var argument = Number.isInteger(capability.argumentIndex) ? 'args[' + capability.argumentIndex + ']' : '';
-        appendApprovalStateNote(header, [t('draftRunCapabilityVersion', { version: capability.capabilityVersion }),
-          capability.code, argument, capability.token].filter(Boolean).join(' · '));
-        if (Array.isArray(capability.candidateArgs)) {
-          appendApprovalStateNote(header, t('draftRunCorrectionCandidate', {
-            command: formatShellCommand(spec.executable, capability.candidateArgs, spec.env)
-          }));
-        }
+      var candidateArgs = capability?.candidateArgs || replan?.candidateArgs;
+      if (displayStatus === 'needs_replan' && !recoveryLabel && (diagnostic || Array.isArray(candidateArgs))) {
+        appendApprovalStateNote(header, Array.isArray(candidateArgs)
+          ? t('draftRunCorrectionCandidate', { command: formatShellCommand(spec.executable, candidateArgs, spec.env) })
+          : t('draftRunCorrectionNextStep'), true);
       }
-      if (target?.status === 'needs_replan' && target.reason && target.reason !== diagnostic) {
-        appendApprovalStateNote(header, target.reason);
+      if ((target?.status === 'needs_replan' || displayStatus === 'superseded') && targetReason && targetReason !== diagnostic
+        && (!recoveryLabel || targetReason !== t('approvalReplanHistoricalStop'))) {
+        appendApprovalStateNote(header, targetReason);
       }
       if (!dependency && displayStatus !== 'superseded' && target?.status !== 'dependency_blocked') {
-        appendDraftRunActions(actions, draftRun, header, target, approvalBlocked);
+        appendDraftRunActions(actions, draftRun, header, target, approvalBlocked, externalAuthorized, needsAuthorization);
       }
       var processing = state.approvalProcessing;
-      if (displayStatus === 'needs_replan' && state.approvalMode === 'delegate' && !state.isBusy
+      if (displayStatus === 'needs_replan' && !recoveryLabel && state.approvalMode === 'delegate' && !state.isBusy
         && processing?.version === 2 && processing?.status === 'blocked' && processing.canResume === true && processing.runId === draftRun.agentRunId
         && processing.targets.find(function(item) { return item.status === 'needs_replan'; })?.id === draftRun.id) {
         appendApprovalStateNote(header, t('approvalInterrupted'));
@@ -3224,6 +3243,9 @@ ${conversationsSessionListFragment.source}
         ? cwdDisplay + String.fromCharCode(10) + cwdUri
         : cwdDisplay || cwdUri, true);
       appendDraftRunField(fields, t('draftRunTimeout'), formatDuration(Number(spec.timeoutMs) || 0), false);
+      if (capability || replan) {
+        fields.append(createDraftRunPreflightDetails(spec.args, capability, replan, draftRun.executionStarted));
+      }
 
       var risk = document.createElement('div');
       if (terminalNotDispatched) {
@@ -3339,10 +3361,26 @@ ${conversationsSessionListFragment.source}
         && !['executed', 'already_processed'].includes(target.status);
     }
 
+    function getApprovalDisplayReason(reason, includeScopedOutcome) {
+      if (!reason) return undefined;
+      var catalogs = Object.values(translations);
+      // Older processing records contain a localized inference, without a
+      // proposal and accepted model response proving a repeated diagnosis.
+      if (catalogs.some(function(catalog) { return catalog.approvalReplanRepeated === reason; })) {
+        return t('approvalReplanHistoricalStop');
+      }
+      // Command cards obtain these facts from the owning DraftRun. Approval
+      // and dependency reasons can be shared with cards for other commands.
+      if (!includeScopedOutcome && catalogs.some(function(catalog) {
+        return catalog.draftRunCorrectionStopped === reason || catalog.draftRunTagTargetVerified === reason;
+      })) return undefined;
+      return reason;
+    }
+
     function formatApprovalDependency(dependency) {
       var label = dependency.label || dependency.targetId;
       var target = label !== dependency.targetId ? label + ' (' + dependency.targetId + ')' : label;
-      return [t('approvalCommandDependency', { target: target }), dependency.reason].filter(Boolean).join(' · ');
+      return [t('approvalCommandDependency', { target: target }), getApprovalDisplayReason(dependency.reason)].filter(Boolean).join(' · ');
     }
 
     function appendApprovalStateNote(notices, text, progress) {
@@ -3377,7 +3415,7 @@ ${conversationsSessionListFragment.source}
         : recoverable ? 'approvalInterrupted' : 'approvalAutoWaiting';
       if (target?.dependency) appendApprovalStateNote(notices, formatApprovalDependency(target.dependency));
       if (!target?.dependency || target.reason) {
-        var reason = target?.reason || (denied && review ? review.rationale : undefined);
+        var reason = getApprovalDisplayReason(target?.reason) || (denied && review ? review.rationale : undefined);
         appendApprovalStateNote(notices, reason || t(fallback), !reason && !recoverable);
       }
       if (recoverable && !state.isBusy && !denied
@@ -3385,12 +3423,9 @@ ${conversationsSessionListFragment.source}
       return false;
     }
 
-    function appendDraftRunActions(container, draftRun, notices, target, approvalBlocked) {
+    function appendDraftRunActions(container, draftRun, notices, target, approvalBlocked, externalAuthorized, needsAuthorization) {
       var statusValue = String(draftRun.status || 'pending');
       var isOwnRunning = String(state.activeDraftRunId || '') === String(draftRun.id || '');
-      var externalAuthorized = !draftRun.spec?.externalCwd
-        || (Array.isArray(state.authorizedExternalExecutionUris)
-          && state.authorizedExternalExecutionUris.includes(String(draftRun.spec?.cwdUri || '')));
       if (statusValue === 'needs_replan' || target?.status === 'needs_replan') {
         if (statusValue === 'needs_replan' && state.approvalMode === 'ask' && !approvalBlocked
           && !draftRun.spec?.restricted && !draftRun.replacementDraftRunId) {
@@ -3406,8 +3441,9 @@ ${conversationsSessionListFragment.source}
           }
           return;
         }
-        if (approvalBlocked || isHeldDraftRunApproval(target)) {
-          if (target?.reason) appendApprovalStateNote(notices, target.reason);
+        if (approvalBlocked || isHeldDraftRunApproval(target) || (needsAuthorization && externalAuthorized)) {
+          var reason = getApprovalDisplayReason(target?.reason);
+          if (reason) appendApprovalStateNote(notices, reason);
           return;
         }
         if (!externalAuthorized) {
@@ -3460,11 +3496,12 @@ ${conversationsSessionListFragment.source}
       return button;
     }
 
-    function getDraftRunTitle(statusValue) {
+    function getDraftRunTitle(statusValue, notDispatched) {
       switch (statusValue) {
         case 'preparing': return t('draftRunTitlePreparing');
-        case 'needs_replan': return t('draftRunTitleNeedsReplan');
-        case 'dependency_blocked': return t('draftRunTitleBlocked');
+        case 'needs_replan': return t(notDispatched ? 'draftRunTitleNeedsReplan' : 'draftRunTitleCorrectionNeeded');
+        case 'dependency_blocked': return t('draftRunTitleDependencyBlocked');
+        case 'needs_authorization': return t('draftRunTitleNeedsAuthorization');
         case 'not_dispatched': return t('draftRunTitleNotDispatched');
         case 'spawn_failed': return t('draftRunTitleSpawnFailed');
         case 'result_unknown': return t('draftRunTitleResultUnknown');
@@ -3494,6 +3531,32 @@ ${conversationsSessionListFragment.source}
       container.append(row);
     }
 
+    function createDraftRunPreflightDetails(args, capability, replan, executionStarted) {
+      var details = document.createElement('details');
+      details.className = 'run-details draft-run-preflight-details';
+      var summary = document.createElement('summary');
+      summary.textContent = t('draftRunPreflightDetails');
+      var body = document.createElement('div');
+      body.className = 'run-details-body';
+      appendDraftRunField(body, t('draftRunOriginalArgv'), JSON.stringify(Array.isArray(args) ? args : []), true);
+      var diagnostic = capability || replan;
+      var entries = [
+        ['capabilityVersion', capability?.capabilityVersion],
+        ['code', diagnostic.code],
+        ['phase', diagnostic.phase],
+        ['started', capability?.started ?? executionStarted],
+        ['blocking', capability?.blocking],
+        ['argumentIndex', capability?.argumentIndex],
+        ['token', typeof capability?.token === 'string' ? JSON.stringify(capability.token) : undefined]
+      ];
+      entries.forEach(function(entry) {
+        if (entry[1] !== undefined) appendDraftRunField(body, entry[0], String(entry[1]), true);
+      });
+      if (diagnostic.reason) appendDraftRunField(body, t('draftRunOriginalDiagnostic'), diagnostic.reason, false);
+      details.append(summary, body);
+      return details;
+    }
+
     function formatShellCommand(executable, args, environment) {
       var command = [executable].concat(Array.isArray(args) ? args : []).map(formatShellWord);
       var overrides = (Array.isArray(environment) ? environment : []).map(function(entry) {
@@ -3516,6 +3579,7 @@ ${conversationsSessionListFragment.source}
         case 'preparing': return t('draftRunStatusPreparing');
         case 'no_changes': return t('draftRunStatusNoChanges');
         case 'needs_replan': return t('draftRunStatusNeedsReplan');
+        case 'needs_authorization': return t('draftRunStatusNeedsAuthorization');
         case 'dependency_blocked': return t('draftRunStatusDependencyBlocked');
         case 'not_dispatched': return t('draftRunStatusNotExecuted');
         case 'spawn_failed': return t('draftRunStatusSpawnFailed');
@@ -4136,10 +4200,10 @@ ${conversationsSessionListFragment.source}
       var processing = state.approvalProcessing;
       if (processing && message.runState && processing.runId === message.runState.taskId) {
         appendRunDetailRow(grid, t('runDetailsApprovalOutcome'), (processing.targets || []).map(function(target) {
-          return [target.id + ' · ' + target.status, target.failureCode, target.reason,
+          return [target.id + ' · ' + target.status, target.failureCode, getApprovalDisplayReason(target.reason, true),
             target.replan?.reason && target.replan.reason !== target.reason ? t('approvalCommandReplanReason', { reason: target.replan.reason }) : '',
             target.dependency ? formatApprovalDependency(target.dependency) : ''].filter(Boolean).join(' · ');
-        }).concat(processing.reason || []).join('\\n') || processing.status);
+        }).concat(getApprovalDisplayReason(processing.reason, true) || []).join('\\n') || processing.status);
       }
       appendRunDetailRow(grid, t('runDetailsModel'), details.modelId || '—');
       appendRunDetailRow(grid, t('runDetailsSource'), getRunSourceLabel(details.sourceId, details.modelId));

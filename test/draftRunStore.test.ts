@@ -698,6 +698,20 @@ test('capability rejection and immutable replacement persist without approval or
     assert.equal(rejected.executionStarted, false);
     assert.equal(rejected.executionPhase, 'not_dispatched');
     assert.equal(await store.approveAndRun(rejected.id, new Set()), undefined);
+    const stillBlocked = await createDraftRunProposal({ executable: 'head', args: ['--unknown-fixture'],
+      reason: 'Another blocked proposal', replacesDraftRun: { draftRunId: rejected.id, specHash: rejected.specHash } });
+    store.addProposals({ proposals: [stillBlocked], sessionId: 's', agentRunId: 'r' });
+    assert.equal(store.get(stillBlocked.id)?.status, 'needs_replan');
+    assert.equal(store.get(rejected.id)?.replacementDraftRunId, undefined);
+    assert.equal(store.get(stillBlocked.id)?.spec.replacesDraftRun?.draftRunId, rejected.id);
+    const candidate = await createDraftRunProposal({ executable: 'head', args: ['-n', '2', 'input.txt'],
+      reason: 'Candidate needing live preflight', replacesDraftRun: { draftRunId: rejected.id, specHash: rejected.specHash } });
+    store.addProposals({ proposals: [candidate], sessionId: 's', agentRunId: 'r' });
+    assert.equal(store.get(rejected.id)?.replacementDraftRunId, candidate.id);
+    assert.equal(store.markNotExecuted(candidate.id, candidate.specHash, { replan: { draftRunId: candidate.id, specHash: candidate.specHash,
+      rootTaskId: 'r', executionSegmentId: 'r', phase: 'preflight', code: 'fixture_preflight', reason: 'Live preflight blocked.', executed: false } }), true);
+    assert.equal(store.get(rejected.id)?.replacementDraftRunId, undefined);
+    assert.equal(store.get(candidate.id)?.status, 'needs_replan');
     const replacement = await createDraftRunProposal({ executable: 'head', args: ['-n', '1', 'input.txt'],
       reason: 'Read bounded preview', replacesDraftRun: { draftRunId: rejected.id, specHash: rejected.specHash } });
     const [fresh] = store.addProposals({ proposals: [replacement], sessionId: 's', agentRunId: 'r', rootTaskRunIds: new Set() });

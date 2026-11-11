@@ -43,6 +43,7 @@ import './draftRunBatchDisplay.test';
 import './fileReference.test';
 import './fileReferenceOpener.test';
 import './gitTools.test';
+import './gitReleaseEvidence.test';
 import './historyCompressor.test';
 import './historyArchive.test';
 import './historyProjection.test';

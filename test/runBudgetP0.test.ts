@@ -1,6 +1,7 @@
 import { CURRENT_AGENT_PROTOCOL_VERSION } from '../src/agent/protocol';
 import './registerVscodeStub';
 import assert from 'node:assert/strict';
+import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import {
   LogicalBudgetExceededError,
@@ -9,8 +10,11 @@ import {
   createLogicalRunBudgetState
 } from '../src/agent/executionPolicy';
 import { AgentRunner } from '../src/agent/runner';
-import { checkpointCopy, normalizeRunCheckpoint, recoveryBlocker, type RunCheckpoint } from '../src/agent/runCheckpoint';
-import type { AgentRequest } from '../src/shared/types';
+import { checkpointCopy, createRunCheckpoint, inheritTaskBudget, normalizeRunCheckpoint, recoveryBlocker, type RunCheckpoint } from '../src/agent/runCheckpoint';
+import { commandCapabilityReplan, commandRecoveryKey, mergeCommandRecoveryObservations, observeCommandRecovery,
+  recordCommandRecoveryDelivery, type CommandRecoveryObservation } from '../src/runs/commandRecovery';
+import { normalizeUserTaskBudgets, taskBudgetFromCheckpoint } from '../src/sessions/userTaskBudget';
+import type { AgentRequest, DraftRun } from '../src/shared/types';
 
 test('length continuation is bounded, persisted, and returns marked partial content', async () => {
   const bodies: string[] = [];
@@ -130,6 +134,103 @@ test('checkpoint normalization rejects old records and preserves current budget 
   assert.equal(paused.request.executionLimits?.maxToolCalls, 48);
   assert.equal(recoveryBlocker(paused), undefined);
   assert.equal(JSON.stringify(raw), serialized, 'normalization must not mutate the stored object');
+});
+
+test('restored command correction distinguishes observation, accepted delivery and a new proposal', () => {
+  const rootTaskId = 'root-task';
+  const input = { ...request(), approvalRootTaskId: rootTaskId };
+  const first = createRunCheckpoint(input, 900_000, 'test', []);
+  first.usedMs = 310;
+  first.usedCostByCurrency = { USD: 0.2 };
+  first.runBudget = createLogicalRunBudgetState({ modelRequests: 4 });
+  const key = 'a'.repeat(64), specHash = 'b'.repeat(64), firstResponse = '1'.repeat(64), acceptedResponse = '2'.repeat(64);
+  first.commandRecoveryKeys = [key];
+  first.commandRecoveryExhausted = true;
+  const observations: CommandRecoveryObservation[] = first.commandRecoveryObservations = [];
+  const draft = { rootTaskId, key, draftRunId: 'first-draft', specHash, observedResponseId: firstResponse };
+  assert.equal(observeCommandRecovery(observations, draft).repeatedOf, undefined);
+  recordCommandRecoveryDelivery(observations, rootTaskId, firstResponse, [draft.draftRunId]);
+  assert.equal(observeCommandRecovery(observations, { ...draft, draftRunId: 'sibling' }, [draft.draftRunId]).repeatedOf, undefined);
+  assert.equal(observations[0].deliveredResponseId, undefined);
+
+  const stale = taskBudgetFromCheckpoint(first);
+  recordCommandRecoveryDelivery(observations, rootTaskId, acceptedResponse, [draft.draftRunId]);
+  assert.equal(observeCommandRecovery(observations, draft, [draft.draftRunId]).repeatedOf, undefined);
+  assert.equal(observations.length, 2);
+  const budget = normalizeUserTaskBudgets(JSON.parse(JSON.stringify({ [rootTaskId]: taskBudgetFromCheckpoint(first) })))[rootTaskId];
+  const segment = createRunCheckpoint(input, 900_000, 'next authorized segment', []);
+  inheritTaskBudget(segment, budget);
+  const restored = normalizeRunCheckpoint(JSON.parse(JSON.stringify(segment)))!;
+  assert.notEqual(restored.taskId, first.taskId);
+  assert.equal(restored.modelRequests, 4);
+  assert.equal(restored.usedMs, 310);
+  assert.deepEqual(restored.usedCostByCurrency, { USD: 0.2 });
+  assert.equal(restored.commandRecoveryExhausted, true, 'historical stop remains auditable');
+  const ledger = restored.commandRecoveryObservations!;
+  assert.equal(observeCommandRecovery(ledger, { ...draft, draftRunId: 'reference-only', observedResponseId: acceptedResponse }).repeatedOf,
+    undefined, 'a persisted delivery is insufficient without diagnostic presence in this accepted request');
+  assert.equal(observeCommandRecovery(ledger, { ...draft, draftRunId: 'new-draft', observedResponseId: acceptedResponse },
+    [draft.draftRunId]).repeatedOf, draft.draftRunId);
+  const merged = mergeCommandRecoveryObservations(rootTaskId, stale.commandRecoveryObservations, ledger)!;
+  assert.equal(merged[0].deliveredResponseId, acceptedResponse);
+  assert.equal(merged.at(-1)?.repeatedOf, draft.draftRunId);
+  restored.request.commandRecoveryContinuation = { targetIds: [draft.draftRunId] };
+  restored.state = { messages: [], toolRounds: [], draftEdits: [], draftRuns: [], reasoningParts: [], turn: 1,
+    toolCallCount: 0, validationRunCount: 0, toolResultTokens: 0,
+    repairLoop: { status: 'idle', iteration: 0, maxIterations: 2, pendingDraftEditIds: [] },
+    pending: { response: { message: { role: 'assistant', content: '' } }, results: {},
+      commandRecoveryResponse: { id: acceptedResponse, deliveredDraftRunIds: [draft.draftRunId] } } };
+  assert.deepEqual(normalizeRunCheckpoint(restored)?.state?.pending?.commandRecoveryResponse,
+    restored.state.pending?.commandRecoveryResponse);
+  restored.state.pending!.commandRecoveryResponse!.deliveredDraftRunIds = ['unverified-draft'];
+  assert.equal(normalizeRunCheckpoint(restored), undefined, 'an unverified response observation fails checkpoint validation');
+  restored.state.pending = undefined;
+  restored.state.draftRuns.push({ id: 'host-preflight-draft', specHash,
+    spec: { executable: 'git', args: ['rev-parse', 'HEAD'], reason: 'Verify HEAD', cwdUri: 'file:///fixture',
+      cwdLabel: 'fixture/.', externalCwd: false, timeoutMs: 5000, env: [] },
+    effectAssessment: { version: 1, verdict: 'likely_readonly', effects: ['workspace_read'], evidence: [] },
+    commandRecoveryResponse: { id: acceptedResponse, deliveredDraftRunIds: [draft.draftRunId] } });
+  assert.deepEqual(normalizeRunCheckpoint(restored)?.state?.draftRuns[0].commandRecoveryResponse,
+    restored.state.draftRuns[0].commandRecoveryResponse);
+  restored.state.draftRuns[0].commandRecoveryResponse!.deliveredDraftRunIds = ['unverified-draft'];
+  assert.equal(normalizeRunCheckpoint(restored), undefined, 'invalid proposal delivery proof cannot cross a restart');
+  restored.state.draftRuns = [];
+  assert.equal(normalizeRunCheckpoint({ ...restored, commandRecoveryObservations: [ledger.at(-1)] }), undefined,
+    'orphan repeat proof fails checkpoint validation');
+  const invalid = normalizeUserTaskBudgets({ [rootTaskId]: { ...budget, commandRecoveryObservations: [ledger.at(-1)] } })[rootTaskId];
+  assert.equal(invalid.commandRecoveryObservations, undefined);
+  assert.equal(invalid.commandRecoveryObservationsInvalid, true);
+  assert.equal(invalid.runBudget?.modelRequests, 4, 'corrupt diagnosis identity cannot reset spent budget');
+  assert.equal(invalid.commandRecoveryExhausted, true);
+});
+
+test('command correction root identity uses parsed option names and structural diagnoses', () => {
+  const keyFor = (args: string[], reason = 'first explanation') => {
+    const draft: DraftRun = { id: reason, specHash: 'a'.repeat(64), agentRunId: 'segment', status: 'pending',
+      sessionId: 'session', messageId: 'message', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+      effectAssessment: { version: 1, verdict: 'unknown', effects: [], evidence: [] },
+      outputHead: '', outputTail: '', outputBytes: 0, outputTruncated: false, omittedOutputBytes: 0,
+      executionStarted: false, executionPhase: 'not_dispatched', spec: { executable: 'git', args, reason,
+        cwdUri: pathToFileURL(process.cwd()).href, cwdLabel: 'fixture/.', externalCwd: false, timeoutMs: 5000, env: [] } };
+    const diagnosis = commandCapabilityReplan(draft, 'root-task');
+    assert.ok(diagnosis);
+    return commandRecoveryKey(draft, diagnosis);
+  };
+  const unknown = keyFor(['rev-parse', '--Future=one', 'HEAD']);
+  assert.equal(unknown, keyFor(['--no-pager', 'rev-parse', '--Future=two', 'HEAD', 'main'], 'new explanation'));
+  assert.equal(unknown, keyFor(['-C', '.', 'rev-parse', '--Future=one', 'HEAD']));
+  assert.equal(unknown, keyFor(['-C', './', '-C', '.', 'rev-parse', '--Future=one', 'HEAD']));
+  assert.notEqual(unknown, keyFor(['rev-parse', '--future=one', 'HEAD']));
+  assert.notEqual(unknown, keyFor(['rev-parse', '--Other=one', 'HEAD']));
+  assert.notEqual(unknown, keyFor(['-C', 'other', 'rev-parse', '--Future=one', 'HEAD']));
+  assert.equal(keyFor(['-C', 'other', '-C', 'nested', 'rev-parse', '--Future=one', 'HEAD']),
+    keyFor(['-C', 'other/nested', 'rev-parse', '--Future=one', 'HEAD']));
+  assert.equal(keyFor(['--git-dir', 'repo/.git', 'rev-parse', '--Future=one', 'HEAD']),
+    keyFor(['--git-dir=repo/.git/./', 'rev-parse', '--Future=one', 'HEAD']));
+  assert.notEqual(keyFor(['rev-parse', '--verify']), keyFor(['rev-parse', '--verify', 'HEAD', 'main']));
+  assert.equal(keyFor(['rev-parse', '--verify', 'HEAD:file']), keyFor(['rev-parse', '--verify', 'HEAD:other']));
+  assert.notEqual(keyFor(['rev-parse', '--verify=value', 'HEAD']), keyFor(['rev-parse', '--verify', '--quiet=value', 'HEAD']));
+  assert.equal(keyFor(['rev-parse', '--verify=value', 'HEAD']), keyFor(['rev-parse', '--verify=other', 'HEAD']));
 });
 
 test('a restored finalization attempt cannot dispatch a second finalization request', async () => {
