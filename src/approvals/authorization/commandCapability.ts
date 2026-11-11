@@ -57,8 +57,7 @@ export function normalizeCommandCapabilityDiagnostic(value: unknown): CommandCap
 
 /** One static authority used by proposal, display and execution preflight.
  * It performs no filesystem/process access and cannot grant execution authority. */
-export function analyzeCommandCapability(spec: DraftRunSpec): CommandCapabilityAnalysis {
-  const semantics = analyzeCommand(spec);
+export function analyzeCommandCapability(spec: DraftRunSpec, semantics = analyzeCommand(spec)): CommandCapabilityAnalysis {
   const diagnostics: CommandCapabilityDiagnostic[] = [];
   for (const reason of semantics.reasons) {
     if (!['unsupported_program', 'unsupported_option', 'missing_option_value', 'invalid_argv', 'git_commit_argv'].includes(reason.code)) continue;

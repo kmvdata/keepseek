@@ -70,7 +70,8 @@ export const approvalRenderFragment: WebviewFragment = {
         var locked = isApprovalModeSelectionLocked();
         var lockText = readinessText || (locked ? t('modelSettingsReadonlyWhileBusy') : '');
         var currentLabelKey = getApprovalModeLabelKey(currentMode);
-        var currentDescriptionKey = getApprovalModeDescriptionKey(currentMode);
+        var currentDescription = t(getApprovalModeDescriptionKey(currentMode));
+        var processHelp = t('approvalDelegateProcessHelp');
 
         if (commandApprovalModeValue) {
           commandApprovalModeValue.textContent = t(currentLabelKey);
@@ -78,15 +79,15 @@ export const approvalRenderFragment: WebviewFragment = {
         }
         if (commandApprovalModeSwitch) {
           commandApprovalModeSwitch.disabled = locked;
-          commandApprovalModeSwitch.title = lockText || t(currentDescriptionKey);
+          var modeHelp = lockText || (currentMode === 'delegate' ? currentDescription + ' · ' + processHelp : currentDescription);
+          commandApprovalModeSwitch.title = modeHelp;
+          commandApprovalModeSwitch.setAttribute('aria-description', modeHelp);
           commandApprovalModeSwitch.setAttribute('aria-disabled', locked ? 'true' : 'false');
           commandApprovalModeSwitch.setAttribute('aria-busy', readiness === 'loading' ? 'true' : 'false');
           commandApprovalModeSwitch.setAttribute('aria-expanded', commandApprovalModeListOpen ? 'true' : 'false');
         }
         if (commandApprovalModeDescription) {
-          commandApprovalModeDescription.textContent = lockText
-            ? lockText
-            : t(currentDescriptionKey);
+          commandApprovalModeDescription.textContent = lockText || currentDescription;
         }
         if (!commandApprovalModeList) { return; }
 
@@ -104,9 +105,6 @@ export const approvalRenderFragment: WebviewFragment = {
           option.disabled = locked || (item.mode !== 'ask' && Boolean(state.isBusy));
           option.setAttribute('role', 'menuitemradio');
           option.setAttribute('aria-checked', isSelected ? 'true' : 'false');
-          option.setAttribute('aria-label', t(item.labelKey));
-          option.title = lockText || t(item.descriptionKey);
-
           var check = document.createElement('span');
           check.className = 'command-model-check';
           check.textContent = isSelected ? '\\u2713' : '';
@@ -119,8 +117,9 @@ export const approvalRenderFragment: WebviewFragment = {
           var copy = document.createElement('span');
           copy.className = 'command-approval-option-copy';
           copy.append(label, description);
-          option.title = lockText || t(item.descriptionKey);
-          option.setAttribute('aria-label', t(item.labelKey) + '. ' + t(item.descriptionKey));
+          option.title = lockText || (item.mode === 'delegate' ? description.textContent + ' · ' + processHelp : description.textContent);
+          option.setAttribute('aria-label', t(item.labelKey));
+          option.setAttribute('aria-description', option.title);
           option.append(check, copy);
           commandApprovalModeList.append(option);
         });

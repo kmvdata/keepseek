@@ -2,7 +2,7 @@ import './registerVscodeStub';
 import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
 import { getAutoApprovalReviewerSetting, InvalidApprovalReviewerSettingError } from '../src/shared/config';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { test } from 'node:test';
@@ -12,6 +12,7 @@ import { resolveConfiguredSubagentModel } from '../src/accounts/subagentModelRes
 import { SubagentSettingsStore } from '../src/accounts/subagentSettingsStore';
 import { ApprovalCircuitBreaker } from '../src/approvals/approvalCircuitBreaker';
 import { OneShotTextRequestError } from '../src/agent/oneShotTextRequest';
+import { inspectValidationSnapshot } from '../src/agent/tools/validationSnapshot';
 import {
   findDeterministicReviewDenial,
   findSensitiveEvidence,
@@ -22,7 +23,8 @@ import { ApprovalReviewerService } from '../src/approvals/approvalReviewer';
 import { createBoundedReviewText, hashApprovalValue } from '../src/approvals/approvalReviewHash';
 import { createDraftEditReviewRequest } from '../src/approvals/approvalReviewSurface';
 import { ApprovalAuditError, ApprovalReviewStore } from '../src/approvals/approvalReviewStore';
-import { APPROVAL_POLICY_VERSION, approvalDisposition, type ApprovalReviewRequest } from '../src/approvals/approvalReviewTypes';
+import { APPROVAL_POLICY_VERSION, EXACT_USER_AUTHORIZATION_RULE, PROJECT_BEHAVIOR_UNKNOWN_RULE, VERIFIED_PROJECT_OPERATION_RULE,
+  approvalDisposition, type ApprovalReviewRequest } from '../src/approvals/approvalReviewTypes';
 import { buildApprovalReviewerProviderBody } from '../src/approvals/oneShotTextRequest';
 import type { AgentRequest, ChatMessage } from '../src/shared/types';
 import { createFullTextDraftEdit } from '../src/edits/draftEdit';
@@ -110,6 +112,31 @@ test('review surfaces are deterministic, bounded, and exclude hidden provider st
     vscode.workspace.isTrusted = trusted;
     vscode.workspace.workspaceFolders = folders;
   }
+});
+
+test('fixed validation rejects same-name launch shims outside the workspace', async () => {
+  await withApprovalFixture(async ({ storageUri }) => {
+    const project = path.join(storageUri.fsPath, 'project');
+    const fakeBin = path.join(storageUri.fsPath, 'unrelated-bin');
+    const windows = process.platform === 'win32';
+    const npm = path.join(fakeBin, windows ? 'npm.cmd' : 'npm');
+    const node = path.join(fakeBin, windows ? 'node.exe' : 'node');
+    const folder = { uri: vscode.Uri.file(project), name: 'fixture', index: 0 } as never;
+    await Promise.all([mkdir(project), mkdir(fakeBin)]);
+    await writeFile(path.join(project, 'package.json'), JSON.stringify({ scripts: { test: 'node --version' } }));
+    const previousPath = process.env.PATH;
+    process.env.PATH = [fakeBin, previousPath].filter(Boolean).join(path.delimiter);
+    try {
+      await writeFile(npm, windows ? '@exit /b 91\r\n' : '#!/bin/sh\nexit 91\n', { mode: 0o700 });
+      await assert.rejects(inspectValidationSnapshot(folder, 'test'), /npm and Node launch identity/u);
+      await rm(npm);
+      await writeFile(node, '#!/bin/sh\nexit 92\n', { mode: 0o700 });
+      await assert.rejects(inspectValidationSnapshot(folder, 'test'), /npm and Node launch identity/u);
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
+  });
 });
 
 test('approval records require an exact current-runtime match and are one-shot', async () => {
@@ -268,7 +295,7 @@ test('subagent selection is shared by reviewer resolution and fixed failures nev
       getAutoSetting: () => { throw new InvalidApprovalReviewerSettingError({ mode: invalidMode }); },
       requestText: async () => { reviewerCalls++; return '{}'; }
     });
-    const request = { ...reviewRequest(), targetId: 'invalid-configuration' };
+    const request = { ...reviewRequest(), targetId: 'invalid-configuration', actionHash: 'different-validation' };
     const invalid = await malformed.review(request, parent);
     assert.equal(invalid.record.reviewState, 'configuration_unavailable');
     assert.equal(reviewerCalls, 0);
@@ -327,7 +354,7 @@ test('reviewer retries once, treats invalid output as unavailable, and never aut
     assert.equal(unavailableAfterRetry.record.decision, 'unavailable');
     assert.equal(unavailableAfterRetry.record.reviewState, 'timeout');
     assert.equal(approved.record.approvalSource, 'auto_approval_review');
-    assert.equal(approved.record.policyVersion, 6);
+    assert.equal(approved.record.policyVersion, 7);
   });
 });
 
@@ -344,6 +371,38 @@ test('approval refusal circuit breaker trips at three consecutive and ten of fif
     breaker.record('recent', 'approve');
   }
   assert.equal(breaker.record('recent', 'deny').reason, 'recent_denials');
+});
+
+test('confirmed reviewer transport outages coalesce within one segment while individual failures stay local', async () => {
+  await withApprovalFixture(async ({ storageUri, store }) => {
+    let attempts = 0;
+    let failure: 'individual' | 'shared' | 'none' = 'individual';
+    const reviewer = new ApprovalReviewerService({ globalStorageUri: storageUri as never, workspaceKey: 'workspace',
+      sourceStore: new ModelSourceStore(storageUri as never), store,
+      requestText: async () => {
+        attempts++;
+        if (failure !== 'none') throw new OneShotTextRequestError('unavailable', 'Reviewer service unavailable',
+          failure === 'shared', failure === 'shared');
+        return JSON.stringify({ decision: 'approve', risk: 'low', reason: 'Exact validation.',
+          policyRules: [], saferAlternative: '', affectedTargets: ['file:///project'] });
+      } });
+    const review = (id: string, agentRunId = 'run') => reviewer.review({ ...reviewRequest(), targetId: id, actionHash: id, agentRunId },
+      parentRequestContext());
+    const individual = await review('individual');
+    assert.equal(individual.record.reviewState, 'service_unavailable');
+    assert.equal(approvalDisposition(individual.record), 'stop');
+    failure = 'none';
+    assert.equal(approvalDisposition((await review('independent')).record), 'execute');
+    assert.equal(attempts, 2);
+
+    failure = 'shared';
+    assert.equal((await review('shared')).record.reviewState, 'service_unavailable');
+    failure = 'none';
+    assert.equal((await review('affected-sibling')).record.reviewState, 'service_unavailable');
+    assert.equal(attempts, 4);
+    assert.equal(approvalDisposition((await review('next-segment', 'next')).record), 'execute');
+    assert.equal(attempts, 5);
+  });
 });
 
 test('a repeated denied action hash is rejected locally without another reviewer request', async () => {
@@ -532,7 +591,7 @@ test('automatic reviewer keeps independent models, policy, approval matches, and
     await modelSettings.save({ mode: 'follow-main' });
     const m = await review('delegate', 'second-approve');
     assert.deepEqual(calls.map(call => call.model), ['auto-model', 'auto-model']);
-    assert.match(calls[0].system, /Approve for me policy v6/u);
+    assert.match(calls[0].system, /Approve for me policy v7/u);
     assert.equal(a.record.approvalSource, 'auto_approval_review');
     assert.equal(a.record.decision, 'approve');
     assert.equal(a.record.risk, 'medium');
@@ -578,7 +637,7 @@ test('automatic reviewer keeps independent models, policy, approval matches, and
   });
 });
 
-test('fully valid high and critical approvals require a single exact user decision', async () => {
+test('high and critical approval responses confer neither automatic nor manual authority', async () => {
   await withApprovalFixture(async ({ storageUri, store }) => {
     let calls = 0;
     let risk: 'high' | 'critical' = 'high';
@@ -591,25 +650,20 @@ test('fully valid high and critical approvals require a single exact user decisi
       } });
     const request = reviewRequest();
     const high = await reviewer.review(request, parentRequestContext());
-    assert.equal(high.record.decision, 'needs_user');
+    assert.equal(high.record.decision, 'unavailable');
     assert.equal(high.record.risk, 'high');
-    assert.deepEqual(high.record.policyRules, ['high_risk_requires_user', 'scope_bound']);
+    assert.deepEqual(high.record.policyRules, ['high_risk_automatic_approval_prohibited', 'scope_bound']);
     assert.equal(high.record.saferAlternative, 'Run validation separately.');
-    assert.equal(approvalDisposition(high.record), 'request_user');
+    assert.equal(approvalDisposition(high.record), 'stop');
     await assert.rejects(reviewer.consumeApproval(high.record, 'auto_approval_review'), /matching approval/u);
     await assert.rejects(reviewer.createUserApproval({ ...request, scopeFingerprint: 'new-scope' },
       { priorReviewId: high.record.reviewId, userRequestId: 'changed' }), /live matching user request/u);
-    const receipts = await Promise.allSettled(['one', 'two'].map(userRequestId =>
-      reviewer.createUserApproval(request, { priorReviewId: high.record.reviewId, userRequestId })));
-    assert.equal(receipts.filter(item => item.status === 'fulfilled').length, 1);
-    const receipt = receipts.find(item => item.status === 'fulfilled')?.value.record;
-    assert.equal(receipt?.approvalSource, 'user_click');
-    assert.equal(receipt?.reviewerConfigFingerprint, high.record.reviewerConfigFingerprint);
-    await reviewer.consumeApproval(receipt!, 'user_click');
+    await assert.rejects(reviewer.createUserApproval(request,
+      { priorReviewId: high.record.reviewId, userRequestId: 'same' }), /live matching user request/u);
 
     risk = 'critical';
-    const critical = await reviewer.review({ ...request, targetId: 'critical' }, parentRequestContext());
-    assert.equal(critical.record.decision, 'needs_user');
+    const critical = await reviewer.review({ ...request, targetId: 'critical', actionHash: 'critical' }, parentRequestContext());
+    assert.equal(critical.record.decision, 'unavailable');
     assert.equal(critical.record.risk, 'critical');
     assert.equal(calls, 2);
   });
@@ -629,16 +683,72 @@ test('unverified affected scope and missing material never become manual authori
       } });
     const request = reviewRequest();
     const mismatched = await reviewer.review(request, parentRequestContext());
-    assert.equal(calls, 2);
+    assert.equal(calls, 1);
     assert.equal(mismatched.record.reviewerModelId, 'main-model');
-    assert.equal(mismatched.record.reviewState, 'insufficient_evidence');
+    assert.equal(mismatched.record.reviewState, 'invalid_response');
     assert.equal(approvalDisposition(mismatched.record), 'stop');
     await assert.rejects(reviewer.createUserApproval(request, { priorReviewId: mismatched.record.reviewId, userRequestId: 'scope' }), /live matching/u);
     unexpected = false;
-    const incomplete = await reviewer.review({ ...request, targetId: 'missing-material' }, parentRequestContext());
+    const incomplete = await reviewer.review({ ...request, targetId: 'missing-material', actionHash: 'missing-material' }, parentRequestContext());
     assert.equal(incomplete.record.decision, 'needs_user');
     assert.equal(approvalDisposition(incomplete.record), 'stop');
-    assert.equal(calls, 3);
+    assert.equal(calls, 2);
+  });
+});
+
+test('verified project launch sends exact facts with bounded context and corrects structured uncertainty once', async () => {
+  await withApprovalFixture(async ({ storageUri, store }) => {
+    const entry = 'file:///project/script%20%E4%BE%8B.js';
+    const prompts: string[] = [];
+    let correctedDecision: 'approve' | 'deny' | 'needs_user' = 'approve';
+    const reviewer = new ApprovalReviewerService({ globalStorageUri: storageUri as never, workspaceKey: 'workspace',
+      sourceStore: new ModelSourceStore(storageUri as never), store,
+      requestText: async ({ userPrompt }) => {
+        prompts.push(userPrompt);
+        const decision = userPrompt.includes('Host policy correction:') ? correctedDecision : 'needs_user';
+        const policyRules = decision === 'needs_user' ? [PROJECT_BEHAVIOR_UNKNOWN_RULE] : decision === 'deny' ? ['concrete_danger'] : [];
+        return JSON.stringify({ decision, risk: 'medium', reason: 'Project behavior is unfamiliar.',
+          policyRules, saferAlternative: '', affectedTargets: [entry] });
+      } });
+    const request = (actionHash: string): ApprovalReviewRequest => ({
+      ...reviewRequest(), targetId: actionHash, actionHash, actionKind: 'draft_run_execute',
+      verifiedProjectOperation: 'script_launch', evidenceIncomplete: true, visibleSessionEvidence: ['长'.repeat(30_000)],
+      exactAction: { kind: 'draft_run_execute', executable: 'node', argv: ['--', 'script 例.js', '--theme=dark'],
+        cwdUri: 'file:///project', envNames: [], timeoutMs: 1_000, specHash: actionHash,
+        scope: { cwd: '/project', executable: '/usr/bin/node', launcher: '/usr/bin/node', launcherTrust: 'verified_runtime',
+          projectEntryUri: entry, paths: [{ uri: entry, role: 'script', external: false }] },
+        effectAssessment: { version: 1, verdict: 'mutating_or_sensitive', effects: ['arbitrary_code'], evidence: [] } }
+    });
+    const approved = await reviewer.review(request('approve'), parentRequestContext());
+    assert.equal(prompts.length, 2);
+    for (const prompt of prompts) {
+      assert.ok(Buffer.byteLength(prompt, 'utf8') <= 32_768);
+      assert.match(prompt, /"verifiedProjectOperation":"script_launch"/u);
+      assert.match(prompt, /"argv":\["--","script 例.js","--theme=dark"\]/u);
+      assert.match(prompt, /Optional code and context omitted/u);
+    }
+    assert.doesNotMatch(prompts[0], /Host policy correction/u);
+    assert.match(prompts[1], /Host policy correction/u);
+    assert.equal(approvalDisposition(approved.record), 'execute');
+    assert.equal(approved.record.projectApproval, true);
+    assert.equal(approved.record.policyRules[0], VERIFIED_PROJECT_OPERATION_RULE);
+    const restarted = new ApprovalReviewStore(storageUri as never);
+    await restarted.initialize();
+    assert.equal(restarted.getLatestForTarget('approve')?.projectApproval, true);
+    const replayed = new ApprovalReviewerService({ globalStorageUri: storageUri as never, workspaceKey: 'workspace',
+      sourceStore: new ModelSourceStore(storageUri as never), store: restarted });
+    await assert.rejects(replayed.consumeApproval(approved.record, 'auto_approval_review'), /matching approval record/u);
+
+    correctedDecision = 'needs_user';
+    const repeated = await reviewer.review(request('uncertain'), parentRequestContext());
+    assert.equal(prompts.length, 4);
+    assert.equal(approvalDisposition(repeated.record), 'stop');
+    assert.equal(repeated.record.policyRules[0], PROJECT_BEHAVIOR_UNKNOWN_RULE);
+    correctedDecision = 'deny';
+    const denied = await reviewer.review(request('deny'), parentRequestContext());
+    assert.equal(prompts.length, 6);
+    assert.equal(denied.record.decision, 'deny');
+    assert.equal(denied.record.projectApproval, undefined);
   });
 });
 
@@ -655,10 +765,12 @@ test('the durable claim prevents duplicate dispatch and recovers interruption wi
         dispatch();
         await pending;
         return JSON.stringify({ decision: 'needs_user', risk: 'high', reason: 'Confirm the exact scope.',
-          policyRules: ['precise_consent'], saferAlternative: '', affectedTargets: ['file:///project'] });
+          policyRules: [EXACT_USER_AUTHORIZATION_RULE], saferAlternative: '', affectedTargets: ['file:///project'] });
       } };
     const reviewer = new ApprovalReviewerService({ ...options, store });
-    const request = reviewRequest();
+    const request: ApprovalReviewRequest = { ...reviewRequest(), actionKind: 'external_file_access',
+      exactAction: { kind: 'external_file_access', uri: 'file:///project', access: 'read' },
+      externalAuthorization: { required: true, targets: ['file:///project'] } };
     const running = reviewer.review(request, parentRequestContext());
     await dispatched;
     try {
@@ -674,6 +786,10 @@ test('the durable claim prevents duplicate dispatch and recovers interruption wi
         assert.equal(approvalDisposition(duplicate.record), 'stop');
         assert.equal(duplicate.record.reviewId, marker?.reviewId);
       }
+      const reidentified = await fromOtherHost.review({ ...request, targetId: 'new-id' }, parentRequestContext());
+      assert.equal(reidentified.record.targetId, 'new-id');
+      assert.equal(approvalDisposition(reidentified.record), 'stop');
+      assert.equal(reidentified.record.policyRules[0], 'review_already_attempted');
       await assert.rejects(reviewer.createUserApproval(request,
         { priorReviewId: marker?.reviewId, userRequestId: 'forged-marker-click' }), /live matching user request/u);
     } finally { finish(); }
@@ -682,6 +798,13 @@ test('the durable claim prevents duplicate dispatch and recovers interruption wi
     assert.equal(approvalDisposition(result.record), 'request_user');
     assert.notEqual(result.record.reviewId, store.getLatestForTarget(request.targetId)?.priorReviewId);
     assert.equal(store.getLatestForTarget(request.targetId)?.reviewId, result.record.reviewId);
+    const receipts = await Promise.allSettled(['one', 'two'].map(userRequestId =>
+      reviewer.createUserApproval(request, { priorReviewId: result.record.reviewId, userRequestId })));
+    const receipt = receipts.find(item => item.status === 'fulfilled')?.value.record;
+    assert.equal(receipts.filter(item => item.status === 'fulfilled').length, 1);
+    assert.equal(receipt?.approvalSource, 'user_click');
+    assert.equal(receipt?.reviewerConfigFingerprint, result.record.reviewerConfigFingerprint);
+    await reviewer.consumeApproval(receipt!, 'user_click');
   });
 });
 
@@ -705,7 +828,7 @@ test('audit and ledger errors and unavailable pricing are excluded from fallback
     assert.equal(attempts, 1);
     assert.equal(store.getLatestForTarget(reviewRequest().targetId)?.reviewState, 'interrupted');
     failure = 'unpriced';
-    const budget = await reviewer.review({ ...reviewRequest(), targetId: 'unpriced' }, parentRequestContext());
+    const budget = await reviewer.review({ ...reviewRequest(), targetId: 'unpriced', actionHash: 'unpriced' }, parentRequestContext());
     assert.equal(budget.record.reviewState, 'budget_stopped');
     assert.equal(approvalDisposition(budget.record), 'stop');
     assert.equal(attempts, 2);
@@ -745,7 +868,7 @@ test('reviewer retries one physical 503 response and records each attempt before
       assert.equal(posts, 2);
       assert.deepEqual([...ledger.values()], ['attempt_without_usage', 'usage_response']);
       failLedger = true;
-      await assert.rejects(reviewer.review({ ...reviewRequest(), targetId: 'ledger-unavailable' }, parent), ApprovalAuditError);
+      await assert.rejects(reviewer.review({ ...reviewRequest(), targetId: 'ledger-unavailable', actionHash: 'ledger-unavailable' }, parent), ApprovalAuditError);
       assert.equal(posts, 2);
     } finally { globalThis.fetch = fetch; }
   });
@@ -759,7 +882,7 @@ test('historical host and model records remain readable without current authorit
     await writeFile(path.join(storageUri.fsPath, 'approval-reviews.json'), JSON.stringify({ version: 1, records: [
       { ...legacyBase, reviewId: 'host', approvalSource: 'host_policy', policyVersion: 2 },
       { ...legacyBase, reviewId: 'forged-host', approvalSource: 'host_policy', policyVersion: 6 },
-      { ...legacyBase, reviewId: 'old-model', approvalSource: 'auto_approval_review', policyVersion: 5,
+      { ...legacyBase, reviewId: 'old-model', approvalSource: 'auto_approval_review', policyVersion: 6,
         targetId: 'old-denial', actionHash: 'restricted', originalActionHash: restrictedOriginal, decision: 'deny', risk: 'high' },
       { ...legacyBase, reviewId: 'old-user', approvalSource: 'user_click', policyVersion: 2, targetId: 'old-user' }
     ] }));
@@ -774,6 +897,13 @@ test('historical host and model records remain readable without current authorit
     await assert.rejects(fresh.consumeMatchingApproval({ ...exact, reviewId: 'forged-host', policyVersion: 6,
       expectedSource: 'host_policy' as never }), /matching approval/u);
     await assert.rejects(fresh.add({ ...approvalRecordInput(), approvalSource: 'host_policy' }), /Historical/u);
+    await fresh.invalidateHistory({ id: 'edit-resend-v7', sessionId: 'session', removedMessageIds: [], removedSegmentIds: ['run'],
+      retainedMessageIds: [] });
+    const restarted = new ApprovalReviewStore(storageUri as never);
+    await restarted.initialize();
+    assert.equal(restarted.getLatestForTarget('old-denial'), undefined);
+    assert.equal(restarted.findHardRunDenial('session', restrictedOriginal)?.reviewId, 'old-model');
+    assert.deepEqual(restarted.decisionHistory('session', 'root'), []);
   });
 });
 

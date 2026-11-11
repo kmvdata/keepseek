@@ -1,7 +1,9 @@
 import * as path from 'node:path';
 import { homedir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import type { CommandSemantics } from './commandSemantics';
 import { isPathInside } from './pathScope';
+import { isExternalNetworkTarget } from './projectLaunchArguments';
 
 const destructiveProgram = /^(?:rm|rmdir|del|erase|unlink|remove-item|rd)(?:\.exe)?$/iu;
 const forbiddenProgram = /^(?:sudo|doas|pkexec|runas|su|mkfs(?:\.[\w-]+)?|mke2fs|fdisk|diskutil|format|diskpart|shutdown|reboot|printenv)(?:\.(?:exe|com))?$/iu;
@@ -28,7 +30,8 @@ export function assertCommandTarget(target: string, writes: boolean): void {
 
 /** Extract visible targets from explicit shell and interpreter arguments. This
  * provides concrete denial evidence. Dynamic subprocess effects remain unknown. */
-export function inspectVisibleCommandTargets(semantics: CommandSemantics): Array<{ value: string; write: boolean }> {
+export function inspectVisibleCommandTargets(semantics: CommandSemantics,
+  collectNetworkTarget?: (value: string) => void): Array<{ value: string; write: boolean }> {
   const targets: Array<{ value: string; write: boolean }> = [];
   const fail = () => { throw new Error('Protected command or credential target. Nothing executed. / 操作涉及受保护的命令或凭据目标，尚未执行。'); };
   if (forbiddenProgram.test(semantics.program)) fail();
@@ -40,6 +43,12 @@ export function inspectVisibleCommandTargets(semantics: CommandSemantics): Array
     if (arg.role !== 'inline_code') {
       if (protectedReference.test(arg.value)) fail();
       if (arg.role === 'text') {
+        const raw = arg.value.replace(/^--[\w-]+=/u, '');
+        if (/^file:/iu.test(raw)) {
+          try { targets.push({ value: fileURLToPath(raw), write: false }); }
+          catch { fail(); }
+          continue;
+        }
         const value = arg.value.replace(/^--[\w-]+=/u, '').replace(/^file:(?!\/\/)/iu, '');
         const isCache = /^(?:npm|pnpm|yarn|bun)$/u.test(semantics.program) && arg.value.startsWith('--cache=');
         if (isCache || /^(?:\/[^/]|[A-Za-z]:[/\\]|\\\\|\.\.?[/\\]|~[/\\])/u.test(value)) {
@@ -58,6 +67,7 @@ export function inspectVisibleCommandTargets(semantics: CommandSemantics): Array
         || /^(?:\/etc\/(?:shadow|sudoers)|\/proc\/(?:self|\d+)\/environ)$/u.test(value)) fail();
       if (destructive && /^(?:~|~\/|\$(?:\{HOME\}|HOME|\{USERPROFILE\}|USERPROFILE)(?:[/\\].*)?|%USERPROFILE%(?:[/\\].*)?|\/(?:[*?]+)?|[A-Za-z]:[/\\](?:[*?]+)?)$/iu.test(value)) fail();
       if (/^of=(?:\/dev\/|\\\\\.\\)/iu.test(value) && /\bdd\b/u.test(code)) fail();
+      if (isExternalNetworkTarget(value)) collectNetworkTarget?.(value);
       if (/^(?:\/|[A-Za-z]:[/\\]|\\\\|\.\.[/\\]|~[/\\])/u.test(value)) {
         targets.push({ value: value.startsWith('~') ? path.join(homedir(), value.slice(2)) : value, write: writes });
       }

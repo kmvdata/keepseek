@@ -6,6 +6,7 @@ import { hasAssociatedRecordOwner, assertManagedStoragePath, readAssociatedJson,
 import type { HistoryTruncationScope } from '../sessions/historyTruncation';
 import {
   APPROVAL_POLICY_VERSION,
+  VERIFIED_PROJECT_OPERATION_RULE,
   approvalDisposition,
   normalizeApprovalReviewState,
   type ApprovalRecordMatch,
@@ -66,7 +67,8 @@ export class ApprovalReviewStore {
 
   public async add(input: ReviewRecordInput): Promise<ApprovalReviewRecord> {
     if (input.policyVersion !== APPROVAL_POLICY_VERSION || input.approvalSource === 'host_policy'
-      || (input.approvalSource === 'local_policy' && input.decision === 'approve')) {
+      || (input.approvalSource === 'local_policy' && input.decision === 'approve')
+      || (input.projectApproval && !hasVerifiedProjectApproval(input))) {
       throw new Error('Historical or non-authorizing approval source cannot issue a current approval record.');
     }
     if (input.approvalSource === 'user_click' && (!input.priorReviewId || !input.userRequestId
@@ -111,7 +113,9 @@ export class ApprovalReviewStore {
       if (denied) return false;
       duplicate = [...records.values()].reverse().find(prior => !prior.historyInvalidatedBy
         && prior.approvalSource === 'auto_approval_review' && prior.sessionId === input.sessionId
-        && prior.rootTaskId === input.rootTaskId && prior.agentRunId === input.agentRunId && prior.targetId === input.targetId);
+        && prior.rootTaskId === input.rootTaskId && prior.agentRunId === input.agentRunId
+        && (prior.targetId === input.targetId || (prior.actionKind === input.actionKind && prior.actionHash === input.actionHash
+          && prior.scopeFingerprint === input.scopeFingerprint)));
       if (duplicate) return false;
       records.set(record.reviewId, record);
       return true;
@@ -235,7 +239,7 @@ export class ApprovalReviewStore {
       || record.actionHash !== input.actionHash || input.policyVersion !== APPROVAL_POLICY_VERSION
       || record.policyVersion !== input.policyVersion
       || (input.expectedSource !== 'auto_approval_review' && input.expectedSource !== 'user_click')
-      || record.approvalSource !== input.expectedSource || record.decision !== 'approve'
+      || record.approvalSource !== input.expectedSource || approvalDisposition(record) !== 'execute'
       || input.approvalMode !== 'delegate' || record.approvalMode !== input.approvalMode
       || !record.scopeFingerprint || record.scopeFingerprint !== input.scopeFingerprint
       || !input.reviewerConfigFingerprint || record.reviewerConfigFingerprint !== input.reviewerConfigFingerprint
@@ -341,7 +345,8 @@ type ReviewSnapshotIdentity = Pick<ApprovalReviewRequest, 'sessionId' | 'rootTas
   | 'actionKind' | 'actionHash' | 'effectHash' | 'approvalMode' | 'scopeFingerprint'>;
 
 function findSafetyDenial(records: Map<string, ApprovalReviewRecord>, input: SafetyDenialIdentity): ApprovalReviewRecord | undefined {
-  return [...records.values()].reverse().find(record => !record.historyInvalidatedBy && record.sessionId === input.sessionId
+  // Truncation revokes live history membership, never the safety finding for an equivalent operation.
+  return [...records.values()].reverse().find(record => record.sessionId === input.sessionId
     && record.actionKind === input.actionKind && record.decision === 'deny'
     && (record.actionHash === input.actionHash || record.originalActionHash === input.actionHash
       || (input.effectHash && record.effectHash === input.effectHash))
@@ -364,6 +369,7 @@ function toDisplay(record: ApprovalReviewRecord): ApprovalReviewDisplay {
     policyVersion: record.policyVersion,
     approvalMode: record.approvalMode,
     approvalSource: record.approvalSource,
+    projectApproval: hasVerifiedProjectApproval(record) ? true : undefined,
     osIsolation: record.osIsolation,
     reviewerSourceId: record.reviewerSourceId,
     reviewerModelId: record.reviewerModelId,
@@ -394,6 +400,7 @@ function normalizeRecord(value: unknown): ApprovalReviewRecord | undefined {
     || !Number.isFinite(Date.parse(record.createdAt))) return undefined;
   return structuredClone({
     ...record,
+    projectApproval: hasVerifiedProjectApproval(record) ? true : undefined,
     reviewState: normalizeApprovalReviewState(record.reviewState),
     effectHash: typeof record.effectHash === 'string' && /^[a-f0-9]{64}$/u.test(record.effectHash) ? record.effectHash : undefined,
     priorReviewId: typeof record.priorReviewId === 'string' ? record.priorReviewId.slice(0, 300) : undefined,
@@ -408,4 +415,11 @@ function normalizeRecord(value: unknown): ApprovalReviewRecord | undefined {
     originalActionHash: typeof record.originalActionHash === 'string' && /^[a-f0-9]{64}$/u.test(record.originalActionHash)
       ? record.originalActionHash : undefined
   });
+}
+
+function hasVerifiedProjectApproval(record: ReviewRecordInput): boolean {
+  return record.projectApproval === true && record.policyVersion >= 7 && record.policyVersion <= APPROVAL_POLICY_VERSION
+    && record.approvalSource === 'auto_approval_review' && record.decision === 'approve'
+    && !record.reviewState && record.policyRules.includes(VERIFIED_PROJECT_OPERATION_RULE)
+    && ['low', 'medium'].includes(record.risk);
 }

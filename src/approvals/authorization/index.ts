@@ -4,5 +4,6 @@ export { analyzeCommandCapability, normalizeCommandCapabilityDiagnostic, COMMAND
 export { analyzeDraftRunEffects } from './commandEffects';
 export { inspectDraftRunScope } from './commandScope';
 export { ExactOperationGrants } from './exactOperationGrants';
-export { draftRunIdentity, inspectAutomaticRunAuthorization, assertAutomaticRunAuthorization, inspectAutomaticEditAuthorization } from './preflight';
+export { draftRunIdentity, inspectAutomaticRunAuthorization, evaluateAutomaticRunAuthorization,
+  assertAutomaticRunAuthorization, inspectAutomaticEditAuthorization } from './preflight';
 export { checkDraftRunApprovalBoundary, validateDraftRunBeforeApproval, InvalidGitCommitError } from './executionBoundary';

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { test } from 'node:test';
@@ -8,6 +8,7 @@ import * as vscode from 'vscode';
 import { createChangeSet } from '../src/edits/changeSet';
 import { ChangeSetStore } from '../src/edits/changeSetStore';
 import { createFullTextDraftEdit } from '../src/edits/draftEdit';
+import { SafeFileEditor } from '../src/edits/safeFileEditor';
 import type { ChangeCheckpoint, ChangeSetFile, ChatMessage, ChatSession } from '../src/shared/types';
 
 test('creates one structured ChangeSet for multiple draft edits', () => {
@@ -654,6 +655,83 @@ test('persists discarded and reverted terminal history without source text', asy
   assert.ok(state.every((changeSet) => changeSet.files.every((file) => !('newText' in file))));
 });
 
+test('command edit dependencies require an applied move and retain reverted endpoints after restart', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-change-command-dependency-'));
+  const previousWorkspaceFolders = vscode.workspace.workspaceFolders;
+  const workspace = vscode.workspace as { workspaceFolders: typeof vscode.workspace.workspaceFolders };
+  workspace.workspaceFolders = [{ uri: vscode.Uri.file(root), name: 'keepseek-test', index: 0 }];
+  t.after(async () => {
+    workspace.workspaceFolders = previousWorkspaceFolders;
+    await rm(root, { recursive: true, force: true });
+  });
+  const source = vscode.Uri.file(path.join(root, '旧入口.js'));
+  const target = vscode.Uri.file(path.join(root, '新入口 file.js'));
+  const body = 'console.log("moved");\n';
+  await writeFile(source.fsPath, body);
+  const fixture = createStoreFixture(root, undefined, new SafeFileEditor());
+  fixture.store.addDraftEdits({ runId: 'move-segment', sessionId: 'session-1', messageId: 'assistant-move', edits: [{
+    id: 'move-entry', uri: source.toString(), sourceUri: source.toString(), targetUri: target.toString(),
+    label: 'Move script entry', kind: 'move_v1', action: 'move', reason: 'Move the script before executing it.',
+    base: { sha256: hash(body), sizeBytes: Buffer.byteLength(body) }
+  }] });
+  const segments = new Set(['move-segment']);
+  const targetInput = new Set([target.toString()]);
+  assert.equal(fixture.store.hasCommandEditCandidates('session-1', new Set(['unrelated'])), false);
+  assert.equal(fixture.store.hasCommandEditCandidates('session-1', segments), true);
+  const check = (store: ChangeSetStore, inputs = targetInput) => store.inspectCommandEditDependencies('session-1', segments, inputs);
+  assert.equal((await check(fixture.store)).dependency?.targetId, 'move-entry');
+  assert.deepEqual((await fixture.store.applyEdit('move-entry'))?.appliedEditIds, ['move-entry']);
+  assert.equal((await check(fixture.store)).allowed, true);
+  assert.equal((await check(fixture.store, new Set([source.toString()]))).allowed, false);
+  await writeFile(target.fsPath, 'console.log("other");\n');
+  assert.equal((await check(fixture.store)).allowed, false);
+  await writeFile(target.fsPath, body);
+  assert.deepEqual((await fixture.store.revertEdit('move-entry'))?.revertedEditIds, ['move-entry']);
+  await fixture.store.flush();
+  const restarted = createStoreFixture(root, undefined, new SafeFileEditor());
+  await restarted.store.initialize();
+  assert.equal(restarted.store.toWebviewState('session-1')[0]?.files[0]?.targetUri, target.toString());
+  assert.equal((await check(restarted.store)).dependency?.targetId, 'move-entry');
+});
+
+test('an external Apply receipt needs a current exact command grant before checking its bytes', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-change-external-command-proof-'));
+  const project = path.join(await realpath(root), 'project');
+  await mkdir(project);
+  const workspace = vscode.workspace as { workspaceFolders: typeof vscode.workspace.workspaceFolders };
+  const previousWorkspaceFolders = workspace.workspaceFolders;
+  workspace.workspaceFolders = [{ uri: vscode.Uri.file(project), name: 'keepseek-test', index: 0 }];
+  t.after(async () => {
+    workspace.workspaceFolders = previousWorkspaceFolders;
+    await rm(root, { recursive: true, force: true });
+  });
+  const entry = vscode.Uri.file(path.join(path.dirname(project), 'external.js'));
+  const edit = createFullTextDraftEdit({ id: 'external-edit', uri: entry.toString(), label: 'External entry', action: 'create',
+    content: 'console.log("authorized");\n', reason: 'Create the explicitly authorized external entry.' });
+  const editor = new SafeFileEditor();
+  const store = createStoreFixture(root, undefined, editor).store;
+  store.addDraftEdits({ runId: 'external-segment', sessionId: 'session-1', messageId: 'assistant-external', edits: [edit] });
+  assert.deepEqual((await store.applyEdit(edit.id, { authorizedUri: edit.uri, isAuthorized: () => true }))?.appliedEditIds, [edit.id]);
+  let reads = 0;
+  const checkFile = editor.matchesAppliedFileIdentity.bind(editor);
+  editor.matchesAppliedFileIdentity = async (...args) => { reads++; return await checkFile(...args); };
+  const check = (authorizedUris?: ReadonlySet<string>) => store.inspectCommandEditDependencies('session-1',
+    new Set(['external-segment']), new Set([entry.toString()]), undefined,
+    { selectedProjectUri: vscode.Uri.file(project).toString(), authorizedUris });
+  const preview = await check(new Set([vscode.Uri.file(path.dirname(project)).toString()]));
+  assert.equal(preview.allowed, true);
+  assert.equal(preview.pendingExternalProof, true);
+  assert.equal(reads, 0);
+  const exact = new Set([entry.toString()]);
+  const verified = await check(exact);
+  assert.equal(verified.allowed, true);
+  assert.equal(verified.pendingExternalProof, undefined);
+  assert.equal(verified.fingerprint, preview.fingerprint);
+  assert.equal(reads, 1);
+  await writeFile(entry.fsPath, 'console.log("replaced");\n');
+  assert.equal((await check(exact)).allowed, false);
+});
+
 test('sharded ChangeSets load only the active session and remain inoperable until an old session is loaded', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'keepseek-change-lazy-'));
   const fixture = createStoreFixture(root);
@@ -744,7 +822,7 @@ function versionedDraft(
   });
 }
 
-function createStoreFixture(root: string, failLabel?: string) {
+function createStoreFixture(root: string, failLabel?: string, editor?: SafeFileEditor) {
   const now = '2026-07-21T00:00:00.000Z';
   const messages: ChatMessage[] = [];
   const activeSession = {
@@ -780,7 +858,7 @@ function createStoreFixture(root: string, failLabel?: string) {
   const diffService = { async openDiff() { return undefined; } };
   return {
     store: new ChangeSetStore(
-      safeFileEditor as never,
+      editor ?? safeFileEditor as never,
       diffService as never,
       sessionStore as never,
       vscode.Uri.file(root),

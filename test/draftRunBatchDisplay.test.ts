@@ -68,6 +68,7 @@ async function createFixture() {
   const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-batch-display-'));
   const workspaceRoot = path.join(root, 'workspace');
   await mkdir(workspaceRoot);
+  await writeFile(path.join(workspaceRoot, 'fixture.js'), 'console.log(process.argv[2]);\n');
   vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file(workspaceRoot), name: 'workspace' }];
   vscode.workspace.isTrusted = true;
   const storage = vscode.Uri.file(path.join(root, 'storage'));
@@ -76,7 +77,7 @@ async function createFixture() {
   const batch = new DraftRunBatchCoordinator(store);
   const proposal = (id: string): DraftRunProposal => {
     const spec: DraftRunSpec = {
-      executable: 'node', args: [id], reason: id,
+      executable: process.execPath, args: ['fixture.js', id], reason: id,
       cwdUri: vscode.Uri.file(workspaceRoot).toString(), cwdLabel: '.',
       externalCwd: false, env: [], timeoutMs: 120000
     };

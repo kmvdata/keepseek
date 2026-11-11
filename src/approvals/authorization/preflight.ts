@@ -3,9 +3,10 @@ import type { ApprovalMode, DraftEdit, DraftRun } from '../../shared/types';
 import { hashApprovalValue, hashDraftEditAction } from '../approvalReviewHash';
 import { inspectDraftRunScope, type CommandRemoteInspection, type CommandScope } from './commandScope';
 import { ExactOperationGrants, type OperationIdentity } from './exactOperationGrants';
-import { checkDraftRunApprovalIdentity } from './executionBoundary';
+import { checkDraftRunApprovalIdentity, getDraftRunLaunchRefusal } from './executionBoundary';
 import { analyzeCommand } from './commandSemantics';
 import { assertCleanDraftEditTarget, inspectDraftEditTarget } from './editTargets';
+import { isPathInside, resolveSelectedProjectRoot } from './pathScope';
 
 interface RunAuthorizationRefusal {
   code: 'external_authorization_required' | 'insufficient_launch_evidence' | 'hard_blocked';
@@ -19,7 +20,16 @@ export function draftRunIdentity(run: DraftRun): OperationIdentity {
 /** Inspect the exact operation before either approver and again before execution.
  * The scope alone can describe missing consent, never grant it. */
 export async function inspectAutomaticRunAuthorization(run: DraftRun, grants: ExactOperationGrants, mode?: ApprovalMode,
-  remoteScope: CommandRemoteInspection = false): Promise<{
+  remoteScope: CommandRemoteInspection = false, selectedProjectUri?: string) {
+  checkDraftRunApprovalIdentity(run);
+  const scope = await inspectDraftRunScope(run, remoteScope, undefined, mode === 'delegate', selectedProjectUri);
+  return evaluateAutomaticRunAuthorization(run, grants, mode, remoteScope, scope);
+}
+
+/** A scope snapshot belongs to one preflight phase. Callers must inspect again
+ * after crossing a model, user, audit consumption or dispatch boundary. */
+export function evaluateAutomaticRunAuthorization(run: DraftRun, grants: ExactOperationGrants, mode: ApprovalMode | undefined,
+  remoteScope: CommandRemoteInspection, scope: CommandScope): {
   allowed: boolean;
   reviewable: boolean;
   requiresExactGrant: boolean;
@@ -29,18 +39,18 @@ export async function inspectAutomaticRunAuthorization(run: DraftRun, grants: Ex
   scopeUris: Set<string>;
   authorizedUris: Set<string>;
   reason: string;
-}> {
-  checkDraftRunApprovalIdentity(run);
-  const scope = await inspectDraftRunScope(run, remoteScope, undefined, mode === 'delegate');
+} {
   checkDraftRunApprovalIdentity(run);
   const reason = [...scope.externalUris.map(uri => `External path / 外部路径: ${uri}`), ...scope.reasons].join('; ');
-  const semantics = analyzeCommand(run.spec);
+  const semantics = scope.semantics ?? analyzeCommand(run.spec);
   const scopeUris = new Set(scope.externalUris);
   if (run.spec.externalCwd && scope.externalUris.length) scopeUris.add(run.spec.cwdUri);
   const requiresNetworkGrant = mode === 'delegate' && needsExactNetworkGrant(run, semantics, remoteScope);
   const requiresExactGrant = scopeUris.size > 0 || requiresNetworkGrant;
   const grantMissing = requiresExactGrant && !grants.matches(draftRunIdentity(run), scope);
-  const ineligible = mode === 'delegate' ? inspectDelegatedRunEligibility(run, scope, semantics, reason) : undefined;
+  const launchRefusal = getDraftRunLaunchRefusal(scope);
+  const ineligible = launchRefusal ? { code: 'insufficient_launch_evidence' as const, reason: launchRefusal }
+    : mode === 'delegate' ? inspectDelegatedRunEligibility(run, scope, semantics, reason) : undefined;
   const refusal = ineligible ?? (grantMissing ? {
     code: 'external_authorization_required' as const,
     reason: reason || 'An exact external operation grant is required. / 此操作需要事先精确授权外部目标。'
@@ -56,9 +66,11 @@ function needsExactNetworkGrant(run: DraftRun, semantics: ReturnType<typeof anal
     && run.spec.args.slice(1, -1).every(arg => /^(?:-[fsS]+|--fail|--silent|--show-error)$/u.test(arg))
     && /^https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/[^\s]*)?$/iu.test(run.spec.args.at(-1) ?? '');
   return semantics.effects.includes('publish_or_deploy')
-    || (/^(?:npm|pnpm|yarn|bun)$/u.test(semantics.program) && run.spec.args.includes('publish'))
+    || (!semantics.projectPackageScript && !semantics.projectScript
+      && /^(?:npm|pnpm|yarn|bun)$/u.test(semantics.program) && run.spec.args.includes('publish'))
     || (semantics.program === 'git' && ['push', 'fetch', 'pull', 'clone', 'remote', 'ls-remote', 'submodule'].includes(subcommand ?? ''))
-    || (semantics.effects.includes('network') && !semantics.effects.includes('package_install') && !loopbackProbe);
+    || (!loopbackProbe && (Boolean(semantics.networkTargets?.length)
+      || semantics.effects.includes('network') && !semantics.effects.includes('package_install')));
 }
 
 function inspectDelegatedRunEligibility(run: DraftRun, scope: CommandScope, semantics: ReturnType<typeof analyzeCommand>,
@@ -68,7 +80,7 @@ function inspectDelegatedRunEligibility(run: DraftRun, scope: CommandScope, sema
     return { code: 'hard_blocked',
       reason: 'Automatic Git release requires a bounded ref query or an explicit, non-forced push. / 自动 Git 发布要求范围明确的引用查询，或显式且非强制的引用推送。' };
   }
-  const packageGlobal = /^(?:npm|pnpm|yarn|bun)$/u.test(semantics.program)
+  const packageGlobal = !semantics.projectPackageScript && !semantics.projectScript && /^(?:npm|pnpm|yarn|bun)$/u.test(semantics.program)
     && run.spec.args.some(arg => /^(?:-[a-z]*g[a-z]*|--global|--location=global)(?:=|$)/u.test(arg) || arg === 'global');
   const pagerCorrection = semantics.gitReplan?.code === 'git_status_pager_override';
   const gitUnbounded = git && !pagerCorrection && (scope.diagnostics.some(item =>
@@ -79,9 +91,7 @@ function inspectDelegatedRunEligibility(run: DraftRun, scope: CommandScope, sema
   if (packageGlobal || gitUnbounded) return { code: 'hard_blocked',
     reason: reason || 'The command would use an unverified repository, configuration or system target. / 命令涉及未经核实的仓库、配置或系统目标。' };
   const gitUnverified = git && (!scope.verifiedLauncher || !scope.gitCwd) && !pagerCorrection;
-  const hasIncompleteLaunch = !scope.boundLauncher
-    || scope.diagnostics.some(item => ['foreign_path', 'path_resolution'].includes(item.code)
-      || (item.code === 'missing_option_value' && !semantics.gitReplan))
+  const hasIncompleteLaunch = scope.diagnostics.some(item => item.code === 'missing_option_value' && !semantics.gitReplan)
     || run.spec.env.some(({ name }) => !/^(?:LANG|LC_ALL|LC_CTYPE|TERM|COLORTERM|CI|NO_COLOR|NODE_ENV|PYTHONDONTWRITEBYTECODE)$/u.test(name));
   if (gitUnverified || hasIncompleteLaunch) return { code: 'insufficient_launch_evidence',
     reason: reason || 'The exact launch cannot be verified. / 无法核实实际启动配置。' };
@@ -89,8 +99,8 @@ function inspectDelegatedRunEligibility(run: DraftRun, scope: CommandScope, sema
 }
 
 export async function assertAutomaticRunAuthorization(run: DraftRun, grants: ExactOperationGrants, fingerprint: string,
-  mode?: ApprovalMode, remoteScope = false): Promise<void> {
-  const decision = await inspectAutomaticRunAuthorization(run, grants, mode, remoteScope);
+  mode?: ApprovalMode, remoteScope: CommandRemoteInspection = false, selectedProjectUri?: string): Promise<void> {
+  const decision = await inspectAutomaticRunAuthorization(run, grants, mode, remoteScope, selectedProjectUri);
   if (!decision.allowed || decision.scope.fingerprint !== fingerprint) {
     throw new Error('Command scope or launch identity changed. Nothing executed. / 命令范围或启动身份已变化，尚未执行。');
   }
@@ -98,7 +108,8 @@ export async function assertAutomaticRunAuthorization(run: DraftRun, grants: Exa
 
 /** Edit scope consent uses the existing exact URI contract. Canonical paths,
  * symlinks, base hashes and dirty editors remain enforced by SafeFileEditor. */
-export async function inspectAutomaticEditAuthorization(input: { sessionId: string; runId: string; edit: DraftEdit; skillScaffold?: boolean }, grants: ExactOperationGrants) {
+export async function inspectAutomaticEditAuthorization(input: { sessionId: string; runId: string; edit: DraftEdit; skillScaffold?: boolean },
+  grants: ExactOperationGrants, selectedProjectUri?: string) {
   if (!vscode.workspace.isTrusted) throw new Error('DraftEdit requires a trusted workspace.');
   const { edit } = input;
   const identity: OperationIdentity = { sessionId: input.sessionId, runId: input.runId,
@@ -112,9 +123,16 @@ export async function inspectAutomaticEditAuthorization(input: { sessionId: stri
     const metadata = await inspectDraftEditTarget(uri, create, allowScaffold);
     assertCleanDraftEditTarget(uri, 'DraftEdit targets a dirty editor. Nothing executed. / 草稿编辑涉及未保存的编辑器，尚未执行。', metadata.canonical);
     if (create && metadata.fileIdentity) throw new Error('DraftEdit creation target already exists. / 草稿编辑的创建目标已存在。');
-    return { ...metadata, uri: value };
+    return { ...metadata, uri: value, local: uri.scheme === 'file' };
   }));
+  const selectedRoot = await resolveSelectedProjectRoot(selectedProjectUri);
+  if (selectedProjectUri && !selectedRoot) throw new Error('Selected project scope is unavailable. / 无法核实选定的项目范围。');
   if (!vscode.workspace.isTrusted) throw new Error('DraftEdit requires a trusted workspace.');
-  const scope = { externalUris: resolved.filter(target => !target.root).map(target => target.uri), fingerprint: hashApprovalValue(resolved) };
-  return { identity, scope, allowed: !scope.externalUris.length || grants.matches(identity, scope) };
+  const inSelectedProject = (target: typeof resolved[number]) => target.local && Boolean(target.root && selectedRoot
+    && isPathInside(selectedRoot, target.canonical));
+  const externalUris = resolved.filter(target => !target.root || (selectedProjectUri && !inSelectedProject(target))).map(target => target.uri);
+  const scope = { externalUris, fingerprint: hashApprovalValue({ selectedRoot, targets: resolved }) };
+  const canonicalTargets = resolved.map(target => target.local ? vscode.Uri.file(target.canonical).toString() : target.uri);
+  return { identity, scope, canonicalTargets, verifiedProjectOperation: resolved.every(inSelectedProject),
+    allowed: !scope.externalUris.length || grants.matches(identity, scope) };
 }

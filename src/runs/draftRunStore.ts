@@ -20,7 +20,7 @@ import type {
 } from '../shared/types';
 import type { ChatMessage } from '../shared/types';
 import { executionSegmentId } from '../sessions/userTask';
-import { hasExactCommandScope } from '../approvals/authorization/commandScope';
+import { hasExactCommandScope, type CommandScope } from '../approvals/authorization/commandScope';
 import { analyzeDraftRunEffects, inspectDraftRunScope, checkDraftRunApprovalBoundary, validateDraftRunBeforeApproval } from '../approvals/authorization';
 import { DraftRunAuthorizationService } from './draftRunAuthorization';
 import type { ApprovalRecordMatch, ApprovalReviewRecord } from '../approvals/approvalReviewTypes';
@@ -530,23 +530,24 @@ export class DraftRunStore {
     if (!decision.allowed) throw new Error(decision.reason);
   }
 
-  private async assertDependencyFacts(run: DraftRun, authorizedUris: ReadonlySet<string>, rootTaskRunIds?: ReadonlySet<string>): Promise<void> {
-    const decision = await inspectDraftRunDependencyFacts(run, id => this.get(id), rootTaskRunIds);
+  private async assertDependencyFacts(run: DraftRun, authorizedUris: ReadonlySet<string>, rootTaskRunIds?: ReadonlySet<string>, selectedProjectUri?: string): Promise<void> {
+    const decision = await inspectDraftRunDependencyFacts(run, id => this.get(id), rootTaskRunIds, selectedProjectUri);
     if (!decision.allowed) throw new Error(decision.reason);
     const prior = Array.from(this.draftRuns.values()).filter(candidate => candidate.id !== run.id
       && candidate.sessionId === run.sessionId
       && (rootTaskRunIds ? rootTaskRunIds.has(candidate.id) : candidate.agentRunId === run.agentRunId));
-    const ancestry = await inspectGitAncestorPrerequisite(run, prior, authorizedUris);
+    const ancestry = await inspectGitAncestorPrerequisite(run, prior, authorizedUris, selectedProjectUri);
     if (!ancestry.allowed) throw new Error(ancestry.reason);
   }
 
-  public async preflightApproval(id: string, authorizedExternalReferenceUris: ReadonlySet<string>, rootTaskRunIds?: ReadonlySet<string>): Promise<DraftRun> {
+  public async preflightApproval(id: string, authorizedExternalReferenceUris: ReadonlySet<string>, rootTaskRunIds?: ReadonlySet<string>,
+    scope?: CommandScope, selectedProjectUri?: string): Promise<DraftRun> {
     const owner = this.draftRuns.get(id)?.sessionId;
     if (owner) await new SessionDeletionAuthority(this.globalStorageUri).assertSessionIdWritable(owner);
     const draftRun = this.draftRuns.get(id);
     if (!draftRun || isHistoryInactive(draftRun) || draftRun.status !== 'pending' || draftRun.dependency) throw new Error('Pending executable DraftRun was not found.');
-    await this.assertDependencyFacts(draftRun, authorizedExternalReferenceUris, rootTaskRunIds);
-    await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris);
+    await this.assertDependencyFacts(draftRun, authorizedExternalReferenceUris, rootTaskRunIds, selectedProjectUri);
+    await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris, scope);
     if (isHistoryInactive(draftRun) || this.draftRuns.get(id) !== draftRun || draftRun.status !== 'pending') throw new Error('DraftRun history changed during approval.');
     return cloneDraftRun(draftRun);
   }
@@ -572,7 +573,9 @@ export class DraftRunStore {
     options: {
       autoContinue?: boolean;
       delegatedApproval?: () => boolean;
-      verifyScope?: () => Promise<void | VerifiedDraftRunLaunch>;
+      /** Invokes a memoized inspection after this phase's caller-owned checks. */
+      verifyScope?: (inspectScope: () => Promise<CommandScope>) => Promise<void | VerifiedDraftRunLaunch>;
+      selectedProjectUri?: string;
       approvalRecord?: ApprovalRecordMatch;
       signal?: AbortSignal;
       /** Finite batch click authority, rechecked after every asynchronous boundary. */
@@ -609,19 +612,28 @@ export class DraftRunStore {
         if (restricted && (!original || !options.delegatedApproval || options.approvalRecord?.expectedSource !== 'auto_approval_review'
           || options.approvalRecord.scopeFingerprint !== restricted.boundaryFingerprint
           || !options.verifyScope)) throw new Error('Restricted validation requires its own automatic approval.');
-        await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris);
-        const scope = restricted ? undefined : await inspectDraftRunScope(draftRun);
+        let fingerprint: string | undefined;
         const verifyScope = async () => {
-          await this.assertDependencyFacts(draftRun, authorizedExternalReferenceUris, options.rootTaskRunIds);
+          await this.assertDependencyFacts(draftRun, authorizedExternalReferenceUris, options.rootTaskRunIds, options.selectedProjectUri);
+          let inspection: Promise<CommandScope> | undefined;
+          const inspectScope = () => inspection ??= inspectDraftRunScope(draftRun, false, undefined, false, options.selectedProjectUri);
           if (restricted && original) {
-            await options.verifyScope?.();
+            await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris);
+            await options.verifyScope?.(inspectScope);
             return { restrictedLaunch: await verifyRestrictedPythonSyntax(draftRun, original) };
           }
-          const current = await inspectDraftRunScope(draftRun);
-          if (current.fingerprint !== scope?.fingerprint || !hasExactCommandScope(current, draftRun.spec.cwdUri, authorizedExternalReferenceUris)) {
+          const verifiedRemoteLaunch = await options.verifyScope?.(inspectScope);
+          const current = await inspectScope();
+          await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris, current);
+          const approvalFingerprint = options.approvalRecord?.scopeFingerprint;
+          const boundFingerprint = verifiedRemoteLaunch?.gitRemote ? verifiedRemoteLaunch.fingerprint : current.fingerprint;
+          if ((fingerprint !== undefined && fingerprint !== current.fingerprint)
+            || (options.delegatedApproval && (!approvalFingerprint || approvalFingerprint !== boundFingerprint))
+            || !hasExactCommandScope(current, draftRun.spec.cwdUri, authorizedExternalReferenceUris)) {
             throw new Error('Exact external operation scope is missing or changed. / 缺少精确范围授权或范围已变化。');
           }
-          return { scope: current, verifiedRemoteLaunch: await options.verifyScope?.() };
+          fingerprint ??= current.fingerprint;
+          return { scope: current, verifiedRemoteLaunch };
         };
         await verifyScope();
         assertAuthorized();
@@ -644,14 +656,12 @@ export class DraftRunStore {
         this.emitState(draftRun);
         await this.persistNow();
 
-        await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris);
         await verifyScope();
         assertAuthorized();
         const permit = options.delegatedApproval
           ? await this.authorization.createDelegatedPermit(draftRun, options.delegatedApproval, options.approvalRecord)
           : this.authorization.createUserClickPermit(draftRun);
         // Approval-record consumption is asynchronous: recheck scope after it too.
-        await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris);
         const { scope: verifiedScope, restrictedLaunch, verifiedRemoteLaunch } = await verifyScope();
         assertAuthorized();
         const abortController = new AbortController();
@@ -668,12 +678,9 @@ export class DraftRunStore {
           draftRun: cloneDraftRun(draftRun),
           permit,
           restrictedLaunch,
-          verifiedLaunch: options.approvalRecord?.approvalMode === 'delegate' && verifiedScope?.boundLauncher
-            ? verifiedRemoteLaunch ?? { executable: verifiedScope.boundLauncher, cwd: vscode.Uri.parse(verifiedScope.cwd).fsPath, env: verifiedScope.environment }
-            : verifiedScope?.executable && !verifiedScope.externalUris.length
-            && (verifiedScope.trustedProjectScript || (!verifiedScope.uncertain && verifiedScope.paths.some(target => target.role === 'repository')))
-            ? { executable: verifiedScope.projectScriptLaunchPath ?? verifiedScope.executable,
-                cwd: vscode.Uri.parse(verifiedScope.cwd).fsPath } : undefined,
+          verifiedLaunch: verifiedRemoteLaunch || (verifiedScope?.boundLauncher
+            ? { executable: verifiedScope.boundLauncher, cwd: vscode.Uri.parse(verifiedScope.cwd).fsPath, env: verifiedScope.environment }
+            : undefined),
           signal: abortController.signal,
           onOutput: (chunk) => this.recordOutput(draftRun, chunk)
         });

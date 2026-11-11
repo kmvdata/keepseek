@@ -509,65 +509,49 @@ test('delegate reviews only metadata for an exact authorized external file and c
   } finally { await rm(externalRoot, { recursive: true, force: true }); }
 });
 
-test('validation needs_user uses a single exact decision and preserves both approval identities', async () => {
+test('fixed validation without a concrete grant gap keeps the operation unexecuted and preserves sibling diagnostics', async () => {
   if (process.platform === 'win32') return;
   const marker = path.join(workspaceRoot, 'manual.txt');
   await writeFile(path.join(workspaceRoot, 'package.json'), JSON.stringify({ scripts: { test: 'node --test verify.cjs' } }));
   await writeFile(path.join(workspaceRoot, 'verify.cjs'), "require('node:fs').appendFileSync('manual.txt', 'once');");
   const review = new FakeApprovalReviewer('needs_user');
-  const request = { ...createRequest('Run the tests.'), approvalMode: 'delegate' as const, sessionId: 'manual-validation' };
-  let confirmations = 0;
-  const runner = new AgentRunner(undefined, undefined, new ValidationToolService(), undefined, undefined, undefined,
-    undefined, undefined, review, async input => {
-      assert.match(input.label, /npm run test/u);
-      assert.match(input.reason, /Denied by reviewer/u);
-      await assert.rejects(readFile(marker), { code: 'ENOENT' });
-      confirmations++;
-      return true;
-    });
+  const validation = new FakeValidationTools([]);
+  const authorization = new AllowAllToolAuthorization();
+  const request = { ...createRequest('Run the tests and read Problems.'), approvalMode: 'delegate' as const, sessionId: 'manual-validation' };
+  const runner = new AgentRunner(undefined, undefined, validation, undefined, undefined, authorization,
+    undefined, undefined, review, async () => assert.fail('No exact authorization gap warrants a click'));
   const response = await withResponses([
-    toolResponse([toolCall('manual-validation', RUN_VALIDATION_TOOL_NAME, { script: 'test' })])
+    toolResponse([toolCall('manual-validation', RUN_VALIDATION_TOOL_NAME, { script: 'test' }),
+      toolCall('diagnostics', READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME, {})])
   ], () => runner.run(request));
-  assert.equal(confirmations, 1);
   assert.equal(review.calls, 1);
-  assert.deepEqual(response.runDetails.approvalReviews?.map(record => [record.approvalSource, record.decision]), [
-    ['auto_approval_review', 'needs_user'], ['user_click', 'approve']
-  ]);
-  assert.equal(response.approvalToolResults?.[0]?.status, 'succeeded', response.approvalToolResults?.[0]?.result.content);
-  assert.equal(await readFile(marker, 'utf8'), 'once');
+  assert.equal(review.consumed, 0);
+  assert.equal(review.userApprovals, 0);
+  assert.equal(validation.runCount, 0);
+  assert.deepEqual(authorization.toolNames, [READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME]);
+  assert.equal(JSON.parse(response.toolRounds?.[0]?.toolResults[1]?.content ?? '{}').ok, true);
+  assert.equal(response.approvalToolResults?.[0]?.status, 'failed');
+  await assert.rejects(readFile(marker), { code: 'ENOENT' });
 });
 
-test('a changed launch or reviewer configuration invalidates the pending validation click', async () => {
+test('changing the approval model after fixed validation review prevents approval consumption and execution', async () => {
   if (process.platform === 'win32') return;
-  const manifest = path.join(workspaceRoot, 'package.json');
   const marker = path.join(workspaceRoot, 'invalidated.txt');
+  await writeFile(path.join(workspaceRoot, 'package.json'), JSON.stringify({ scripts: { test: 'node --test verify.cjs' } }));
   await writeFile(path.join(workspaceRoot, 'verify.cjs'), "require('node:fs').writeFileSync('invalidated.txt', 'ran');");
-  for (const change of ['launch', 'configuration'] as const) {
-    await writeFile(manifest, JSON.stringify({ scripts: { test: 'node --test verify.cjs' } }));
-    const reviewer = new FakeApprovalReviewer('needs_user');
-    const request = { ...createRequest('Run the fixed test script.'), approvalMode: 'delegate' as const,
-      sessionId: `manual-validation-${change}` };
-    let confirmations = 0;
-    const runner = new AgentRunner(undefined, undefined, new ValidationToolService(), undefined, undefined, undefined,
-      undefined, undefined, reviewer, async (input, _signal, verifyCurrent) => {
-        assert.equal(await verifyCurrent?.(), true);
-        input.id = `click-${change}`;
-        confirmations++;
-        if (change === 'launch') await writeFile(manifest, JSON.stringify({ scripts: { test: 'node --test verify.cjs', pretest: 'echo changed' } }));
-        else reviewer.configurationChanged = true;
-        assert.equal(await verifyCurrent?.(), false);
-        return true;
-      });
-    const response = await withResponses([
-      toolResponse([toolCall('manual-test', RUN_VALIDATION_TOOL_NAME, { script: 'test' })])
-    ], () => runner.run(request));
-    assert.equal(confirmations, 1);
-    assert.equal(reviewer.calls, 1);
-    assert.equal(reviewer.userApprovals, 0);
-    assert.equal(reviewer.consumed, 0);
-    assert.equal(JSON.parse(response.approvalToolResults?.[0]?.result.content ?? '{}').errorType, 'approval_scope_changed');
-    await assert.rejects(readFile(marker), { code: 'ENOENT' });
-  }
+  const reviewer = new FakeApprovalReviewer('approve', async () => { reviewer.configurationChanged = true; });
+  const request = { ...createRequest('Run the fixed test script.'), approvalMode: 'delegate' as const,
+    sessionId: 'validation-configuration-change' };
+  const runner = new AgentRunner(undefined, undefined, new ValidationToolService(), undefined, undefined, undefined,
+    undefined, undefined, reviewer, async () => assert.fail('Stale reviewer configuration cannot request a click'));
+  const response = await withResponses([
+    toolResponse([toolCall('changed-configuration', RUN_VALIDATION_TOOL_NAME, { script: 'test' })])
+  ], () => runner.run(request));
+  assert.equal(reviewer.calls, 1);
+  assert.equal(reviewer.userApprovals, 0);
+  assert.equal(reviewer.consumed, 0);
+  assert.equal(JSON.parse(response.approvalToolResults?.[0]?.result.content ?? '{}').errorType, 'approval_scope_changed');
+  await assert.rejects(readFile(marker), { code: 'ENOENT' });
 });
 
 test('external read combines exact URI permission and one read in one host request', async () => {
@@ -753,7 +737,7 @@ class FakeApprovalReviewer implements ApprovalReviewerAdapter {
       targetId: request.targetId,
       actionKind: request.actionKind,
       actionHash: request.actionHash,
-      policyVersion: 6,
+      policyVersion: 7,
       approvalSource: source,
       reviewerSourceId: source === 'auto_approval_review' ? 'review-source' : '',
       reviewerModelId: source === 'auto_approval_review' ? 'review-model' : '',

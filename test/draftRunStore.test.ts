@@ -5,7 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { test } from 'node:test';
 import * as vscode from './stubs/vscode';
-import { analyzeDraftRunEffects } from '../src/approvals/authorization';
+import { analyzeDraftRunEffects, inspectDraftRunScope } from '../src/approvals/authorization';
 import type {
   DraftRunExecutionOutcome,
   DraftRunExecutorAdapter,
@@ -68,6 +68,30 @@ test('scope is rechecked after persisted approval consumption, before any proces
     assert.match(result?.error ?? '', /Scope changed/u);
     assert.equal(executor.executeCount, 0);
     assert.equal(await store.approveAndRun(proposal.id, new Set()), undefined, 'failed attempt is not automatically retried');
+  });
+});
+
+test('the reviewed script bytes cannot change during persisted approval consumption', async () => {
+  await withDraftRunFixture(async ({ workspaceRoot, store, executor, approvalReviews }) => {
+    const entry = path.join(workspaceRoot, '新入口 file.js');
+    await writeFile(entry, 'console.log("first");\n');
+    const proposal = await createDraftRunProposal({ executable: process.execPath, args: [path.basename(entry)],
+      reason: 'Execute the reviewed workspace entry.' });
+    const [run] = store.addProposals({ proposals: [proposal], agentRunId: 'r', sessionId: 's' });
+    const approvalRecord = await addReviewerApproval(approvalReviews, proposal, 's', 'r');
+    const consume = approvalReviews.consumeMatchingApproval.bind(approvalReviews);
+    approvalReviews.consumeMatchingApproval = async (...args) => {
+      const record = await consume(...args);
+      await writeFile(entry, 'console.log("other");\n');
+      return record;
+    };
+    const result = await store.approveAndRun(run.id, new Set(), { delegatedApproval: () => true, approvalRecord });
+    assert.equal(result?.status, 'failed');
+    assert.equal(result?.executionPhase, 'not_dispatched');
+    assert.equal(result?.executionStarted, false);
+    assert.equal(executor.executeCount, 0);
+    assert.ok(approvalReviews.get(approvalRecord.reviewId)?.consumedAt);
+    assert.match(result?.error ?? '', /scope is missing or changed/u);
   });
 });
 
@@ -639,7 +663,7 @@ async function addReviewerApproval(
     actionHash: proposal.specHash,
     policyVersion: APPROVAL_POLICY_VERSION,
     approvalMode: 'delegate',
-    scopeFingerprint: 'b'.repeat(64),
+    scopeFingerprint: (await inspectDraftRunScope(proposal)).fingerprint,
     approvalSource: 'auto_approval_review',
     reviewerConfigFingerprint: 'a'.repeat(64),
     reviewerSourceId: 'test-source',

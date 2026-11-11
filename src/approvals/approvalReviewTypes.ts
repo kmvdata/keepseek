@@ -1,6 +1,12 @@
 import type { DraftEditAction, DraftRunEffectAssessment, SafeNpmScript } from '../shared/types';
 
-export const APPROVAL_POLICY_VERSION = 6;
+export const APPROVAL_POLICY_VERSION = 7;
+
+export const EXACT_USER_AUTHORIZATION_RULE = 'exact_user_authorization_required';
+export const PROJECT_BEHAVIOR_UNKNOWN_RULE = 'project_behavior_unknown';
+export const VERIFIED_PROJECT_OPERATION_RULE = 'verified_project_operation';
+
+export type VerifiedProjectOperation = 'file_change' | 'script_launch' | 'fixed_validation';
 
 export type ApprovalActionKind =
   | 'external_file_access'
@@ -48,6 +54,7 @@ export type ApprovalReviewExactAction =
       uri: string;
       sourceUri?: string;
       targetUri?: string;
+      canonicalTargets?: string[];
       metadataOnly?: boolean;
       proposedChange: BoundedReviewText;
       payloadVersion?: string;
@@ -65,6 +72,8 @@ export type ApprovalReviewExactAction =
       envNames: string[];
       scope?: { cwd: string; executable?: string; launcher?: string; environmentNames?: string[];
         launcherTrust?: 'verified_runtime' | 'identity_only';
+        projectEntryUri?: string;
+        networkTargets?: string[];
         osIsolation?: 'none'; paths: Array<{ uri: string; role: string; external: boolean }> };
       restricted?: {
         kind: 'python_ast_v1';
@@ -94,6 +103,8 @@ export interface ApprovalReviewRequest {
   scopeFingerprint?: string;
   approvalMode?: 'delegate';
   externalAuthorization?: { required: boolean; targets: string[] };
+  /** Host-verified scope, never a model claim or a grant. Runtime only. */
+  verifiedProjectOperation?: VerifiedProjectOperation;
   originalGoalSummary: string;
   evidenceIncomplete?: boolean;
   visibleSessionEvidence: string[];
@@ -128,6 +139,7 @@ export interface ApprovalReviewRecord {
   scopeFingerprint?: string;
   approvalMode?: 'delegate';
   approvalSource: ApprovalReviewSource;
+  projectApproval?: true;
   osIsolation?: 'none';
   reviewerConfigFingerprint?: string;
   originalActionHash?: string;
@@ -161,11 +173,12 @@ export interface ApprovalReviewOutcome {
 /** Shared by draft processing and in-loop tools; text never determines routing. */
 export function approvalDisposition(record: ApprovalReviewRecord): 'execute' | 'request_user' | 'deny' | 'stop' {
   if (record.decision === 'deny') return 'deny';
-  if (record.policyVersion !== APPROVAL_POLICY_VERSION || record.approvalSource === 'host_policy' || record.approvalSource === 'local_policy') return 'stop';
-  if (record.decision === 'approve') return record.reviewState ? 'stop' : 'execute';
-  if (record.decision === 'needs_user') return record.reviewState ? 'stop' : 'request_user';
-  return record.reviewState && ['configuration_unavailable', 'service_unavailable', 'timeout', 'invalid_response'].includes(record.reviewState)
-    ? 'request_user' : 'stop';
+  if (record.policyVersion !== APPROVAL_POLICY_VERSION || record.reviewState
+    || record.approvalSource === 'host_policy' || record.approvalSource === 'local_policy') return 'stop';
+  if (record.decision === 'approve' && (record.approvalSource === 'user_click' || ['low', 'medium'].includes(record.risk))) return 'execute';
+  if (record.decision === 'needs_user' && record.approvalSource === 'auto_approval_review'
+    && record.policyRules.includes(EXACT_USER_AUTHORIZATION_RULE)) return 'request_user';
+  return 'stop';
 }
 
 export interface ApprovalRecordMatch {

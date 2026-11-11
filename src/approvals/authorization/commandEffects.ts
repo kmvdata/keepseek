@@ -1,11 +1,11 @@
 import type { DraftRunEffectAssessment, DraftRunSpec } from '../../shared/types';
 import { analyzeCommandCapability } from './commandCapability';
-import type { AuthorizationReason } from './reasons';
+import type { CommandScope } from './commandScope';
 
 /** Display advice only. Authority comes from preflight + exact-operation grants. */
-export function analyzeDraftRunEffects(spec: DraftRunSpec, scopeReasons?: readonly AuthorizationReason[]): DraftRunEffectAssessment {
-  const { semantics: parsed } = analyzeCommandCapability(spec);
-  const reasons = scopeReasons ?? parsed.reasons;
+export function analyzeDraftRunEffects(spec: DraftRunSpec, scope?: Pick<CommandScope, 'semantics' | 'diagnostics'>): DraftRunEffectAssessment {
+  const parsed = scope?.semantics ?? analyzeCommandCapability(spec).semantics;
+  const reasons = scope?.diagnostics ?? parsed.reasons;
   const effects = [...parsed.effects];
   if (reasons.length) effects.push('unknown');
   const sensitive = effects.some(effect => !['workspace_read', 'unknown', 'long_running'].includes(effect));

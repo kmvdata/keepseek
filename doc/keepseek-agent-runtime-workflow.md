@@ -201,19 +201,19 @@ spawn(executable, args, { shell: false })
 | 模式 | 决策者 | 行为 |
 | --- | --- | --- |
 | `ask`（请求批准） | 用户 | 默认，逐项或批量批准，零审批模型请求 |
-| `delegate`（帮我审批） | 独立审批 reviewer，必要时用户 | 通过安全检查的受审操作进入一次逻辑审查，区分 approve/needs_user/deny/unavailable。仍具执行资格且需用户决定时，宿主发出绑定当前 runtime 的精确单次请求 |
+| `delegate`（帮我审批） | 独立审批 reviewer，必要时用户 | v7 对宿主已核验的常规工程文件变更和脚本启动默认自动批准。每个受审操作进入一次逻辑审查。仍有执行资格且存在具体授权缺口时，宿主发出绑定当前 runtime 的精确单次请求 |
 
 当前仅接受 ask/delegate；审批模型位于 `/` → 子代理模型 → 审批模型，配置仅取用户级 `kmvdata.keepseek.autoApprovalReviewer`，与普通子代理 default/角色设置独立。follow-main 跟随执行段的实际主模型。等待用户暂停有效计时，关闭 Webview 不取消等待；重启不恢复旧批准、队列或 permit。详细恢复与验收见 [帮我审批](keepseek-approve-for-me-verification.md)。
 
 共同规则：
 
 - 所有动作先过确定性硬检查，审批不能绕过工作区信任、URI 授权、基线、脏编辑器或 permit。
-- reviewer 是无工具、关闭 thinking 的独立审查，仅使用白名单事实和有界材料。一次逻辑审查共用一个截止时间，可重试故障最多额外尝试一次。
+- reviewer 是无工具、关闭 thinking 的独立审查，仅使用白名单事实和有界材料。一次逻辑审查共用一个截止时间，可重试故障和只因不熟悉工程逻辑而转人工的无效决定共用一次额外尝试。
 - actionHash 绑定完整 canonical payload；patch 即使只展示有界 hunks，也不能复用变更后的批准。
 - 批准记录与 session/run/target/kind/hash/policy/runtime 绑定；重启不恢复审批队列，不复用旧 reviewer 批准。
 - 停止或切回 `ask` 会撤销队列和未执行授权。
 - 决定与真实结果以固定 user-tail 追加到下一条真实 user 消息，不能插入或改写旧历史。
-- 修改失败会阻止依赖它的命令；连续拒绝达到熔断阈值时停止续跑。
+- 依赖本轮改动的脚本在 Apply 和 read-back 后才绑定实际入口并审查。局部修改或审批失败会阻止依赖项，可证明独立且有权限的步骤继续。连续拒绝达到熔断阈值时停止续跑。
 
 模型给出的“低风险”分析只供展示，不能自行改变审批模式。
 

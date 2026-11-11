@@ -9,6 +9,7 @@ import { decodeRollbackSafeUtf8Text } from '../shared/safeTextSnapshot';
 import { findSensitiveEvidence } from '../approvals/approvalPolicy';
 import { assertOperationPath } from '../approvals/authorization/protectedTargets';
 import { assertCleanDraftEditTarget, findDraftEditTargetTabs, inspectDraftEditTarget } from '../approvals/authorization/editTargets';
+import { fileIdentity } from '../approvals/authorization/projectLaunchIdentity';
 import { shouldSkipTextUri } from '../shared/textFileGuards';
 import type { ChangeCheckpoint, DraftEdit, FileContentIdentity, TextPatchV1 } from '../shared/types';
 import { ChangeArtifactStore } from './changeArtifactStore';
@@ -210,6 +211,12 @@ export class SafeFileEditor {
         && checkpoint.originalSizeBytes === currentSize) return 'base';
     }
     return 'unknown';
+  }
+
+  public async matchesAppliedFileIdentity(uri: vscode.Uri, expected: FileContentIdentity, observedStat: string): Promise<boolean> {
+    if (uri.scheme !== 'file') return false;
+    const current = await hashLocalFile(uri.fsPath, { stat: observedStat, sizeBytes: expected.sizeBytes });
+    return current.sha256 === expected.sha256 && current.sizeBytes === expected.sizeBytes;
   }
 
   private async assertCommonPreconditions(uri: vscode.Uri, edit: DraftEdit, approval?: DelegatedEditApproval): Promise<void> {
@@ -587,19 +594,26 @@ export class SafeFileEditor {
   }
 }
 
-async function hashLocalFile(filePath: string): Promise<FileContentIdentity> {
+async function hashLocalFile(filePath: string, observed?: { stat: string; sizeBytes: number }): Promise<FileContentIdentity> {
   const handle = await fs.open(filePath, fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK ?? 0) | (fsConstants.O_NOFOLLOW ?? 0));
   const hash = createHash('sha256');
   let sizeBytes = 0;
   const buffer = Buffer.allocUnsafe(256 * 1024);
+  const changed = () => new Error('Applied file changed during read-back. / 已落盘文件在核验期间发生变化。');
   try {
-    if (!(await handle.stat()).isFile()) throw new Error('DraftEdit target is not a regular file.');
+    const before = await handle.stat();
+    if (!before.isFile()) throw new Error('DraftEdit target is not a regular file.');
+    if (observed && fileIdentity(before) !== observed.stat) throw changed();
     for (;;) {
       const { bytesRead } = await handle.read(buffer, 0, buffer.byteLength, null);
       if (!bytesRead) break;
-      hash.update(buffer.subarray(0, bytesRead));
       sizeBytes += bytesRead;
+      if (observed && sizeBytes > observed.sizeBytes) throw changed();
+      hash.update(buffer.subarray(0, bytesRead));
     }
+    if (observed && (fileIdentity(await handle.stat()) !== observed.stat
+      || fileIdentity(await fs.lstat(filePath)) !== observed.stat
+      || path.relative(filePath, await fs.realpath(filePath)) !== '')) throw changed();
   } finally {
     await handle.close();
   }

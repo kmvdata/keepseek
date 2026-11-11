@@ -1250,7 +1250,9 @@ export class AgentLoop {
     let validationRunCount = restored?.validationRunCount ?? 0;
     let toolResultTokens = restored?.toolResultTokens ?? 0;
     let approvalReviewStopReason: string | undefined;
+    let approvalLocalPreflightFailure: string | undefined;
     let approvalReviewBoundaryReached = false;
+    let approvalReviewFailed = false;
     const approvalToolResults: NonNullable<AgentResponse['approvalToolResults']> = [];
     emitUsageEstimate(tools);
 
@@ -1931,7 +1933,9 @@ export class AgentLoop {
             error: approvalReviewStopReason
           });
         }
-        if (approvalReviewBoundaryReached) {
+        const independentTool = approvalReviewFailed && getToolAuthorizationMetadata(toolCall.function.name).riskLevel === 'low'
+          && this.getEvidenceEffectKind(toolCall.function.name) !== 'delegation';
+        if (approvalReviewBoundaryReached && !independentTool) {
           return JSON.stringify({
             ok: true,
             status: 'approval_review_deferred',
@@ -2042,8 +2046,10 @@ export class AgentLoop {
               executed: false,
               error: validationPreflight.error
             });
-            if (normalizeApprovalMode(runAuthorizationPolicy.approvalMode) !== 'ask') {
-              approvalReviewStopReason = validationPreflight.error;
+            if (normalizeApprovalMode(runAuthorizationPolicy.approvalMode) === 'delegate') {
+              approvalLocalPreflightFailure = validationPreflight.error;
+              approvalReviewBoundaryReached = true;
+              approvalReviewFailed = true;
             }
           } else if (isDraftEditPreparationTool(toolCall.function.name) && !repairLoop.beginRepair()) {
             const state = repairLoop.getState();
@@ -2085,18 +2091,18 @@ export class AgentLoop {
             if (validationPreflight && authorizationDecision.allowed && !authorizationDecision.executionSnapshot) {
               authorizationDecision = { ...authorizationDecision, executionSnapshot: validationPreflight.snapshot.fingerprint };
             }
-            if (authorizationDecision.approvalReview) approvalReviewBoundaryReached = true;
-            if (!authorizationDecision.allowed && toolCall.function.name === RUN_VALIDATION_TOOL_NAME
-              && authorizationDecision.requiresExplicitConfirmation && normalizeApprovalMode(request.approvalMode) !== 'ask') {
-              approvalReviewStopReason = authorizationDecision.reason;
-            }
-            if (!authorizationDecision.allowed && authorizationDecision.scope === 'workspace_read'
-              && authorizationDecision.requiresExplicitConfirmation) {
+            if (authorizationDecision.approvalReview) {
               approvalReviewBoundaryReached = true;
-              approvalReviewStopReason = authorizationDecision.reason;
+              approvalReviewFailed = !authorizationDecision.allowed;
             }
-            if (!authorizationDecision.allowed && ['approval_reviewer_unavailable', 'approval_budget_exhausted',
-              'approval_request_cancelled', 'review_in_progress', 'review_already_attempted'].includes(authorizationDecision.failureCode ?? '')) {
+            if (!authorizationDecision.allowed && authorizationDecision.requiresExplicitConfirmation
+              && normalizeApprovalMode(request.approvalMode) === 'delegate') {
+              approvalLocalPreflightFailure = authorizationDecision.reason;
+              approvalReviewBoundaryReached = true;
+              approvalReviewFailed = true;
+            }
+            if (!authorizationDecision.allowed && (authorizationDecision.failureCode === 'approval_budget_exhausted'
+              || (authorizationDecision.failureCode === 'approval_reviewer_unavailable' && !authorizationDecision.approvalReview))) {
               approvalReviewStopReason = authorizationDecision.reason ?? (request.language === 'en'
                 ? 'Approval processing stopped. Nothing executed.'
                 : '审批处理已停止，尚未执行。');
@@ -2643,15 +2649,16 @@ export class AgentLoop {
       if (rolloverAfterBatchReason && !logicalBudget.isToolBudgetExhausted()) {
         await rolloverEpoch(rolloverAfterBatchReason);
       }
-      if (approvalReviewStopReason) {
-        emitStatus({ base: 'complete', phase: 'finalizing', detail: approvalReviewStopReason });
+      const approvalStopReason = approvalReviewStopReason ?? (!draftEdits.length && !draftRuns.length ? approvalLocalPreflightFailure : undefined);
+      if (approvalStopReason) {
+        emitStatus({ base: 'complete', phase: 'finalizing', detail: approvalStopReason });
         return finishRun({
-          message: approvalReviewStopReason,
+          message: approvalStopReason,
           reasoningContent: this.formatReasoning(reasoningParts),
           draftEdits,
           draftRuns,
           approvalContinuationRequired: true,
-          approvalContinuationStopReason: approvalReviewStopReason,
+          approvalContinuationStopReason: approvalStopReason,
           approvalToolResults
         }, { finishReason: 'approval_review_stopped', stopped: true });
       }
@@ -3846,7 +3853,10 @@ ${launch.evidence.content}`;
     const stale = () => deny(language === 'en' ? 'Approval scope or configuration changed. Nothing executed.'
       : '审批范围或配置已变化，尚未执行。', prior, 'approval_scope_changed');
     let outcome = prior;
-    const needsUser = Boolean(requiredUserScope) || disposition === 'request_user';
+    if (disposition === 'request_user' && !requiredUserScope) {
+      return deny(prior.record.rationale, prior, 'approval_needs_user');
+    }
+    const needsUser = Boolean(requiredUserScope);
     if (needsUser) {
       if (!reviewer.createUserApproval || !this.requestManualToolApproval) {
         return deny(prior.record.rationale, prior, prior.record.decision === 'unavailable'

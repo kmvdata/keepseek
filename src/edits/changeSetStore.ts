@@ -3,6 +3,9 @@ import { SessionDeletionAuthority } from '../sessions/sessionDeletionAuthority';
 import { hasAssociatedRecordOwner, isMissingAssociatedFile, assertManagedStoragePath, deleteAssociatedUri, readAssociatedJson, withAssociatedStoreGate, withoutDeletedSessions } from '../sessions/sessionAssociatedPersistence';
 import { createHash, randomUUID } from 'node:crypto';
 import { isWorkspaceSkillScaffoldPath } from '../approvals/authorization/protectedTargets';
+import { canonicalPath, isPathInside, resolveSelectedProjectRoot } from '../approvals/authorization/pathScope';
+import { assertCleanDraftEditTarget, inspectDraftEditTarget } from '../approvals/authorization/editTargets';
+import type { ApprovalDependency } from '../approvals/approvalProcessing';
 import * as vscode from 'vscode';
 import type { ChatSessionStore } from '../sessions/chatSessionStore';
 import { isHistoryOriginRemoved, type HistoryTruncationScope } from '../sessions/historyTruncation';
@@ -15,7 +18,8 @@ import type {
   ChangeSetFile,
   ChangeSetRevertResult,
   ChatMessage,
-  DraftEdit
+  DraftEdit,
+  FileContentIdentity
 } from '../shared/types';
 import { getErrorMessage } from '../shared/errors';
 import type { DraftDiffService } from './draftDiffService';
@@ -62,6 +66,7 @@ interface ChangeSetStorageIndex {
 export interface WebviewChangeSetFile {
   id: string;
   uri: string;
+  targetUri?: string;
   label: string;
   action: ChangeSetFile['action'];
   kind?: string;
@@ -448,6 +453,103 @@ export class ChangeSetStore {
       }
     }
     return [...uris];
+  }
+
+  public hasCommandEditCandidates(sessionId: string, segments: ReadonlySet<string>): boolean {
+    const matches = (set: ChangeSet | WebviewChangeSet) => set.sessionId === sessionId && segments.has(set.runId)
+      && hasActiveHistory(set) && set.files.some(file => file.status !== 'superseded');
+    return [...this.changeSets.values()].some(matches)
+      || [...this.historicalChangeSets.values()].some(set => !this.changeSets.has(set.id) && matches(set));
+  }
+
+  /** Match only task-owned edits to concrete command inputs. An applied journal
+   * and current on-disk result are required before the input can be used. */
+  public async inspectCommandEditDependencies(sessionId: string, segments: ReadonlySet<string>, targets: ReadonlySet<string>,
+    observedEntry?: { uri: string; identity: FileContentIdentity; stat?: string },
+    scope: { selectedProjectUri?: string; authorizedUris?: ReadonlySet<string> } = {}): Promise<{
+    allowed: boolean; fingerprint: string; dependency?: ApprovalDependency; pendingExternalProof?: true;
+  }> {
+    type Binding = { setId: string; file: WebviewChangeSetFile; removed: boolean; appliedAt?: string };
+    const bindings = new Map<string, { latestProposal: Binding; latestApplied?: Binding }>();
+    const bind = (target: string, binding: Binding) => {
+      const previous = bindings.get(target)?.latestApplied;
+      // Proposals for the same path may be applied in a different order. A
+      // later unresolved proposal still needs its own Apply result.
+      const latestApplied = binding.appliedAt && (!previous?.appliedAt || binding.appliedAt >= previous.appliedAt) ? binding : previous;
+      bindings.set(target, { latestProposal: binding, latestApplied });
+    };
+    const match = async (value: string): Promise<string | undefined> => {
+      const uri = vscode.Uri.parse(value);
+      if (uri.scheme !== 'file') return undefined;
+      const canonical = await canonicalPath(uri.fsPath).catch(() => undefined);
+      const exact = canonical ? vscode.Uri.file(canonical).toString() : value;
+      return targets.has(exact) ? exact : targets.has(value) ? value : undefined;
+    };
+    if (targets.size) {
+      for (const set of this.toWebviewState(sessionId)) {
+        if (!segments.has(set.runId)) continue;
+        for (const file of set.files) {
+          if (file.status === 'superseded') continue;
+          const appliedAt = file.status === 'applied' && file.checkpointId
+            ? this.checkpoints.get(file.checkpointId)?.appliedAt : undefined;
+          const source = await match(file.uri);
+          if (source) bind(source, { setId: set.id, file, appliedAt, removed: file.action === 'delete' || file.action === 'move' });
+          const target = file.targetUri && await match(file.targetUri);
+          if (target) bind(target, { setId: set.id, file, appliedAt, removed: false });
+        }
+      }
+    }
+    const verified = [];
+    const selectedRoot = bindings.size && scope.selectedProjectUri ? await resolveSelectedProjectRoot(scope.selectedProjectUri) : undefined;
+    let pendingExternalProof: true | undefined;
+    for (const [target, { latestProposal, latestApplied }] of bindings) {
+      const { setId, file, removed } = latestProposal.appliedAt && latestApplied ? latestApplied : latestProposal;
+      const reject = (reason: string) => ({ allowed: false, fingerprint: '', dependency: { targetId: file.id, label: file.label, reason } });
+      if (removed) return reject('A task edit removes the required command input. / 本任务的文件变更移除了命令所需的输入。');
+      const live = this.findEdit(file.id);
+      const checkpoint = file.checkpointId ? this.checkpoints.get(file.checkpointId) : undefined;
+      if (!live || live.changeSet.id !== setId || live.edit.status !== 'applied' || !checkpoint
+        || checkpoint.state !== 'applied' || checkpoint.operation !== 'apply' || checkpoint.changeSetId !== setId
+        || checkpoint.editId !== file.id || checkpoint.uri !== file.uri || checkpoint.targetUri !== file.targetUri
+        || this.activeEditOperations.has(file.id)) {
+        return reject('The required file edit has no completed Apply with read-back evidence. / 命令所需的文件变更尚无完成 Apply 并核验落盘的证据。');
+      }
+      const result = live.edit.kind === 'move_v1' ? live.edit.base : getDraftEditResult(live.edit);
+      if (!result || checkpoint.appliedTextHash !== result.sha256 || checkpoint.appliedSizeBytes !== result.sizeBytes) {
+        return reject('The applied file identity does not match the required edit. / 已落盘文件的身份与所需变更不匹配。');
+      }
+      verified.push([target, setId, file.id, checkpoint.id, result.sha256, result.sizeBytes]);
+      try {
+        const uri = vscode.Uri.parse(file.targetUri ?? file.uri);
+        const metadata = await inspectDraftEditTarget(uri, false, this.isUserSkillScaffold(live.changeSet, live.edit));
+        assertCleanDraftEditTarget(uri, 'The required command input has unsaved changes. / 命令所需的输入包含未保存的修改。', metadata.canonical);
+        const source = file.targetUri ? await inspectDraftEditTarget(vscode.Uri.parse(file.uri), true) : undefined;
+        if (source?.fileIdentity) return reject('The source of the required move changed after Apply. / 所需移动的源文件在 Apply 后发生变化。');
+        const canonicalUri = vscode.Uri.file(metadata.canonical).toString();
+        const fileIdentity = metadata.fileIdentity;
+        if (!fileIdentity || fileIdentity[3] !== result.sizeBytes) {
+          return reject('The required command input changed after Apply. / 命令所需的输入在 Apply 后发生变化。');
+        }
+        const local = metadata.root && (!scope.selectedProjectUri || selectedRoot && isPathInside(selectedRoot, metadata.canonical));
+        if (!local && !scope.authorizedUris?.has(canonicalUri)) {
+          // The old Apply grant does not authorize reading current external bytes.
+          pendingExternalProof = true;
+          continue;
+        }
+        if (!vscode.workspace.isTrusted) return reject('The workspace is no longer trusted. / 工作区已不受信任。');
+        const stat = [fileIdentity[0], fileIdentity[1], ...fileIdentity.slice(3)].join(':');
+        const verifiedResult = observedEntry?.uri === canonicalUri && observedEntry.stat === stat
+          ? observedEntry.identity.sha256 === result.sha256 && observedEntry.identity.sizeBytes === result.sizeBytes
+          : await this.safeFileEditor.matchesAppliedFileIdentity(vscode.Uri.parse(canonicalUri), result, stat);
+        if (!verifiedResult || this.checkpoints.get(checkpoint.id) !== checkpoint || this.activeEditOperations.has(file.id)
+          || live.edit.status !== 'applied' || !hasActiveHistory(live.changeSet)) {
+          return reject('The required command input changed after Apply. / 命令所需的输入在 Apply 后发生变化。');
+        }
+      } catch {
+        return reject('The required command input could not be verified after Apply. / 无法核实命令所需输入在 Apply 后的状态。');
+      }
+    }
+    return { allowed: true, pendingExternalProof, fingerprint: createHash('sha256').update(JSON.stringify(verified)).digest('hex') };
   }
 
   public getChangeSetEditUris(changeSetId: string): string[] {
@@ -1617,6 +1719,8 @@ function cloneWebviewChangeSet(changeSet: WebviewChangeSet): WebviewChangeSet {
     files: changeSet.files.map((file) => ({
       id: file.id,
       uri: file.uri,
+      targetUri: file.kind === 'move_v1' && typeof file.targetUri === 'string' && file.targetUri.length <= 16_384
+        && !file.targetUri.includes('\0') ? file.targetUri : undefined,
       label: file.label,
       action: file.action,
       kind: file.kind,
@@ -1652,6 +1756,7 @@ function toWebviewChangeSetFile(file: ChangeSetFile): WebviewChangeSetFile {
   return {
     id: file.id,
     uri: file.uri,
+    targetUri: file.kind === 'move_v1' ? file.targetUri : undefined,
     label: file.label,
     action: file.action,
     kind: getDraftEditKind(file),

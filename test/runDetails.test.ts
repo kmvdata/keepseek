@@ -21,34 +21,53 @@ describe('RunDetailsBuilder', () => {
         authorizations: [{ toolName: 'coarse-source', allowed: true, riskLevel: 'low', scope: 'validation', source: 'delegated_approver' }],
         approvalReviews: [
           { ...baseReview, reviewId: 'historical-host', approvalSource: 'host_policy', policyVersion: 2 },
-          { ...baseReview, reviewId: 'historical-model', approvalSource: 'auto_approval_review', policyVersion: 5, reviewerModelId: 'older-reviewer' },
+          { ...baseReview, reviewId: 'historical-model', approvalSource: 'auto_approval_review', policyVersion: 5,
+            reviewerModelId: 'older-reviewer', projectApproval: true },
           { ...baseReview, reviewId: 'historical-user', approvalSource: 'user_click', policyVersion: 2 },
           { ...baseReview, reviewId: 'new-review', approvalSource: 'auto_approval_review', policyVersion: 6,
             reviewerSourceId: 'review-source', reviewerModelId: 'actual-reviewer', decision: 'needs_user', risk: 'critical' },
-          { ...baseReview, reviewId: 'invalid-config', approvalSource: 'auto_approval_review', policyVersion: 6,
-            reviewerModelId: 'never-requested', decision: 'unavailable', reviewState: 'configuration_unavailable' },
+          { ...baseReview, reviewId: 'project-review', approvalSource: 'auto_approval_review', policyVersion: 7,
+            reviewerSourceId: 'review-source', reviewerModelId: 'project-reviewer', projectApproval: true },
+          { ...baseReview, reviewId: 'invalid-config', approvalSource: 'auto_approval_review', policyVersion: 7,
+            reviewerModelId: 'never-requested', decision: 'unavailable', reviewState: 'configuration_unavailable', projectApproval: true },
           { ...baseReview, reviewId: 'interrupted', approvalSource: 'auto_approval_review', policyVersion: 6,
             decision: 'unavailable', reviewState: 'in_progress', exactAction: { secret: 'never-display' } }
         ] } }]
     }] }, { key: 'workspace:ui', name: 'UI', folderUris: [] })[0];
     const reviews = session.messages[0].runDetails?.approvalReviews;
-    assert.deepEqual(reviews?.map(review => review.policyVersion), [2, 5, 2, 6, 6, 6]);
+    assert.deepEqual(reviews?.map(review => review.policyVersion), [2, 5, 2, 6, 7, 7, 6]);
+    assert.deepEqual(reviews?.filter(review => review.projectApproval).map(review => review.reviewId), ['project-review']);
     assert.equal(reviews?.at(-1)?.reviewState, 'interrupted');
     assert.doesNotMatch(JSON.stringify(reviews), /never-display/u);
     for (const language of ['zh-CN', 'en'] as const) {
       const view = createWebviewDomHarness();
       view.receive({ type: 'state', revision: 1, state: { activeSessionId: session.id, language, messages: session.messages,
+        approvalMode: 'delegate', draftRuns: [
+          { id: 'exact-target', sessionId: session.id, messageId: 'assistant', status: 'done', executionStarted: true,
+            executionPhase: 'exited', exitCode: 0, spec: { executable: 'node', args: ['entry.js'], reason: 'Project script' },
+            approvalReview: reviews?.find(review => review.reviewId === 'project-review') },
+          { id: 'unknown', sessionId: session.id, messageId: 'assistant', status: 'failed', executionStarted: true,
+            executionPhase: 'result_unknown', exitCode: 13, spec: { executable: 'node', args: ['other.js'] } }
+        ],
         startup: { interactiveReady: true, sideEffectsReady: true } } });
-      const details = view.element('transcript').querySelector('.run-details');
+      const transcript = view.element('transcript');
+      const details = transcript.querySelector('.run-details');
       assert.ok(details);
       const labels = WEBVIEW_TRANSLATIONS[language];
       for (const label of [labels.approvalSourceHost, labels.approvalSourceDelegatedExecution, labels.approvalNeedsUser,
-        labels.approvalRiskCritical, labels.approvalReviewState_configuration_unavailable, labels.approvalReviewState_interrupted]) {
+        labels.approvalRiskCritical, labels.approvalReviewState_configuration_unavailable, labels.approvalReviewState_interrupted,
+        labels.approvalProjectAutoApproved, labels.runDetailsCommandResults, labels.draftRunExitCode.replace('{code}', '0')]) {
         assert.ok(details.textContent.includes(label), label);
       }
       assert.match(details.textContent, /review-source \/ actual-reviewer/u);
+      assert.match(details.textContent, /review-source \/ project-reviewer/u);
       assert.doesNotMatch(details.textContent, /never-requested|never-display/u);
       assert.equal(details.textContent.split(labels.approvalSourceHost).length - 1, 1);
+      const card = transcript.querySelector('[data-draft-run-id="exact-target"]');
+      assert.ok(card?.textContent.includes(labels.approvalProjectAutoApproved));
+      assert.ok(card?.textContent.includes(labels.draftRunExitCode.replace('{code}', '0')));
+      assert.ok(!transcript.textContent.includes(labels.draftRunExitCode.replace('{code}', '13')));
+      assert.equal(transcript.querySelector('button[data-manual-approval-action]'), null);
     }
   });
 

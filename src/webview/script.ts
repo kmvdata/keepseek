@@ -2902,6 +2902,7 @@ ${conversationsSessionListFragment.source}
 
     function buildDraftRunTimelineProjection() {
       var byMessageId = Object.create(null);
+      var resultsByMessageId = Object.create(null);
       var unlinked = [];
       var messagesById = Object.create(null);
       (Array.isArray(state.messages) ? state.messages : []).forEach(function(message) {
@@ -2920,6 +2921,11 @@ ${conversationsSessionListFragment.source}
           || runsById[String(run.id)]) return false;
         runsById[String(run.id)] = run;
         runOrder[String(run.id)] = visibleRunCount++;
+        var result = formatDraftRunProcessResult(run);
+        if (result && run.messageId && messagesById[run.messageId]?.role === 'assistant') {
+          var messageResults = resultsByMessageId[run.messageId] || (resultsByMessageId[run.messageId] = []);
+          messageResults.push([run.spec?.reason || run.id, result].join(' · '));
+        }
         return true;
       });
       var groups = [];
@@ -2999,7 +3005,7 @@ ${conversationsSessionListFragment.source}
           byMessageId[item.messageId].push(item);
         } else unlinked.push(item);
       });
-      return { byMessageId: byMessageId, unlinked: unlinked };
+      return { byMessageId: byMessageId, unlinked: unlinked, resultsByMessageId: resultsByMessageId };
     }
 
     function isDraftRunBatchActive(batch) {
@@ -3151,7 +3157,7 @@ ${conversationsSessionListFragment.source}
       var meta = document.createElement('div');
       meta.className = 'draft-run-meta';
       meta.textContent = [existingRelease || draftRun.gitReusedDraftRunId || recoveryLabel ? '' : getDraftRunStatusLabel(displayStatus),
-        spec.reason].filter(Boolean).join(' · ');
+        formatDraftRunProcessResult(draftRun), spec.reason].filter(Boolean).join(' · ');
       if (typeof draftRun.gitQueryResult?.predicate === 'boolean') {
         meta.textContent += ' · ' + t(draftRun.gitQueryResult.predicate ? 'draftRunPredicateTrue' : 'draftRunPredicateFalse');
       }
@@ -3580,6 +3586,12 @@ ${conversationsSessionListFragment.source}
       return quote + word.split(quote).join(quote + '"' + quote + '"' + quote) + quote;
     }
 
+    function formatDraftRunProcessResult(run) {
+      if (run.executionStarted !== true || run.executionPhase !== 'exited') return '';
+      return [Number.isInteger(run.exitCode) ? t('draftRunExitCode', { code: run.exitCode }) : '',
+        run.signal ? t('draftRunExitSignal', { signal: run.signal }) : ''].filter(Boolean).join(' · ');
+    }
+
     function getDraftRunStatusLabel(statusValue) {
       switch (statusValue) {
         case 'preparing': return t('draftRunStatusPreparing');
@@ -3766,7 +3778,8 @@ ${conversationsSessionListFragment.source}
     }
 
     function isApprovalSafetyDenied(review) {
-      return review?.decision === 'deny' && ['auto_approval_review', 'local_policy'].includes(review.approvalSource);
+      return review?.decision === 'deny' && (['auto_approval_review', 'local_policy'].includes(review.approvalSource)
+        || (review.approvalSource === 'host_policy' && review.risk === 'critical'));
     }
 
     function getAuthorizationSourceLabel(source) {
@@ -3795,7 +3808,9 @@ ${conversationsSessionListFragment.source}
       }
       switch (review.decision) {
         case 'needs_user': return t('approvalNeedsUser');
-        case 'approve': return t(review.approvalSource === 'auto_approval_review' ? 'approvalAutoReviewerApproved' : 'approvalDecisionApprove');
+        case 'approve':
+          if (review.approvalSource !== 'auto_approval_review') return t('approvalDecisionApprove');
+          return t(review.projectApproval === true ? 'approvalProjectAutoApproved' : 'approvalAutoReviewerApproved');
         case 'deny': return t(review.approvalSource === 'auto_approval_review' ? 'approvalDecisionReviewerDenied'
           : review.approvalSource === 'local_policy' ? 'approvalDecisionBlocked' : 'approvalDecisionDeny');
         default: return t('approvalDecisionUnavailable');
@@ -4074,17 +4089,13 @@ ${conversationsSessionListFragment.source}
           var runStatePanel = createRunStatePanel(message);
           if (runStatePanel) body.append(runStatePanel);
         }
-        if (message.role === 'assistant' && !message.isStreaming && message.runDetails) {
-          body.append(createRunDetailsPanel(message));
-        }
-
         if (message.role === 'assistant' && !message.isStreaming) {
+          if (message.runDetails) body.append(createRunDetailsPanel(message, draftRunProjection.resultsByMessageId?.[message.id] || []));
           var messageChangeSets = changeSetProjection.byMessageId[String(message.id)] || [];
           messageChangeSets.forEach(function(changeSet) {
             body.append(createChangeSetCard(changeSet));
           });
-          var messageDraftRuns = draftRunProjection.byMessageId[String(message.id)] || [];
-          renderDraftRunItems(body, messageDraftRuns);
+          renderDraftRunItems(body, draftRunProjection.byMessageId[String(message.id)] || []);
         }
 
         item.append(body);
@@ -4233,7 +4244,7 @@ ${conversationsSessionListFragment.source}
       return panel;
     }
 
-    function createRunDetailsPanel(message) {
+    function createRunDetailsPanel(message, commandResults) {
       var details = message.runDetails || {};
       var panel = document.createElement('details');
       panel.className = 'run-details';
@@ -4427,6 +4438,8 @@ ${conversationsSessionListFragment.source}
         });
         body.append(createRunTextSection(t('runDetailsValidation'), validations));
       }
+
+      if (commandResults.length) body.append(createRunTextSection(t('runDetailsCommandResults'), commandResults));
 
       if (Array.isArray(details.authorizations) && details.authorizations.length) {
         var authorizations = details.authorizations.map(function(record) {

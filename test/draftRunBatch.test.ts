@@ -1,6 +1,6 @@
 import * as assert from 'node:assert/strict';
 import { sessionUseFixture } from './sessionUseFixture';
-import { realpath, mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { test } from 'node:test';
@@ -67,6 +67,8 @@ async function fixture(run: (f: Awaited<ReturnType<typeof createFixture>>) => Pr
 async function createFixture() {
   const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-batch-'));
   const workspaceRoot = path.join(root, 'workspace'); await mkdir(workspaceRoot);
+  const script = path.join(workspaceRoot, 'batch fixture.js');
+  await writeFile(script, '// Fixture entry for exact launcher preflight.\n');
   vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file(workspaceRoot), name: 'workspace' }];
   vscode.workspace.isTrusted = true;
   const executor = new ControlledExecutor();
@@ -75,7 +77,7 @@ async function createFixture() {
   const changed = { fn: () => {} };
   const batch = new DraftRunBatchCoordinator(store, () => changed.fn());
   const proposal = (id: string, overrides: Partial<DraftRunSpec> = {}): DraftRunProposal => {
-    const spec: DraftRunSpec = { executable: 'node', args: [id, '; literal', 'C:\\a b\\x'],
+    const spec: DraftRunSpec = { executable: process.execPath, args: [script, id, '; literal', '有空格 的参数'],
       reason: 'test ' + id, cwdUri: vscode.Uri.file(workspaceRoot).toString(), cwdLabel: '.',
       externalCwd: false, env: [{ name: 'BATCH_TEST', value: '$literal' }], timeoutMs: 120000, ...overrides };
     return { id, spec, specHash: hashDraftRunSpec(spec), effectAssessment: analyzeDraftRunEffects(spec) };
@@ -350,8 +352,7 @@ test('whole snapshot requires trust and exact external cwd authorization, withou
     const external = path.join(f.root, 'external'); await mkdir(external);
     f.store.addProposals({ proposals: [f.proposal('A'), f.proposal('B', { cwdUri: vscode.Uri.file(external).toString(), cwdLabel: external, externalCwd: true })], sessionId: 's', agentRunId: 'r' });
     const id = f.accept(); if (mode === 'trust') vscode.workspace.isTrusted = false;
-    const externalScript = vscode.Uri.file(path.join(await realpath(external), 'B')).toString();
-    const executing = f.batch.execute(id, { authorizedUris: new Set(mode === 'authorized' ? [vscode.Uri.file(external).toString(), externalScript] : []), assertContext: () => {}, onCurrent: () => {} });
+    const executing = f.batch.execute(id, { authorizedUris: new Set(mode === 'authorized' ? [vscode.Uri.file(external).toString()] : []), assertContext: () => {}, onCurrent: () => {} });
     if (mode === 'authorized') { await f.executor.started(1); f.executor.finish('A'); await f.executor.started(2); f.executor.finish('B'); }
     await executing;
     assert.equal(f.executor.calls.length, mode === 'authorized' ? 2 : 0);
@@ -418,7 +419,8 @@ function hostFixture(f: Awaited<ReturnType<typeof createFixture>>) {
     selectedSourceId: 'source', selectedModelId: 'model', language: 'en', agentSettings: {},
     repairLoopsBySession: new Map(), authorizedExternalReferenceUris: new Set(), authorizedExternalExecutionUris: new Set(),
     fileContext: { clear: () => {} },
-    changeSets: { hasPendingForSession: () => states.pendingEdits },
+    changeSets: { hasPendingForSession: () => states.pendingEdits, hasCommandEditCandidates: () => false,
+      inspectCommandEditDependencies: async () => ({ allowed: true, fingerprint: 'fixture-empty-dependencies' }) },
     hasActiveBackgroundRun: () => states.background,
     sessionStore: { ...sessionUseFixture(), activeSessionId: 's', getActiveSession: () => session, persist: async () => {} },
     t: (key: string) => key,
@@ -610,7 +612,8 @@ function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: '
     'isDraftRunBatchActive', 'getDraftRunBatchMembers', 'createDraftRunTimelineItem', 'renderDraftRunItems',
     'captureDraftRunActionFocus', 'findDraftRunActionFocus', 'renderTranscript', 'handleDraftRunActionClick', 'handleChangeSetActionClick',
     'createApprovalReviewSummary', 'formatApprovalReviewDetails', 'getApprovalSourceLabel', 'getApprovalDecisionLabel', 'getApprovalRiskLabel', 'isApprovalSafetyDenied',
-    'getDraftRunTitle', 'appendDraftRunField', 'createDraftRunPreflightDetails', 'formatShellCommand', 'formatShellWord', 'getDraftRunStatusLabel', 'getDraftRunEffectLabel',
+    'getDraftRunTitle', 'appendDraftRunField', 'createDraftRunPreflightDetails', 'formatShellCommand', 'formatShellWord',
+    'formatDraftRunProcessResult', 'getDraftRunStatusLabel', 'getDraftRunEffectLabel',
     'createChangeSetCard', 'createChangeSetFileRow', 'createEditActionButton', 'createEditOpenFileButton',
     'createChangeSetActionButton', 'getChangeSetStatusLabel', 'getChangeFileStatusLabel', 'isChangeSetActionable',
     'renderUnlinkedChangeSets', 'buildDraftRunTimelineProjection', 'handleDraftRunCloneFeedback'];
@@ -1412,7 +1415,7 @@ test('a changed hash or revoked external authorization before B leaves B and C u
     const external = path.join(f.root, 'external'); await mkdir(external);
     const uri = vscode.Uri.file(external).toString();
     f.store.addProposals({ proposals: [f.proposal('A'), f.proposal('B', { externalCwd: true, cwdUri: uri }), f.proposal('C')], sessionId: 's', agentRunId: 'r' });
-    const authorizedUris = new Set([uri, vscode.Uri.file(path.join(await realpath(external), 'B')).toString()]);
+    const authorizedUris = new Set([uri]);
     const executing = f.batch.execute(f.accept(), { authorizedUris, assertContext: () => {}, onCurrent: () => {} });
     await f.executor.started(1);
     if (change === 'authorization') authorizedUris.clear();

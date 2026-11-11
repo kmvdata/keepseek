@@ -1,6 +1,7 @@
 import * as path from 'node:path';
 import type { DraftRunEffect, DraftRunSpec } from '../../shared/types';
 import { authorizationReason, type AuthorizationReason } from './reasons';
+import { isExplicitUri, isExternalNetworkTarget, isNodeProgram, isPythonProgram, projectFileArgument, projectPackageScript } from './projectLaunchArguments';
 
 export type ArgumentRole = 'subcommand' | 'option' | 'option_value' | 'text' | 'revision'
   | 'read_path' | 'write_path' | 'cwd' | 'repository' | 'script' | 'inline_code';
@@ -26,6 +27,9 @@ export interface CommandSemantics {
   gitRefMutation?: { name: string; action: 'create' | 'delete' | 'force' };
   gitReplan?: GitCommandReplan;
   projectScript?: true;
+  projectExecutable?: true;
+  projectPackageScript?: { name: string; index: number };
+  networkTargets?: string[];
 }
 
 /** Exact finite query grammar. Runtime, repository and helper checks remain mandatory. */
@@ -189,10 +193,28 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
     effects.add('arbitrary_code');
     reason('external_helper', value, 'This option can invoke an external program.', '该选项可能调用外部程序。');
   };
+  const scriptArg = (index: number) => {
+    const raw = args[index];
+    const operand = raw.replace(/^--[\w-]+=/u, '')
+      .replace(/^-[A-Za-z](?=\/|\.\.?[\\/]|[A-Za-z]:[\\/])/u, '');
+    if (isExternalNetworkTarget(operand)) {
+      effects.add('network');
+      (result.networkTargets ??= []).push(operand);
+    }
+    // Scope the path-shaped operands without interpreting unknown script
+    // flags or expanding argv. Visible URLs and tilde paths are separate.
+    const pathOperand = !operand.startsWith('-') && !isExplicitUri(operand) && !/^~[\\/]/u.test(operand)
+      && (/[\\/]/u.test(operand) || operand.startsWith('.') || /\.[\p{L}\p{N}]{1,12}$/u.test(operand));
+    const output = /^--(?:output|out|dest|destination|target-dir|write-to)=/u.test(raw)
+      || /^--(?:output|out|dest|destination|target-dir|write-to)$/u.test(args[index - 1] ?? '');
+    arg(index, output && (pathOperand || /^file:|^~[\\/]/iu.test(operand)) ? 'write_path'
+      : pathOperand ? 'read_path' : 'text', operand);
+  };
 
   // Version queries are still subject to executable identity and environment checks.
   const versionPrograms = new Set(['git', 'node', 'bun', 'npm', 'python', 'python3', 'ruby', 'perl', 'rg', 'grep']);
-  if (args.length === 1 && ['--version', '-V'].includes(args[0]) && versionPrograms.has(program)) {
+  if (args.length === 1 && ['--version', '-V'].includes(args[0]) && (versionPrograms.has(program)
+    || isPythonProgram(program) || isNodeProgram(program))) {
     arg(0, 'option');
   } else if (program === 'git') {
     effects.add('workspace_read');
@@ -506,39 +528,50 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
       'Recursive search and configuration paths require exact scope authorization.', '递归搜索与配置文件路径需要精确范围授权。');
   } else if (['echo', 'printf', 'true', 'false'].includes(program)) {
     args.forEach((_, i) => arg(i, 'text'));
-  } else if (/^(?:(?:ba|z|k|c|fi)?sh|cmd|pwsh|powershell|node|python\d*|ruby|perl|bun|npm|pnpm|yarn)$/u.test(program)) {
+  } else if (/^(?:(?:ba|z|k|c|fi)?sh|cmd|pwsh|powershell|ruby|perl|bun|npm|pnpm|yarn)$/u.test(program)
+    || isNodeProgram(program) || isPythonProgram(program)) {
     effects.add('shell_interpreter'); effects.add('arbitrary_code');
     if (['npm', 'pnpm', 'yarn', 'bun'].includes(program)
       && ['ci', 'install', 'add', 'remove', 'uninstall', 'update', 'upgrade', 'publish'].includes(args[0])) {
       effects.add('package_install'); effects.add('workspace_write'); effects.add('network');
       if (args[0] === 'publish') effects.add('publish_or_deploy');
     }
-    const scriptExtension = /^(?:sh|bash|zsh)$/u.test(program) ? /\.sh$/u
-      : /^python\d*$/u.test(program) ? /\.py$/u
-        : program === 'node' ? /\.(?:js|mjs|cjs)$/u : undefined;
-    if (scriptExtension?.test(args[0] ?? '') && !args[0].startsWith('-')) {
-      const operands = args.slice(1).map(value => value.replace(/^--[\w-]+=/u, '')
-        .replace(/^-[A-Za-z](?=\/|\.\.?[\\/]|[A-Za-z]:[\\/])/u, ''));
-      // The first argv is a file, so later flags are script arguments, not
-      // interpreter flags. Explicit URI arguments do not enter this lane.
-      result.projectScript = operands.some(value => /^(?:[a-z][a-z\d+.-]*:\/\/|file:|~[\\/])/iu.test(value)) ? undefined : true;
-      arg(0, 'script');
-      operands.forEach((operand, index) => {
-        arg(index + 1, operand.startsWith('-') || /^(?:[a-z][a-z\d+.-]*:\/\/|file:|~[\\/])/iu.test(operand) ? 'text' : 'read_path', operand);
-      });
+    const entryIndex = projectFileArgument(program, args);
+    const packageScript = projectPackageScript(program, args);
+    if (entryIndex !== undefined) {
+      result.projectScript = true;
+      for (let index = 0; index < entryIndex; index++) arg(index, 'option');
+      arg(entryIndex, 'script');
+      for (let index = entryIndex + 1; index < args.length; index++) scriptArg(index);
+    } else if (packageScript) {
+      result.projectPackageScript = packageScript;
+      arg(0, 'subcommand');
+      arg(1, 'text');
+      if (args.length > 2) arg(2, 'option');
+      for (let index = 3; index < args.length; index++) scriptArg(index);
     } else {
       const inline = args.findIndex(a => ['-c', '-e', '--eval', '-Command', '-command', '/c', '/C'].includes(a)
       || (program.endsWith('sh') && /^-[a-z]*c[a-z]*$/u.test(a)));
       let scriptSeen = false;
+      let preloadValue = false;
       const packageManager = ['npm', 'pnpm', 'yarn', 'bun'].includes(program);
-      const bunFile = program === 'bun' && /\.(?:[cm]?[jt]s|[jt]sx)$/iu.test(args[0] ?? '');
       const directoryOption = /^(?:--prefix|--cwd|--dir|--cache|-C)$/u;
       args.forEach((value, i) => {
         const attachedDirectory = /^(?:--(?:prefix|cwd|dir|cache)=|-C(?=\/|\.|[a-z]:))(.*)$/iu.exec(value);
-        if (inline >= 0) arg(i, i === inline + 1 ? 'inline_code' : i <= inline ? 'option' : 'text');
-        else if (bunFile && i === 0) arg(i, 'script');
+        const preload = isNodeProgram(program) ? /^(?:-r|--(?:require|import|loader|experimental-loader|env-file|env-file-if-exists|experimental-config-file|experimental-policy))(?:=(.*))?$/u.exec(value) : undefined;
+        if (preloadValue) { scriptArg(i); preloadValue = false; }
+        else if (preload && (inline < 0 || i < inline)) {
+          if (preload[1] === undefined) { arg(i, 'option'); preloadValue = true; }
+          else scriptArg(i);
+          reason('external_helper', value, 'This option can load additional code before the script entry.', '此选项可在脚本入口之前加载额外代码。');
+        } else if (isPythonProgram(program) && /^-c.+/su.test(value) && !scriptSeen) {
+          arg(i, 'inline_code', value.slice(2));
+          reason('inline_code', program, 'Inline code requires separate approval.', '内联代码需单独审批。');
+          scriptSeen = true;
+        } else if (inline >= 0) arg(i, i === inline + 1 ? 'inline_code' : i <= inline ? 'option' : 'text');
         else if (packageManager && attachedDirectory) arg(i, 'write_path', attachedDirectory[1]);
         else if (packageManager && directoryOption.test(args[i - 1] ?? '')) arg(i, 'write_path');
+        else if (packageManager && isExternalNetworkTarget(value.replace(/^--[\w-]+=/u, ''))) scriptArg(i);
         else if (packageManager) arg(i, i === 0 && !value.startsWith('-') ? 'subcommand' : value.startsWith('-') ? 'option' : 'text');
         else if (value.startsWith('-')) arg(i, 'option');
         else { arg(i, scriptSeen ? 'text' : 'script'); scriptSeen = true; }
@@ -554,7 +587,12 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
     if (['curl', 'wget', 'ssh', 'scp', 'sftp', 'ftp', 'nc', 'ncat', 'telnet'].includes(program)) effects.add('network');
     if (['sudo', 'doas', 'runas', 'pkexec'].includes(program)) effects.add('privilege_escalation');
     if (['printenv', 'env', 'set'].includes(program)) effects.add('credential_access');
-    args.forEach((value, i) => {
+    if (!effects.size && /[/\\]/u.test(spec.executable)) {
+      result.projectExecutable = true;
+      effects.add('arbitrary_code');
+      args.forEach((_, i) => scriptArg(i));
+      reason('script_execution', program, 'The explicit executable can run project code.', '显式可执行文件可运行项目代码。');
+    } else args.forEach((value, i) => {
       if (program === 'dd' && /^(?:if|of)=/u.test(value)) {
         arg(i, value.startsWith('of=') ? 'write_path' : 'read_path', value.slice(3));
         return;
@@ -565,7 +603,7 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
       arg(i, /^(?:https?|ssh|git):\/\//u.test(operand) ? 'text'
         : /[/\\]/u.test(operand) || !value.startsWith('-') ? (writers.includes(program) ? 'write_path' : 'read_path') : 'option', operand);
     });
-    reason('unsupported_program', program, 'No bounded argument grammar is available for this program.', '该程序没有受支持的有限参数规则。');
+    if (!result.projectExecutable) reason('unsupported_program', program, 'No bounded argument grammar is available for this program.', '该程序没有受支持的有限参数规则。');
   }
   if (spec.env.length) reason('environment_override', spec.env.map(e => e.name).join(', '),
     'Environment overrides can change execution or configuration lookup.', '环境变量覆盖可能改变执行行为或配置查找。');

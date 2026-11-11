@@ -1,5 +1,5 @@
 import * as path from 'node:path';
-import { lstat, readlink, realpath } from 'node:fs/promises';
+import { lstat, readlink, realpath, stat } from 'node:fs/promises';
 import * as vscode from 'vscode';
 
 export function isPathInside(root: string, target: string): boolean {
@@ -47,4 +47,18 @@ export async function findCanonicalWorkspaceFolder(cwdPath: string): Promise<{
     if (isPathInside(realRoot, cwdPath)) return { folder, realPath: realRoot };
   }
   return undefined;
+}
+
+/** The task can select a subdirectory, but it must still belong to a trusted
+ * local workspace. A multi-root workspace without a task selection does not
+ * supply a single project root for automatic project operations. */
+export async function resolveSelectedProjectRoot(projectUri?: string): Promise<string | undefined> {
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  if (!projectUri) {
+    return folders.length === 1 && folders[0].uri.scheme === 'file' ? realpath(folders[0].uri.fsPath) : undefined;
+  }
+  const uri = vscode.Uri.parse(projectUri);
+  if (uri.scheme !== 'file') return undefined;
+  const root = await realpath(uri.fsPath);
+  return (await stat(root)).isDirectory() && await findCanonicalWorkspaceFolder(root) ? root : undefined;
 }

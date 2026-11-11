@@ -1501,6 +1501,11 @@ function normalizeRunDetails(value: unknown, restoring = false): ChatMessage['ru
           policyVersion: normalizeNonNegativeInteger(review.policyVersion),
           approvalMode: (review.approvalMode === 'delegate' ? review.approvalMode : undefined) as import('../approvals/approvalReviewTypes').ApprovalReviewDisplay['approvalMode'],
           osIsolation: review.osIsolation === 'none' ? 'none' as const : undefined,
+          projectApproval: review.projectApproval === true && typeof review.policyVersion === 'number'
+            && Number.isInteger(review.policyVersion) && review.policyVersion >= 7
+            && review.approvalSource === 'auto_approval_review' && review.decision === 'approve' && review.reviewState === undefined
+            && typeof review.reviewerModelId === 'string' && review.reviewerModelId.length > 0
+            && (review.risk === 'low' || review.risk === 'medium') ? true as const : undefined,
           approvalSource: review.approvalSource as import('../approvals/approvalReviewTypes').ApprovalReviewSource,
           reviewerSourceId: typeof review.reviewerSourceId === 'string' ? review.reviewerSourceId : '',
           reviewerModelId: typeof review.reviewerModelId === 'string' ? review.reviewerModelId : '',

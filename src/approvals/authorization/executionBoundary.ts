@@ -6,6 +6,7 @@ import { hashDraftRunSpec } from '../../runs/draftRunProposal';
 import { getFileReferenceAuthorizationKey } from '../../context/references/fileReference';
 import { findCanonicalWorkspaceFolder } from './pathScope';
 import { inspectGitCommandReplan, type GitCommandReplan } from './commandSemantics';
+import type { CommandScope } from './commandScope';
 
 export class CommandCapabilityError extends Error {
   public constructor(public readonly diagnostic: CommandCapabilityDiagnostic) {
@@ -26,23 +27,36 @@ export function assertValidGitCommitArguments(spec: DraftRunSpec): void {
   if (diagnosis && diagnosis.code !== 'git_status_pager_override') throw new InvalidGitCommitError(diagnosis);
 }
 
+export function getDraftRunLaunchRefusal(scope: CommandScope): string | undefined {
+  const diagnostic = scope.diagnostics.find(item => ['script_entry_unverified', 'interpreter_identity', 'launch_scope_unverified',
+    'foreign_path', 'path_resolution'].includes(item.code));
+  return diagnostic?.message ?? (!scope.boundLauncher
+    ? 'The exact launch cannot be verified. / 无法核实实际启动配置。' : undefined);
+}
+
 export async function validateDraftRunBeforeApproval(
   draftRun: DraftRun,
-  authorizedExternalReferenceUris: ReadonlySet<string>
+  authorizedExternalReferenceUris: ReadonlySet<string>,
+  scope?: CommandScope
 ): Promise<void> {
   checkDraftRunApprovalBoundary(draftRun, authorizedExternalReferenceUris);
-  const cwdUri = vscode.Uri.parse(draftRun.spec.cwdUri);
-  const stat = await vscode.workspace.fs.stat(cwdUri);
-  if (stat.type !== vscode.FileType.Directory || cwdUri.scheme !== 'file') {
-    throw new Error('DraftRun working directory is no longer an executable local directory.');
-  }
-  const canonicalCwd = await realpath(cwdUri.fsPath);
-  if (!await findCanonicalWorkspaceFolder(canonicalCwd) && !authorizedExternalReferenceUris.has(vscode.Uri.file(canonicalCwd).toString())
-    && !authorizedExternalReferenceUris.has(cwdUri.toString())) {
-    throw new Error(`Authorize the exact external working directory before running this DraftRun: ${cwdUri.toString()}`);
+  if (!scope) {
+    const cwdUri = vscode.Uri.parse(draftRun.spec.cwdUri);
+    const stat = await vscode.workspace.fs.stat(cwdUri);
+    if (stat.type !== vscode.FileType.Directory || cwdUri.scheme !== 'file') {
+      throw new Error('DraftRun working directory is no longer an executable local directory.');
+    }
+    const canonicalCwd = await realpath(cwdUri.fsPath);
+    if (!await findCanonicalWorkspaceFolder(canonicalCwd) && !authorizedExternalReferenceUris.has(vscode.Uri.file(canonicalCwd).toString())
+      && !authorizedExternalReferenceUris.has(cwdUri.toString())) {
+      throw new Error(`Authorize the exact external working directory before running this DraftRun: ${cwdUri.toString()}`);
+    }
+  } else {
+    const launchFailure = getDraftRunLaunchRefusal(scope);
+    if (launchFailure) throw new Error(launchFailure);
   }
   checkDraftRunApprovalBoundary(draftRun, authorizedExternalReferenceUris);
-  const diagnosis = analyzeCommandCapability(draftRun.spec).diagnostics.find(item => item.blocking);
+  const diagnosis = analyzeCommandCapability(draftRun.spec, scope?.semantics).diagnostics.find(item => item.blocking);
   if (diagnosis) throw new CommandCapabilityError(diagnosis);
 }
 

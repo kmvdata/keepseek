@@ -1,7 +1,9 @@
 import * as path from 'node:path';
-import { access, realpath, stat } from 'node:fs/promises';
+import { access, lstat, realpath, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { homedir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import * as vscode from 'vscode';
 import type { DraftRun } from '../../shared/types';
 import { createControlledEnvironment } from '../../runs/executionEnvironment';
@@ -9,12 +11,18 @@ import { findSensitiveEvidence } from '../approvalPolicy';
 import { assertOperationPath, isGitProjectSkillPath, isProtectedOperationPath } from './protectedTargets';
 import type { GitRemoteScope } from './gitRemoteScope';
 import { inspectLocalGitScope, type GitTagSnapshot } from './localGitScope';
-import { analyzeCommand, isGitReleaseRef } from './commandSemantics';
+import { inspectPackageLaunch, parseLiteralLifecycleArgv } from './packageLaunch';
+import { analyzeCommand, isGitReleaseRef, type CommandSemantics } from './commandSemantics';
+import { isNodeProgram, isPythonProgram } from './projectLaunchArguments';
+import { fileIdentity, hashRegularFile, inspectProjectExecutable, inspectPythonVenv, installedBunPath, installedInterpreter, installedLaunchPath,
+  isNativeExecutable, type ResolvedExecutable } from './projectLaunchIdentity';
 import { canonicalPath, isPathInside, joinUnresolvedPath } from './pathScope';
 import { authorizationReason, type AuthorizationReason } from './reasons';
 import { assertCommandTarget, inspectVisibleCommandTargets } from './visibleCommandTargets';
 
 export interface CommandScope {
+  semantics?: CommandSemantics;
+  selectedProjectRoot?: string;
   externalUris: string[];
   cwd: string;
   /** Effective Git cwd after validated global -C operands. */
@@ -31,6 +39,9 @@ export interface CommandScope {
   /** The interpreter, on-disk entry and explicit argv paths were verified. The script runs with host privileges. */
   trustedProjectScript?: boolean;
   projectScriptLaunchPath?: string;
+  projectScriptEntryUri?: string;
+  projectScriptEntryIdentity?: { sha256: string; sizeBytes: number };
+  projectScriptEntryStat?: string;
   paths: Array<{ uri: string; role: string; external: boolean }>;
   uncertain: boolean;
   reasons: string[];
@@ -43,23 +54,48 @@ export interface CommandScope {
 export type CommandRemoteInspection = boolean | 'metadata';
 
 export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectRemote: CommandRemoteInspection = false,
-  tagSnapshot?: { ref: string; signal: AbortSignal }, allowUnresolvedLauncher = false): Promise<CommandScope> {
+  tagSnapshot?: { ref: string; signal: AbortSignal }, allowUnresolvedLauncher = false, selectedProjectUri?: string,
+  allowMissingCwd = false): Promise<CommandScope> {
   const parsed = analyzeCommand(run.spec);
   const diagnostics = [...parsed.reasons];
   const roots = await Promise.all((vscode.workspace.workspaceFolders ?? []).filter(f => f.uri.scheme === 'file')
     .map(f => canonicalPath(f.uri.fsPath)));
-  const cwd = vscode.Uri.parse(run.spec.cwdUri).fsPath;
+  const cwdUri = vscode.Uri.parse(run.spec.cwdUri);
+  if (cwdUri.scheme !== 'file') throw new Error('Commands require a local working directory. / 命令需要本地工作目录。');
+  const cwd = await (allowMissingCwd ? canonicalPath(cwdUri.fsPath) : realpath(cwdUri.fsPath));
+  const cwdInfo = await stat(cwd).catch((error: NodeJS.ErrnoException) => {
+    if (!allowMissingCwd || error.code !== 'ENOENT') throw error;
+    return undefined;
+  });
+  if (cwdInfo && !cwdInfo.isDirectory()) throw new Error('Commands require a local working directory. / 命令需要本地工作目录。');
+  const selected = selectedProjectUri && vscode.Uri.parse(selectedProjectUri);
+  const selectedProjectRoot = selected
+    ? selected.scheme === 'file' ? await realpath(selected.fsPath) : undefined
+    : roots.filter(root => isPathInside(root, cwd)).sort((a, b) => b.length - a.length)[0];
+  if (selected && (!selectedProjectRoot || !roots.some(root => isPathInside(root, selectedProjectRoot))
+    || !(await stat(selectedProjectRoot)).isDirectory())) {
+    throw new Error('The selected project root cannot be verified. / 无法核实当前选定的工程根目录。');
+  }
+  const projectLaunch = Boolean(parsed.projectScript || parsed.projectPackageScript || parsed.projectExecutable);
   const external = new Set<string>();
   const paths: CommandScope['paths'] = [];
   const pathIdentities: unknown[] = [];
+  const checkedPaths = new Set<string>();
   const gitSkillOperands: string[] = [];
   let localScript: string | undefined;
-  const check = async (value: string, role: string, gitAddOperand = false) => {
+  let scriptEntry: string | undefined;
+  let projectScriptEntryIdentity: CommandScope['projectScriptEntryIdentity'];
+  let projectScriptEntryStat: string | undefined;
+  const check = async (value: string, role: string, gitAddOperand = false,
+    knownEntry?: { fileIdentity: string; sha256: string }) => {
+    const checkKey = JSON.stringify([value, role, gitAddOperand]);
+    if (checkedPaths.has(checkKey)) return;
+    checkedPaths.add(checkKey);
     const write = role === 'write_path';
     const projectSkill = gitAddOperand && roots.some(root => isGitProjectSkillPath(root, value));
     if (!projectSkill || isProtectedOperationPath(value, write, true)) assertOperationPath(value, write);
     let resolved: string;
-    try { resolved = await canonicalPath(value); }
+    try { resolved = role === 'cwd' && value === cwdUri.fsPath ? cwd : await canonicalPath(value); }
     catch {
       diagnostics.push(authorizationReason('path_resolution', value,
         'The path cannot be resolved reliably.', '无法可靠解析该路径。'));
@@ -73,24 +109,35 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectR
     } else assertOperationPath(resolved, write);
     assertCommandTarget(resolved, write);
     const uri = vscode.Uri.file(resolved).toString();
-    const outside = !roots.some(root => isPathInside(root, resolved));
-    if ((write || role === 'script' || role === 'executable') && vscode.workspace.textDocuments?.some(document => document.isDirty && document.uri.scheme === 'file'
+    const outside = projectLaunch && selectedProjectRoot ? !isPathInside(selectedProjectRoot, resolved)
+      : !roots.some(root => isPathInside(root, resolved));
+    if ((write || ['script', 'executable', 'launcher_config', 'package_manifest', 'lifecycle_script'].includes(role))
+      && vscode.workspace.textDocuments?.some(document => document.isDirty && document.uri.scheme === 'file'
       && [resolved, value].some(target => isPathInside(path.resolve(target), path.resolve(document.uri.fsPath))))) {
       throw new Error('Command targets a dirty editor. Nothing executed. / 命令涉及未保存的编辑器，尚未执行。');
     }
-    const info = await stat(resolved).catch((error: NodeJS.ErrnoException) => {
+    const info = await (role === 'cwd' && resolved === cwd ? Promise.resolve(cwdInfo) : stat(resolved)).catch((error: NodeJS.ErrnoException) => {
       if (error.code !== 'ENOENT') throw error;
       return undefined;
     });
     if (info && !info.isFile() && !info.isDirectory()) {
       throw new Error('The command targets a special filesystem object. / 命令指向特殊文件系统对象。');
     }
-    if (parsed.projectScript && role === 'script' && info?.isFile() && info.nlink === 1 && !outside) {
-      localScript = resolved;
+    if (role === 'script' && projectLaunch && info?.isFile() && info.nlink === 1) {
+      scriptEntry = resolved;
+      if (!outside) {
+        localScript = resolved;
+        projectScriptEntryStat = fileIdentity(info);
+        if (knownEntry && knownEntry.fileIdentity !== projectScriptEntryStat) {
+          throw new Error('The package entry changed during preflight. / 软件包脚本入口在预检期间已变化。');
+        }
+        projectScriptEntryIdentity = { sha256: knownEntry?.sha256 ?? await hashRegularFile(resolved, info), sizeBytes: info.size };
+        pathIdentities.push(projectScriptEntryIdentity);
+      }
     }
     paths.push({ uri, role, external: outside });
     pathIdentities.push(info && [info.dev, info.ino, info.mode,
-      ...(['script', 'write_path', 'executable'].includes(role) ? [info.mtimeMs, info.ctimeMs, info.size] : [])]);
+      ...(['script', 'write_path', 'executable', 'package_manifest', 'lifecycle_script'].includes(role) ? [info.mtimeMs, info.ctimeMs, info.size] : [])]);
     if (outside) external.add(uri);
   };
   if (findSensitiveEvidence(JSON.stringify([run.spec.executable, run.spec.args, run.spec.env]))
@@ -103,7 +150,9 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectR
     throw new Error('Credential access, privilege escalation or unsafe execution environment. Nothing executed. / 操作涉及凭据、提权或高风险执行环境，尚未执行。');
   }
   const visibleTargets = inspectVisibleCommandTargets(parsed);
-  await check(cwd, 'cwd');
+  const projectOperandPath = (value: string) => /^file:/iu.test(value) ? fileURLToPath(value)
+    : /^~[\\/]/u.test(value) ? joinUnresolvedPath(homedir(), value.slice(2)) : value;
+  await check(cwdUri.fsPath, 'cwd');
   const gitCommand = parsed.program === 'git' ? parsed.arguments.find(argument => argument.role === 'subcommand') : undefined;
   for (const operand of parsed.arguments) {
     if (!['read_path', 'write_path', 'cwd', 'repository', 'script'].includes(operand.role)) continue;
@@ -120,7 +169,8 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectR
       continue;
     }
     const base = joinUnresolvedPath(cwd, ...operand.cwdChanges.filter(Boolean));
-    await check(joinUnresolvedPath(base, operand.value), operand.role, gitCommand?.value === 'add' && operand.role === 'read_path');
+    const value = projectLaunch && operand.role !== 'script' ? projectOperandPath(operand.value) : operand.value;
+    await check(joinUnresolvedPath(base, value), operand.role, gitCommand?.value === 'add' && operand.role === 'read_path');
   }
   for (const target of visibleTargets) {
     if (process.platform !== 'win32' && /^(?:[A-Za-z]:|\\\\)/u.test(target.value)) {
@@ -136,13 +186,83 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectR
     && [executable.path, executable.launchPath].includes(path.resolve(document.uri.fsPath)))) {
     throw new Error('The launcher has unsaved changes. Nothing executed. / 启动程序有未保存的修改，尚未执行。');
   }
-  if (!executable?.trusted) diagnostics.push(authorizationReason('executable_identity', run.spec.executable,
+  const launchDirectory = executable && await realpath(path.dirname(executable.launchPath));
+  const launchOutsideWorkspace = executable && launchDirectory && !roots.some(root =>
+    isPathInside(root, executable.path) || isPathInside(root, launchDirectory));
+  const installed = executable?.trusted && launchOutsideWorkspace
+    && await installedLaunchPath(executable, env.HOME ?? env.USERPROFILE, launchDirectory);
+  const venv = executable && selectedProjectRoot && !launchOutsideWorkspace && isPythonProgram(parsed.program)
+    ? await inspectPythonVenv(executable, selectedProjectRoot, cwd, env, resolveExecutable) : undefined;
+  if (venv) await check(venv.config, 'launcher_config');
+  const packageLaunch = executable && launchOutsideWorkspace && selectedProjectRoot === cwd && parsed.projectPackageScript
+    ? await inspectPackageLaunch(parsed.program, parsed.projectPackageScript.name, cwd, executable, env, resolveExecutable) : undefined;
+  if (parsed.projectPackageScript && !packageLaunch) {
+    // Bind a visible manifest even when the launcher or custom configuration
+    // cannot qualify for the ordinary lane. This also retains symlink grants.
+    const manifest = path.join(cwd, 'package.json');
+    if (await lstat(manifest).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ENOENT') throw error;
+      return undefined;
+    })) await check(manifest, 'package_manifest');
+  }
+  if (packageLaunch) {
+    await check(packageLaunch.manifest, 'script', false, packageLaunch);
+    for (const definition of packageLaunch.lifecycle) {
+      if (findSensitiveEvidence(definition)) {
+        throw new Error('Package lifecycle contains sensitive material. / 软件包生命周期包含敏感信息。');
+      }
+      const targets = inspectVisibleCommandTargets({ program: 'sh', effects: ['arbitrary_code'], reasons: [],
+        arguments: [{ index: 0, value: definition, role: 'inline_code', cwdChanges: [] }] }, value => {
+          if (!parsed.effects.includes('network')) parsed.effects.push('network');
+          (parsed.networkTargets ??= []).push(value);
+        });
+      for (const target of targets) await check(joinUnresolvedPath(cwd, target.value), target.write ? 'write_path' : 'read_path');
+      const literal = parseLiteralLifecycleArgv(definition);
+      if (literal) {
+        const [launcher, ...argv] = literal;
+        const lifecycle = analyzeCommand({ ...run.spec, executable: launcher, args: argv, env: [] });
+        if (lifecycle.effects.includes('privilege_escalation') || lifecycle.effects.includes('credential_access')
+          || /^(?:npm|pnpm|yarn|bun)$/u.test(lifecycle.program) && !lifecycle.projectScript && !lifecycle.projectPackageScript
+            && argv.some(arg => /^(?:--global|--location=global|-[a-z]*g[a-z]*)(?:=|$)/u.test(arg) || arg === 'global')) {
+          throw new Error('Protected package lifecycle effect. Nothing executed. / 软件包生命周期涉及受保护操作，尚未执行。');
+        }
+        for (const effect of lifecycle.effects) {
+          if (['package_install', 'publish_or_deploy', 'network'].includes(effect) && !parsed.effects.includes(effect)) parsed.effects.push(effect);
+        }
+        if (lifecycle.projectScript || lifecycle.projectExecutable) {
+          if (lifecycle.projectExecutable) await check(joinUnresolvedPath(cwd, launcher), 'lifecycle_script');
+          for (const item of lifecycle.arguments) {
+            if (item.role === 'script') await check(joinUnresolvedPath(cwd, item.value), 'lifecycle_script');
+            else if (['read_path', 'write_path'].includes(item.role)) await check(joinUnresolvedPath(cwd, projectOperandPath(item.value)), item.role);
+          }
+          for (const item of inspectVisibleCommandTargets(lifecycle)) {
+            await check(joinUnresolvedPath(cwd, item.value), item.write ? 'write_path' : 'read_path');
+          }
+        }
+      }
+    }
+  }
+  const custom = parsed.projectExecutable && executable && selectedProjectRoot && launchDirectory
+    && [executable.path, launchDirectory].every(target => isPathInside(selectedProjectRoot, target))
+    ? await inspectProjectExecutable(executable, cwd, env, resolveExecutable) : undefined;
+  if (custom && executable) await check(executable.launchPath, 'script');
+  if (parsed.projectExecutable && executable && selectedProjectRoot && launchDirectory && !custom
+    && [executable.path, launchDirectory].every(target => isPathInside(selectedProjectRoot, target))) {
+    diagnostics.push(authorizationReason('interpreter_identity', run.spec.executable,
+      'The project executable has no verified native or script launcher.',
+      '工程可执行文件没有已核实的原生启动器或脚本解释器。'));
+  }
+  if (parsed.networkTargets?.some(target => {
+    try { return Boolean(new URL(target).password); } catch { return false; }
+  })) throw new Error('A command network target contains credentials. Nothing executed. / 命令网络目标含有凭据，尚未执行。');
+  const interpreterVerified = Boolean(installed || venv || packageLaunch || custom);
+  if (!installed && !venv && !packageLaunch && !custom) diagnostics.push(authorizationReason('executable_identity', run.spec.executable,
     'The resolved executable is not a verified system command; its basename is not authority.',
     '解析后的可执行文件不是已核实的系统命令；文件名不能作为授权依据。'));
   // Explicit executable paths are also filesystem targets (PATH-selected system
   // binaries are runtime dependencies, not workspace operand grants).
   if (/[/\\]/u.test(run.spec.executable)) {
-    if (!executable?.trusted) {
+    if (!executable?.trusted && !venv && !packageLaunch && !custom) {
       const selected = await resolveExecutable(path.basename(run.spec.executable), cwd, env);
       if (!executable || selected?.launchPath !== executable.launchPath) await check(joinUnresolvedPath(cwd, run.spec.executable), 'executable');
     }
@@ -150,6 +270,13 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectR
     && !roots.some(root => isPathInside(root, executable.path))) {
     await check(executable.launchPath, 'executable');
   }
+  if ((parsed.projectScript || isNodeProgram(parsed.program) || isPythonProgram(parsed.program))
+    && !interpreterVerified) diagnostics.push(authorizationReason('interpreter_identity', run.spec.executable,
+    'The interpreter is not an installed runtime or verified project virtual environment.',
+    '启动器并非已安装的运行时或已核实的项目虚拟环境。'));
+  if (parsed.projectScript && !scriptEntry) diagnostics.push(authorizationReason('script_entry_unverified', '',
+    'The supplied script is not an existing regular file with an exact launch identity.',
+    '指定的脚本不是可以核实启动身份的现有常规文件。'));
   let gitFingerprint: string | undefined;
   let gitCwd: string | undefined;
   let gitBranchRef: string | undefined;
@@ -158,7 +285,7 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectR
   let gitTagSnapshot: GitTagSnapshot | undefined;
   const gitRuntime = diagnostics.findIndex(item => item.code === 'git_runtime');
   const boundedGitOptions = gitCommand && ['status', 'diff', 'log', 'show'].includes(gitCommand.value);
-  if (executable?.trusted && !roots.some(root => isPathInside(root, executable.path)) && gitCommand && gitRuntime >= 0
+  if (executable && installed && gitCommand && gitRuntime >= 0
     && diagnostics.every(item => ['git_runtime', 'git_commit_argv', 'git_ref_mutation', 'missing_option_value'].includes(item.code)
       || (boundedGitOptions && item.code === 'unsupported_option'))
     && !external.size && (!parsed.gitRemote || inspectRemote)) {
@@ -209,26 +336,31 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectR
     throw new Error('Project skill paths require a verified local Git repository. Nothing executed. / 项目技能路径需通过本地 Git 仓库核验，原命令未启动。');
   }
   const externalUris = [...external].sort();
-  const trustedProjectScript = Boolean(executable?.trusted && localScript && !externalUris.length
-    && !roots.some(root => isPathInside(root, executable.path) || isPathInside(root, executable.launchPath))
-    && diagnostics.every(item => item.code === 'script_execution')
-    && roots.some(root => paths.every(target => isPathInside(root, vscode.Uri.parse(target.uri).fsPath))));
+  const trustedProjectScript = Boolean(interpreterVerified && localScript && !externalUris.length
+    && !parsed.networkTargets?.length && !parsed.effects.includes('network')
+    && diagnostics.every(item => item.code === 'script_execution' || item.code === 'environment_override'
+      && run.spec.env.every(({ name }) => /^(?:LANG|LC_ALL|LC_CTYPE|TERM|COLORTERM|CI|NO_COLOR|NODE_ENV|PYTHONDONTWRITEBYTECODE)$/u.test(name)))
+    && selectedProjectRoot && paths.every(target => isPathInside(selectedProjectRoot, vscode.Uri.parse(target.uri).fsPath)));
   // Python uses the launcher path to discover virtual environments and its
   // installation prefix. Keep that spelling after verifying its real target.
-  const projectScriptLaunchPath = trustedProjectScript && /^python\d*$/u.test(parsed.program) ? executable?.launchPath : undefined;
+  const projectScriptLaunchPath = executable && interpreterVerified && isPythonProgram(parsed.program) ? executable.launchPath : undefined;
   if (!executable && process.platform !== 'win32' && !allowUnresolvedLauncher) {
     throw new Error('Executable cannot be resolved. Nothing executed. / 无法解析实际程序，尚未执行。');
   }
   const fingerprint = createHash('sha256').update(JSON.stringify({
-    version: 1, executable, env, roots, paths, pathIdentities, gitFingerprint, gitCwd, externalUris, diagnostics, trustedProjectScript
+    version: 2, executable, env, roots, selectedProjectRoot, venv: venv?.fingerprint, packageRuntime: packageLaunch?.runtime, custom,
+    paths, pathIdentities, gitFingerprint, gitCwd, externalUris, diagnostics, trustedProjectScript,
+    argv: projectLaunch ? run.spec.args : undefined, networkTargets: parsed.networkTargets
   })).digest('hex');
-  return { externalUris, paths, cwd: paths[0]?.uri ?? run.spec.cwdUri, gitCwd, gitBranchRef, gitRemote, gitRepositoryIdentity, gitTagSnapshot,
-    executable: executable?.path, verifiedLauncher: executable?.trusted ? executable.launchPath : undefined,
+  return { semantics: parsed, selectedProjectRoot, externalUris, paths, cwd: paths[0]?.uri ?? run.spec.cwdUri,
+    gitCwd, gitBranchRef, gitRemote, gitRepositoryIdentity, gitTagSnapshot,
+    executable: executable?.path, verifiedLauncher: installed || venv || packageLaunch || custom ? executable?.launchPath : undefined,
     boundLauncher: executable?.launchPath, environment: env, environmentNames: Object.keys(env).sort(),
-    trustedProjectScript, projectScriptLaunchPath, uncertain: diagnostics.length > 0, diagnostics,
+    trustedProjectScript, projectScriptLaunchPath, projectScriptEntryUri: scriptEntry ? vscode.Uri.file(scriptEntry).toString() : undefined,
+    projectScriptEntryIdentity, projectScriptEntryStat,
+    uncertain: diagnostics.length > 0, diagnostics,
     reasons: diagnostics.map(reason => reason.message), fingerprint };
 }
-
 export function hasExactCommandScope(scope: CommandScope, cwdUri: string, authorizedUris: ReadonlySet<string>): boolean {
   return scope.externalUris.every(uri => authorizedUris.has(uri)
     || (uri === scope.cwd && authorizedUris.has(cwdUri) && scope.paths.every(target => target.uri !== uri || target.role === 'cwd')));
@@ -236,13 +368,13 @@ export function hasExactCommandScope(scope: CommandScope, cwdUri: string, author
 
 /** Match POSIX PATH lookup, including relative/empty entries. On Windows,
  * bind an explicit filename or a PATH-selected .exe and spawn its full path. */
-export async function resolveExecutable(executable: string, cwd: string, env: NodeJS.ProcessEnv): Promise<{
-  path: string; launchPath: string; identity: string; trusted: boolean;
-} | undefined> {
+export async function resolveExecutable(executable: string, cwd: string, env: NodeJS.ProcessEnv): Promise<ResolvedExecutable | undefined> {
   const windows = process.platform === 'win32';
-  const filename = windows && !path.extname(executable) ? executable + '.exe' : executable;
+  const filename = windows && (!path.extname(executable) || isPythonProgram(path.basename(executable))) ? executable + '.exe' : executable;
   const candidates = (windows ? /[/\\]/u : /\//u).test(executable) ? [joinUnresolvedPath(cwd, filename)]
     : (env.PATH ?? (windows ? '' : '/usr/bin:/bin')).split(path.delimiter).map(dir => joinUnresolvedPath(cwd, dir, filename));
+  const systemRoots = windows ? [] : await Promise.all(['/bin', '/usr/bin'].map(dir => realpath(dir)));
+  const hostExecutable = await realpath(process.execPath);
   for (const candidate of candidates) {
     try {
       await access(candidate, constants.X_OK);
@@ -251,35 +383,25 @@ export async function resolveExecutable(executable: string, cwd: string, env: No
       if (!info.isFile()) continue;
       // OS-owned system locations or the running extension host binary only.
       // A workspace/PATH shim named `cat`/`git` never gains their authority.
-      const systemRoots = windows ? [] : await Promise.all(['/bin', '/usr/bin'].map(dir => realpath(dir)));
       const system = info.uid === 0 && (info.mode & 0o022) === 0
         && systemRoots.some(root => path.dirname(resolved) === root);
-      const name = path.basename(executable);
+      const name = path.basename(executable).replace(/\.exe$/iu, '').toLowerCase();
       const ownerControlled = (info.uid === 0 || info.uid === process.getuid?.()) && (info.mode & 0o022) === 0;
       const packagedGit = process.platform === 'darwin' && name === 'git'
         && /^\/(?:opt\/homebrew|usr\/local)\/Cellar\/git\/[^/]+\/bin\/git$/u.test(resolved)
         && ownerControlled;
-      const installedInterpreter = ownerControlled && isInstalledInterpreter(name, resolved, env.HOME, system, info.uid === 0);
-      const hostRuntime = resolved === await realpath(process.execPath);
+      const hostRuntime = resolved === hostExecutable;
+      const interpreter = isNodeProgram(name) || isPythonProgram(name) || name === 'bun';
+      const trustedInterpreter = interpreter && (ownerControlled || windows)
+        && (name === 'bun' ? installedBunPath(resolved, homedir(), system, info.uid === 0)
+          : installedInterpreter(name, resolved, homedir(), system, info.uid === 0, hostRuntime))
+        && await isNativeExecutable(resolved, info).catch(() => false);
       const matchingName = path.basename(resolved) === name;
       const standardWindowsGit = windows && /^git(?:\.exe)?$/iu.test(name)
         && /^([a-z]:)\\Program Files(?: \(x86\))?\\Git\\(?:cmd|bin)\\git\.exe$/iu.test(resolved);
-      return { path: resolved, launchPath: candidate, identity: `${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}:${info.ctimeMs}`,
-        trusted: standardWindowsGit || (!windows && (installedInterpreter || (matchingName && (system || packagedGit || hostRuntime)))) };
+      return { path: resolved, launchPath: candidate, identity: fileIdentity(info),
+        trusted: standardWindowsGit || trustedInterpreter || (!windows && !interpreter && matchingName && (system || packagedGit || hostRuntime)) };
     } catch { /* Continue PATH lookup as spawn does for absent/non-executable entries. */ }
   }
   return undefined;
-}
-
-function isInstalledInterpreter(name: string, resolved: string, home: string | undefined, system: boolean, rootOwned: boolean): boolean {
-  if (name === 'node') {
-    return (rootOwned && resolved === '/usr/local/bin/node')
-      || (process.platform === 'darwin' && /^\/(?:opt\/homebrew|usr\/local)\/Cellar\/node(?:@\d+)?\/[^/]+\/bin\/node$/u.test(resolved));
-  }
-  if (!/^python\d*$/u.test(name) || !/^python\d+(?:\.\d+)*$/u.test(path.basename(resolved))) return false;
-  if (system) return true;
-  if (process.platform === 'darwin'
-    && /^\/(?:opt\/homebrew|usr\/local)\/Cellar\/python(?:@\d+(?:\.\d+)*)?\/[^/]+\/(?:Frameworks\/Python\.framework\/Versions\/[^/]+\/)?bin\/python\d+(?:\.\d+)*$/u.test(resolved)) return true;
-  return Boolean(home && path.isAbsolute(home) && ['miniconda3', 'anaconda3', 'miniforge3'].some(distribution =>
-    path.dirname(resolved) === path.join(home, distribution, 'bin')));
 }

@@ -14,6 +14,7 @@ export function createDraftEditReviewRequest(input: {
   rootTaskId?: string;
   agentRunId: string;
   edit: DraftEdit;
+  canonicalTargets?: readonly string[];
   originalText: string;
   metadataOnly?: boolean;
   history: readonly ChatMessage[];
@@ -57,6 +58,7 @@ export function createDraftEditReviewRequest(input: {
       uri: input.edit.uri,
       sourceUri: input.edit.kind === 'move_v1' ? input.edit.sourceUri : undefined,
       targetUri: input.edit.kind === 'move_v1' ? input.edit.targetUri : undefined,
+      canonicalTargets: input.canonicalTargets ? [...input.canonicalTargets] : undefined,
       metadataOnly: input.metadataOnly || input.edit.action === 'delete',
       proposedChange: createBoundedReviewText(change),
       payloadVersion: getDraftEditKind(input.edit),
@@ -80,7 +82,7 @@ export function createDraftRunReviewRequest(input: {
 }): ApprovalReviewRequest {
   const plan = input.draftRun.spec.restricted;
   const original = input.originalDraftRun;
-  const assessment = plan ? input.draftRun.effectAssessment : analyzeDraftRunEffects(input.draftRun.spec, input.scope?.diagnostics);
+  const assessment = plan ? input.draftRun.effectAssessment : analyzeDraftRunEffects(input.draftRun.spec, input.scope);
   return createBaseRequest({
     sessionId: input.draftRun.sessionId,
     rootTaskId: input.rootTaskId ?? input.draftRun.agentRunId,
@@ -88,6 +90,7 @@ export function createDraftRunReviewRequest(input: {
     actionKind: 'draft_run_execute',
     targetId: input.draftRun.id,
     actionHash: hashDraftRunAction(input.draftRun),
+    verifiedProjectOperation: !plan && input.scope?.trustedProjectScript ? 'script_launch' : undefined,
     history: input.history,
     purpose: input.draftRun.spec.reason,
     staticRiskAnalysis: [
@@ -108,6 +111,8 @@ export function createDraftRunReviewRequest(input: {
         paths: [{ uri: plan.targetUri, role: 'read_snapshot', external: false }] }
         : input.scope && { cwd: input.scope.cwd, executable: input.scope.executable, launcher: input.scope.boundLauncher,
           launcherTrust: input.scope.verifiedLauncher ? 'verified_runtime' : 'identity_only',
+          projectEntryUri: input.scope.projectScriptEntryUri,
+          networkTargets: input.scope.semantics?.networkTargets?.map(target => redactSensitiveReviewText(target)),
           osIsolation: 'none', environmentNames: input.scope.environmentNames, paths: input.scope.paths },
       restricted: plan && original && { kind: plan.kind, original: {
         id: original.id, specHash: original.specHash, executable: original.spec.executable,
@@ -137,6 +142,7 @@ export function createValidationReviewRequest(input: {
     actionKind: 'validation_run',
     targetId: input.targetId,
     actionHash: hashApprovalValue([input.script, input.workspaceRootId, input.snapshot.fingerprint]),
+    verifiedProjectOperation: input.snapshot.evidenceComplete ? 'fixed_validation' : undefined,
     history: input.request.history,
     purpose: `Run the fixed ${input.script} validation requested by the main model.`,
     staticRiskAnalysis: ['registered_validation_tool', `fixed_script:${input.script}`,
@@ -199,6 +205,7 @@ function createBaseRequest(input: {
   actionHash: string;
   effectHash?: string;
   historicalActionHashes?: readonly string[];
+  verifiedProjectOperation?: ApprovalReviewRequest['verifiedProjectOperation'];
   evidenceIncomplete?: boolean;
   hideToolResultBodies?: boolean;
   history: readonly ChatMessage[];
@@ -218,6 +225,7 @@ function createBaseRequest(input: {
     actionHash: input.actionHash,
     effectHash: input.effectHash,
     historicalActionHashes: input.historicalActionHashes,
+    verifiedProjectOperation: input.verifiedProjectOperation,
     originalGoalSummary: compact(redactSensitiveReviewText(firstUser), 1_200),
     evidenceIncomplete: input.evidenceIncomplete === true || firstUser !== redactSensitiveReviewText(firstUser) || input.purpose.length > 1_200
       || input.staticRiskAnalysis.some(item => item.length > 1_000),

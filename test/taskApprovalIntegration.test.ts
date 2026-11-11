@@ -1462,6 +1462,7 @@ async function createFixture(root: string, mode: 'ask' | 'delegate') {
   let now = 0, executeCount = 0, reviewCount = 0, continuationCount = 0;
   let decision: 'approve' | 'needs_user' | 'deny' = 'approve';
   let risk: 'low' | 'high' | 'critical' = 'low';
+  let policyRules: string[] | undefined;
   let alternative = '';
   let manualDecision: boolean | 'hold' = false;
   const observed = new Set<string>();
@@ -1481,15 +1482,17 @@ async function createFixture(root: string, mode: 'ask' | 'delegate') {
       assert.equal(input.model.id, 'main');
       const lines = input.userPrompt.split('\n');
       assert.equal(lines[1], '<FACTS>');
-      const { exactAction } = JSON.parse(lines[2]);
+      const { exactAction, externalAuthorization } = JSON.parse(lines[2]);
       assert.ok(exactAction, 'review sees the exact operation');
       assert.equal(lines[4], '<UNTRUSTED_EVIDENCE>');
       assert.ok(JSON.parse(lines[5]).originalGoalSummary, 'review uses task-scoped public evidence');
       await onReview?.(input.userPrompt);
       const affectedTargets = exactAction.targetUri ? [exactAction.sourceUri, exactAction.targetUri]
-        : [exactAction.uri ?? exactAction.cwdUri ?? exactAction.launch?.cwdUri];
+        : [exactAction.uri ?? exactAction.scope?.projectEntryUri ?? exactAction.cwdUri ?? exactAction.launch?.cwdUri];
+      if (externalAuthorization?.required) affectedTargets.push(...externalAuthorization.targets);
       return JSON.stringify({ decision, risk, reason: decision === 'deny' ? 'Not allowed.' : 'Requested operation.',
-        policyRules: ['direct_user_goal'], saferAlternative: alternative, affectedTargets });
+        policyRules: policyRules ?? [decision === 'needs_user' ? 'exact_user_authorization_required' : 'direct_user_goal'],
+        saferAlternative: alternative, affectedTargets: [...new Set(affectedTargets)] });
     } });
   const executor = { execute: async () => { executeCount++; now += 3000; return { exitCode: 0, signal: undefined, timedOut: false, cancelled: false }; }, cancel: () => false, showTerminal: () => false, dispose: () => {} } as DraftRunExecutorAdapter;
   const runs = new DraftRunStore(storageUri, executor, new DraftRunAuthorizationService(reviews));
@@ -1520,6 +1523,7 @@ async function createFixture(root: string, mode: 'ask' | 'delegate') {
     continuations: () => continuationCount, deny: () => { decision = 'deny'; },
     setDecision: (value: typeof decision) => { decision = value; },
     setRisk: (value: typeof risk) => { risk = value; },
+    setPolicyRules: (value: string[]) => { policyRules = value; },
     onReview: (callback: (prompt: string) => Promise<void>) => { onReview = callback; },
     setAlternative: (value: string) => { alternative = value; },
     manualDecision: (value: boolean | 'hold') => { manualDecision = value; },
@@ -1605,25 +1609,20 @@ test('needs_user creates one host-bound request; forged/repeated messages cannot
 for (const risk of ['high', 'critical'] as const) test(`a valid ${risk} approve cannot automatically write a file`, async () => {
   await fixture('delegate', async f => {
     f.setRisk(risk);
-    f.manualDecision('hold');
     f.response.draftRuns = [];
     await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
     f.host.queueResponseApprovals(f.session, f.message, f.response);
-    const ready = f.waitForManual();
-    const running = f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
-    try {
-      await Promise.race([ready, running]);
-      assert.equal(f.manualRequests(), 1);
-      assert.equal(f.reviews(), 1);
-      const record = f.message.runDetails?.approvalReviews?.at(-1);
-      assert.equal(record?.decision, 'needs_user');
-      assert.equal(record?.risk, risk);
-      assert.equal(record?.policyVersion, APPROVAL_POLICY_VERSION);
-      await assert.rejects(readFile(path.join(f.workspace, 'result.txt')), { code: 'ENOENT' });
-    } finally {
-      f.host.abortPrompt();
-      await running;
-    }
+    await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+    assert.equal(f.manualRequests(), 0);
+    assert.equal(f.reviews(), 1);
+    const record = settledApprovalReviews(f.message).at(-1);
+    assert.equal(record?.decision, 'unavailable');
+    assert.equal(record?.reviewState, 'invalid_response');
+    assert.equal(record?.risk, risk);
+    assert.equal(record?.policyVersion, APPROVAL_POLICY_VERSION);
+    assert.ok(record);
+    const store = (f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews;
+    assert.ok(store.get(record.reviewId)?.policyRules.includes('high_risk_automatic_approval_prohibited'));
     await assert.rejects(readFile(path.join(f.workspace, 'result.txt')), { code: 'ENOENT' });
   });
 });
@@ -1647,7 +1646,7 @@ test('a file baseline change while the reviewer is in flight prevents Apply afte
   });
 });
 
-for (const kind of ['edit', 'command'] as const) test(`reviewer deny survives switching to ask and renaming an equivalent ${kind}`, async () => {
+for (const kind of ['edit', 'command'] as const) test(`reviewer deny survives a v6 audit reload, switching to ask, and renaming an equivalent ${kind}`, async () => {
   await fixture('delegate', async f => {
     f.deny();
     if (kind === 'edit') f.response.draftRuns = [];
@@ -1658,6 +1657,20 @@ for (const kind of ['edit', 'command'] as const) test(`reviewer deny survives sw
     assert.equal(f.reviews(), 1);
     assert.equal(f.session.approvalProcessing?.targets[0].status, 'denied');
 
+    const storagePath = path.join(f.root, 'storage');
+    const auditPath = path.join(storagePath, 'approval-reviews.json');
+    const audit = JSON.parse(await readFile(auditPath, 'utf8'));
+    assert.equal(audit.version, 1);
+    const denial = audit.records.find((record: { decision: string }) => record.decision === 'deny');
+    assert.ok(denial);
+    const reviewId = denial.reviewId;
+    for (const record of audit.records) record.policyVersion = 6;
+    await writeFile(auditPath, JSON.stringify(audit));
+    const restartedAudit = new ApprovalReviewStore(vscode.Uri.file(storagePath) as never);
+    await restartedAudit.initialize();
+    assert.equal(restartedAudit.get(reviewId)?.policyVersion, 6);
+    assert.equal(restartedAudit.get(reviewId)?.decision, 'deny');
+    Object.assign(f.host, { approvalReviews: restartedAudit });
     await f.host.handleMessage({ type: 'setApprovalMode', mode: 'ask' });
     assert.equal(f.session.approvalMode, 'ask');
     const edit = { ...f.response.draftEdits[0], id: 'same-edit-new-id', reason: 'Rephrased file edit' };
@@ -1721,6 +1734,365 @@ const pythonAvailable = ['darwin', 'linux'].includes(process.platform) && (() =>
   try { return execFileSync(testPython, ['-I', '-S', '-B', '--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).startsWith('Python 3'); }
   catch { return false; }
 })();
+
+function installRealTaskExecutor(f: Awaited<ReturnType<typeof createFixture>>,
+  beforeLaunch: (input: Parameters<DraftRunExecutorAdapter['execute']>[0]) => void | Promise<void>) {
+  const spawn = new SpawnDraftRunExecutor();
+  const reviews = (f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews;
+  const storageUri = vscode.Uri.file(path.join(f.root, 'actual-run-storage')) as never;
+  const runs = new DraftRunStore(storageUri, {
+    execute: async input => { await beforeLaunch(input); return spawn.execute(input); },
+    cancel: id => spawn.cancel(id), showTerminal: id => spawn.showTerminal(id), dispose: () => spawn.dispose()
+  }, new DraftRunAuthorizationService(reviews));
+  Object.assign(f.host, { draftRuns: runs });
+  return { runs, storageUri };
+}
+
+for (const language of ['node', 'python'] as const) {
+  test(`Apply and read-back precede ${language} review and real launch under both approval modes`,
+    { skip: language === 'python' && !pythonAvailable }, async () => {
+      for (const mode of ['delegate', 'ask'] as const) await fixture(mode, async f => {
+        const cwd = path.join(f.workspace, 'run 空间');
+        await mkdir(cwd);
+        const entryName = language === 'node' ? '入口 file.cjs' : '入口 file.py';
+        const file = path.join(cwd, entryName);
+        const marker = path.join(cwd, 'started.txt');
+        const previousSource = 'raise RuntimeError("old Python file executed")\n';
+        const source = language === 'node'
+          ? `/*${'x'.repeat(48 * 1024)}*/\nrequire('node:fs').appendFileSync('started.txt', process.argv[2] + '\\n');\nconsole.log('new Node file');\n`
+          : "from pathlib import Path\nimport sys\nwith Path('started.txt').open('a') as marker:\n    marker.write(sys.argv[1] + '\\n')\nprint(sys.prefix)\n";
+        const venv = path.join(f.workspace, '.venv');
+        const executable = language === 'node' ? process.execPath : path.join(venv, 'bin', 'python');
+        if (language === 'python') {
+          execFileSync(testPython, ['-m', 'venv', '--without-pip', venv], { stdio: 'pipe' });
+          await writeFile(file, previousSource);
+        }
+        const args = [language === 'node' ? '--no-warnings' : '-B', '--', `./${entryName}`, '--literal=空间 value'];
+        const trace: string[] = [];
+        const { runs, storageUri } = installRealTaskExecutor(f, async input => {
+          trace.push('spawn');
+          assert.equal(await readFile(file, 'utf8'), source);
+          assert.equal(input.verifiedLaunch?.cwd, await realpath(cwd));
+          assert.deepEqual(input.draftRun.spec.args, args);
+        });
+        const assertBeforeApply = async () => {
+          if (language === 'node') await assert.rejects(readFile(file), { code: 'ENOENT' });
+          else assert.equal(await readFile(file, 'utf8'), previousSource);
+        };
+        try {
+          f.session.messages[0].content = `Write and run the ${entryName} project script using ${language}.`;
+          const uri = vscode.Uri.file(file).toString();
+          f.response.draftEdits = [createFullTextDraftEdit({ id: 'entry-edit', uri, label: entryName,
+            action: language === 'node' ? 'create' : 'modify', content: source, reason: 'Prepare the requested entry script',
+            ...(language === 'python' ? { base: { sha256: createHash('sha256').update(previousSource).digest('hex'),
+              sizeBytes: Buffer.byteLength(previousSource) } } : {}) })];
+          const proposal = await createDraftRunProposal({ executable, args, cwd: 'run 空间', reason: 'Run the new entry script' });
+          f.response.draftRuns = [proposal];
+          f.onReview(async prompt => {
+            const lines = prompt.split('\n');
+            const facts = JSON.parse(lines[2]);
+            if (facts.actionKind === 'draft_edit_apply') {
+              trace.push('edit review');
+              assert.equal(facts.verifiedProjectOperation, 'file_change');
+              if (language === 'node') {
+                const evidence = JSON.parse(lines[5]);
+                assert.ok(evidence.proposedChange?.truncated || evidence.truncation);
+              }
+              await assertBeforeApply();
+            } else {
+              trace.push('launch review');
+              assert.equal(facts.verifiedProjectOperation, 'script_launch');
+              assert.equal(facts.exactAction.scope.projectEntryUri, vscode.Uri.file(await realpath(file)).toString());
+              assert.equal(await readFile(file, 'utf8'), source);
+              assert.equal(f.edits.toWebviewState(f.session.id)[0].files[0].status, 'applied');
+              // Emulate a reviewer that initially asks because it understands only
+              // the exact visible launch, then corrects its decision once.
+              const onlyProjectBehaviorUnknown = language === 'node' && f.reviews() === 2;
+              f.setDecision(onlyProjectBehaviorUnknown ? 'needs_user' : 'approve');
+              f.setPolicyRules(onlyProjectBehaviorUnknown ? ['project_behavior_unknown'] : ['direct_user_goal']);
+            }
+            assert.ok(Buffer.byteLength(prompt) < Buffer.byteLength(source) || language === 'python');
+            await assert.rejects(readFile(marker), { code: 'ENOENT' });
+          });
+          await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+          f.host.queueResponseApprovals(f.session, f.message, f.response);
+          await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+          if (mode === 'ask') {
+            await assertBeforeApply();
+            await assert.rejects(readFile(marker), { code: 'ENOENT' });
+            assert.deepEqual(trace, []);
+            assert.equal(f.reviews(), 0);
+            await f.host.handleApplyDraftEdit({ type: 'applyDraftEdit', id: 'entry-edit', requestId: 'apply-entry' });
+            assert.equal(await readFile(file, 'utf8'), source);
+            await assert.rejects(readFile(marker), { code: 'ENOENT' });
+            await captureDraftRunClick(f.host)(proposal);
+          } else {
+            assert.deepEqual(f.session.approvalProcessing?.targets.map(target => target.status), ['executed', 'executed'],
+              JSON.stringify(f.session.approvalProcessing));
+            const records = settledApprovalReviews(f.message);
+            assert.equal(records.length, 2, 'a correction stays within the same logical launch review');
+            assert.ok(records.every(record => record.approvalSource === 'auto_approval_review' && record.policyVersion === 7));
+            assert.ok(records.every(record => record.projectApproval === true && record.reviewerModelId === 'main' && record.consumedAt));
+          }
+          const result = runs.get(proposal.id);
+          assert.equal(result?.status, 'done', result?.error);
+          assert.equal(language === 'node' ? result?.outputHead.trim() : await realpath(result.outputHead.trim()),
+            language === 'node' ? 'new Node file' : await realpath(venv));
+          assert.equal(await readFile(marker, 'utf8'), '--literal=空间 value\n');
+          assert.deepEqual(trace, mode === 'ask' ? ['spawn'] : language === 'node'
+            ? ['edit review', 'launch review', 'launch review', 'spawn'] : ['edit review', 'launch review', 'spawn']);
+          assert.equal(f.manualRequests(), 0);
+          assert.equal(f.reviews(), mode === 'ask' ? 0 : language === 'node' ? 3 : 2);
+          if (mode === 'delegate') {
+            f.host.queueResponseApprovals(f.session, f.message, f.response);
+            const duplicate = f.queue.take(f.session.id);
+            if (duplicate) await f.host.executeDelegatedApprovals(duplicate);
+          } else await captureDraftRunClick(f.host)(proposal);
+          assert.equal(trace.filter(step => step === 'spawn').length, 1);
+          assert.equal(await readFile(marker, 'utf8'), '--literal=空间 value\n');
+          await runs.flush();
+          const restored = new DraftRunStore(storageUri);
+          try {
+            await restored.initialize();
+            assert.equal(restored.get(proposal.id)?.status, 'done');
+            assert.equal(restored.get(proposal.id)?.outputHead, result?.outputHead);
+          } finally { restored.dispose(); }
+        } finally { await runs.flush(); runs.dispose(); }
+      });
+    });
+}
+
+for (const scenario of ['apply_conflict', 'entry_changed_during_review'] as const) {
+  const reason = scenario === 'apply_conflict' ? 'an Apply baseline conflict' : 'an entry change during review';
+  test(`${reason} blocks the affected launch and preserves disjoint siblings`, async () => {
+    await fixture('delegate', async f => {
+      const affectedDir = path.join(f.workspace, 'affected');
+      const siblingDir = path.join(f.workspace, 'sibling');
+      await mkdir(affectedDir);
+      await mkdir(siblingDir);
+      const entry = path.join(affectedDir, 'entry.cjs');
+      const siblingEntry = path.join(siblingDir, 'entry.cjs');
+      const before = 'process.exit(37);\n';
+      const changed = 'process.exit(38);\n';
+      const writeMarker = "require('node:fs').appendFileSync('started.txt', 'started\\n');\n";
+      await writeFile(entry, before);
+      await writeFile(siblingEntry, writeMarker);
+      const editUri = vscode.Uri.file(entry).toString();
+      const entryUri = vscode.Uri.file(await realpath(entry)).toString();
+      const edit = createFullTextDraftEdit({ id: 'affected-edit', uri: editUri, label: 'entry.cjs', action: 'modify',
+        reason: 'Update the requested entry', content: writeMarker,
+        base: { sha256: createHash('sha256').update(before).digest('hex'), sizeBytes: Buffer.byteLength(before) } });
+      const separateFile = path.join(siblingDir, 'separate.txt');
+      const separate = createFullTextDraftEdit({ id: 'separate-edit', uri: vscode.Uri.file(separateFile).toString(),
+        label: 'separate.txt', action: 'create', reason: 'Create the separate requested note', content: 'independent\n' });
+      const affected = await createDraftRunProposal({ executable: process.execPath, args: ['./entry.cjs'], cwd: 'affected', reason: 'Run the updated entry' });
+      const sibling = await createDraftRunProposal({ executable: process.execPath, args: ['./entry.cjs'], cwd: 'sibling', reason: 'Run the separate entry' });
+      const started: string[] = [];
+      const { runs } = installRealTaskExecutor(f, input => { started.push(input.draftRun.id); });
+      try {
+        f.session.messages[0].content = 'Update and run affected/entry.cjs. Separately create sibling/separate.txt and run sibling/entry.cjs.';
+        f.response.draftEdits = [edit, separate];
+        f.response.draftRuns = [affected, sibling];
+        f.onReview(async prompt => {
+          const { exactAction } = JSON.parse(prompt.split('\n')[2]);
+          if (scenario === 'apply_conflict' && exactAction.uri === editUri) await writeFile(entry, changed);
+          if (scenario === 'entry_changed_during_review' && exactAction.scope?.projectEntryUri === entryUri) {
+            assert.equal(await readFile(entry, 'utf8'), writeMarker);
+            await writeFile(entry, changed);
+          }
+        });
+        await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+        f.host.queueResponseApprovals(f.session, f.message, f.response);
+        await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+        const targets = f.session.approvalProcessing?.targets;
+        assert.equal(targets?.find(target => target.id === edit.id)?.status === 'executed', scenario !== 'apply_conflict');
+        assert.equal(targets?.find(target => target.id === separate.id)?.status, 'executed');
+        assert.equal(targets?.find(target => target.id === sibling.id)?.status, 'executed', JSON.stringify(targets));
+        if (scenario === 'apply_conflict') {
+          assert.equal(targets?.find(target => target.id === affected.id)?.status, 'dependency_blocked', JSON.stringify(targets));
+          assert.equal(settledApprovalReviews(f.message).some(record => record.targetId === affected.id), false);
+        }
+        assert.deepEqual(started, [sibling.id]);
+        assert.equal(runs.get(affected.id)?.executionStarted, false);
+        assert.equal(await readFile(entry, 'utf8'), changed);
+        assert.equal(await readFile(separateFile, 'utf8'), 'independent\n');
+        assert.equal(await readFile(path.join(siblingDir, 'started.txt'), 'utf8'), 'started\n');
+        await assert.rejects(readFile(path.join(affectedDir, 'started.txt')), { code: 'ENOENT' });
+        assert.equal(f.reviews(), scenario === 'apply_conflict' ? 3 : 4);
+        assert.equal(f.manualRequests(), 0);
+      } finally { await runs.flush(); runs.dispose(); }
+    });
+  });
+}
+
+test('a move must settle at its destination before the reviewer sees or starts the moved entry', async () => {
+  await fixture('delegate', async f => {
+    const source = path.join(f.workspace, 'source.cjs');
+    const destination = path.join(f.workspace, 'moved entry.cjs');
+    const content = "console.log('moved entry ran');\n";
+    await writeFile(source, content);
+    const sourceUri = vscode.Uri.file(source).toString();
+    const targetUri = vscode.Uri.file(destination).toString();
+    f.session.messages[0].content = 'Move source.cjs to moved entry.cjs and run the moved entry.';
+    f.response.draftEdits = [{ id: 'move-entry', uri: sourceUri, kind: 'move_v1', action: 'move', sourceUri, targetUri,
+      reason: 'Move the requested entry', label: 'source.cjs',
+      base: { sha256: createHash('sha256').update(content).digest('hex'), sizeBytes: Buffer.byteLength(content) } }];
+    const proposal = await createDraftRunProposal({ executable: process.execPath, args: ['./moved entry.cjs'], reason: 'Run the moved entry' });
+    f.response.draftRuns = [proposal];
+    const trace: string[] = [];
+    const verifyMove = async () => {
+      await assert.rejects(readFile(source), { code: 'ENOENT' });
+      assert.equal(await readFile(destination, 'utf8'), content);
+    };
+    const { runs } = installRealTaskExecutor(f, async () => { trace.push('spawn'); await verifyMove(); });
+    try {
+      f.onReview(async prompt => {
+        const facts = JSON.parse(prompt.split('\n')[2]);
+        if (facts.actionKind === 'draft_edit_apply') {
+          trace.push('move review');
+          assert.equal(facts.verifiedProjectOperation, 'file_change');
+          assert.equal(await readFile(source, 'utf8'), content);
+          await assert.rejects(readFile(destination), { code: 'ENOENT' });
+        } else {
+          trace.push('launch review');
+          await verifyMove();
+          assert.equal(facts.exactAction.scope.projectEntryUri, vscode.Uri.file(await realpath(destination)).toString());
+        }
+      });
+      await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+      f.host.queueResponseApprovals(f.session, f.message, f.response);
+      await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+      assert.deepEqual(trace, ['move review', 'launch review', 'spawn']);
+      assert.equal(runs.get(proposal.id)?.outputHead, 'moved entry ran\n');
+      assert.equal(f.reviews(), 2);
+      assert.equal(f.manualRequests(), 0);
+    } finally { await runs.flush(); runs.dispose(); }
+  });
+});
+
+test('npm runs the applied manifest once and blocks a lifecycle with an unapplied entry', { skip: process.platform === 'win32' }, async t => {
+  const candidates = ['/usr/local/bin/npm', '/usr/bin/npm', '/opt/homebrew/bin/npm'];
+  const installed = await Promise.all(candidates.map(async candidate => ({ candidate, target: await realpath(candidate).catch(() => '') })));
+  const npm = installed.find(({ target }) => target.endsWith('/npm/bin/npm-cli.js'))?.candidate;
+  if (!npm) { t.skip('Requires an installed POSIX npm CLI.'); return; }
+  for (const entryConflict of [false, true]) await fixture('delegate', async f => {
+    const home = process.env.HOME;
+    const search = process.env.PATH;
+    process.env.HOME = f.root;
+    process.env.PATH = [path.dirname(npm), path.dirname(process.execPath), '/usr/bin', '/bin'].join(path.delimiter);
+    const manifest = path.join(f.workspace, 'package.json');
+    const marker = path.join(f.workspace, 'lifecycle.log');
+    const previous = JSON.stringify({ name: 'keepseek-lifecycle', scripts: { job: 'node ./old.cjs' } });
+    const content = JSON.stringify({ name: 'keepseek-lifecycle', scripts: {
+      prejob: 'node ./before.cjs', job: 'node ./job.cjs', postjob: 'node ./after.cjs'
+    } });
+    const trace: string[] = [];
+    const { runs } = installRealTaskExecutor(f, async () => {
+      trace.push('spawn');
+      assert.equal(await readFile(manifest, 'utf8'), content);
+    });
+    try {
+      await writeFile(manifest, previous);
+      for (const step of ['old', 'before', 'job', 'after']) {
+        await writeFile(path.join(f.workspace, `${step}.cjs`),
+          `require('node:fs').appendFileSync('lifecycle.log', ${JSON.stringify(step + '\n')});\n`);
+      }
+      f.session.messages[0].content = 'Update the package.json job and run its local before, job and after steps.';
+      f.response.draftEdits = [createFullTextDraftEdit({ id: 'manifest-edit', uri: vscode.Uri.file(manifest).toString(),
+        label: 'package.json', action: 'modify', reason: 'Update requested lifecycle', content,
+        base: { sha256: createHash('sha256').update(previous).digest('hex'), sizeBytes: Buffer.byteLength(previous) } })];
+      const beforeFile = path.join(f.workspace, 'before.cjs');
+      const beforeUri = vscode.Uri.file(beforeFile).toString();
+      if (entryConflict) {
+        const base = await readFile(beforeFile);
+        f.response.draftEdits.push(createFullTextDraftEdit({ id: 'before-edit', uri: beforeUri, label: 'before.cjs', action: 'modify',
+          reason: 'Update the requested before step', content: "console.log('new before step');\n",
+          base: { sha256: createHash('sha256').update(base).digest('hex'), sizeBytes: base.length } }));
+      }
+      const proposal = await createDraftRunProposal({ executable: npm, args: ['run', 'job'], reason: 'Run the new requested lifecycle' });
+      f.response.draftRuns = [proposal];
+      f.onReview(async prompt => {
+        const facts = JSON.parse(prompt.split('\n')[2]);
+        if (facts.actionKind === 'draft_edit_apply' && facts.exactAction.uri === beforeUri) {
+          trace.push('lifecycle entry edit review');
+          await writeFile(beforeFile, 'process.exit(41);\n');
+        } else if (facts.actionKind === 'draft_edit_apply') {
+          trace.push('manifest review');
+          assert.equal(await readFile(manifest, 'utf8'), previous);
+        } else {
+          trace.push('lifecycle review');
+          assert.equal(await readFile(manifest, 'utf8'), content);
+          assert.equal(facts.verifiedProjectOperation, 'script_launch');
+          assert.equal(facts.exactAction.scope.projectEntryUri, vscode.Uri.file(await realpath(manifest)).toString());
+        }
+        await assert.rejects(readFile(marker), { code: 'ENOENT' });
+      });
+      await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+      f.host.queueResponseApprovals(f.session, f.message, f.response);
+      await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+      if (entryConflict) {
+        assert.deepEqual(trace, ['manifest review', 'lifecycle entry edit review']);
+        const target = f.session.approvalProcessing?.targets.find(item => item.id === proposal.id);
+        assert.equal(target?.status, 'dependency_blocked', JSON.stringify(f.session.approvalProcessing));
+        assert.equal(target.dependency?.targetId, 'before-edit');
+        assert.equal(runs.get(proposal.id)?.executionStarted, false);
+        await assert.rejects(readFile(marker), { code: 'ENOENT' });
+      } else {
+        assert.deepEqual(trace, ['manifest review', 'lifecycle review', 'spawn']);
+        assert.equal(runs.get(proposal.id)?.status, 'done');
+        assert.equal(await readFile(marker, 'utf8'), 'before\njob\nafter\n');
+      }
+      assert.equal(f.reviews(), 2);
+      assert.equal(f.manualRequests(), 0);
+    } finally {
+      if (home === undefined) delete process.env.HOME; else process.env.HOME = home;
+      if (search === undefined) delete process.env.PATH; else process.env.PATH = search;
+      await runs.flush(); runs.dispose();
+    }
+  });
+});
+
+test('a reviewed project script that exits nonzero provides actual evidence once without a new click or spawn', async () => {
+  await fixture('delegate', async f => {
+    const marker = path.join(f.workspace, 'exit-count.txt');
+    await writeFile(path.join(f.workspace, 'exit.cjs'),
+      "require('node:fs').appendFileSync('exit-count.txt', '1');\nconsole.log('reached the script');\nprocess.exit(42);\n");
+    f.session.messages[0].content = 'Run exit.cjs once and diagnose its result.';
+    f.response.draftEdits = [];
+    const proposal = await createDraftRunProposal({ executable: process.execPath, args: ['./exit.cjs'], reason: 'Inspect the requested script result' });
+    f.response.draftRuns = [proposal];
+    const started: string[] = [];
+    const { runs } = installRealTaskExecutor(f, input => { started.push(input.draftRun.id); });
+    const handoffs: string[] = [];
+    Object.assign(f.host, { sendPrompt: async (prompt: string) => {
+      handoffs.push(prompt + '\n' + (runs.getPendingProviderTail(f.session.id, 'en')?.content ?? ''));
+    } });
+    try {
+      await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+      f.host.queueResponseApprovals(f.session, f.message, f.response);
+      await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+      const run = runs.get(proposal.id);
+      assert.equal(run?.status, 'failed');
+      assert.equal(run.executionStarted, true);
+      assert.equal(run.executionPhase, 'exited');
+      assert.equal(run.exitCode, 42);
+      assert.match(run.outputHead, /reached the script/u);
+      assert.equal(run.approvalReview?.projectApproval, true);
+      assert.equal(handoffs.length, 1);
+      assert.match(handoffs[0], /42/u);
+      assert.equal(await readFile(marker, 'utf8'), '1');
+      assert.deepEqual(started, [proposal.id]);
+      assert.equal(f.reviews(), 1);
+      assert.equal(f.manualRequests(), 0);
+      f.host.queueResponseApprovals(f.session, f.message, f.response);
+      const duplicate = f.queue.take(f.session.id);
+      if (duplicate) await f.host.executeDelegatedApprovals(duplicate);
+      assert.equal(await readFile(marker, 'utf8'), '1');
+      assert.deepEqual(started, [proposal.id]);
+      assert.equal(f.reviews(), 1);
+    } finally { await runs.flush(); runs.dispose(); }
+  });
+});
 
 function astCommand(target: string): string {
   return `import ast, pathlib; p = pathlib.Path('${target}'); ast.parse(p.read_text(encoding='utf-8')); print('syntax ok', p)`;
@@ -1801,7 +2173,7 @@ for (const scenario of ['valid', 'syntax_error', 'changed', 'denied', 'needs_use
         if (scenario === 'budget') {
           assert.match(f.session.approvalProcessing?.targets[0].reason ?? '', /budget/u);
         } else {
-          assert.match(requests[0].system, /Approve for me policy v6/u);
+          assert.match(requests[0].system, /Approve for me policy v7/u);
           assert.equal(requests[0].model, 'main');
           assert.doesNotMatch(requests[0].user, /BODY_MUST_STAY_LOCAL/u);
           const payload = JSON.parse(requests[0].user.split('\n')[2]);
@@ -1876,7 +2248,7 @@ test('Auto approval distinguishes visible hard targets from otherwise reviewable
       await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
       f.host.queueResponseApprovals(f.session, f.message, f.response);
       await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
-      const reviewable = ['mixed_write', 'dynamic', 'shim', 'subprocess', 'injection', 'exact'].includes(scenario);
+      const reviewable = ['mixed_write', 'dynamic', 'subprocess', 'injection', 'exact'].includes(scenario);
       assert.equal(f.reviews(), reviewable || ['traversal', 'external'].includes(scenario) ? 1 : 0, scenario);
       assert.equal(f.executions(), reviewable ? 1 : 0, scenario);
       assert.equal(f.runs.get(proposal.id)?.replacementDraftRunId, undefined, scenario);
@@ -2155,7 +2527,7 @@ for (const scenario of ['reject', 'stop', 'mode', 'new_task', 'session', 'trust'
 }
 
 for (const failure of ['timeout', 'invalid_json', 'configuration'] as const) {
-  test(`automatic review ${failure} is audited separately and can be decided once by the user`, { timeout: 15_000 }, async () => {
+  test(`automatic review ${failure} records the stopped action without a manual fallback`, { timeout: 15_000 }, async () => {
     await fixture('delegate', async f => {
       const reviews = (f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews;
       let attempts = 0;
@@ -2169,25 +2541,84 @@ for (const failure of ['timeout', 'invalid_json', 'configuration'] as const) {
         } });
       Object.assign(f.host, { approvalReviewer: reviewer });
       f.manualDecision(true);
-      f.response.draftEdits[0].uri = vscode.Uri.file(path.join(f.root, 'fault-approved.txt')).toString();
       f.response.draftRuns = [];
       await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
       f.host.queueResponseApprovals(f.session, f.message, f.response);
       await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
       assert.equal(attempts, failure === 'configuration' ? 0 : 2);
-      assert.equal(f.manualRequests(), 1);
+      assert.equal(f.manualRequests(), 0);
       const records = settledApprovalReviews(f.message);
+      assert.equal(records.length, 1);
       assert.equal(records[0].decision, 'unavailable');
       assert.equal(records[0].reviewState, failure === 'configuration' ? 'configuration_unavailable'
         : failure === 'timeout' ? 'timeout' : 'invalid_response');
-      assert.equal(records[1].approvalSource, 'user_click');
-      assert.equal(records[1].priorReviewId, records[0].reviewId);
-      assert.equal(records.some(record => record.decision === 'deny'), false);
-      assert.equal(await readFile(path.join(f.root, 'fault-approved.txt'), 'utf8'), 'result\n');
-      assert.equal(f.continuations(), 1);
+      assert.equal(records[0].consumedAt, undefined);
+      await assert.rejects(readFile(path.join(f.workspace, 'result.txt')), { code: 'ENOENT' });
+      assert.ok(f.continuations() <= 1, 'a bounded diagnostic handoff may continue the task');
     });
   });
 }
+
+test('an invalid response is isolated while a disjoint sibling still obtains its own reviewer approval', async () => {
+  await fixture('delegate', async f => {
+    const reviews = (f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews;
+    const storage = vscode.Uri.file(path.join(f.root, 'storage')) as never;
+    const failedUri = f.response.draftEdits[0].uri;
+    const siblingFile = path.join(f.workspace, 'sibling.txt');
+    const siblingUri = vscode.Uri.file(siblingFile).toString();
+    const requests: string[] = [];
+    const reviewer = new ApprovalReviewerService({ globalStorageUri: storage, workspaceKey: f.scope.key,
+      sourceStore: new ModelSourceStore(storage), store: reviews,
+      requestText: async input => {
+        const { exactAction } = JSON.parse(input.userPrompt.split('\n')[2]);
+        requests.push(exactAction.uri);
+        return exactAction.uri === failedUri ? '{not-json}' : JSON.stringify({ decision: 'approve', risk: 'low',
+          reason: 'Independent and in scope.', policyRules: ['direct_user_goal'], saferAlternative: '', affectedTargets: [exactAction.uri] });
+      } });
+    Object.assign(f.host, { approvalReviewer: reviewer });
+    f.response.draftEdits.push(createFullTextDraftEdit({ id: 'sibling', uri: siblingUri, label: 'sibling.txt',
+      action: 'create', reason: 'Create a separate requested file', content: 'sibling\n' }));
+    f.response.draftRuns = [];
+    await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+    f.host.queueResponseApprovals(f.session, f.message, f.response);
+    await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+    assert.deepEqual(requests, [failedUri, failedUri, siblingUri]);
+    assert.equal(f.manualRequests(), 0);
+    const records = settledApprovalReviews(f.message);
+    assert.deepEqual(records.map(record => record.decision), ['unavailable', 'approve']);
+    assert.equal(await readFile(siblingFile, 'utf8'), 'sibling\n');
+    await assert.rejects(readFile(path.join(f.workspace, 'result.txt')), { code: 'ENOENT' });
+  });
+});
+
+test('a segment-wide reviewer service outage uses one bounded transport sequence and opens no manual requests', async () => {
+  await fixture('delegate', async f => {
+    const reviews = (f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews;
+    const storage = vscode.Uri.file(path.join(f.root, 'storage')) as never;
+    const siblingFile = path.join(f.workspace, 'outage-sibling.txt');
+    const attempts: string[] = [];
+    const reviewer = new ApprovalReviewerService({ globalStorageUri: storage, workspaceKey: f.scope.key,
+      sourceStore: new ModelSourceStore(storage), store: reviews, requestText: async input => {
+        attempts.push(JSON.parse(input.userPrompt.split('\n')[2]).exactAction.uri);
+        throw new OneShotTextRequestError('unavailable', 'The test service is offline.', true, true);
+      } });
+    Object.assign(f.host, { approvalReviewer: reviewer });
+    f.response.draftEdits.push(createFullTextDraftEdit({ id: 'outage-sibling', uri: vscode.Uri.file(siblingFile).toString(),
+      label: 'outage-sibling.txt', action: 'create', reason: 'Create the other requested file', content: 'sibling\n' }));
+    f.response.draftRuns = [];
+    await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+    f.host.queueResponseApprovals(f.session, f.message, f.response);
+    await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+    assert.deepEqual(attempts, [f.response.draftEdits[0].uri, f.response.draftEdits[0].uri]);
+    assert.equal(f.manualRequests(), 0);
+    assert.ok(f.session.approvalProcessing?.targets.every(target => target.status === 'review_unavailable'));
+    const records = settledApprovalReviews(f.message);
+    assert.ok(records.length >= 1);
+    assert.ok(records.every(record => record.reviewState === 'service_unavailable' && !record.consumedAt));
+    await assert.rejects(readFile(siblingFile), { code: 'ENOENT' });
+    await assert.rejects(readFile(path.join(f.workspace, 'result.txt')), { code: 'ENOENT' });
+  });
+});
 
 test('forged legacy mode messages cannot reactivate model_review or process existing drafts', async () => {
   await fixture('delegate', async f => {
@@ -2465,14 +2896,16 @@ test('a confirmed repetition in one segment does not reopen through the original
 test('an explicit user correction uses the stopped task budget, and an unrelated request starts a new task', async () => {
   await fixture('delegate', async f => {
     f.response.draftEdits = [];
+    f.response.draftRuns = [await createDraftRunProposal({ executable: 'node', args: ['--version'], cwd: f.root, reason: 'Check runtime' })];
     f.cp.runBudget = createLogicalRunBudgetState({ modelRequests: 4 });
     await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
     const root = f.message.userTask!.id;
-    const denied = f.runs.get(f.proposal.id)!;
+    const denied = f.runs.get(f.response.draftRuns[0].id)!;
     const reviewer = (f.host as unknown as { approvalReviewer: ApprovalReviewerService }).approvalReviewer;
     const scope = await inspectDraftRunScope(denied);
     const reviewRequest = { ...createDraftRunReviewRequest({ draftRun: denied, scope, rootTaskId: root,
-      history: f.session.messages, language: 'en' }), approvalMode: 'delegate' as const, scopeFingerprint: scope.fingerprint };
+      history: f.session.messages, language: 'en' }), approvalMode: 'delegate' as const, scopeFingerprint: scope.fingerprint,
+      externalAuthorization: { required: true, targets: [denied.spec.cwdUri] } };
     f.setDecision('needs_user');
     const prior = await reviewer.review(reviewRequest, { model: f.cp.request.model });
     assert.equal(prior.record.decision, 'needs_user');
@@ -2503,7 +2936,7 @@ test('an explicit user correction uses the stopped task budget, and an unrelated
     f.session.messages.push({ id: 'corrected-user', role: 'user', content: 'Correct the previous command.', createdAt: f.message.createdAt, userTask: task });
     const assistant: ChatMessage = { id: 'correction-assistant', role: 'assistant', content: '', createdAt: f.message.createdAt, userTask: task };
     f.session.messages.push(assistant);
-    const reproposed = await createDraftRunProposal({ executable: 'node', args: ['--version'], reason: 'Different wording for the rejected effect' });
+    const reproposed = await createDraftRunProposal({ executable: 'node', args: ['--version'], cwd: f.root, reason: 'Different wording for the rejected effect' });
     const response = { ...f.response, draftRuns: [reproposed] };
     const checkpoint = createRunCheckpoint({ ...f.cp.request, assistantMessageId: assistant.id }, 0, 'explicit correction fixture', f.scope.folderUris);
     inheritTaskBudget(checkpoint, f.session.userTaskBudgets![root]);

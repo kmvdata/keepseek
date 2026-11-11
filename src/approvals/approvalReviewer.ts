@@ -10,9 +10,13 @@ import { MissingModelSourceApiKeyError } from '../accounts/accountResolver';
 import { requiresModelSourceApiKey } from '../accounts/sourceCapabilities';
 import { resolveConfiguredSubagentModel, UnavailableSubagentModelError } from '../accounts/subagentModelResolver';
 import type { AgentRequest, KeepseekModel, ProviderUsageLedgerRecord, UsageEvent } from '../shared/types';
-import { AUTO_APPROVAL_REVIEWER_SYSTEM_PROMPT, ApprovalAffectedScopeError, findDeterministicReviewDenial, hasIncompleteAutomaticReviewEvidence, parseAutoApprovalReviewerJson, redactSensitiveReviewText, serializeApprovalReviewRequest } from './approvalPolicy';
+import { AUTO_APPROVAL_REVIEWER_SYSTEM_PROMPT, PROJECT_POLICY_CORRECTION, ApprovalAffectedScopeError,
+  findDeterministicReviewDenial, isProjectBehaviorOnlyEscalation, isVerifiedProjectOperation, parseAutoApprovalReviewerJson,
+  prepareAutomaticReviewEvidence, redactSensitiveReviewText } from './approvalPolicy';
 import { requestApprovalReviewText } from './oneShotTextRequest';
-import { APPROVAL_POLICY_VERSION, approvalDisposition, type ApprovalAuthorizationSource, type ApprovalReviewerJson, type ApprovalReviewOutcome, type ApprovalReviewRecord, type ApprovalReviewRequest, type ApprovalReviewState } from './approvalReviewTypes';
+import { APPROVAL_POLICY_VERSION, EXACT_USER_AUTHORIZATION_RULE, PROJECT_BEHAVIOR_UNKNOWN_RULE, VERIFIED_PROJECT_OPERATION_RULE,
+  approvalDisposition, type ApprovalAuthorizationSource, type ApprovalReviewerJson, type ApprovalReviewOutcome,
+  type ApprovalReviewRecord, type ApprovalReviewRequest, type ApprovalReviewState } from './approvalReviewTypes';
 import { ApprovalAuditError, ApprovalReviewStore } from './approvalReviewStore';
 import type { ApprovalCircuitBreaker } from './approvalCircuitBreaker';
 
@@ -35,6 +39,7 @@ export interface ApprovalReviewerAdapter {
 
 export class ApprovalReviewerService implements ApprovalReviewerAdapter {
   private readonly configBindingKey = randomBytes(32);
+  private readonly unavailableServices = new Map<string, Error>();
 
   public constructor(private readonly options: {
     globalStorageUri: import('vscode').Uri;
@@ -113,7 +118,8 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
     if (deterministicDenial) {
       return this.withCircuit(request, 'reviewed', await this.createLocalDenial(request, deterministicDenial));
     }
-    if (hasIncompleteAutomaticReviewEvidence(request)) {
+    const serialized = prepareAutomaticReviewEvidence(request);
+    if (!serialized) {
       return this.createPause(request, 'insufficient_evidence', 'insufficient_evidence', request.responseLanguage === 'en'
         ? 'Material approval evidence is missing or truncated. Nothing executed.'
         : '审批关键材料缺失或已截断，尚未执行。');
@@ -129,21 +135,26 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
     });
     if (claim.status === 'denied') return this.blockPreviouslyDenied(request, claim.record);
     if (claim.status === 'duplicate') {
+      const rationale = request.responseLanguage === 'en'
+        ? 'Independent review was already claimed for this operation.' : '该精确操作已被认领进行独立审查。';
+      if (claim.record.targetId !== request.targetId) {
+        return this.createPause(request, 'interrupted', 'review_already_attempted', rationale);
+      }
       return { status: 'unavailable', record: { ...claim.record, decision: 'unavailable',
         reviewState: claim.record.reviewState === 'in_progress' ? 'in_progress' : 'interrupted',
-        rationale: request.responseLanguage === 'en' ? 'Independent review was already claimed for this operation.' : '该精确操作已被认领进行独立审查。',
+        projectApproval: undefined, rationale,
         policyRules: ['review_already_attempted'] } };
     }
     try {
       throwIfCancelled(signal);
       onStart?.(claim.record);
-      return await this.reviewClaim(request, modelContext, signal);
+      return await this.reviewClaim(request, serialized, modelContext, signal);
     } finally {
       this.options.store.finishAutomaticReview(claim.record.reviewId);
     }
   }
 
-  private async reviewClaim(request: ApprovalReviewRequest, modelContext?: ApprovalReviewerModelContext,
+  private async reviewClaim(request: ApprovalReviewRequest, serialized: string, modelContext?: ApprovalReviewerModelContext,
     signal?: AbortSignal): Promise<ApprovalReviewOutcome> {
     const deadlineAt = Date.now() + getConfiguredModelRequestTimeoutMs();
     try { assertReviewBudget(modelContext); }
@@ -161,8 +172,10 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
     if (resolved.status === 'unavailable') {
       return this.createUnavailable(request, resolved, resolved.error, 'configuration_unavailable', 'review_configuration_unavailable');
     }
-    const serialized = serializeApprovalReviewRequest(request);
-    let scopeMismatch = false;
+    const serviceKey = JSON.stringify([request.sessionId, request.rootTaskId, request.agentRunId, resolved.configFingerprint]);
+    const unavailable = this.unavailableServices.get(serviceKey);
+    if (unavailable) return this.createUnavailable(request, resolved, unavailable, 'service_unavailable', 'reviewer_unavailable');
+    let correction = '';
     for (let attempt = 0; ; attempt++) {
       let decision: ApprovalReviewerJson;
       try {
@@ -174,7 +187,7 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
         const raw = await (this.options.requestText ?? requestApprovalReviewText)({
           model: resolved.model, sourceConfig: resolved.sourceConfig, globalStorageUri: this.options.globalStorageUri,
           taskCostBudget: modelContext?.taskCostBudget, taskRunBudget: modelContext?.taskRunBudget,
-          systemPrompt: AUTO_APPROVAL_REVIEWER_SYSTEM_PROMPT, userPrompt: serialized, language: request.responseLanguage,
+          systemPrompt: AUTO_APPROVAL_REVIEWER_SYSTEM_PROMPT, userPrompt: serialized + correction, language: request.responseLanguage,
           signal, deadlineAt, sessionId: request.sessionId, taskId: request.rootTaskId, runId: request.agentRunId,
           onUsage: event => this.options.onUsage?.(event, request.sessionId),
           onUsageLedgerRecord: record => this.options.onUsageLedgerRecord?.(record, request.sessionId)
@@ -182,13 +195,25 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
         throwIfCancelled(signal);
         try { decision = parseAutoApprovalReviewerJson(raw, request); }
         catch (error) {
-          scopeMismatch ||= error instanceof ApprovalAffectedScopeError;
+          if (error instanceof ApprovalAffectedScopeError) throw error;
           throw new OneShotTextRequestError('invalid', error instanceof Error ? error.message : 'Invalid review response.');
         }
         if (decision.decision !== 'deny') assertReviewDeadline(modelContext, deadlineAt);
+        if (isProjectBehaviorOnlyEscalation(decision, request)) {
+          if (!attempt) {
+            correction = PROJECT_POLICY_CORRECTION;
+            continue;
+          }
+          return this.createUnavailable(request, resolved, new Error(request.responseLanguage === 'en'
+            ? 'No usable project operation decision after the bounded correction.' : '有界纠正后仍无有效工程操作决定。'),
+          'invalid_response', PROJECT_BEHAVIOR_UNKNOWN_RULE);
+        }
       } catch (error) {
         throwIfCancelled(signal);
         if (isApprovalBudgetFailure(error)) return this.createBudgetStop(request, error);
+        if (error instanceof ApprovalAffectedScopeError) return this.createUnavailable(request, resolved, new Error(request.responseLanguage === 'en'
+          ? 'The reviewer reported an affected target outside the exact operation scope.' : '审批模型报告的受影响目标与精确操作范围不符。'),
+        'invalid_response', 'review_affected_scope_mismatch');
         const providerError = error instanceof OneShotTextRequestError ? error
           : isRecoverableNetworkError(error) && error instanceof Error
             ? new OneShotTextRequestError('unavailable', error.message, true) : undefined;
@@ -202,25 +227,29 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
           return this.createBudgetStop(request, new LogicalBudgetExceededError('provider_cost_budget_exhausted'));
         }
         if (!attempt && Date.now() < deadlineAt && (providerError.retryable || providerError.reason === 'invalid')) continue;
-        if (scopeMismatch) return this.createUnavailable(request, resolved, new Error(request.responseLanguage === 'en'
-          ? 'The reviewer reported an affected target outside the exact operation scope.' : '审批模型报告的受影响目标超出精确操作范围。'),
-        'insufficient_evidence', 'review_affected_scope_mismatch');
         if (providerError.reason === 'timeout') return this.createUnavailable(request, resolved, providerError, 'timeout', 'review_timeout');
         if (providerError.reason === 'invalid') return this.createUnavailable(request, resolved, providerError, 'invalid_response', 'invalid_review_response');
+        // Only a proven service failure is shared across this execution segment.
+        // Invalid decisions and timeouts remain local to their exact action.
+        if (providerError.sharedServiceFailure) {
+          if (this.unavailableServices.size >= 64) this.unavailableServices.delete(this.unavailableServices.keys().next().value!);
+          this.unavailableServices.set(serviceKey, providerError);
+        }
         return this.createUnavailable(request, resolved, providerError, 'service_unavailable', 'reviewer_unavailable');
       }
-      const outcome = applyHostDecisionPolicy(decision, request.responseLanguage);
+      const outcome = applyHostDecisionPolicy(decision, request);
       const record = await this.options.store.add({
         ...reviewIdentity(request), approvalSource: 'auto_approval_review',
         reviewerConfigFingerprint: resolved.configFingerprint, reviewerSourceId: resolved.sourceConfig.sourceId,
         reviewerModelId: resolved.model.id, reviewerProvider: resolved.sourceConfig.provider,
         decision: outcome.decision, risk: outcome.risk, rationale: redactSensitiveReviewText(outcome.reason, 800),
+        projectApproval: outcome.projectApproval,
         policyRules: outcome.policyRules, affectedTargets: outcome.affectedTargets?.map(target => redactSensitiveReviewText(target, 300)),
         saferAlternative: outcome.saferAlternative ? redactSensitiveReviewText(outcome.saferAlternative) : undefined,
-        reviewState: outcome.decision === 'needs_user' && outcome.policyRules.includes('insufficient_evidence') ? 'insufficient_evidence' : undefined
+        reviewState: outcome.reviewState
       });
       throwIfCancelled(signal);
-      return this.withCircuit(request, 'reviewed', record);
+      return this.withCircuit(request, outcome.decision === 'unavailable' ? 'unavailable' : 'reviewed', record);
     }
   }
 
@@ -329,14 +358,15 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
     reviewState: ApprovalReviewState, rule: string): Promise<ApprovalReviewOutcome> {
     const model = resolved.status === 'resolved' ? resolved : undefined;
     const message = redactSensitiveReviewText(error.message);
+    const reason = reviewState === 'invalid_response'
+      ? request.responseLanguage === 'en' ? 'Approval response unusable; operation did not run' : '审批模型未给出可用决定，操作尚未执行'
+      : request.responseLanguage === 'en' ? 'Approval model unavailable; operation did not run' : '审批模型不可用，操作尚未执行';
     const record = await this.options.store.add({
       ...reviewIdentity(request), approvalSource: 'auto_approval_review',
       reviewerConfigFingerprint: resolved.configFingerprint, reviewerSourceId: model?.sourceConfig.sourceId ?? '',
       reviewerModelId: model?.model.id ?? '', reviewerProvider: model?.sourceConfig.provider ?? '',
       decision: 'unavailable', risk: 'high', reviewState,
-      rationale: request.responseLanguage === 'en'
-        ? `Approval model unavailable; operation did not run: ${message}`
-        : `审批模型不可用，操作尚未执行：${message}`,
+      rationale: `${reason} · ${message}`,
       policyRules: [rule]
     });
     return this.withCircuit(request, 'unavailable', record);
@@ -373,7 +403,7 @@ function reviewIdentity(request: ApprovalReviewRequest) {
 
 function canUseManualReview(reviewed: ApprovalReviewRecord, request: ApprovalReviewRequest): boolean {
   const disposition = approvalDisposition(reviewed);
-  return disposition === 'request_user' || (disposition === 'execute' && request.externalAuthorization?.required === true);
+  return hasExactUserAuthorizationGap(request) && (disposition === 'request_user' || disposition === 'execute');
 }
 
 function throwIfCancelled(signal?: AbortSignal): void {
@@ -397,15 +427,45 @@ function isApprovalBudgetFailure(error: unknown): boolean {
     || (error instanceof OneShotTextRequestError && ['unpriced_cost', 'budget_exhausted', 'budget_missing'].includes(error.reason));
 }
 
-function applyHostDecisionPolicy(decision: ApprovalReviewerJson, language: ApprovalReviewRequest['responseLanguage']): ApprovalReviewerJson {
-  if (decision.decision !== 'approve' || (decision.risk !== 'high' && decision.risk !== 'critical')) return decision;
-  const rule = 'high_risk_requires_user';
-  return {
-    ...decision, decision: 'needs_user', policyRules: [rule, ...decision.policyRules.filter(value => value !== rule).slice(0, 15)],
-    reason: language === 'en'
-      ? `Host policy prohibits automatic approval at the reported risk level. ${decision.reason}`
-      : `宿主规则禁止在此风险等级自动批准。${decision.reason}`
-  };
+function hasExactUserAuthorizationGap(request: ApprovalReviewRequest): boolean {
+  return request.externalAuthorization?.required === true && request.externalAuthorization.targets.length > 0;
+}
+
+type HostReviewDecision = Omit<ApprovalReviewerJson, 'decision'> & Pick<ApprovalReviewRecord, 'decision' | 'reviewState' | 'projectApproval'>;
+
+function applyHostDecisionPolicy(decision: ApprovalReviewerJson, request: ApprovalReviewRequest): HostReviewDecision {
+  if (decision.decision === 'deny') return decision;
+  if (decision.decision === 'needs_user') {
+    const exactGap = hasExactUserAuthorizationGap(request)
+      && decision.policyRules.length === 1 && decision.policyRules[0] === EXACT_USER_AUTHORIZATION_RULE;
+    return { ...decision, reviewState: exactGap ? undefined : 'insufficient_evidence' };
+  }
+  if (decision.risk === 'high' || decision.risk === 'critical') {
+    return {
+      ...decision, decision: 'unavailable', reviewState: 'invalid_response',
+      policyRules: prependPolicyRule(decision, 'high_risk_automatic_approval_prohibited'),
+      reason: request.responseLanguage === 'en'
+        ? `Host policy prohibits automatic approval at the reported risk level. ${decision.reason}`
+        : `宿主规则禁止在此风险等级自动批准。${decision.reason}`
+    };
+  }
+  if (isVerifiedProjectOperation(request)) {
+    return { ...decision, projectApproval: true, policyRules: prependPolicyRule(decision, VERIFIED_PROJECT_OPERATION_RULE) };
+  }
+  if (decision.policyRules.includes(VERIFIED_PROJECT_OPERATION_RULE)) {
+    return {
+      ...decision, decision: 'unavailable', reviewState: 'invalid_response',
+      policyRules: ['unverified_project_operation'],
+      reason: request.responseLanguage === 'en'
+        ? 'The reviewer claimed a verified project scope that the host did not establish.'
+        : '审批模型引用了宿主尚未核验的工程范围。'
+    };
+  }
+  return decision;
+}
+
+function prependPolicyRule(decision: ApprovalReviewerJson, rule: string): string[] {
+  return [rule, ...decision.policyRules.filter(value => value !== rule).slice(0, 15)];
 }
 
 export function toReviewerModelContext(request: AgentRequest): ApprovalReviewerModelContext {

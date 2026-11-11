@@ -104,7 +104,8 @@ export class OneShotTextRequestError extends Error {
   public constructor(public readonly reason: 'unavailable' | 'invalid' | 'timeout' | 'cancelled'
     | 'output_truncated' | 'budget_missing' | 'budget_exhausted' | 'unpriced_cost'
     | 'source_identity_missing' | 'model_unavailable' | 'save_failed', message: string,
-  public readonly retryable = false) {
+  public readonly retryable = false,
+  public readonly sharedServiceFailure = false) {
     super(message);
     this.name = 'OneShotTextRequestError';
   }
@@ -278,7 +279,8 @@ export async function requestOneShotText(input: OneShotTextRequestInput): Promis
     throw new OneShotTextRequestError(reason, isTitle
       ? 'Session title returned no usable response / 会话标题未返回可用响应'
       : response.error ?? (input.language === 'en' ? 'Approval reviewer returned no usable response.' : '审批模型未返回可用响应。'),
-    response.retryable);
+    response.retryable, reason === 'unavailable' && (response.failureKind === 'network'
+      || (response.failureKind === 'http' && [401, 502, 503, 504].includes(response.status ?? 0))));
   }
   // Provider reasoning is intentionally ignored and never leaves this call.
   return response.message.content.trim();

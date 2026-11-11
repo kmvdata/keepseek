@@ -2,6 +2,8 @@ import { lstat, readFile, readdir, realpath } from 'node:fs/promises';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { resolveExecutable } from '../../approvals/authorization/commandScope';
+import { inspectInstalledNpmRuntime } from '../../approvals/authorization/packageLaunch';
+import { installedLaunchPath } from '../../approvals/authorization/projectLaunchIdentity';
 import { isPathInside } from '../../approvals/authorization/pathScope';
 import { createBoundedReviewText, hashApprovalText, hashApprovalValue } from '../../approvals/approvalReviewHash';
 import { findSensitiveEvidence, redactSensitiveReviewText } from '../../approvals/approvalPolicy';
@@ -66,19 +68,19 @@ export async function inspectValidationSnapshot(folder: vscode.WorkspaceFolder, 
   const windows = process.platform === 'win32';
   const node = await resolveExecutable('node', cwd, env);
   const npm = await resolveExecutable(windows ? 'npm.cmd' : 'npm', cwd, env);
+  const invalidLaunch = () => new Error('Cannot establish the npm and Node launch identity. / 无法确认 npm 和 Node 的启动身份。');
+  if (!npm || !node?.trusted || [npm, node].some(program => isPathInside(cwd, program.path))
+    || (env.PATH ?? '').split(path.delimiter).some(entry => !path.isAbsolute(entry))) throw invalidLaunch();
   // On Windows, launch the adjacent JS entry through the pinned node.exe
   // without handing argv to cmd.exe. Unsupported shim layouts fail closed.
-  const windowsCli = windows && npm
-    ? await realpath(path.join(path.dirname(npm.path), 'node_modules', 'npm', 'bin', 'npm-cli.js'))
-    : undefined;
+  const bundledCli = windows ? path.join(path.dirname(node.path), 'node_modules', 'npm', 'bin', 'npm-cli.js') : undefined;
+  if (windows ? !await installedLaunchPath(node, env.USERPROFILE)
+    || path.dirname(npm.path) !== path.dirname(node.path)
+    || await realpath(path.dirname(npm.launchPath)) !== path.dirname(node.path)
+    : !await inspectInstalledNpmRuntime(npm, env, node)) throw invalidLaunch();
+  const windowsCli = bundledCli ? await realpath(bundledCli) : undefined;
   const cliInfo = windowsCli ? await lstat(windowsCli) : undefined;
-  // npm is a runtime dependency. Reject project-local PATH shims and relative
-  // PATH entries, which can silently change resolution after npm changes cwd.
-  if (!npm || !node || [npm, node].some(program => isPathInside(cwd, program.path))
-    || (windows && (!windowsCli || !cliInfo?.isFile() || isPathInside(cwd, windowsCli)))
-    || (env.PATH ?? '').split(path.delimiter).some(entry => !path.isAbsolute(entry))) {
-    throw new Error('Cannot establish the npm and Node launch identity. / 无法确认 npm 和 Node 的启动身份。');
-  }
+  if (windows && (!windowsCli || windowsCli !== bundledCli || !cliInfo?.isFile())) throw invalidLaunch();
   const configNames = (await readdir(cwd)).filter(name => VALIDATION_CONFIG.test(name)).sort();
   const args = selected.trim().split(/\s+/u);
   if (args.length === 2 && args[0] === 'node' && args[1] === 'out-test/test/runTests.js'
@@ -116,13 +118,13 @@ export async function inspectValidationSnapshot(folder: vscode.WorkspaceFolder, 
   const cwdUri = folder.uri.toString();
   const scriptEvidence = JSON.stringify(entries);
   const evidence = createBoundedReviewText(redactSensitiveReviewText(scriptEvidence, 12_000));
-  const evidenceComplete = evidence.content === scriptEvidence;
+  const evidenceTruncated = evidence.content !== scriptEvidence;
   const configFingerprint = hashApprovalValue({ cwd, entries, configs, npmrcIdentity, manifest: hashApprovalText(manifest) });
   const fingerprint = hashApprovalValue({ cwdUri, configFingerprint, npm, node, argv, env, cliIdentity: cliInfo && [cliInfo.dev, cliInfo.ino, cliInfo.size, cliInfo.mtimeMs, cliInfo.ctimeMs] });
   return {
     cwd, cwdUri, executable, argv, env, fingerprint,
-    evidenceComplete: evidenceComplete && !npmrc,
-    evidence: { ...evidence, truncated: !evidenceComplete },
+    evidenceComplete: !npmrc,
+    evidence: { ...evidence, totalChars: scriptEvidence.length, contentHash: hashApprovalText(scriptEvidence), truncated: evidenceTruncated },
     configNames
   };
 }

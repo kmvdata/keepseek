@@ -1,4 +1,4 @@
-import { hasExactCommandScope, inspectDraftRunScope } from '../approvals/authorization/commandScope';
+import { hasExactCommandScope, inspectDraftRunScope, type CommandScope } from '../approvals/authorization/commandScope';
 import { randomUUID } from 'node:crypto';
 import type { DraftRun, DraftRunBatchSnapshot, DraftRunBatchState } from '../shared/types';
 import type { DraftRunStore } from './draftRunStore';
@@ -126,6 +126,8 @@ export class DraftRunBatchCoordinator {
   public async execute(operationId: string, input: {
     authorizedUris: ReadonlySet<string>;
     rootTaskRunIds?: ReadonlySet<string>;
+    selectedProjectUri?: string;
+    verifyEditDependencies?: (run: DraftRun, scope: CommandScope) => Promise<void>;
     assertContext: () => void;
     onCurrent: (run: DraftRun | undefined) => void;
   }): Promise<void> {
@@ -143,7 +145,7 @@ export class DraftRunBatchCoordinator {
       for (const [index, entry] of op.state.entries.entries()) {
         op.state.currentIndex = index + 1;
         const run = this.store.validateApprovalBoundary(entry.draftRunId, input.authorizedUris, entry.specHash);
-        const scope = await inspectDraftRunScope(run);
+        const scope = await inspectDraftRunScope(run, false, undefined, false, input.selectedProjectUri, true);
         assertValid();
         if (!hasExactCommandScope(scope, run.spec.cwdUri, input.authorizedUris)) {
           throw new Error('A command needs individual external scope authorization. / 命令需要逐项授权外部范围。');
@@ -170,7 +172,7 @@ export class DraftRunBatchCoordinator {
         }
         const prior = [...(input.rootTaskRunIds ?? new Set(op.state.entries.map(item => item.draftRunId)))]
           .flatMap(id => { const member = this.store.get(id); return member ? [member] : []; });
-        const ancestor = await inspectGitAncestorPrerequisite(run, prior, input.authorizedUris);
+        const ancestor = await inspectGitAncestorPrerequisite(run, prior, input.authorizedUris, input.selectedProjectUri);
         assertValid();
         if (!ancestor.allowed) {
           firstFailure ??= ancestor.reason;
@@ -193,6 +195,16 @@ export class DraftRunBatchCoordinator {
           result = await this.store.approveAndRun(entry.draftRunId, input.authorizedUris, {
             signal: op.controller.signal, expectedSpecHash: entry.specHash,
             rootTaskRunIds: input.rootTaskRunIds,
+            selectedProjectUri: input.selectedProjectUri,
+            verifyScope: async inspectScope => {
+              if (!input.verifyEditDependencies) return;
+              const scope = await inspectScope();
+              assertValid();
+              if (!hasExactCommandScope(scope, run.spec.cwdUri, input.authorizedUris)) {
+                throw new Error('A command needs individual external scope authorization. / 命令需要逐项授权外部范围。');
+              }
+              await input.verifyEditDependencies(run, scope);
+            },
             userApproval: () => { assertValid(); return true; }
           });
         } catch (error) {

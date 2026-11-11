@@ -771,6 +771,106 @@ test('inline shell, PATH shims and external scripts do not inherit verified proj
   }
 });
 
+test('interpreter flags stop at the verified file entry and leave literal project args intact', () => {
+  const entry = './脚本 with spaces';
+  for (const [executable, prefix] of [
+    ['node.exe', ['--enable-source-maps', '--max-old-space-size=256', '--']],
+    ['nodejs', ['--no-warnings']],
+    ['python3.12', ['-Bu', '-X', 'utf8', '--']],
+    ['python.exe', ['-Wdefault', '--check-hash-based-pycs', 'default', '--']]
+  ] as const) {
+    const spec = createSpec(executable, [...prefix, entry, '--eval', 'some arbitrary value', '--input=./data/项目.txt']);
+    const { semantics, supported } = analyzeCommandCapability(spec);
+    assert.equal(supported, true);
+    assert.equal(semantics.projectScript, true);
+    assert.deepEqual(semantics.arguments.slice(prefix.length).map(({ role, value }) => [role, value]), [
+      ['script', entry], ['text', '--eval'], ['text', 'some arbitrary value'], ['read_path', './data/项目.txt']
+    ]);
+    assert.equal(spec.args.at(-1), '--input=./data/项目.txt');
+  }
+  for (const [executable, argv] of [
+    ['node', ['-e', 'console.log(42)']], ['node', ['--import=./preload.js', entry]],
+    ['node', ['--env-file=/etc/secret', entry]], ['node', ['-']],
+    ['python3', ['-cprint(42)']], ['python3', ['-m', 'pytest']], ['python3', ['-X', 'presite=external', entry]]
+  ] as Array<[string, string[]]>) {
+    assert.notEqual(analyzeCommand(createSpec(executable, argv)).projectScript, true, JSON.stringify(argv));
+  }
+});
+
+test('project launch scope binds custom launchers and canonical selected-root targets', async t => {
+  if (process.platform === 'win32') return t.skip('POSIX custom shebang and symlink fixture');
+  const { workspace, shell, createRun } = await projectScriptFixture(t);
+  const project = path.join(workspace, '任务');
+  await mkdir(project);
+  const sibling = path.join(workspace, 'sibling.txt');
+  await writeFile(sibling, 'outside selected project\n');
+  const entry = path.join(project, '运行 now');
+  await writeFile(entry, '#!' + shell + '\nprintf "%s\\n" "$1"\n', { mode: 0o700 });
+  const projectUri = vscode.Uri.file(project).toString();
+  const cwdUri = vscode.Uri.file(workspace).toString();
+  const scopeFor = async (executable: string, args: string[], selected = cwdUri) =>
+    inspectAutomaticRunAuthorization(await createRun(executable, args), new ExactOperationGrants(), 'delegate', false, selected);
+
+  const custom = await scopeFor(entry, ['--arbitrary-flag']);
+  assert.equal(custom.allowed, true, custom.reason);
+  assert.equal(custom.scope.trustedProjectScript, true);
+  assert.equal(custom.scope.projectScriptEntryUri, vscode.Uri.file(entry).toString());
+  assert.equal(custom.scope.projectScriptEntryIdentity?.sizeBytes, Buffer.byteLength('#!' + shell + '\nprintf "%s\\n" "$1"\n'));
+  assert.match(custom.scope.projectScriptEntryIdentity?.sha256 ?? '', /^[a-f0-9]{64}$/u);
+
+  const siblingScope = await scopeFor(shell, [entry, '--input=' + vscode.Uri.file(sibling).toString()], projectUri);
+  assert.equal(siblingScope.allowed, false);
+  assert.equal(siblingScope.requiresExactGrant, true);
+  assert.deepEqual(siblingScope.scope.externalUris, [cwdUri, vscode.Uri.file(sibling).toString()]);
+  assert.notEqual(siblingScope.scope.trustedProjectScript, true);
+
+  const endpoint = 'https://example.invalid/upload';
+  const network = await scopeFor(shell, [entry, '--target=' + endpoint]);
+  assert.deepEqual(network.scope.semantics?.networkTargets, [endpoint]);
+  assert.equal(network.requiresNetworkGrant, true);
+  assert.equal(network.allowed, false);
+  assert.equal(network.scope.trustedProjectScript, false);
+
+  const fake = path.join(project, 'node');
+  await writeFile(fake, '#!' + shell + '\nexit 0\n', { mode: 0o700 });
+  const shim = await scopeFor(fake, [entry]);
+  assert.equal(shim.reviewable, false);
+  assert.ok(shim.scope.diagnostics.some(reason => reason.code === 'interpreter_identity'));
+  assert.equal((await scopeFor(fake, ['-e', 'console.log(42)'])).reviewable, false);
+  await assert.rejects(scopeFor(process.execPath, ['--require=file:///etc/shadow', entry]), /Protected credential|system target/u);
+  await assert.rejects(scopeFor(shell, [entry, '--output=file:///etc/keepseek-sentinel']), /Protected credential|system target/u);
+});
+
+test('verified package lifecycle retains manifest identity and external target requirements', async t => {
+  if (process.platform === 'win32') return t.skip('POSIX native Bun fixture');
+  const { workspace, createRun } = await projectScriptFixture(t);
+  const manifest = path.join(workspace, 'package.json');
+  const entry = path.join(workspace, 'entry.js');
+  await writeFile(entry, 'console.log("fixture");\n');
+  const writeManifest = (command: string) => writeFile(manifest, JSON.stringify({
+    scripts: { prefixture: 'echo preparing', fixture: command, postfixture: 'echo complete' }
+  }));
+  await writeManifest('node ./entry.js');
+  const run = await createRun('bun', ['run', 'fixture', '--', '--anything']);
+  const grants = new ExactOperationGrants();
+  const initial = await inspectAutomaticRunAuthorization(run, grants, 'delegate');
+  if (!initial.scope.trustedProjectScript) return t.skip('A supported native Bun install with default lifecycle configuration is unavailable');
+  assert.equal(initial.allowed, true);
+  assert.equal(initial.scope.projectScriptEntryUri, vscode.Uri.file(manifest).toString());
+  assert.equal(initial.scope.semantics?.projectPackageScript?.name, 'fixture');
+  assert.ok(initial.scope.paths.some(target => target.uri === vscode.Uri.file(entry).toString() && target.role === 'lifecycle_script'));
+
+  await writeManifest('node ./entry.js https://example.invalid/upload');
+  const withNetwork = await inspectAutomaticRunAuthorization(run, grants, 'delegate');
+  assert.equal(withNetwork.requiresNetworkGrant, true);
+  assert.equal(withNetwork.allowed, false);
+  assert.notEqual(withNetwork.scope.fingerprint, initial.scope.fingerprint);
+  assert.deepEqual(withNetwork.scope.semantics?.networkTargets, ['https://example.invalid/upload']);
+
+  await writeManifest('rm -rf /');
+  await assert.rejects(inspectAutomaticRunAuthorization(run, grants, 'delegate'), /Protected command/u);
+});
+
 test('controlled validation retains its narrow blocking policy', () => {
   assert.equal(hasValidationBlockingRisk('bun run compile'), false);
   assert.equal(hasValidationBlockingRisk('git status --short'), false);

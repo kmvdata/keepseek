@@ -36,6 +36,8 @@ export interface VerifiedDraftRunLaunch {
   cwd: string;
   env?: NodeJS.ProcessEnv;
   gitRemote?: GitRemoteCommand;
+  /** Remote transport approval binds the repository, endpoint and refs. */
+  fingerprint?: string;
 }
 
 export interface DraftRunExecutorAdapter {

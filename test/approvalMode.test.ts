@@ -40,7 +40,8 @@ test('draft receipt and host authorization text describe the actual mode without
     assert.match(scope, /file:\/\/\/outside\/result.txt/u);
     assert.notEqual(localize(lang, 'approvalReviewerUnavailable'), 'approvalReviewerUnavailable');
     const delegate = WEBVIEW_TRANSLATIONS[lang].approvalDelegateDescription;
-    assert.match(delegate, lang === 'en' ? /ask you when needed/u : /必要时请你确认/u);
+    assert.match(delegate, lang === 'en' ? /project edits and run scripts after review/u : /项目.*经审查后自动执行/u);
+    assert.match(WEBVIEW_TRANSLATIONS[lang].approvalDelegateProcessHelp, lang === 'en' ? /no OS sandbox/u : /无操作系统沙箱/u);
     assert.ok(delegate.length <= WEBVIEW_TRANSLATIONS[lang].approvalAskDescription.length * 1.2);
   }
 });
@@ -482,10 +483,10 @@ test('ask mode retires malformed argv without treating independent later checks 
   }
 });
 
-test('model denial records why a DraftEdit did not run without another model call', async () => {
+test('model denial keeps the denied DraftEdit unexecuted and permits an independent edit', async () => {
   const fixture = workflowFixture({ mode: 'delegate', denyTarget: 'e1' });
   await fixture.run();
-  assert.deepEqual(fixture.effects, ['stopped']);
+  assert.deepEqual(fixture.effects, ['edit:e2', 'stopped']);
   assert.match(fixture.prompts[0] ?? '', /denied by the configured reviewer/iu);
   assert.match(fixture.prompts[0] ?? '', /materially safer (?:new )?action/u);
 });
@@ -497,7 +498,7 @@ test('model denial never spawns a DraftRun', async () => {
   assert.match(fixture.prompts[0] ?? '', /"decision":"deny"/u);
 });
 
-test('reviewer unavailability freezes every remaining effect in the batch', async () => {
+test('a proven unavailable reviewer stops remaining actions that require that reviewer', async () => {
   const fixture = workflowFixture({ mode: 'delegate', unavailableBeforeEffects: true });
   await fixture.run();
   assert.deepEqual(fixture.effects, ['stopped']);
@@ -691,6 +692,8 @@ function workflowFixture(options: {
     sessionStore: { ...sessionUseFixture(), activeSessionId: 's', getActiveSession: () => session, persist: async () => {} },
     changeSets: {
       flush: async () => {},
+      hasCommandEditCandidates: () => false,
+      inspectCommandEditDependencies: async () => ({ allowed: true, fingerprint: 'no-edit-dependencies' }),
       toWebviewState: () => [{ runId: 'r', files: ['e1', 'e2'].map((id) => ({ id, uri: 'file:///workspace/' + id, label: id, status: 'pending' })) }],
       getPendingEdit: (id: string) => ({ edit: edit(id), runId: 'r', sessionId: 's' }),
       preflightEditOutput: async (_id: string, scanSensitive: boolean) => { assert.equal(scanSensitive, true); },

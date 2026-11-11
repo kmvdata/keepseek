@@ -2,7 +2,9 @@ import type { DraftRun } from '../shared/types';
 import type { ApprovalDependency } from '../approvals/approvalProcessing';
 import { analyzeCommand } from '../approvals/authorization/commandSemantics';
 import { hasExactCommandScope, inspectDraftRunScope } from '../approvals/authorization/commandScope';
-import { isPathInside } from '../approvals/authorization/pathScope';
+import { canonicalPath, isPathInside, joinUnresolvedPath } from '../approvals/authorization/pathScope';
+import { inspectVisibleCommandTargets } from '../approvals/authorization/visibleCommandTargets';
+import * as path from 'node:path';
 import * as vscode from 'vscode';
 
 export interface DraftRunDependencyDecision {
@@ -10,6 +12,33 @@ export interface DraftRunDependencyDecision {
   code?: 'dependency_missing' | 'dependency_identity' | 'dependency_cycle' | 'dependency_unsettled' | 'dependency_condition' | 'dependency_stale';
   reason?: string;
   dependency?: ApprovalDependency;
+}
+
+/** Match task-owned edits before binding a launch. An entry that will be created
+ * by Apply still has a usable path identity, without treating it as launchable. */
+export async function draftRunEditDependencyTargets(run: Pick<DraftRun, 'spec'>): Promise<ReadonlySet<string>> {
+  const cwd = vscode.Uri.parse(run.spec.cwdUri);
+  if (cwd.scheme !== 'file') return new Set();
+  const semantics = analyzeCommand(run.spec);
+  const targets = semantics.arguments.filter(argument => ['script', 'read_path'].includes(argument.role))
+    .map(argument => ({ value: argument.value, base: joinUnresolvedPath(cwd.fsPath, ...argument.cwdChanges) }));
+  targets.push(...inspectVisibleCommandTargets(semantics).filter(target => !target.write)
+    .map(target => ({ value: target.value, base: cwd.fsPath })));
+  if (semantics.projectPackageScript) targets.push({ value: 'package.json', base: cwd.fsPath });
+  if (/[/\\]/u.test(run.spec.executable)) targets.push({ value: run.spec.executable, base: cwd.fsPath });
+  const local = new Set<string>();
+  for (const { value, base } of targets) {
+    if (!value || value === '-' || process.platform !== 'win32' && /^(?:[A-Za-z]:|\\\\)/u.test(value)) continue;
+    const uri = /^file:/iu.test(value) ? vscode.Uri.parse(value) : undefined;
+    if (uri && uri.scheme !== 'file') continue;
+    local.add(uri?.fsPath ?? joinUnresolvedPath(base, value));
+  }
+  const aliases = await Promise.all([...local].map(async value => {
+    const literal = vscode.Uri.file(path.resolve(value)).toString();
+    const canonical = await canonicalPath(value).catch(() => undefined);
+    return canonical ? [literal, vscode.Uri.file(canonical).toString()] : [literal];
+  }));
+  return new Set(aliases.flat());
 }
 
 /** Dependencies are immutable spec/hash inputs. They convey requirements, never authority.
@@ -63,7 +92,7 @@ export function inspectDraftRunDependencies(run: DraftRun, get: (id: string) => 
  * repository metadata/configuration, executable, environment and paths. Query facts with no
  * snapshot cannot authorize dependent execution. */
 export async function inspectDraftRunDependencyFacts(run: DraftRun, get: (id: string) => DraftRun | undefined,
-  allowedRunIds?: ReadonlySet<string>): Promise<DraftRunDependencyDecision> {
+  allowedRunIds?: ReadonlySet<string>, selectedProjectUri?: string): Promise<DraftRunDependencyDecision> {
   const decision = inspectDraftRunDependencies(run, get, allowedRunIds);
   if (!decision.allowed) return decision;
   const visited = new Set<string>();
@@ -83,7 +112,7 @@ export async function inspectDraftRunDependencyFacts(run: DraftRun, get: (id: st
       };
       if (!prior.gitQueryResult.scopeFingerprint) return reject();
       try {
-        const scope = await inspectDraftRunScope(prior);
+        const scope = await inspectDraftRunScope(prior, false, undefined, false, selectedProjectUri);
         if (scope.uncertain || scope.fingerprint !== prior.gitQueryResult.scopeFingerprint) return reject();
       } catch { return reject(); }
     }
@@ -98,15 +127,15 @@ export async function inspectDraftRunDependencyFacts(run: DraftRun, get: (id: st
  * host-confirmed root-task members. Compare real repository identity rather than
  * cwd text, including -C/subdirectories; pure verified observations stay independent. */
 export async function inspectGitAncestorPrerequisite(run: DraftRun, prior: readonly DraftRun[],
-  authorizedUris: ReadonlySet<string> = new Set()): Promise<DraftRunDependencyDecision> {
+  authorizedUris: ReadonlySet<string> = new Set(), selectedProjectUri?: string): Promise<DraftRunDependencyDecision> {
   const candidates = prior.filter(item => item.id !== run.id && item.sessionId === run.sessionId
     && !item.historyInvalidationId && !item.historyOriginUnverified && item.status === 'done'
     && item.gitQueryResult?.kind === 'ancestor').slice().sort((a, b) => a.createdAt.localeCompare(b.createdAt)).reverse();
   if (!candidates.length || await isIndependentDraftRunCheck(run, authorizedUris)) return { allowed: true };
-  const actionScope = await inspectDraftRunScope(run).catch(() => undefined);
+  const actionScope = await inspectDraftRunScope(run, false, undefined, false, selectedProjectUri).catch(() => undefined);
   const actionRepository = actionScope?.paths.find(item => item.role === 'repository')?.uri;
   for (const fact of candidates) {
-    const scope = await inspectDraftRunScope(fact).catch(() => undefined);
+    const scope = await inspectDraftRunScope(fact, false, undefined, false, selectedProjectUri).catch(() => undefined);
     const repository = scope?.paths.find(item => item.role === 'repository')?.uri;
     if (actionRepository && repository && actionRepository !== repository) continue;
     const sameRepository = repository && (actionRepository ? actionRepository === repository

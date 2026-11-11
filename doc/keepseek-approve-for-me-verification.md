@@ -1,6 +1,103 @@
 # KeepSeek「帮我审批」统一合同与验收
 
-## 2026-11-11 当前合同
+## 2026-11-11 v7 当前合同
+
+实施基线为 `7c0aec40adb2ef4d4b30f07f77e0a78a54f16c94`，KeepSeek 0.5.3，Asia/Shanghai。审批策略升级为 v7，审计容器 `approval-reviews.json` 仍为 v1。父会话请求与工具 schema 仍为 v15，审批交付仍为 v13。
+
+| 环节 | 当前行为 |
+| --- | --- |
+| 请求批准 | 用户逐项或批量批准。批准前零副作用，整个模式零 reviewer 请求。普通工作区读取、原生只读 Git、草稿准备、静态诊断及已核实结果沿用现有能力。 |
+| 帮我审批 | 可信工程内、与当前任务相关的普通文件新增、修改、移动、删除和脚本启动，经宿主核验范围及实际身份后，由独立、无工具审批模型默认批准。真实批准、人工点击、宿主阻断和审查故障按各自来源记录。 |
+| 工程内启动 | 宿主核对可信根、canonical cwd、真实启动器、实际入口、完整 literal argv、受控环境和可见目标。入口后的普通脚本值保留原样。只有绑定真实入口的操作可按工程内常规启动审查。内联、stdin、无法绑定的模块、预加载、动态 shell 和外部包装器继续按具体行为处理。固定验证入口只接受 `compile`、`lint`、`test`。 |
+| 本轮文件依赖 | 依赖入口变更时先走 DraftEdit → ChangeSet → SafeFileEditor，完成 journal、原子写入和 read-back。随后冻结当前落盘入口并审查。Apply 失败、结果未知、取消或依赖身份变化会阻断对应命令。可证明独立且具备条件的兄弟操作继续。 |
+| 决定与补证 | 一次逻辑审查共用原截止时间和根任务预算，最多额外尝试一次。仅不熟悉项目逻辑、普通参数、传递依赖或有界材料截断时，已核验的任务相关操作仍应批准。若模型仅以此要求人工，使用结构化规则纠正一次。有效 `deny`、最终无效决定、超时和不可用都保留各自审计及未执行结果。高或严重风险禁止自动批准。 |
+| 授权 | 已有精确授权直接复用。具体可由用户解决的缺口才发出单次请求，列出所需范围及本次动作。工程内普通操作遇到 reviewer 故障只保留该项诊断。系统破坏、提权、凭据访问、保护绕过及越界按真实影响判定。硬阻断及适用安全拒绝约束两种模式。 |
+| 执行与恢复 | 关键边界重新核验范围、配置、身份、基线、依赖和取消。命令经短时单次 permit，保持 `spawn(executable, args, { shell:false })`。执行结果以实际进程状态为准，未知副作用不自动重跑。关闭 Webview 保留当次等待，重启恢复审计和中断说明，运行期授权和执行许可不重放。历史 v6 及更早审计沿用现有格式，保留适用安全拒绝。 |
+
+工程进程以扩展宿主账号权限运行，无操作系统沙箱。实际文件、网络和子进程能力取决于宿主环境。审查材料包含白名单事实和有界脱敏证据。/ Project processes run with the extension host account’s privileges and no OS sandbox. File, network, and subprocess access depend on the host environment. The reviewer sees allowlisted facts and bounded, redacted evidence.
+
+### F5 现场步骤 / F5 acceptance
+
+开发仓库运行 `bun run compile` 后按 F5。开发宿主打开并信任独立的临时 `project`。/ Run `bun run compile` in the development repo and press F5. Open and trust the disposable `project` in the Extension Development Host.
+
+macOS / Linux（shell）
+
+```bash
+acceptance_root=$(mktemp -d)
+mkdir -p "$acceptance_root/project/scripts" "$acceptance_root/outside"
+printf 'external fixture\n' > "$acceptance_root/outside/reference.txt"
+cd "$acceptance_root/project"
+printf '{"scripts":{"compile":"node --version","lint":"node --version","test":"node --version"}}\n' > package.json
+printf 'console.log("before apply");\n' > 'scripts/入口 文件.js'
+python3 -m venv .venv
+```
+
+Windows（PowerShell）
+
+```powershell
+$acceptanceRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("keepseek-v7-" + [Guid]::NewGuid().ToString())
+New-Item -ItemType Directory -Path "$acceptanceRoot/project/scripts", "$acceptanceRoot/outside" | Out-Null
+Set-Content -LiteralPath "$acceptanceRoot/outside/reference.txt" -Value 'external fixture'
+Set-Location -LiteralPath "$acceptanceRoot/project"
+Set-Content -LiteralPath 'package.json' -Encoding ascii -Value '{"scripts":{"compile":"node --version","lint":"node --version","test":"node --version"}}'
+Set-Content -LiteralPath 'scripts/入口 文件.js' -Encoding ascii -Value 'console.log("before apply");'
+python -m venv .venv
+```
+
+| 中文验收 | English acceptance |
+| --- | --- |
+| 在 `/` 菜单切换中英文，验证仅有「请求批准」和「帮我审批」，用键盘查看选项及宿主进程权限说明。在「子代理模型 → 审批模型」分别查看跟随主模型与固定账号模型。 | Switch languages in `/`, check **Ask for approval** and **Approve for me**, and use the keyboard to reach their help and read the process permissions. In **Subagent models → Approval model**, check follow-main and a fixed account model. |
+| 在「帮我审批」下，要求同一任务修改 `scripts/入口 文件.js` 让它输出 `after apply`，创建 `scripts/入口 文件.py` 输出 `python after apply`，再分别启动。Node 参数逐项为 `['--', 'scripts/入口 文件.js', '普通 参数']`。Python 参数逐项为 `['-B', '--', 'scripts/入口 文件.py', '普通 参数']`，使用系统 Python 和 `.venv` 入口各试一次。核对命令原样显示，输出来自落盘后版本，自动批准注明实际模型，未出现人工审批。 | In **Approve for me**, ask one task to change `scripts/入口 文件.js` to print `after apply`, create `scripts/入口 文件.py` to print `python after apply`, and launch both. Use `['--', 'scripts/入口 文件.js', '普通 参数']` for Node and `['-B', '--', 'scripts/入口 文件.py', '普通 参数']` for Python. Repeat the Python test with the project virtual environment. Check literal arguments, outputs from the applied versions, the actual approving model, and zero manual prompts. |
+| 加长一个脚本直到审查只提供有界材料，重复修改和运行。让进程以非零状态退出一次，在卡片和 Run Details 检查真实退出码。运行固定验证三个脚本，并区分审查次数、执行次数与原生只读工具。 | Make a script long enough for bounded review evidence and repeat the edit and launch. Have one process exit nonzero and compare the recorded exit code in its card and Run Details. Run all three fixed validation scripts and distinguish review, process, and native read-only tool counts. |
+| 在「请求批准」下重复文件修改与脚本启动。逐项比较点击前后的文件内容、进程计数和审批模型请求，验证零 reviewer 请求。 | Repeat a file edit and script launch in **Ask for approval**. Compare file contents, process counts, and reviewer requests before and after the clicks. Verify zero reviewer requests. |
+| 用 `outside/reference.txt` 演练单次授权和已有精确授权复用。核对首次缺口只出现一个精确请求，改变目标或重复点击无效。等待期间关闭再重开 Webview，核对焦点和等待恢复。重载窗口后旧按钮不能执行。 | Use `outside/reference.txt` to exercise one-shot authorization and reuse of an existing exact grant. Check that the first gap yields one scoped request and that changing the target or clicking twice cannot reuse it. Close and reopen the Webview while waiting. Check focus and the pending request, then reload the window and verify that old controls are inert. |
+| 把审批模型暂设不存在的固定来源或模型。对工程内普通操作核对配置故障、零进程、零人工审批，且已有授权的独立读取可继续。超时、无效 JSON、危险预加载、提权和真实拒绝用受控测试注入并核对哨兵。 | Temporarily select an invalid fixed approval source or model. For routine project actions, verify a configuration error, zero processes, zero prompts, and continued authorized independent reads. Use controlled tests and sentinel files for timeouts, invalid JSON, risky preload, privilege escalation, and valid denials. |
+
+| 平台 / Platform | 现场核对 / Field checks |
+| --- | --- |
+| macOS | 常用 `node` 和实际安装的 `python3`，例如 Homebrew 或 python.org 的解释器。核对 `.venv/bin/python` 的真实目标和虚拟环境语义，以及工作区内外符号链接。 / Use a concrete `python3` installation such as Homebrew or python.org. Check the real target and environment of `.venv/bin/python`, plus in-root and escaping symlinks. |
+| Windows | `node.exe`、`python.exe` 和 `.venv\Scripts\python.exe`，盘符及含空格和 Unicode 的相对与绝对路径，外部 junction 或符号链接。 / Executables, drive letters, relative and absolute paths with spaces and Unicode, and an escaping junction or symlink. |
+| Linux | `node`、`python3`、安装中的 `python3.<minor>` 别名与 `.venv/bin/python`，路径大小写和符号链接。 / Available versioned Python aliases, path case, and symlinks. |
+
+记录主模型与审批模型来源、逻辑审查数、上游请求数、人工卡数、业务进程数、Apply/read-back/spawn 顺序和退出码。原生开发宿主和线上模型分别按实际证据记录。/ Record model sources, logical reviews, upstream requests, manual cards, business process starts, Apply/read-back/spawn order, and exit codes. Record native host and live-model results from their own observations.
+
+### v7 自动化证据 / Automated verification
+
+真实临时工程使用 Provider 队列、ChangeSetStore、SafeFileEditor 和 SpawnDraftRunExecutor。审批模型响应由可计数的夹具注入。Node 使用带空格和 Unicode 的入口，Python 使用真实 `.venv`，命令读取的都是 Apply 后的文件内容。另测移动后启动、Apply 基线冲突、审查期间入口改写、实际退出码 42 及 v6 拒绝重载。
+
+| 对照场景 | v6 起始提交 | v7 |
+| --- | --- | --- |
+| 运行现有 Node 入口 | 1 次真实启动、1 次逻辑审查、1 次上游审查请求、0 次人工请求 | 相同 |
+| 新建 48 KiB 的 Node 入口并保留 `--no-warnings --` 和带空格的字面参数 | 0 次 Apply、0 次启动、0 次上游审查请求、0 次人工请求 | 1 次 Apply 并完成落盘核验、1 次真实启动、2 次逻辑审查、2 次上游审查请求、0 次人工请求 |
+| 运行现有入口时目标相关 `realpath` / `stat` 次数 | 82（cwd 16/16、入口 10/10、启动器 20/10） | 40（cwd 5/5、入口 10/5、启动器 10/5） |
+
+对照在隔离的 v6 源码和 v7 编译产物上使用相同夹具。从完成 checkpoint 保存后开始，统计审批阶段 cwd、入口和启动器的 `fs.promises.realpath` 与 `stat`。计数范围限这三类目标的两个 API，创建阶段、其他路径、访问检查、句柄统计和文件哈希各有独立开销。
+
+npm 夹具验证了实际 `pre → main → post` 顺序。前置脚本的变更发生 Apply 冲突时，命令报告对应编辑依赖且启动计数为零。
+
+同一编译配置下，英文静态 system 为 11,064 字节，中文为 9,601 字节，工具定义及顺序为 26,375 字节，均与 v6 基线逐字节一致。工具 JSON SHA-256 为 `5eedfab6cb618ad1c27c9491247b50c65a2932ad1db4b8499deecea4493450d5`。新 delegate 用户消息追加 v7 审批说明。
+
+最终工作树在 macOS x86_64、Node v24.15.0、Bun 1.3.12 下验证。
+
+| 验证 | 退出码 | 结果 |
+| --- | --- | --- |
+| `bun run compile` | 0 | 扩展源码编译通过 |
+| `bun run lint` | 0 | 静态检查通过 |
+| `bun run build:test` | 0 | 测试构建通过 |
+| `bun run test` | 0 | 1,628 项中 1,627 通过、0 失败、1 跳过、0 取消。环境禁止绑定本地端口，跳过故障服务器用例。 |
+| `git diff --check` | 0 | 补丁格式通过 |
+
+受控 reviewer、真实进程和当前协议可按以下入口复测。原生 VS Code F5、Windows/Linux 实机及线上审批模型待现场验证。
+
+```bash
+bun run build:test
+node --require ./out-test/test/registerVscodeStub.js --test \
+  out-test/test/approvalReviewer.test.js out-test/test/runnerValidationState.test.js \
+  out-test/test/taskApprovalIntegration.test.js out-test/test/draftRunRisk.test.js \
+  out-test/test/changeSet.test.js out-test/test/draftRunStore.test.js
+```
+
+## 2026-11-11 v6 历史合同与验收
 
 实施基线为 `1ea43329d48e5300d9fc6700d31d9858b20e5331`，KeepSeek 0.5.3，Asia/Shanghai。审批策略和 reviewer ruleset 统一为 v6，`approval-reviews.json` 容器仍为 v1。父会话请求和工具 schema 仍为 v15，审批交付仍为 v13。主模型的中英文 system 更新了审批规则句，既有会话历史和用户尾部已保存字节继续使用原文。
 
@@ -33,7 +130,7 @@ flowchart TD
 
 外部目标未获准时，预检只使用允许探测的元数据。用户同意后重新核对 canonical target、scope、Git 远端和 ref、启动配置及文件基线，范围变化时撤销临时授权。外部读取的单次批准绑定精确 URI、实际行范围和读取上限。同一精确 URI 的读取安全拒绝也约束该文件的其他范围。编辑重发保留原审计并撤销被截断操作的活动授权。已完成及副作用未知的操作恢复时保持已有状态。
 
-### F5 现场步骤 / F5 acceptance
+### v6 F5 现场步骤 / v6 F5 acceptance
 
 开发仓库运行 `bun run compile` 并按 F5 启动扩展开发宿主。在临时目录建立夹具，从开发宿主打开其 `project`。/ Run `bun run compile` in the development repo and launch the Extension Development Host with F5. Open the fixture’s `project` there.
 
@@ -66,7 +163,7 @@ git remote add origin "$acceptance_root/remote.git"
 | 用户级审批模型暂设不存在的固定 sourceId/modelId，核对配置不可用、零网络请求和一次精确人工请求。等待期间修改启动脚本、文件基线或审批模型设置，旧批准应失效。恢复有效配置。服务故障、超时、无效 JSON、确定性 high/critical 和 deny 使用下方受控用例注入。 | Set the user-level fixed approval model to a nonexistent sourceId/modelId. Verify a configuration error, zero network requests, and one exact manual request. While waiting, change the script, file baseline, or reviewer setting and check that the old approval expires. Restore the setting. Use the controlled tests below to inject service failures, timeouts, malformed JSON, high/critical risk, and denials. |
 | 等待期间关闭再重开 Webview，确认当前请求仍可操作且 Tab 焦点正常。分别测试 Stop、切换模式和重载窗口，核对旧按钮不可执行，重启只显示中断说明。打开历史宿主审批记录并核对中英文历史标签，粗粒度来源显示中性标签。 | Close and reopen the Webview during a pending request. Verify it can still be answered and can be reached with Tab. Exercise Stop, a mode change, and Reload Window. Old controls must remain inert and restart must show the interrupted explanation. Check bilingual historical host approval and the neutral label for coarse execution provenance. |
 
-### 本次验收记录 / Verification
+### v6 验收记录 / v6 verification
 
 本地夹具已在 macOS x86_64、Node v24.15.0 和 Bun 1.3.12 下复现。临时项目与裸远端均初始化，远端路径和初始文件核验通过，三个 npm 夹具脚本均退出 0。文档中的本地相对链接已检查。
 
