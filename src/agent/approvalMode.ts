@@ -19,7 +19,7 @@ export function getApprovalModeUserTail(mode: ApprovalMode): string {
     'Pass -a and -m separately when needed and give every -m exactly one complete message argument.'
   ].join(' ');
   return mode === 'delegate'
-    ? `<keepseek-approval-mode>delegate: The user selected Approve for me. Propose exact immutable DraftEdits and DraftRuns. ${validation} ${git} Ordinary trusted-project edits and exact file launches default to approval by an independent tool-free reviewer. Use the real script entry, executable and literal arguments. For an entry created, moved or edited this turn, apply and verify the on-disk version before review and execution. Project processes use extension-host privileges without an OS sandbox. Prefer bounded evidence gathering and already-authorized alternatives. Only the host can request a precise one-shot user decision for a concrete authorization gap; never manufacture approval by asking for a click in prose. A user decision keeps this mode and does not grant permanent trust. Reuse completed work, never repeat an uncertain effect or pursue a denied effect through equivalents. A safety denial permits only a materially safer action. Continue authorized independent work and claim completion only from actual verified results.</keepseek-approval-mode>`
+    ? `<keepseek-approval-mode>delegate: The user selected Approve for me. Propose exact immutable DraftEdits and DraftRuns. ${validation} ${git} Ordinary trusted-project edits and exact file launches default to approval by an independent tool-free reviewer. Use the real script entry, executable and literal arguments. For an entry created, moved or edited this turn, apply and verify the on-disk version before review and execution. Project processes use extension-host privileges without an OS sandbox. Prefer bounded evidence gathering and already-authorized alternatives. Only the host can request a precise one-shot user decision for a concrete authorization gap, a user-confirmable risk or an unavailable review after host checks. Waiting and paused operations have not run. Keep their prerequisites and use the recorded outcomes to continue independent work. A user decision keeps this mode and does not grant permanent trust. Reuse completed work, never repeat an uncertain effect or pursue a denied effect through equivalents. A safety denial permits only a materially safer action. Continue authorized independent work and claim completion only from actual verified results.</keepseek-approval-mode>`
     : `<keepseek-approval-mode>ask: The user selected project-wide Ask for approval. File writes and arbitrary commands require individual user approval. ${validation} Prepare pending drafts and wait for their results.</keepseek-approval-mode>`;
 }
 
@@ -30,7 +30,9 @@ export interface DelegatedApprovalBatch {
   backgroundRunId?: string;
   editIds: string[];
   draftRunIds: string[];
-  confirmTargetId?: string;
+  resume?: boolean;
+  resumeTargetId?: string;
+  manualAction?: { targetId: string; priorReviewId: string; retry?: boolean };
   continueAfterApprovalReview?: boolean;
   approvalReviews?: ApprovalReviewDisplay[];
   approvalToolResults?: Array<{
@@ -47,20 +49,25 @@ export interface DelegatedApprovalBatch {
 
 /** Volatile queue: reloading the extension must never execute restored drafts. */
 export class DelegatedApprovalQueue {
-  private pending?: DelegatedApprovalBatch;
+  private pending: DelegatedApprovalBatch[] = [];
   private active?: AbortController;
   private activeBatch?: DelegatedApprovalBatch;
 
   public enqueue(batch: DelegatedApprovalBatch): void {
     if (batch.editIds.length || batch.draftRunIds.length || batch.continueAfterApprovalReview) {
-      this.pending = structuredClone(batch);
+      const copy = structuredClone(batch);
+      const index = this.pending.findIndex(item => item.sessionId === batch.sessionId && (batch.resume
+        ? item.runId === batch.runId && item.resume && item.resumeTargetId === batch.resumeTargetId : !item.resume));
+      if (index === -1) this.pending.push(copy);
+      else this.pending[index] = copy;
     }
   }
 
   public take(sessionId: string): { batch: DelegatedApprovalBatch; controller: AbortController } | undefined {
-    if (this.active || !this.pending || this.pending.sessionId !== sessionId) return undefined;
-    const batch = this.pending;
-    this.pending = undefined;
+    if (this.active) return undefined;
+    const index = this.pending.findIndex(batch => batch.sessionId === sessionId);
+    if (index === -1) return undefined;
+    const [batch] = this.pending.splice(index, 1);
     this.active = new AbortController();
     this.activeBatch = batch;
     return { batch, controller: this.active };
@@ -74,7 +81,7 @@ export class DelegatedApprovalQueue {
   public hasPending(sessionId: string, rootTaskId?: string): boolean {
     const matches = (batch: DelegatedApprovalBatch | undefined) => Boolean(batch && batch.sessionId === sessionId
       && (!rootTaskId || batch.rootTaskId === rootTaskId));
-    return matches(this.pending) || matches(this.activeBatch);
+    return this.pending.some(matches) || matches(this.activeBatch);
   }
 
   /** Revoke only work whose execution segment left the full host history. */
@@ -82,13 +89,13 @@ export class DelegatedApprovalQueue {
     const affected = (batch: DelegatedApprovalBatch | undefined) => batch?.sessionId === scope.sessionId
       && (scope.removedSegmentIds.includes(batch.runId)
         || [...batch.editIds, ...batch.draftRunIds].some(id => removedTargetIds.includes(id)));
-    if (affected(this.pending)) this.pending = undefined;
+    this.pending = this.pending.filter(batch => !affected(batch));
     if (affected(this.activeBatch)) this.active?.abort(new Error('Approval source was superseded by edit and resend.'));
   }
 
-  public cancel(): void {
-    this.pending = undefined;
-    this.active?.abort();
+  public cancel(reason?: unknown): void {
+    this.pending = [];
+    this.active?.abort(reason);
   }
 }
 

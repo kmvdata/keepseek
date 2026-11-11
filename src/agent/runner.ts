@@ -22,7 +22,7 @@ import {
   mergeCostLimits,
   mergeDurations
 } from './executionPolicy';
-import { createRunCheckpoint, checkpointCopy, type RunCheckpoint, AgentInterruptedError, recoveryBlocker, endpointHash, isCostLimitExhausted } from './runCheckpoint';
+import { createRunCheckpoint, checkpointCopy, canRecoverToolApproval, type RunCheckpoint, type PendingToolApproval, AgentInterruptedError, recoveryBlocker, endpointHash, isCostLimitExhausted } from './runCheckpoint';
 import { restorePluginSkillProgress, type PluginSkillProgress } from './runCheckpoint';
 import { assertPluginSkillsCurrent, executePluginSkillRead } from './pluginSkillRuntime';
 import {
@@ -369,6 +369,12 @@ export class AgentRunAbortedError extends Error {
   }
 }
 
+const APPROVAL_PENDING_TOOL_RESULT = JSON.stringify({
+  ok: true,
+  status: 'approval_result_pending',
+  message: 'The host will provide the review decision and any execution result in the next user message.'
+});
+
 /** Reusable provider/tool loop. A child gets a fresh instance with isolated
  * mutable services; the main extension coordinator uses AgentRunner below. */
 export class AgentLoop {
@@ -400,7 +406,9 @@ export class AgentLoop {
     await assertPluginSkillsCurrent(request.currentRunContext?.skills ?? [], []);
     if (request.checkpoint) await assertPluginSkillsCurrent(request.checkpoint.request.currentRunContext?.skills ?? [], [], request.checkpoint);
     if (request.checkpoint) {
-      const requestCheckpoint = request.checkpoint;
+      // Session persistence publishes a frozen checkpoint. Reconciliation
+      // owns only its working copy, including evidence recovered from disk.
+      const requestCheckpoint = checkpointCopy(request.checkpoint);
       request = { ...request, checkpoint: requestCheckpoint };
       await this.reconcilePersistedEvidence(requestCheckpoint, request.sessionId ?? request.subagentContext?.parentSessionId ?? requestCheckpoint.taskId);
       if (requestCheckpoint.state?.pending?.executing) {
@@ -435,7 +443,7 @@ export class AgentLoop {
       throw new Error('Prepared root cost policy changed / 预备根任务费用策略已变化');
     }
     const maxCost = prepared?.cost.limit ?? configuredMaxCost;
-    const cp = request.checkpoint ? checkpointCopy(request.checkpoint) : createRunCheckpoint(request, limit,
+    const cp = request.checkpoint ?? createRunCheckpoint(request, limit,
       request.executionLimits?.timeLimitSource ?? (request.executionLimits?.maxRunMs ? 'explicit invocation + agent.maxExecutionMs' : 'agent.maxExecutionMs (0 = unlimited)'),
       (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.toString()), maxCost);
     const taskCostBudget = prepared?.cost ?? request.taskCostBudget ?? new ExecutionCostBudget(maxCost, cp.usedCostByCurrency);
@@ -472,6 +480,13 @@ export class AgentLoop {
     cp.attempt++; cp.status = 'running'; cp.stopReason = undefined; cp.error = undefined;
     const ownClock = new ExecutionClock(limit, cp.usedMs);
     const clocks = request.taskClock ? [ownClock, request.taskClock] : [ownClock];
+    const restoreActiveDeadline = () => {
+      const remaining = Math.min(...clocks.map(clock => clock.remainingMs));
+      const deadline = Math.min(Date.now() + remaining, parentRunBudget?.deadlineAt ?? Infinity);
+      activeRunBudget.state.deadlineAt = Number.isFinite(deadline) ? new Date(deadline).toISOString() : undefined;
+    };
+    if (cp.state?.pending?.approval) restoreActiveDeadline();
+    let manualWait = false;
     let releases: Array<() => void> = [];
     const resumeClock = () => { if (!releases.length) releases = clocks.map((clock) => clock.enter()); };
     const suspendClock = () => { releases.forEach((release) => release()); releases = []; };
@@ -552,6 +567,8 @@ export class AgentLoop {
           callbacks.onActivity?.(kind);
         },
         onStatus: (status) => {
+          if (status.phase === 'awaiting_manual_approval') manualWait = true;
+          else if (manualWait) { restoreActiveDeadline(); manualWait = false; }
           if ((status.phase === 'awaiting_authorization' && normalizeApprovalMode(request.approvalMode) === 'ask')
             || status.phase === 'waiting_for_apply' || status.phase === 'waiting_for_subagent' || status.phase === 'awaiting_manual_approval') suspendClock();
           else resumeClock();
@@ -577,7 +594,9 @@ export class AgentLoop {
               : 'connection_interrupted';
       cp.status = ['storage_failure', 'resource_limit'].includes(cp.stopReason) ? 'blocked' : 'interrupted';
       cp.error = error instanceof Error ? error.message : String(error);
-      if (cp.stopReason !== 'storage_failure' && cp.stopReason !== 'resource_limit') await persist();
+      if (cp.stopReason === 'storage_failure' && canRecoverToolApproval(cp)) {
+        await persist().catch(() => undefined); // A separate audit writer may have failed while checkpoint storage is healthy.
+      } else if (cp.stopReason !== 'storage_failure' && cp.stopReason !== 'resource_limit') await persist();
       if (cp.stopReason === 'time_budget') throw new ExecutionBudgetError();
       throw error;
     } finally {
@@ -1098,7 +1117,6 @@ export class AgentLoop {
       projectionMetadata: projection.metadata
     });
     draftEdits.forEach((edit) => validationState.recordDraftEdit(edit.id));
-    const runDeadlineAt = logicalBudget.deadlineAt;
     const calibrationStore = new ContextWindowCalibrationStore(this.globalStorageUri);
     const calibrationKey = {
       sourceId: runtimeConfig.sourceId,
@@ -1254,6 +1272,39 @@ export class AgentLoop {
     let approvalReviewBoundaryReached = false;
     let approvalReviewFailed = false;
     const approvalToolResults: NonNullable<AgentResponse['approvalToolResults']> = [];
+    const reviewedEvidenceRefs = new Set(restored?.reviewedEvidenceRefs);
+    const reviewedOutcomes = new Map<string, NonNullable<ToolEvidence['approvalResult']>>();
+    const addReviewedResult = async (evidence: ToolEvidence, rawContent?: string) => {
+      if (!evidence.approvalResult || reviewedOutcomes.has(evidence.toolCallId)) return;
+      const content = rawContent ?? await evidenceStore.readContent(evidence);
+      reviewedOutcomes.set(evidence.toolCallId, evidence.approvalResult);
+      reviewedEvidenceRefs.add(evidence.evidenceRef);
+      approvalToolResults.push({ toolCallId: evidence.toolCallId, toolName: evidence.toolName,
+        status: evidence.approvalResult.status, result: createBoundedReviewText(content) });
+    };
+    const activateReviewedBoundary = (toolCallId: string) => {
+      const outcome = reviewedOutcomes.get(toolCallId);
+      if (!outcome) return;
+      approvalReviewBoundaryReached = true;
+      approvalReviewFailed = !outcome.authorized;
+      approvalReviewStopReason ??= outcome.stopReason;
+    };
+    const finishApprovalBoundary = (stopReason?: string) => {
+      const message = stopReason ?? (request.language === 'en'
+        ? 'Approval processing reached a safe continuation boundary.'
+        : '审批处理已到达安全续跑边界。');
+      emitStatus({ base: 'complete', phase: 'finalizing', detail: message });
+      return finishRun({ message, reasoningContent: this.formatReasoning(reasoningParts), draftEdits, draftRuns,
+        approvalContinuationRequired: true, approvalContinuationStopReason: stopReason, approvalToolResults },
+      { finishReason: stopReason ? 'approval_review_stopped' : 'approval_review_boundary', stopped: Boolean(stopReason) });
+    };
+    for (const ref of reviewedEvidenceRefs) {
+      const evidence = await evidenceStore.findByRef(ref, evidenceSessionId, checkpoint.taskId);
+      if (!evidence?.approvalResult) throw new AgentInterruptedError('uncertain_tool_result', request.language === 'en'
+        ? 'The saved approval result could not be verified. Restore its evidence before continuing.'
+        : '无法核验已保存的审批结果。请恢复证据后继续。');
+      await addReviewedResult(evidence);
+    }
     emitUsageEstimate(tools);
 
     let nextTurn = restored?.turn ?? 0;
@@ -1287,11 +1338,16 @@ export class AgentLoop {
         messages: committedMessages, provider: committedProvider, completedReplay, toolRounds, draftEdits, draftRuns,
         reasoningParts, turn: nextTurn, toolCallCount, validationRunCount, toolResultTokens,
         validationState: validationState.getState(), repairLoop: repairLoop.getState(), epoch: { ...epoch, calibration: { ...admission.state } }, pending,
+        reviewedEvidenceRefs: reviewedEvidenceRefs.size ? [...reviewedEvidenceRefs] : undefined,
         continuation: pending ? checkpoint.state?.continuation : undefined
       };
       await callbacks.onCheckpoint?.(checkpoint);
     };
     await saveStep();
+    if (!pending && approvalToolResults.length) {
+      for (const result of approvalToolResults) activateReviewedBoundary(result.toolCallId);
+      return finishApprovalBoundary(approvalReviewStopReason);
+    }
     const rolloverEpoch = async (reason: ContextEpochRolloverReason): Promise<void> => {
       const compressionStarted = performance.now();
       const summaryUsageBefore = { ...upstreamUsageTotals };
@@ -1336,7 +1392,7 @@ export class AgentLoop {
         try {
           if (epoch.turnInEpoch > 0 || projection.compressibleMessageIds.length > 0) semanticSummary = await this.createEpochSemanticSummary({
             request, runtimeConfig, messages, tools, providerRunState, callbacks: runCallbacks,
-            trace, usageTotals: upstreamUsageTotals, runDeadlineAt
+            trace, usageTotals: upstreamUsageTotals, runDeadlineAt: logicalBudget.deadlineAt
           });
         } catch (error) {
           // A summary timeout is recoverable through the deterministic host
@@ -1533,7 +1589,7 @@ export class AgentLoop {
 
     for (let turn = nextTurn; ; turn += 1) {
       this.throwIfAborted(request.signal, request.language);
-      const runTimeStopReason = this.getRunTimeStopReason(runDeadlineAt);
+      const runTimeStopReason = this.getRunTimeStopReason(logicalBudget.deadlineAt);
       if (runTimeStopReason) {
         emitStatus({
           base: 'thinking',
@@ -1550,7 +1606,7 @@ export class AgentLoop {
       // The schema is frozen for the whole session/run. When tool calls are no
       // longer allowed, keep the identical tools array and switch tool_choice to
       // none instead of removing the cached schema prefix.
-      const resumingAcceptedToolRound = pending?.commandRecoveryResponse && pending.response.message.tool_calls?.length;
+      const resumingAcceptedToolRound = (pending?.commandRecoveryResponse || pending?.approval) && pending.response.message.tool_calls?.length;
       const toolBudgetExhausted = runtimeConfig.toolsEnabled && !resumingAcceptedToolRound && logicalBudget.isToolBudgetExhausted();
       const isBudgetFinalization = toolBudgetExhausted;
       if (isBudgetFinalization && !pending) {
@@ -1614,7 +1670,7 @@ export class AgentLoop {
           messages,
           toolsForTurn,
           runCallbacks,
-          runDeadlineAt,
+          logicalBudget.deadlineAt,
           {
           trace,
           usageTotals: upstreamUsageTotals,
@@ -1826,7 +1882,7 @@ export class AgentLoop {
             response,
             draftEdits,
             callbacks: runCallbacks,
-            runDeadlineAt,
+            runDeadlineAt: logicalBudget.deadlineAt,
             outputReserveTokens,
             reasoningParts,
             runtimeUsageBreakdown,
@@ -1925,7 +1981,10 @@ export class AgentLoop {
           runDetailsBuilderRef.current?.recordToolResult(toolCall.id, toolCall.function.name, rejected);
           return rejected;
         }
-        if (Object.hasOwn(pending!.results, toolCall.id)) return pending!.results[toolCall.id];
+        if (Object.hasOwn(pending!.results, toolCall.id)) {
+          activateReviewedBoundary(toolCall.id);
+          return pending!.results[toolCall.id];
+        }
         if (approvalReviewStopReason) {
           return JSON.stringify({
             ok: false,
@@ -1947,19 +2006,32 @@ export class AgentLoop {
           toolCall: trace.includesPayload('request') ? toolCall : summarizeDeepSeekToolCall(toolCall)
         });
         const argumentsHash = hashText(toolCall.function.arguments || '{}');
-        let evidenceRecord = await evidenceStore.ensureIntent({
+        const effectKind = this.getEvidenceEffectKind(toolCall.function.name);
+        const resumingApproval = pending!.approval?.toolCallId === toolCall.id ? pending!.approval : undefined;
+        const savedEvidence = resumingApproval
+          ? await evidenceStore.findByToolCall(evidenceSessionId, checkpoint.taskId, toolCall.id, epoch.index) : undefined;
+        if (resumingApproval && (!savedEvidence || savedEvidence.toolName !== toolCall.function.name
+          || savedEvidence.argumentsHash !== argumentsHash || savedEvidence.effectKind !== effectKind
+          || !['pending', 'completed'].includes(savedEvidence.executionStatus))) {
+          throw new AgentInterruptedError('uncertain_tool_result', request.language === 'en'
+            ? 'The saved operation lacks proof that no execution occurred. Verify its effects before requesting it again.'
+            : '保存的操作缺少未执行证明。请先核验其效果，再重新提出操作。');
+        }
+        let evidenceRecord = savedEvidence ?? await evidenceStore.ensureIntent({
           sessionId: evidenceSessionId,
           taskId: checkpoint.taskId,
           epochIndex: epoch.index,
           toolCallId: toolCall.id,
           toolName: toolCall.function.name,
           argumentsHash,
-          effectKind: this.getEvidenceEffectKind(toolCall.function.name)
+          effectKind
         });
         if (evidenceRecord.executionStatus === 'completed') {
           if (evidenceRecord.pluginSkillProgress) restorePluginSkillProgress(checkpoint, evidenceRecord.pluginSkillProgress);
+          await addReviewedResult(evidenceRecord);
+          activateReviewedBoundary(toolCall.id);
           if (evidenceRecord.providerEnvelope === undefined) {
-            const raw = await evidenceStore.readContent(evidenceRecord);
+            const raw = evidenceRecord.approvalResult ? APPROVAL_PENDING_TOOL_RESULT : await evidenceStore.readContent(evidenceRecord);
             const decision = admission.decide({
               estimatedInputTokens: this.estimateCurrentProviderInputTokens(request, messages, tools, providerRunState),
               configuredMaxOutputTokens: runtimeConfig.maxTokens,
@@ -1978,7 +2050,8 @@ export class AgentLoop {
         }
         const blockedDraftId = toolCall.function.name === RUN_DRAFT_TOOL_NAME ? `preflight-${evidenceRecord.id}` : undefined;
         const resumingBlockedProposal = blockedDraftId && draftRuns.some(run => run.id === blockedDraftId && run.capabilityDiagnostic?.blocking);
-        if (!resumingBlockedProposal && !logicalBudget.tryRecordToolCall()) {
+        const resumingTool = Boolean(resumingBlockedProposal || resumingApproval);
+        if (!resumingTool && !logicalBudget.tryRecordToolCall()) {
           return JSON.stringify({
             ok: false,
             errorType: 'tool_call_budget_exhausted',
@@ -1986,7 +2059,7 @@ export class AgentLoop {
           });
         }
         toolCallCount = logicalBudget.state.toolCalls;
-        if (!resumingBlockedProposal) epoch.toolCallsInEpoch += 1;
+        if (!resumingTool) epoch.toolCallsInEpoch += 1;
         taskPlan.startTool(toolCall.function.name);
         emitStatus({
           base: 'executing',
@@ -2032,6 +2105,7 @@ export class AgentLoop {
               executed: false
             });
           } else if (validationPreflight?.status === 'unavailable') {
+            if (resumingApproval) throw new AgentInterruptedError('waiting_for_user', validationPreflight.error);
             rawToolResult = JSON.stringify({
               ok: false,
               errorType: 'validation_unavailable',
@@ -2080,8 +2154,26 @@ export class AgentLoop {
               agentRunId: checkpoint.taskId,
               approvalMode: runAuthorizationPolicy.approvalMode,
               emitStatus,
-              validationPreflight
+              validationPreflight,
+              recovery: resumingApproval,
+              progressIndependentEvidence: async () => {
+                // An existing evidence reference is immutable and need not
+                // wait for the validation or external read under review.
+                for (const sibling of toolCalls.slice(toolCalls.indexOf(toolCall) + 1)) {
+                  if (sibling.function.name !== READ_EVIDENCE_TOOL_NAME) continue;
+                  const reference = this.parseToolResultObject(sibling.function.arguments)?.evidenceRef;
+                  const saved = typeof reference === 'string' && await evidenceStore.findByRef(reference, evidenceSessionId, checkpoint.taskId);
+                  if (saved && saved.executionStatus === 'completed' && !saved.approvalResult) await executeToolCall(sibling);
+                }
+              },
+              persistApproval: async (approval) => {
+                pending!.approval = approval;
+                await saveStep!();
+              }
             });
+            if (resumingApproval && !reviewed) throw new AgentInterruptedError('waiting_for_user', request.language === 'en'
+              ? 'The saved approval scope or mode changed. Restore it or request a new operation.'
+              : '保存的审批范围或模式已变化。请恢复原范围或模式，或重新提出操作。');
             authorizationDecision = reviewed?.decision ?? await abortable(this.toolAuthorization.authorize({
               toolName: toolCall.function.name,
               args: toolArgs,
@@ -2140,6 +2232,7 @@ export class AgentLoop {
                   })
                 : createAuthorizationDeniedToolResult(authorizationDecision);
             } else {
+              if (pending!.approval?.toolCallId === toolCall.id) pending!.approval = undefined;
               pending!.executing = { id: toolCall.id, name: toolCall.function.name, evidenceRef: evidenceRecord.evidenceRef };
               await saveStep!(); // A durable intent is required before validation/delegation or any proposal.
               evidenceRecord = await evidenceStore.markExecuting(evidenceRecord);
@@ -2164,7 +2257,7 @@ export class AgentLoop {
               if (getSubagentHandoffKind(toolCall.function.name)) emitStatus({ base: 'waiting', phase: 'waiting_for_subagent', toolName: toolCall.function.name });
               const execution = this.handleToolCall(toolCall, draftEdits, draftRuns, request.language, {
                 signal: request.signal,
-                runDeadlineAt,
+                runDeadlineAt: logicalBudget.deadlineAt,
                 authorization: authorizationDecision,
                 historyArchive: request.historyArchive,
                 parentRequest: request,
@@ -2203,7 +2296,8 @@ export class AgentLoop {
           }
           if (request.signal?.aborted || checkpoint.stopReason === 'storage_failure' || checkpoint.stopReason === 'resource_limit'
             || error instanceof LogicalBudgetExceededError || error instanceof ExecutionBudgetError
-            || error instanceof AgentInterruptedError && (error.reason === 'resource_limit' || error.reason === 'storage_failure')) throw error;
+            || error instanceof AgentInterruptedError && (['resource_limit', 'storage_failure'].includes(error.reason)
+              || error.reason === 'waiting_for_user' && pending!.approval?.toolCallId === toolCall.id)) throw error;
           rawToolResult = JSON.stringify({
             ok: false,
             errorType: 'tool_execution_failed',
@@ -2223,7 +2317,16 @@ export class AgentLoop {
           await saveStep!();
           this.throwIfAborted(request.signal, request.language);
         }
-        evidenceRecord = await evidenceStore.complete(evidenceRecord, rawToolResult, { pluginSkillProgress });
+        const approvalResult: ToolEvidence['approvalResult'] = authorizationDecision?.approvalReview ? {
+          authorized: authorizationDecision.allowed,
+          status: authorizationDecision.failureCode === 'user_rejected' ? 'denied'
+            : ['unavailable', 'needs_user'].includes(authorizationDecision.approvalReview.decision)
+              || ['approval_needs_user', 'approval_scope_changed', 'approval_request_cancelled'].includes(authorizationDecision.failureCode ?? '')
+              ? 'failed' : authorizationDecision.allowed ? this.isToolResultError(rawToolResult) ? 'failed' : 'succeeded' : 'denied',
+          stopReason: approvalReviewStopReason?.slice(0, 1200)
+        } : undefined;
+        evidenceRecord = await evidenceStore.complete(evidenceRecord, rawToolResult, { pluginSkillProgress, approvalResult });
+        await addReviewedResult(evidenceRecord, rawToolResult);
         if (pluginSkillProgress) restorePluginSkillProgress(checkpoint, pluginSkillProgress);
         if (this.isToolResultError(rawToolResult)) {
           epoch.failures.push({
@@ -2233,19 +2336,6 @@ export class AgentLoop {
             errorType: readToolResultErrorType(rawToolResult)
           });
           if (epoch.failures.length > 200) epoch.failures.splice(0, epoch.failures.length - 200);
-        }
-        if (authorizationDecision?.approvalReview) {
-          approvalToolResults.push({
-            toolCallId: toolCall.id,
-            toolName: toolCall.function.name,
-            status: ['unavailable', 'needs_user'].includes(authorizationDecision.approvalReview.decision)
-              || ['approval_needs_user', 'approval_scope_changed', 'approval_request_cancelled'].includes(authorizationDecision.failureCode ?? '')
-              ? 'failed'
-              : authorizationDecision.allowed
-                ? this.isToolResultError(rawToolResult) ? 'failed' : 'succeeded'
-                : 'denied',
-            result: createBoundedReviewText(rawToolResult)
-          });
         }
         runDetailsBuilderRef.current?.recordToolResult(toolCall.id, toolCall.function.name, rawToolResult);
         taskPlan.finishTool(toolCall.function.name, rawToolResult);
@@ -2311,13 +2401,7 @@ export class AgentLoop {
         });
         this.throwIfAborted(request.signal, request.language);
         const nextToolsForRequest = tools;
-        const providerVisibleToolResult = authorizationDecision?.approvalReview
-          ? JSON.stringify({
-              ok: true,
-              status: 'approval_result_pending',
-              message: 'The host will provide the review decision and any execution result in the next user message.'
-            })
-          : rawToolResult;
+        const providerVisibleToolResult = approvalResult ? APPROVAL_PENDING_TOOL_RESULT : rawToolResult;
         const admissionDecision = await decideWithCalibrationRepair({
           estimatedInputTokens: this.estimateCurrentProviderInputTokens(request, messages, nextToolsForRequest, providerRunState,
             responseFunctionOutputs, anthropicToolResults),
@@ -2439,6 +2523,7 @@ export class AgentLoop {
 
       const executeToolCall = async (toolCall: DeepSeekToolCall): Promise<string> => {
         const result = await performToolCall(toolCall);
+        if (pending!.approval?.toolCallId === toolCall.id) pending!.approval = undefined;
         pending!.results[toolCall.id] = result;
         pending!.executing = undefined;
         checkpoint.lastStepAt = new Date().toISOString();
@@ -2650,32 +2735,7 @@ export class AgentLoop {
         await rolloverEpoch(rolloverAfterBatchReason);
       }
       const approvalStopReason = approvalReviewStopReason ?? (!draftEdits.length && !draftRuns.length ? approvalLocalPreflightFailure : undefined);
-      if (approvalStopReason) {
-        emitStatus({ base: 'complete', phase: 'finalizing', detail: approvalStopReason });
-        return finishRun({
-          message: approvalStopReason,
-          reasoningContent: this.formatReasoning(reasoningParts),
-          draftEdits,
-          draftRuns,
-          approvalContinuationRequired: true,
-          approvalContinuationStopReason: approvalStopReason,
-          approvalToolResults
-        }, { finishReason: 'approval_review_stopped', stopped: true });
-      }
-      if (approvalReviewBoundaryReached) {
-        const message = request.language === 'en'
-          ? 'Approval processing reached a safe continuation boundary.'
-          : '审批处理已到达安全续跑边界。';
-        emitStatus({ base: 'complete', phase: 'finalizing', detail: message });
-        return finishRun({
-          message,
-          reasoningContent: this.formatReasoning(reasoningParts),
-          draftEdits,
-          draftRuns,
-          approvalContinuationRequired: true,
-          approvalToolResults
-        }, { finishReason: 'approval_review_boundary' });
-      }
+      if (approvalStopReason || approvalReviewBoundaryReached) return finishApprovalBoundary(approvalStopReason);
     }
 
     } catch (error) {
@@ -2694,7 +2754,11 @@ export class AgentLoop {
         }, { finishReason: budgetReason, stopped: true });
       }
       let failedPlan;
-      if (error instanceof AgentRunAbortedError || request.signal?.aborted) {
+      const approvalPaused = error instanceof AgentInterruptedError && error.reason === 'waiting_for_user' && canRecoverToolApproval(checkpoint);
+      if (approvalPaused) {
+        const plan = taskPlan.getPlan();
+        failedPlan = { ...plan, status: 'blocked' as const, blockers: [...plan.blockers, error.message] };
+      } else if (error instanceof AgentRunAbortedError || request.signal?.aborted) {
         failedPlan = taskPlan.stop(error instanceof Error ? error.message : undefined);
       } else {
         failedPlan = taskPlan.fail(error instanceof Error ? error.message : String(error));
@@ -2708,7 +2772,7 @@ export class AgentLoop {
         taskPlan: failedPlan,
         repairLoop: repairLoop.getState(),
         finishReason: undefined,
-        failureReason: error instanceof Error ? error.message : String(error),
+        failureReason: approvalPaused ? undefined : error instanceof Error ? error.message : String(error),
         stopped: error instanceof AgentRunAbortedError || request.signal?.aborted
       }) ?? createFallbackRunDetails(trace.runId, request, failedPlan, traceLog?.uri, error));
       throw error;
@@ -3721,6 +3785,9 @@ export class AgentLoop {
     approvalMode: AgentRequest['approvalMode'];
     emitStatus: (status: AgentActivityInput) => void;
     validationPreflight?: Extract<ValidationPreflightResult, { status: 'ready' }>;
+    recovery?: PendingToolApproval;
+    progressIndependentEvidence: () => Promise<void>;
+    persistApproval: (approval: PendingToolApproval) => Promise<void>;
   }): Promise<{ decision: ToolAuthorizationDecision; verifyExecution?: () => Promise<boolean> } | undefined> {
     const mode = normalizeApprovalMode(input.approvalMode);
     const reviewer = this.approvalReviewer;
@@ -3804,7 +3871,7 @@ export class AgentLoop {
       scope = script === 'test' ? 'validation_test' : 'validation_compile_lint';
       const launch = preflight.snapshot;
       snapshot = launch.fingerprint;
-      label = `npm run ${script} · ${launch.cwdUri}
+      label = `${launch.executable} ${JSON.stringify(launch.argv)} · ${launch.cwdUri}
 ${launch.evidence.content}`;
       reviewRequest = createValidationReviewRequest({
         request: input.request, agentRunId: input.agentRunId, targetId: input.toolCall.id, script,
@@ -3831,73 +3898,117 @@ ${launch.evidence.content}`;
       : '审批审查服务不可用，尚未执行。', undefined, 'approval_reviewer_unavailable');
     reviewRequest = { ...reviewRequest, approvalMode: mode, scopeFingerprint: snapshot };
     const modelContext = toReviewerModelContext(input.request);
-    this.throwIfAborted(signal, language);
-    const prior = await reviewer.review(reviewRequest, modelContext, signal, () => {
-      input.emitStatus({ base: 'thinking', phase: 'reviewing_tool_result', toolName, detail: scope });
-    });
-    this.throwIfAborted(signal, language);
-    const disposition = approvalDisposition(prior.record);
-    if (disposition === 'deny') return deny(formatSafetyDenial(prior.record, language), prior,
-      prior.record.approvalSource === 'user_click' ? 'user_rejected' : undefined);
-    if (prior.circuitBreakReason || disposition === 'stop') {
-      return deny(prior.record.rationale, prior, prior.record.policyRules[0]);
+    const staleReason = language === 'en' ? 'Approval scope or configuration changed. Nothing executed. Restore the reviewed scope or request a new operation.'
+      : '审批范围或配置已变化，尚未执行。请恢复已审查的范围，或重新提出操作。';
+    let checkpoint: PendingToolApproval = input.recovery ?? { toolCallId: input.toolCall.id,
+      actionHash: reviewRequest.actionHash, scopeFingerprint: snapshot, status: 'reviewing' };
+    const saveApproval = async (status: PendingToolApproval['status'], priorReviewId = checkpoint.priorReviewId) => {
+      checkpoint = { ...checkpoint, status, priorReviewId };
+      await input.persistApproval(checkpoint);
+    };
+    const pause = async (reason: string, reviewId?: string): Promise<never> => {
+      await saveApproval('paused', reviewId);
+      throw new AgentInterruptedError('waiting_for_user', reason);
+    };
+    if (checkpoint.actionHash !== reviewRequest.actionHash || checkpoint.scopeFingerprint !== snapshot) {
+      return pause(staleReason);
     }
-
-    const verifyCurrent = async () => {
+    const verifyCurrent = async (automatic?: ApprovalReviewRecord) => {
       if (signal?.aborted || !vscode.workspace.isTrusted) return false;
       try {
-        await reviewer.assertReviewerConfiguration?.(reviewRequest, modelContext, prior.record);
+        if (automatic) await reviewer.assertReviewerConfiguration?.(reviewRequest, modelContext, automatic);
         return await verifyScope() && !signal?.aborted && vscode.workspace.isTrusted;
       } catch { return false; }
     };
-    const stale = () => deny(language === 'en' ? 'Approval scope or configuration changed. Nothing executed.'
-      : '审批范围或配置已变化，尚未执行。', prior, 'approval_scope_changed');
-    let outcome = prior;
-    if (disposition === 'request_user' && !requiredUserScope) {
-      return deny(prior.record.rationale, prior, 'approval_needs_user');
-    }
-    const needsUser = Boolean(requiredUserScope);
-    if (needsUser) {
-      if (!reviewer.createUserApproval || !this.requestManualToolApproval) {
-        return deny(prior.record.rationale, prior, prior.record.decision === 'unavailable'
-          ? 'approval_reviewer_unavailable' : 'approval_needs_user');
+
+    for (;;) {
+      this.throwIfAborted(signal, language);
+      if (!await verifyCurrent()) return pause(staleReason);
+      await saveApproval('reviewing');
+      let claimedReviewId: string | undefined;
+      let prior: ApprovalReviewOutcome;
+      try {
+        prior = await reviewer.review(reviewRequest, modelContext, signal, (claim) => {
+          claimedReviewId = claim.reviewId;
+          input.emitStatus({ base: 'thinking', phase: 'reviewing_tool_result', toolName, detail: scope });
+        }, checkpoint.priorReviewId ? { retryOf: checkpoint.priorReviewId,
+          recovery: input.recovery ? 'not_dispatched' : undefined } : undefined);
+      } catch (error) {
+        if (claimedReviewId && error instanceof ApprovalAuditError) await saveApproval('paused', claimedReviewId);
+        throw error;
       }
-      if (!await verifyCurrent()) return stale();
-      const reason = (requiredUserScope ? (language === 'en' ? 'Authorize this exact URI and allow one read: '
-        : '授权此精确 URI 并允许本次读取：') + requiredUserScope + ' · ' : '') + prior.record.rationale;
-      input.emitStatus({ base: 'waiting', phase: 'awaiting_manual_approval', detail: reason });
-      const manual: ManualToolApproval = { id: '', sessionId: reviewRequest.sessionId, label, reason, request: reviewRequest,
-        authorizationTargets: requiredUserScope ? [requiredUserScope] : undefined, priorReviewId: prior.record.reviewId };
-      const approved = await this.requestManualToolApproval(manual, signal, verifyCurrent);
-      if (!await verifyCurrent()) return stale();
-      const link = { priorReviewId: prior.record.reviewId, userRequestId: manual.id };
-      if (!approved) {
-        if (manual.status === 'rejected' && reviewer.createUserRejection) {
-          const rejection = await reviewer.createUserRejection(reviewRequest, link);
-          return deny(rejection.rationale, { status: 'reviewed', record: rejection }, 'user_rejected');
+      this.throwIfAborted(signal, language);
+      const disposition = approvalDisposition(prior.record);
+      if (disposition === 'deny') return deny(formatSafetyDenial(prior.record, language), prior,
+        prior.record.approvalSource === 'user_click' ? 'user_rejected' : undefined);
+      if (prior.circuitBreakReason || disposition === 'stop') {
+        if (['in_progress', 'insufficient_evidence', 'interrupted', 'scope_mismatch'].includes(prior.record.reviewState ?? '')) {
+          return pause(prior.record.rationale, prior.record.approvalSource === 'auto_approval_review' ? prior.record.reviewId : undefined);
         }
-        return deny(reason, prior, 'approval_request_cancelled');
+        return deny(prior.record.rationale, prior, prior.record.policyRules[0]);
       }
-      input.emitStatus({ base: 'executing', phase: 'executing_tool', toolName });
-      if (authorizeExternalRead && (!await authorizeExternalRead() || !await verifyCurrent())) return stale();
-      outcome = await reviewer.createUserApproval(reviewRequest, link);
+
+      const needsUser = disposition === 'request_user' || Boolean(requiredUserScope);
+      let outcome = prior;
+      if (needsUser) {
+        const reason = (requiredUserScope ? (language === 'en' ? 'Authorize this exact URI and allow one read: '
+          : '授权此精确 URI 并允许本次读取：') + requiredUserScope + ' · ' : '') + prior.record.rationale;
+        if (!reviewer.createUserApproval || !this.requestManualToolApproval) return pause(reason, prior.record.reviewId);
+        if (!await verifyCurrent()) return pause(staleReason, prior.record.reviewId);
+        await saveApproval('waiting', prior.record.reviewId);
+        await input.progressIndependentEvidence();
+        input.emitStatus({ base: 'waiting', phase: 'awaiting_manual_approval', detail: reason });
+        const manual: ManualToolApproval = { id: '', sessionId: reviewRequest.sessionId, label, reason, request: reviewRequest,
+          authorizationTargets: requiredUserScope ? [requiredUserScope] : undefined, priorReviewId: prior.record.reviewId,
+          affectedTargets: prior.record.affectedTargets,
+          risk: prior.record.decision === 'unavailable' ? undefined : prior.record.risk, reviewState: prior.record.reviewState };
+        let approved: boolean;
+        try {
+          approved = await this.requestManualToolApproval(manual, signal, verifyCurrent);
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          throw new AgentInterruptedError('storage_failure', detail);
+        }
+        this.throwIfAborted(signal, language);
+        if (manual.resolutionReason === 'storage_failed') throw new AgentInterruptedError('storage_failure', reason);
+        if (!await verifyCurrent()) return pause(staleReason);
+        const link = { priorReviewId: prior.record.reviewId, userRequestId: manual.id };
+        if (!approved) {
+          if (manual.resolutionReason === 'retry_requested') {
+            input.emitStatus({ base: 'thinking', phase: 'reviewing_tool_result', toolName, detail: scope });
+            continue;
+          }
+          if (manual.status === 'rejected') {
+            const rejection = await reviewer.createUserRejection?.(reviewRequest, link);
+            return deny(rejection?.rationale ?? reason, rejection ? { status: 'reviewed', record: rejection } : prior, 'user_rejected');
+          }
+          return pause(reason);
+        }
+        input.emitStatus({ base: 'executing', phase: 'executing_tool', toolName });
+        this.throwIfCostLimitReached(input.request);
+        if (authorizeExternalRead && (!await authorizeExternalRead() || !await verifyCurrent())) return pause(staleReason);
+        outcome = await reviewer.createUserApproval(reviewRequest, link);
+      }
+      if (approvalDisposition(outcome.record) !== 'execute') {
+        if (outcome.record.decision === 'deny') return deny(formatSafetyDenial(outcome.record, language), outcome);
+        return pause(outcome.record.rationale, outcome.record.reviewId);
+      }
+      const verifyExecution = () => verifyCurrent(needsUser ? undefined : outcome.record);
+      const stale = () => needsUser ? pause(staleReason) : deny(staleReason, prior, 'approval_scope_changed');
+      if (!await verifyExecution()) return stale();
+      await reviewer.consumeApproval(outcome.record, needsUser ? 'user_click' : 'auto_approval_review');
+      if (!await verifyExecution()) return stale();
+      return {
+        decision: {
+          allowed: true, toolName, riskLevel: scope === 'workspace_read' ? 'low' : 'medium', scope,
+          source: needsUser ? 'explicit_confirmation' : 'model_reviewer', requiresExplicitConfirmation: false,
+          reason: outcome.record.rationale, executionSnapshot: snapshot,
+          approvalReview: toApprovalReviewDisplay(outcome.record),
+          priorApprovalReview: prior !== outcome ? toApprovalReviewDisplay(prior.record) : undefined
+        },
+        verifyExecution
+      };
     }
-    if (outcome.record.decision !== 'approve') {
-      return deny(outcome.record.decision === 'deny' ? formatSafetyDenial(outcome.record, language) : outcome.record.rationale, outcome);
-    }
-    if (!await verifyCurrent()) return stale();
-    await reviewer.consumeApproval(outcome.record, needsUser ? 'user_click' : 'auto_approval_review');
-    if (!await verifyCurrent()) return stale();
-    return {
-      decision: {
-        allowed: true, toolName, riskLevel: scope === 'workspace_read' ? 'low' : 'medium', scope,
-        source: needsUser ? 'explicit_confirmation' : 'model_reviewer', requiresExplicitConfirmation: false,
-        reason: outcome.record.rationale, executionSnapshot: snapshot,
-        approvalReview: toApprovalReviewDisplay(outcome.record),
-        priorApprovalReview: prior !== outcome ? toApprovalReviewDisplay(prior.record) : undefined
-      },
-      verifyExecution: verifyCurrent
-    };
   }
 
   private async handleToolCall(
@@ -5338,6 +5449,9 @@ ${launch.evidence.content}`;
     if (evidence.executionStatus === 'completed') {
       if (evidence.pluginSkillProgress) restorePluginSkillProgress(checkpoint, evidence.pluginSkillProgress);
       if (checkpoint.state.epoch) this.upsertEpochEvidenceRef(checkpoint.state.epoch, evidence);
+      if (evidence.approvalResult) {
+        checkpoint.state.reviewedEvidenceRefs = [...new Set([...(checkpoint.state.reviewedEvidenceRefs ?? []), evidence.evidenceRef])];
+      }
       if (evidence.providerEnvelope !== undefined) checkpoint.state.pending.results[executing.id] = evidence.providerEnvelope;
       checkpoint.state.pending.executing = undefined;
       return;

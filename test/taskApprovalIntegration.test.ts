@@ -1,5 +1,6 @@
 import './registerVscodeStub';
 import { RunDetailsBuilder } from '../src/agent/logging/runDetails';
+import { InteractionTraceLogService } from '../src/agent/logging/interactionTrace';
 import { AgentRunner } from '../src/agent/runner';
 import { RUN_DRAFT_TOOL_NAME } from '../src/agent/protocol';
 import assert from 'node:assert/strict';
@@ -30,7 +31,7 @@ import { createDraftRunProposal, hashDraftRunSpec } from '../src/runs/draftRunPr
 import { inspectDraftRunScope, inspectAutomaticEditAuthorization, ExactOperationGrants, draftRunIdentity, inspectAutomaticRunAuthorization, assertAutomaticRunAuthorization } from '../src/approvals/authorization';
 import { normalizeApprovalProcessing } from '../src/approvals/approvalProcessing';
 import type { WebviewMessage } from '../src/provider/webviewMessages';
-import { ApprovalReviewStore } from '../src/approvals/approvalReviewStore';
+import { ApprovalAuditError, ApprovalReviewStore } from '../src/approvals/approvalReviewStore';
 import { ApprovalReviewerService } from '../src/approvals/approvalReviewer';
 import { createDraftRunReviewRequest } from '../src/approvals/approvalReviewSurface';
 import { APPROVAL_POLICY_VERSION } from '../src/approvals/approvalReviewTypes';
@@ -601,7 +602,10 @@ test('Git queries without repository evidence return bounded diagnosis without r
     assert.equal(f.executions(), 0); assert.equal(f.reviews(), 0);
     const target = f.session.approvalProcessing?.targets[0];
     assert.equal(target?.status, 'insufficient_launch_evidence');
-    assert.equal(f.continuations(), 1, 'missing repository evidence gets one same-task correction opportunity');
+    assert.equal(f.continuations(), 0);
+    assert.equal(f.session.approvalProcessing?.status, 'paused');
+    assert.equal(f.session.approvalProcessing?.canResume, true);
+    assert.equal(f.runs.get(f.response.draftRuns[0].id)?.status, 'pending');
     assert.match(target?.reason ?? '', /No Git repository|未找到 Git 仓库/u);
     assert.doesNotMatch(target?.reason ?? '', /Script contents|脚本内容/u);
     assert.deepEqual(f.runs.get(f.response.draftRuns[0].id)!.effectAssessment.effects, ['workspace_read', 'unknown']);
@@ -1162,7 +1166,7 @@ test('delegate creates a local tag and asks once for an ungranted push; rejectio
       assert.equal(execFileSync('git', ['--git-dir', remote, 'tag', '--list'], { encoding: 'utf8' }), approve ? 'test-task-approval\n' : '');
       assert.equal(f.manualRequests(), 1);
       assert.equal(f.reviews(), 2);
-      assert.deepEqual(runs.toWebviewState(f.session.id).map(run => run.status).sort(), approve ? ['done', 'done'] : ['done', 'failed']);
+      assert.deepEqual(runs.toWebviewState(f.session.id).map(run => run.status).sort(), approve ? ['done', 'done'] : ['done', 'rejected']);
     } finally { await runs.flush(); runs.dispose(); }
   });
 });
@@ -1424,15 +1428,15 @@ async function fixture(mode: 'ask' | 'delegate', body: (f: Awaited<ReturnType<ty
     if (mode === 'delegate') {
       assert.deepEqual(modals, [], 'delegate must not open an approval modal');
       if (f.session.approvalProcessing?.mode === 'delegate') {
-        assert.ok(['completed', 'stopped'].includes(f.session.approvalProcessing.status));
-        assert.ok(f.session.approvalProcessing.targets.every(target => !['pending', 'manual_required', 'needs_authorization'].includes(target.status)));
+        assert.ok(['completed', 'stopped', 'paused', 'waiting_user'].includes(f.session.approvalProcessing.status));
+        assert.ok(f.session.approvalProcessing.targets.every(target => !['pending', 'needs_authorization'].includes(target.status)));
       }
     }
   } finally {
     vscode.window.showWarningMessage = originalDialog;
     if (f) { await f.runs.flush(); await f.edits.flush(); await f.storage.flush(); f.runs.dispose(); f.diff.dispose(); f.clock.dispose(); }
     vscode.workspace.workspaceFolders = folders; vscode.workspace.isTrusted = trusted;
-    await rm(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 30 });
   }
 }
 
@@ -1466,7 +1470,6 @@ async function createFixture(root: string, mode: 'ask' | 'delegate') {
   let alternative = '';
   let manualDecision: boolean | 'hold' = false;
   const observed = new Set<string>();
-  let onManual: (() => void) | undefined;
   let onReview: ((prompt: string) => Promise<void>) | undefined;
   const clock = new UserTaskClock(() => now);
   const reviews = new ApprovalReviewStore(storageUri); await reviews.initialize();
@@ -1494,11 +1497,12 @@ async function createFixture(root: string, mode: 'ask' | 'delegate') {
         policyRules: policyRules ?? [decision === 'needs_user' ? 'exact_user_authorization_required' : 'direct_user_goal'],
         saferAlternative: alternative, affectedTargets: [...new Set(affectedTargets)] });
     } });
-  const executor = { execute: async () => { executeCount++; now += 3000; return { exitCode: 0, signal: undefined, timedOut: false, cancelled: false }; }, cancel: () => false, showTerminal: () => false, dispose: () => {} } as DraftRunExecutorAdapter;
+  const executor = { execute: async () => { executeCount++; now += 3000; return { started: true, phase: 'exited', exitCode: 0, signal: undefined, timedOut: false, cancelled: false }; }, cancel: () => false, showTerminal: () => false, dispose: () => {} } satisfies DraftRunExecutorAdapter;
   const runs = new DraftRunStore(storageUri, executor, new DraftRunAuthorizationService(reviews));
   const diff = new DraftDiffService();
   const edits = new ChangeSetStore(new SafeFileEditor(), diff, sessions, storageUri, key => key);
   const queue = new DelegatedApprovalQueue();
+  const executeBatch = (KeepseekChatViewProvider.prototype as unknown as Host).executeDelegatedApprovals;
   const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
     language: 'en', sessionStore: sessions, taskClock: clock, changeSets: edits, draftRuns: runs, delegatedApprovals: queue,
     activeChangeActions: new Set(), sessionReady: true, approvalDataReady: true, requestContextReady: true, availableModels: [],
@@ -1509,12 +1513,21 @@ async function createFixture(root: string, mode: 'ask' | 'delegate') {
     externalEffectGrants: new ExactOperationGrants(), authorizedExternalReferenceUris: new Set(), authorizedExternalExecutionUris: new Set(),
     agentActivity: { sequence: 0 }, getApprovalReviewerModelContext: async () => ({ model: request.model }),
     postState: () => {
-      const pending = (host as unknown as { manualToolApproval?: { ready: boolean; view: { id: string } } }).manualToolApproval;
-      if (pending?.ready && !observed.has(pending.view.id)) {
-        observed.add(pending.view.id); onManual?.();
-        if (manualDecision !== 'hold') queueMicrotask(() => void host.handleMessage({ type: 'resolveValidationApproval', id: pending.view.id, approve: manualDecision === true }));
+      for (const snapshot of session.pendingApprovals ?? []) {
+        if (snapshot.status === 'waiting') observed.add(snapshot.id);
       }
     }, postToWebview: () => {}, setAgentActivity: () => {}, scheduleRunContextRefresh: () => {}, awaitRunContextRefresh: async () => true,
+    scheduleDraftRunAutoContinuation: () => {},
+    executeDelegatedApprovals: async (next: NonNullable<ReturnType<DelegatedApprovalQueue['take']>>) => {
+      await executeBatch.call(host, next);
+      if (manualDecision === 'hold') return;
+      for (const pending of session.pendingApprovals ?? []) {
+        if (pending.status !== 'waiting') continue;
+        await host.handleMessage({ type: 'resolveValidationApproval', id: pending.id, approve: manualDecision });
+        const resumed = queue.take(session.id);
+        if (resumed) await executeBatch.call(host, resumed);
+      }
+    },
     handleAppliedRepairEdits: async () => {}, selectedSourceId: 'main', selectedModelId: 'main',
     sendPrompt: async () => { continuationCount++; const work = clock.enter(session, userTask); now += 5000; work.finish(); }
   }) as Host;
@@ -1528,7 +1541,11 @@ async function createFixture(root: string, mode: 'ask' | 'delegate') {
     setAlternative: (value: string) => { alternative = value; },
     manualDecision: (value: boolean | 'hold') => { manualDecision = value; },
     manualRequests: () => observed.size,
-    waitForManual: () => new Promise<void>(resolve => { onManual = resolve; }) };
+    resolveManual: async (id: string, approve: boolean) => {
+      await host.handleMessage({ type: 'resolveValidationApproval', id, approve });
+      const resumed = queue.take(session.id);
+      if (resumed) await host.executeDelegatedApprovals(resumed);
+    } };
 }
 
 test('delegate writes outside the workspace only with a prior exact write grant and reviewer', async () => {
@@ -1569,9 +1586,7 @@ test('needs_user creates one host-bound request; forged/repeated messages cannot
     f.response.draftEdits[0].uri = vscode.Uri.file(target).toString();
     await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
     f.host.queueResponseApprovals(f.session, f.message, f.response);
-    const ready = f.waitForManual();
-    const running = f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
-    await ready;
+    await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
     assert.equal(f.session.approvalProcessing?.status, 'waiting_user');
     assert.equal(f.manualRequests(), 1);
     await assert.rejects(readFile(target), { code: 'ENOENT' });
@@ -1585,9 +1600,8 @@ test('needs_user creates one host-bound request; forged/repeated messages cannot
     const used = executionTimeView(f.session).currentMs;
     f.advance(60_000);
     assert.equal(executionTimeView(f.session).currentMs, used, 'human wait is excluded');
+    await f.resolveManual(pending.id, true);
     await f.host.handleMessage({ type: 'resolveValidationApproval', id: pending.id, approve: true });
-    await f.host.handleMessage({ type: 'resolveValidationApproval', id: pending.id, approve: true });
-    await running;
     assert.equal(await readFile(target, 'utf8'), 'result\n');
     assert.equal(f.continuations(), 1);
     assert.equal(f.session.approvalMode, 'delegate');
@@ -1601,7 +1615,8 @@ test('needs_user creates one host-bound request; forged/repeated messages cannot
     assert.ok(records[1].consumedAt);
     const raw = JSON.stringify(f.session);
     const restored = new ChatSessionStore(f.storage, 'en', f.scope); await restored.initialize();
-    assert.equal(restored.getActiveSession().pendingApproval?.runtimeId, undefined);
+    assert.equal(restored.getActiveSession().pendingApproval?.runtimeId, pending.runtimeId);
+    assert.equal(restored.getActiveSession().pendingApproval?.request, undefined);
     assert.equal(JSON.parse(raw).pendingApproval.actionHash, pending.actionHash);
   });
 });
@@ -1609,20 +1624,20 @@ test('needs_user creates one host-bound request; forged/repeated messages cannot
 for (const risk of ['high', 'critical'] as const) test(`a valid ${risk} approve cannot automatically write a file`, async () => {
   await fixture('delegate', async f => {
     f.setRisk(risk);
+    f.manualDecision('hold');
     f.response.draftRuns = [];
     await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
     f.host.queueResponseApprovals(f.session, f.message, f.response);
     await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
-    assert.equal(f.manualRequests(), 0);
+    assert.equal(f.manualRequests(), 1);
     assert.equal(f.reviews(), 1);
     const record = settledApprovalReviews(f.message).at(-1);
-    assert.equal(record?.decision, 'unavailable');
-    assert.equal(record?.reviewState, 'invalid_response');
+    assert.equal(record?.decision, 'needs_user');
     assert.equal(record?.risk, risk);
     assert.equal(record?.policyVersion, APPROVAL_POLICY_VERSION);
     assert.ok(record);
     const store = (f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews;
-    assert.ok(store.get(record.reviewId)?.policyRules.includes('high_risk_automatic_approval_prohibited'));
+    assert.ok(store.get(record.reviewId)?.policyRules.includes('user_confirmable_risk'));
     await assert.rejects(readFile(path.join(f.workspace, 'result.txt')), { code: 'ENOENT' });
   });
 });
@@ -1831,7 +1846,7 @@ for (const language of ['node', 'python'] as const) {
               JSON.stringify(f.session.approvalProcessing));
             const records = settledApprovalReviews(f.message);
             assert.equal(records.length, 2, 'a correction stays within the same logical launch review');
-            assert.ok(records.every(record => record.approvalSource === 'auto_approval_review' && record.policyVersion === 7));
+            assert.ok(records.every(record => record.approvalSource === 'auto_approval_review' && record.policyVersion === APPROVAL_POLICY_VERSION));
             assert.ok(records.every(record => record.projectApproval === true && record.reviewerModelId === 'main' && record.consumedAt));
           }
           const result = runs.get(proposal.id);
@@ -2173,7 +2188,7 @@ for (const scenario of ['valid', 'syntax_error', 'changed', 'denied', 'needs_use
         if (scenario === 'budget') {
           assert.match(f.session.approvalProcessing?.targets[0].reason ?? '', /budget/u);
         } else {
-          assert.match(requests[0].system, /Approve for me policy v7/u);
+          assert.ok(requests[0].system.includes(`Approve for me policy v${APPROVAL_POLICY_VERSION}`));
           assert.equal(requests[0].model, 'main');
           assert.doesNotMatch(requests[0].user, /BODY_MUST_STAY_LOCAL/u);
           const payload = JSON.parse(requests[0].user.split('\n')[2]);
@@ -2471,14 +2486,12 @@ for (const scenario of ['reject', 'stop', 'mode', 'new_task', 'session', 'trust'
       f.response.draftEdits[0].uri = vscode.Uri.file(target).toString();
       await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
       f.host.queueResponseApprovals(f.session, f.message, f.response);
-      const ready = f.waitForManual();
-      const running = f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
-      await ready;
+      await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
       const pending = f.session.pendingApproval!;
-      const click = () => f.host.handleMessage({ type: 'resolveValidationApproval', id: pending.id, approve: true });
+      const click = () => f.resolveManual(pending.id, true);
       const sessions = (f.host as unknown as { sessionStore: ChatSessionStore }).sessionStore;
       const originalDocuments = vscode.workspace.textDocuments;
-      if (scenario === 'reject') await f.host.handleMessage({ type: 'resolveValidationApproval', id: pending.id, approve: false });
+      if (scenario === 'reject') await f.resolveManual(pending.id, false);
       else if (scenario === 'stop') f.host.abortPrompt();
       else if (scenario === 'mode') { await sessions.setApprovalMode('ask'); await click(); }
       else if (scenario === 'new_task') {
@@ -2501,16 +2514,15 @@ for (const scenario of ['reject', 'stop', 'mode', 'new_task', 'session', 'trust'
         const restored = new ChatSessionStore(f.storage, 'en', f.scope); await restored.initialize();
         const snapshot = restored.getActiveSession();
         assert.equal(snapshot.pendingApproval?.status, 'interrupted');
-        assert.equal(snapshot.pendingApproval?.runtimeId, undefined);
+        assert.equal(snapshot.pendingApproval?.runtimeId, pending.runtimeId, 'persisted runtime is audit data only');
         assert.equal(snapshot.pendingApproval?.request, undefined);
-        assert.equal(snapshot.approvalProcessing?.status, 'blocked');
+        assert.equal(snapshot.approvalProcessing?.status, 'paused');
         assert.equal(snapshot.approvalProcessing?.canResume, true);
         assert.equal(new DelegatedApprovalQueue().take(snapshot.id), undefined);
         f.host.abortPrompt();
       }
-      await running;
       vscode.workspace.textDocuments = originalDocuments;
-      if (scenario === 'closed_view') {
+      if (scenario === 'closed_view' || scenario === 'configuration') {
         assert.equal(await readFile(target, 'utf8'), 'result\n');
         assert.equal(f.continuations(), 1);
       } else {
@@ -2527,7 +2539,7 @@ for (const scenario of ['reject', 'stop', 'mode', 'new_task', 'session', 'trust'
 }
 
 for (const failure of ['timeout', 'invalid_json', 'configuration'] as const) {
-  test(`automatic review ${failure} records the stopped action without a manual fallback`, { timeout: 15_000 }, async () => {
+  test(`automatic review ${failure} retains a precise manual fallback`, { timeout: 15_000 }, async () => {
     await fixture('delegate', async f => {
       const reviews = (f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews;
       let attempts = 0;
@@ -2540,13 +2552,13 @@ for (const failure of ['timeout', 'invalid_json', 'configuration'] as const) {
           throw new OneShotTextRequestError('timeout', 'review request timeout', true);
         } });
       Object.assign(f.host, { approvalReviewer: reviewer });
-      f.manualDecision(true);
+      f.manualDecision('hold');
       f.response.draftRuns = [];
       await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
       f.host.queueResponseApprovals(f.session, f.message, f.response);
       await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
       assert.equal(attempts, failure === 'configuration' ? 0 : 2);
-      assert.equal(f.manualRequests(), 0);
+      assert.equal(f.manualRequests(), 1);
       const records = settledApprovalReviews(f.message);
       assert.equal(records.length, 1);
       assert.equal(records[0].decision, 'unavailable');
@@ -2554,10 +2566,108 @@ for (const failure of ['timeout', 'invalid_json', 'configuration'] as const) {
         : failure === 'timeout' ? 'timeout' : 'invalid_response');
       assert.equal(records[0].consumedAt, undefined);
       await assert.rejects(readFile(path.join(f.workspace, 'result.txt')), { code: 'ENOENT' });
-      assert.ok(f.continuations() <= 1, 'a bounded diagnostic handoff may continue the task');
+      assert.equal(f.continuations(), 0);
+      await f.resolveManual(f.session.pendingApproval!.id, true);
+      assert.equal(await readFile(path.join(f.workspace, 'result.txt'), 'utf8'), 'result\n');
+      assert.equal(f.continuations(), 1);
+      assert.equal(attempts, failure === 'configuration' ? 0 : 2);
+      assert.deepEqual(settledApprovalReviews(f.message).map(record => record.decision), ['unavailable', 'approve']);
     });
   });
 }
+
+for (const recovery of ['retry', 'restart'] as const) test(`an unusable review resumes through ${recovery} with fresh authority`, async () => {
+  await fixture('delegate', async f => {
+    f.manualDecision('hold');
+    f.response.draftRuns = [];
+    const storageUri = vscode.Uri.file(path.join(f.root, 'storage')) as never;
+    const originalStore = (f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews;
+    let attempts = 0;
+    const reviewerFor = (store: ApprovalReviewStore) => new ApprovalReviewerService({ globalStorageUri: storageUri,
+      workspaceKey: f.scope.key, sourceStore: new ModelSourceStore(storageUri), store, requestText: async input => {
+        const { exactAction } = JSON.parse(input.userPrompt.split('\n')[2]);
+        if (++attempts < 3) return '{invalid-json}';
+        return JSON.stringify({ decision: 'approve', risk: recovery === 'restart' ? 'high' : 'low',
+          reason: 'The exact target is known.', policyRules: ['direct_user_goal'], saferAlternative: '', affectedTargets: [exactAction.uri] });
+      } });
+    Object.assign(f.host, { approvalReviewer: reviewerFor(originalStore) });
+    await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+    f.host.queueResponseApprovals(f.session, f.message, f.response);
+    await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+    const old = f.session.pendingApproval!;
+    assert.equal(old.status, 'waiting');
+    await assert.rejects(readFile(path.join(f.workspace, 'result.txt')), { code: 'ENOENT' });
+    if (recovery === 'retry') {
+      await f.host.handleMessage({ type: 'retryManualApproval', id: old.id, sessionId: f.session.id, runtimeId: old.runtimeId });
+      await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+      assert.equal(f.session.pendingApproval?.resolutionReason, 'retry_requested');
+      assert.equal(f.session.approvalProcessing?.status, 'completed');
+      assert.ok(originalStore.get(old.priorReviewId!)?.supersededByReviewId);
+    } else {
+      const sessions = new ChatSessionStore(f.storage, 'en', f.scope); await sessions.initialize();
+      const restored = sessions.getActiveSession();
+      const store = new ApprovalReviewStore(storageUri); await store.initialize();
+      const queue = new DelegatedApprovalQueue();
+      const diff = new DraftDiffService();
+      const edits = new ChangeSetStore(new SafeFileEditor(), diff, sessions, storageUri, key => key);
+      await edits.initialize();
+      const prototype = KeepseekChatViewProvider.prototype as unknown as Host;
+      const host: Host = Object.assign(Object.create(prototype), f.host, { sessionStore: sessions, changeSets: edits,
+        delegatedApprovals: queue, approvalReviews: store, approvalReviewer: reviewerFor(store), batchManualApprovals: new Map(),
+        postState: () => {}, executeDelegatedApprovals: prototype.executeDelegatedApprovals });
+      try {
+        assert.equal(restored.pendingApproval?.status, 'interrupted');
+        await host.handleMessage({ type: 'resolveValidationApproval', id: old.id, approve: true });
+        assert.equal(queue.take(restored.id), undefined);
+        await host.handleMessage({ type: 'resumeApprovalProcessing', sessionId: restored.id, runId: f.cp.taskId,
+          rootTaskId: f.message.userTask!.id, targetId: 'edit' });
+        await host.executeDelegatedApprovals(queue.take(restored.id)!);
+        const fresh = restored.pendingApproval!;
+        assert.equal(fresh.status, 'waiting');
+        assert.notEqual(fresh.id, old.id);
+        assert.notEqual(fresh.runtimeId, old.runtimeId);
+        assert.ok(store.get(old.priorReviewId!)?.supersededByReviewId);
+        await host.handleMessage({ type: 'resolveValidationApproval', id: old.id, approve: true });
+        assert.equal(queue.take(restored.id), undefined);
+        await host.handleMessage({ type: 'resolveValidationApproval', id: fresh.id, approve: true });
+        await host.executeDelegatedApprovals(queue.take(restored.id)!);
+        assert.equal(restored.approvalProcessing?.status, 'completed');
+      } finally { await edits.flush(); diff.dispose(); }
+    }
+    assert.equal(attempts, 3);
+    assert.equal(await readFile(path.join(f.workspace, 'result.txt'), 'utf8'), 'result\n');
+  });
+});
+
+test('a manual approval audit write fault pauses the unstarted command and preserves its dependent', async t => {
+  await fixture('delegate', async f => {
+    f.manualDecision('hold');
+    f.setRisk('high');
+    const dependent = await createDraftRunProposal({ executable: 'node', args: ['--version'], reason: 'Requires the first result',
+      prerequisites: [{ draftRunId: f.proposal.id, specHash: f.proposal.specHash, condition: 'completed' }] });
+    f.response.draftEdits = [];
+    f.response.draftRuns = [f.proposal, dependent];
+    await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+    f.host.queueResponseApprovals(f.session, f.message, f.response);
+    await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+    const manual = f.session.pendingApproval!;
+    const reviewer = (f.host as unknown as { approvalReviewer: ApprovalReviewerService }).approvalReviewer;
+    const auditWrite = t.mock.method(reviewer, 'createUserApproval', async () => { throw new ApprovalAuditError('Fixture audit write failed.'); });
+    await f.resolveManual(manual.id, true);
+    assert.equal(f.executions(), 0);
+    assert.equal(f.session.approvalProcessing?.status, 'paused');
+    assert.equal(f.runs.get(f.proposal.id)?.approvalHold?.failureCode, 'audit_persistence_failed');
+    assert.equal(f.runs.get(f.proposal.id)?.executionPhase, 'not_dispatched');
+    assert.equal(f.runs.get(dependent.id)?.dependency?.targetId, f.proposal.id);
+    auditWrite.mock.restore();
+    f.setRisk('low');
+    await f.host.handleMessage({ type: 'resumeApprovalProcessing', sessionId: f.session.id, runId: f.cp.taskId,
+      rootTaskId: f.message.userTask!.id, targetId: f.proposal.id });
+    await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+    assert.equal(f.executions(), 2);
+    assert.equal(f.session.approvalProcessing?.status, 'completed');
+  });
+});
 
 test('an invalid response is isolated while a disjoint sibling still obtains its own reviewer approval', async () => {
   await fixture('delegate', async f => {
@@ -2576,6 +2686,7 @@ test('an invalid response is isolated while a disjoint sibling still obtains its
           reason: 'Independent and in scope.', policyRules: ['direct_user_goal'], saferAlternative: '', affectedTargets: [exactAction.uri] });
       } });
     Object.assign(f.host, { approvalReviewer: reviewer });
+    f.manualDecision('hold');
     f.response.draftEdits.push(createFullTextDraftEdit({ id: 'sibling', uri: siblingUri, label: 'sibling.txt',
       action: 'create', reason: 'Create a separate requested file', content: 'sibling\n' }));
     f.response.draftRuns = [];
@@ -2583,7 +2694,7 @@ test('an invalid response is isolated while a disjoint sibling still obtains its
     f.host.queueResponseApprovals(f.session, f.message, f.response);
     await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
     assert.deepEqual(requests, [failedUri, failedUri, siblingUri]);
-    assert.equal(f.manualRequests(), 0);
+    assert.equal(f.manualRequests(), 1);
     const records = settledApprovalReviews(f.message);
     assert.deepEqual(records.map(record => record.decision), ['unavailable', 'approve']);
     assert.equal(await readFile(siblingFile, 'utf8'), 'sibling\n');
@@ -2591,7 +2702,109 @@ test('an invalid response is isolated while a disjoint sibling still obtains its
   });
 });
 
-test('a segment-wide reviewer service outage uses one bounded transport sequence and opens no manual requests', async () => {
+test('Python probe with unusable review keeps its bound test pending while an independent test runs', async t => {
+  try { execFileSync('python3', ['--version'], { stdio: 'pipe' }); }
+  catch { t.skip('Python 3 is unavailable'); return; }
+  const wallClock = Date.now;
+  let idleMs = 0;
+  t.mock.method(Date, 'now', () => wallClock() + idleMs);
+  await fixture('delegate', async f => {
+    const launches: string[] = [];
+    const { runs, storageUri } = installRealTaskExecutor(f, input => { launches.push(input.draftRun.id); });
+    const config = vscode.workspace.getConfiguration;
+    vscode.workspace.getConfiguration = () => ({ ...config(), get<T>(key: string, fallback: T): T {
+      return key === 'trace.enabled' ? true as T : key === 'trace.maxFileBytes' ? 1_000_000 as T : config().get(key, fallback);
+    } });
+    const reviewStorage = vscode.Uri.file(path.join(f.root, 'storage')) as never;
+    const traceService = new InteractionTraceLogService(reviewStorage);
+    const trace = traceService.createRunTrace(undefined, { sessionId: f.session.id, taskId: f.message.userTask?.id });
+    try {
+      trace.record({ type: 'oversized_stream_fixture', content: 'x'.repeat(1_000_001) });
+      await trace.flush();
+      assert.match(await readFile(vscode.Uri.parse(trace.logUri!).fsPath, 'utf8'), /"type":"trace_truncated"/u);
+      f.response.runDetails.traceLogUri = trace.logUri;
+      Object.assign(f.host, { traceLogService: traceService });
+      f.manualDecision('hold');
+      f.cp.maxExecutionMs = 300_000;
+      f.cp.runBudget = createLogicalRunBudgetState({ deadlineAt: new Date(Date.now() + 290_000).toISOString() });
+      f.cp.budgetLimits = { maxModelRequests: 10, maxToolRounds: 20, maxToolCalls: 20, maxContinuations: 4,
+        maxContextEpochRollovers: 2, maxUpstreamTokens: 32_000, maxTreeUpstreamTokens: 64_000,
+        maxContinuationOutputTokens: 0, maxContinuationOutputChars: 0 };
+      f.session.projectScopeUri = vscode.Uri.file(f.workspace).toString();
+      f.session.messages[0].content = 'Create result.txt, probe Python dependencies, then run the dependent test and the independent test.';
+      await writeFile(path.join(f.workspace, 'dependent.cjs'), 'console.log("dependent-ok");\n');
+      await writeFile(path.join(f.workspace, 'independent.cjs'), 'console.log("independent-ok");\n');
+      const inline = 'import sys, unittest; from pathlib import Path; print(sys.version_info.major, Path("result.txt").read_text().strip())';
+      const probe = await createDraftRunProposal({ executable: 'python3', args: ['-c', inline], reason: 'Probe the Python runtime and unittest dependency' });
+      const dependent = await createDraftRunProposal({ executable: process.execPath, args: ['dependent.cjs'],
+        prerequisites: [{ draftRunId: probe.id, specHash: probe.specHash, condition: 'completed' }], reason: 'Run the test after the probe succeeds' });
+      const independent = await createDraftRunProposal({ executable: process.execPath, args: ['independent.cjs'], reason: 'Run the disjoint unit test' });
+      f.response.draftRuns = [probe, dependent, independent];
+      const attempts: string[] = [];
+      const store = (f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews;
+      const reviewer = new ApprovalReviewerService({ globalStorageUri: reviewStorage, workspaceKey: f.scope.key,
+        sourceStore: new ModelSourceStore(reviewStorage), store, requestText: async input => {
+          const { exactAction } = JSON.parse(input.userPrompt.split('\n')[2]);
+          const args: string[] = exactAction.args ?? exactAction.argv ?? [];
+          if (args.includes(inline)) {
+            assert.equal(await readFile(path.join(f.workspace, 'result.txt'), 'utf8'), 'result\n');
+            attempts.push(input.userPrompt);
+            return JSON.stringify({ decision: 'approve', risk: 42, reason: 'Fixture supplies a numeric risk.',
+              policyRules: ['direct_user_goal'], saferAlternative: '', affectedTargets: [exactAction.cwdUri] });
+          }
+          return JSON.stringify({ decision: 'approve', risk: 'low', reason: 'Exact requested fixture.',
+            policyRules: ['direct_user_goal'], saferAlternative: '', affectedTargets: [exactAction.uri ?? exactAction.scope?.projectEntryUri ?? exactAction.cwdUri] });
+        } });
+      Object.assign(f.host, { approvalReviewer: reviewer });
+      await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+      f.host.queueResponseApprovals(f.session, f.message, f.response);
+      await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+      assert.deepEqual(f.session.approvalProcessing?.targets.map(target => target.status),
+        ['executed', 'manual_required', 'dependency_blocked', 'executed'], JSON.stringify(f.session.approvalProcessing));
+      assert.deepEqual(launches, [independent.id]);
+      assert.equal(attempts.length, 2);
+      assert.match(attempts[1], /risk/u);
+      assert.equal(f.manualRequests(), 1);
+      assert.equal(runs.get(probe.id)?.executionPhase, 'not_dispatched');
+      assert.equal(runs.get(probe.id)?.outputBytes, 0);
+      assert.equal(runs.get(dependent.id)?.dependency?.targetId, probe.id);
+      assert.equal(runs.get(dependent.id)?.executionStarted, false);
+      const pending = f.session.pendingApproval!;
+      const restoredAudit = new ApprovalReviewStore(reviewStorage);
+      await restoredAudit.initialize();
+      const invalid = restoredAudit.get(pending.priorReviewId!);
+      assert.equal(invalid?.decision, 'unavailable');
+      assert.equal(invalid?.reviewState, 'invalid_response');
+      assert.equal(invalid?.targetId, probe.id);
+      assert.equal(invalid?.reviewAttempts, 2);
+      const restoredRuns = new DraftRunStore(storageUri, new SpawnDraftRunExecutor(), new DraftRunAuthorizationService(store));
+      try {
+        await restoredRuns.initialize();
+        assert.equal(restoredRuns.get(probe.id)?.status, 'pending');
+        assert.equal(restoredRuns.get(probe.id)?.approvalHold?.status, 'paused');
+        assert.equal(restoredRuns.get(dependent.id)?.dependency?.targetId, probe.id);
+        assert.equal(restoredRuns.get(independent.id)?.executionPhase, 'exited');
+      } finally { restoredRuns.dispose(); }
+      idleMs = 3_600_783;
+      await f.resolveManual(pending.id, true);
+      await f.resolveManual(pending.id, true);
+      assert.deepEqual(launches, [independent.id, probe.id, dependent.id]);
+      assert.equal(attempts.length, 2, 'the reviewer is unnecessary for manual approval');
+      assert.equal(f.continuations(), 1);
+      assert.match(runs.get(probe.id)?.outputHead ?? '', /3 result/u);
+      assert.match(runs.get(dependent.id)?.outputHead ?? '', /dependent-ok/u);
+      assert.equal(runs.get(probe.id)?.executionPhase, 'exited');
+      assert.equal(runs.get(dependent.id)?.executionPhase, 'exited');
+      assert.equal(settledApprovalReviews(f.message).filter(record => record.targetId === 'edit').length, 1);
+    } finally {
+      vscode.workspace.getConfiguration = config;
+      await trace.close?.();
+      await runs.flush(); runs.dispose();
+    }
+  });
+});
+
+test('a segment-wide reviewer outage uses one transport sequence and preserves separate manual requests', async () => {
   await fixture('delegate', async f => {
     const reviews = (f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews;
     const storage = vscode.Uri.file(path.join(f.root, 'storage')) as never;
@@ -2603,6 +2816,7 @@ test('a segment-wide reviewer service outage uses one bounded transport sequence
         throw new OneShotTextRequestError('unavailable', 'The test service is offline.', true, true);
       } });
     Object.assign(f.host, { approvalReviewer: reviewer });
+    f.manualDecision('hold');
     f.response.draftEdits.push(createFullTextDraftEdit({ id: 'outage-sibling', uri: vscode.Uri.file(siblingFile).toString(),
       label: 'outage-sibling.txt', action: 'create', reason: 'Create the other requested file', content: 'sibling\n' }));
     f.response.draftRuns = [];
@@ -2610,8 +2824,8 @@ test('a segment-wide reviewer service outage uses one bounded transport sequence
     f.host.queueResponseApprovals(f.session, f.message, f.response);
     await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
     assert.deepEqual(attempts, [f.response.draftEdits[0].uri, f.response.draftEdits[0].uri]);
-    assert.equal(f.manualRequests(), 0);
-    assert.ok(f.session.approvalProcessing?.targets.every(target => target.status === 'review_unavailable'));
+    assert.equal(f.manualRequests(), 2);
+    assert.ok(f.session.approvalProcessing?.targets.every(target => target.status === 'manual_required'));
     const records = settledApprovalReviews(f.message);
     assert.ok(records.length >= 1);
     assert.ok(records.every(record => record.reviewState === 'service_unavailable' && !record.consumedAt));
@@ -2632,7 +2846,7 @@ test('forged legacy mode messages cannot reactivate model_review or process exis
   });
 });
 
-test('manual request expiration revokes the token without recording a user rejection', { timeout: 15_000 }, async t => {
+test('a precise manual request still works after the former one-hour model timeout', { timeout: 15_000 }, async t => {
   await fixture('delegate', async f => {
     f.setDecision('needs_user'); f.manualDecision('hold');
     f.response.draftRuns = [];
@@ -2640,22 +2854,17 @@ test('manual request expiration revokes the token without recording a user rejec
     f.response.draftEdits[0].uri = vscode.Uri.file(target).toString();
     await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
     f.host.queueResponseApprovals(f.session, f.message, f.response);
-    const nativeTimeout = globalThis.setTimeout;
-    let expire: (() => void) | undefined;
-    t.mock.method(globalThis, 'setTimeout', (callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
-      if (delay !== undefined && delay >= 3_599_000 && delay <= 3_600_000) expire = () => callback(...args);
-      return nativeTimeout(callback, delay, ...args);
-    });
-    const ready = f.waitForManual();
-    const running = f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
-    await ready;
+    const now = Date.now;
+    let elapsed = 0;
+    t.mock.method(Date, 'now', () => now() + elapsed);
+    await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
     const token = f.session.pendingApproval!.id;
-    assert.ok(expire); expire();
-    await running;
-    assert.equal(f.session.pendingApproval?.status, 'cancelled');
+    elapsed = 3_600_783;
+    assert.equal(f.session.pendingApproval?.status, 'waiting');
     assert.equal(f.message.runDetails?.approvalReviews?.some(record => record.approvalSource === 'user_click'), false);
-    await f.host.handleMessage({ type: 'resolveValidationApproval', id: token, approve: true });
     await assert.rejects(readFile(target), { code: 'ENOENT' });
+    await f.resolveManual(token, true);
+    assert.equal(await readFile(target, 'utf8'), 'result\n');
     assert.equal(f.executions(), 0);
   });
 });

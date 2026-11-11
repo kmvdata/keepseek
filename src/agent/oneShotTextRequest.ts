@@ -6,7 +6,7 @@ import { applyProviderRequestBudget, loadProviderRequestBudget } from './request
 import { getAgentRuntimeProfile } from '../shared/modelProfiles';
 import { randomUUID } from 'node:crypto';
 import type { ModelSourceConfigSnapshot } from '../accounts/types';
-import { isOfficialAnthropicSource, requiresModelSourceApiKey } from '../accounts/sourceCapabilities';
+import { isOfficialAnthropicSource, isOfficialDeepSeekSource, requiresModelSourceApiKey } from '../accounts/sourceCapabilities';
 import type { KeepseekLanguage } from '../shared/i18n';
 import type { KeepseekModel, ProviderCacheObservation, ProviderUsageLedgerRecord, UsageEvent, UsagePriceSnapshot } from '../shared/types';
 import type { DeepSeekChatRequestBody } from './deepseek/types';
@@ -28,6 +28,7 @@ export function buildOneShotTextProviderBody(input: {
   userPrompt: string;
   maxOutputTokens?: number;
   cacheControl?: AnthropicMessagesRequestBody['cache_control'];
+  jsonObject?: boolean;
 }): DeepSeekChatRequestBody | OpenAiResponsesRequestBody | AnthropicMessagesRequestBody {
   const modelMaxTokens = getAgentRuntimeProfile(input.model ?? { id: input.modelId, label: input.modelId, provider: input.provider },
     { thinkingEnabled: false, reasoningEffort: 'high' }).maxTokens;
@@ -70,6 +71,7 @@ export function buildOneShotTextProviderBody(input: {
     temperature: 0,
     top_p: 0.1,
     max_tokens: maxTokens,
+    ...(input.jsonObject ? { response_format: { type: 'json_object' } } : {}),
     stream_options: { include_usage: true }
   };
 }
@@ -139,8 +141,9 @@ export async function requestOneShotText(input: OneShotTextRequestInput): Promis
     modelId: input.model.id, model: input.model, provider: input.sourceConfig.provider,
     systemPrompt: input.systemPrompt, userPrompt: input.userPrompt, maxOutputTokens,
     // Match the existing main/summary policy only on the canonical Anthropic
-    // endpoint. Compatible gateways and approval reviewer bytes stay unchanged.
-    cacheControl: isTitle && isOfficialAnthropicSource(input.sourceConfig) ? { type: 'ephemeral' } : undefined
+    // endpoint. Compatible gateways retain their existing text contract.
+    cacheControl: isTitle && isOfficialAnthropicSource(input.sourceConfig) ? { type: 'ephemeral' } : undefined,
+    jsonObject: !isTitle && isOfficialDeepSeekSource(input.sourceConfig)
   });
   // Use the same admission estimator/calibration as all other Provider requests,
   // while respecting this auxiliary request's smaller output cap.

@@ -593,7 +593,7 @@ export function getScript(): string {
     const pendingDraftRunActions = new Set();
     let pendingDraftRunBatchSnapshot = '';
     let retainedDraftRunBatchFocus = null;
-    let pendingManualApprovalDecisionId = '';
+    const pendingManualApprovalIds = new Set();
     let settingsMenuOpen = false;
     let backgroundRunDialogOpen = false;
     let dismissedBackgroundRunId = '';
@@ -1345,6 +1345,12 @@ ${conversationsMenuDismissFragment.source}
           // Missing fields in an old or partial message cannot carry another
           // session's interaction lease into the newly selected session.
           delete state.interaction;
+          delete state.approvalProcessing;
+          delete state.approvalRecovery;
+          delete state.manualToolApprovals;
+          delete state.manualToolApproval;
+          delete state.pendingApproval;
+          pendingManualApprovalIds.clear();
           state.isBusy = false;
           state.agentActivity = { base: 'idle', phase: 'idle' };
         }
@@ -3100,9 +3106,12 @@ ${conversationsSessionListFragment.source}
     function createDraftRunCard(draftRun) {
       var statusValue = String(draftRun.status || 'pending');
       var notDispatched = draftRun.executionStarted === false && draftRun.executionPhase === 'not_dispatched';
+      var spawnFailed = draftRun.executionStarted === false && draftRun.executionPhase === 'spawn_failed';
       var terminalNotDispatched = notDispatched && ['rejected', 'done', 'cancelled', 'failed', 'needs_replan', 'no_changes'].includes(statusValue);
       var spec = draftRun.spec || {};
       var target = getApprovalTarget(draftRun.id);
+      var approvalHold = draftRun.approvalHold;
+      var approvalWaitingLabel = getApprovalWaitingLabel(target, approvalHold);
       var targetReason = getApprovalDisplayReason(target?.reason);
       var dependency = draftRun.dependency || target?.dependency;
       var replan = draftRun.replan || target?.replan;
@@ -3112,6 +3121,7 @@ ${conversationsSessionListFragment.source}
       var needsAuthorization = ['needs_authorization', 'external_authorization_required'].includes(target?.status);
       var approvalBlocked = ['hard_blocked', 'identity_mismatch', 'missing'].includes(target?.status)
         || isApprovalSafetyDenied(draftRun.approvalReview);
+      var safetyBlocked = target?.status === 'hard_blocked' || isApprovalSafetyDenied(draftRun.approvalReview);
       var recoveryOutcome = statusValue === 'needs_replan' && notDispatched ? draftRun.commandRecoveryOutcome : undefined;
       var recoveryLabel = recoveryOutcome?.kind === 'repeated' ? 'draftRunCorrectionStopped'
         : recoveryOutcome?.kind === 'git_tag_verified' ? 'draftRunTagTargetVerified' : undefined;
@@ -3119,9 +3129,9 @@ ${conversationsSessionListFragment.source}
       if (draftRun.replacementDraftRunId && statusValue === 'needs_replan') {
         displayStatus = 'superseded';
       } else if ((dependency || target?.status === 'dependency_blocked') && !['done', 'running', 'approved'].includes(statusValue)) {
-        displayStatus = 'dependency_blocked';
+        displayStatus = statusValue === 'pending' ? 'waiting_prerequisite' : 'dependency_blocked';
       } else if (statusValue === 'failed' || statusValue === 'cancelled') {
-        if (draftRun.executionPhase === 'spawn_failed' && draftRun.executionStarted === false) {
+        if (spawnFailed) {
           displayStatus = 'spawn_failed';
         } else if (notDispatched) {
           displayStatus = 'not_dispatched';
@@ -3132,6 +3142,8 @@ ${conversationsSessionListFragment.source}
         displayStatus = 'needs_replan';
       } else if (statusValue === 'pending' && approvalBlocked) {
         displayStatus = 'blocked';
+      } else if (statusValue === 'pending' && approvalWaitingLabel) {
+        displayStatus = 'waiting_approval';
       } else if (statusValue === 'pending' && (needsAuthorization || !externalAuthorized)) {
         displayStatus = 'needs_authorization';
       } else if (statusValue === 'pending' && state.approvalMode === 'delegate' && !state.isBusy) {
@@ -3153,7 +3165,10 @@ ${conversationsSessionListFragment.source}
       var release = draftRun.gitReleaseEvidence;
       var existingRelease = release && !release.executed;
       title.textContent = draftRun.gitReusedDraftRunId ? t('draftRunGitResultReused')
-        : existingRelease ? t('draftRunReleaseAlreadyVerified') : getDraftRunTitle(displayStatus, notDispatched);
+        : existingRelease ? t('draftRunReleaseAlreadyVerified')
+        : displayStatus === 'waiting_approval' ? t(approvalWaitingLabel)
+        : safetyBlocked && ['blocked', 'not_dispatched'].includes(displayStatus) ? t('approvalSafetyBlocked')
+        : getDraftRunTitle(displayStatus, notDispatched);
       var meta = document.createElement('div');
       meta.className = 'draft-run-meta';
       meta.textContent = [existingRelease || draftRun.gitReusedDraftRunId || recoveryLabel ? '' : getDraftRunStatusLabel(displayStatus),
@@ -3167,10 +3182,10 @@ ${conversationsSessionListFragment.source}
         meta.textContent += ' · ' + t('approvalSourceLabel') + ': ' + t('approvalSourceUser');
       }
       heading.append(title);
-      if (terminalNotDispatched) {
+      if (terminalNotDispatched || (notDispatched && (approvalWaitingLabel || displayStatus === 'waiting_prerequisite' || approvalBlocked))) {
         var badge = document.createElement('div');
         badge.className = 'draft-run-not-dispatched-badge';
-        badge.textContent = t('draftRunNotDispatchedBadge');
+        badge.textContent = t(terminalNotDispatched ? 'draftRunNotDispatchedBadge' : 'draftRunWaitingDispatchBadge');
         heading.append(badge);
       }
       heading.append(meta);
@@ -3235,11 +3250,11 @@ ${conversationsSessionListFragment.source}
         appendDraftRunActions(actions, draftRun, header, target, approvalBlocked, externalAuthorized, needsAuthorization);
       }
       var processing = state.approvalProcessing;
-      if (displayStatus === 'needs_replan' && !recoveryLabel && state.approvalMode === 'delegate' && !state.isBusy
-        && processing?.version === 2 && processing?.status === 'blocked' && processing.canResume === true && processing.runId === draftRun.agentRunId
+      if (displayStatus === 'needs_replan' && !recoveryLabel && canResumeApproval(target)
+        && processing.runId === draftRun.agentRunId
         && processing.targets.find(function(item) { return item.status === 'needs_replan'; })?.id === draftRun.id) {
         appendApprovalStateNote(header, t('approvalInterrupted'));
-        appendApprovalResumeAction(actions, 'approvalResumeProcessing');
+        appendApprovalResumeAction(actions, 'approvalResumeProcessing', draftRun.id);
       }
       if (actions.childElementCount) header.append(actions);
 
@@ -3280,13 +3295,15 @@ ${conversationsSessionListFragment.source}
       if (draftRun.approvalReview) {
         card.append(createApprovalReviewSummary(draftRun.approvalReview));
       }
-      if (draftRun.output || draftRun.error) {
+      if (draftRun.output || (draftRun.error && !notDispatched && !spawnFailed)) {
         var output = document.createElement('pre');
         output.className = 'draft-run-output';
         output.textContent = [draftRun.output, draftRun.error ? '[KeepSeek] ' + draftRun.error : '']
           .filter(Boolean)
           .join(String.fromCharCode(10));
         card.append(output);
+      } else if (draftRun.error) {
+        appendApprovalStateNote(card, t('draftRunHostDiagnostic', { reason: draftRun.error }));
       }
       if (draftRun.outputTruncated) {
         var notice = document.createElement('div');
@@ -3367,8 +3384,15 @@ ${conversationsSessionListFragment.source}
     }
 
     function isHeldDraftRunApproval(target) {
-      return ['blocked', 'stopped'].includes(state.approvalProcessing?.status) && target
+      return ['blocked', 'paused', 'waiting_user', 'stopped'].includes(state.approvalProcessing?.status) && target
         && !['executed', 'already_processed'].includes(target.status);
+    }
+
+    function getApprovalWaitingLabel(target, hold) {
+      if (target?.status === 'paused' || target?.status === 'insufficient_launch_evidence' || hold?.status === 'paused') return 'approvalPaused';
+      if (target?.status === 'manual_required' || hold?.status === 'waiting_user') return 'approvalWaitingUser';
+      if (target?.status === 'review_unavailable') return 'approvalReplyUnavailable';
+      return undefined;
     }
 
     function getApprovalDisplayReason(reason, includeScopedOutcome) {
@@ -3401,38 +3425,62 @@ ${conversationsSessionListFragment.source}
       notices.append(note);
     }
 
-    function appendApprovalResumeAction(actions, label, authorizeTargetId) {
-      if (state.approvalMode !== 'delegate' || state.approvalProcessing?.version !== 2) return;
+    function canResumeApproval(target) {
+      var processing = state.approvalProcessing;
+      if (state.approvalMode !== 'delegate' || state.isBusy || processing?.version !== 2
+        || !['blocked', 'paused', 'waiting_user'].includes(processing.status) || processing.canResume !== true
+        || !target || target.canResume === false
+        || !['needs_replan', 'needs_authorization', 'external_authorization_required',
+          'manual_required', 'paused', 'review_unavailable', 'insufficient_launch_evidence'].includes(target.status)) return false;
+      var recovery = state.approvalRecovery;
+      return recovery?.canResume === true && recovery.sessionId === state.activeSessionId
+        && recovery.runId === processing.runId && recovery.rootTaskId === processing.rootTaskId;
+    }
+
+    function appendApprovalResumeAction(actions, label, targetId) {
+      if (!canResumeApproval(getApprovalTarget(targetId))) return;
+      var recovery = state.approvalRecovery;
       var button = document.createElement('button');
       button.type = 'button';
       button.textContent = t(label);
       button.title = t('approvalResumeHint');
       button.disabled = !state.startup?.sideEffectsReady;
       button.addEventListener('click', function() {
-        vscode.postMessage({ type: 'resumeApprovalProcessing', authorizeTargetId: authorizeTargetId });
+        if (button.disabled || !canResumeApproval(getApprovalTarget(targetId))) return;
+        if (recovery !== state.approvalRecovery) return;
+        button.disabled = true;
+        vscode.postMessage({ type: 'resumeApprovalProcessing', sessionId: recovery.sessionId,
+          runId: recovery.runId, rootTaskId: recovery.rootTaskId, targetId: targetId });
       });
       actions.append(button);
     }
 
-    function appendAutomaticApprovalState(notices, actions, id, review) {
+    function appendAutomaticApprovalState(notices, actions, id, review, hold, headingShowsStatus) {
       var processing = state.approvalProcessing;
       var target = getApprovalTarget(id);
       var denied = target && target.status === 'denied' || review && review.decision === 'deny';
       var active = processing && ['processing', 'replanning'].includes(processing.status);
-      var recoverable = processing?.version === 2 && processing?.status === 'blocked' && processing.canResume === true;
+      var recoverable = canResumeApproval(target);
+      var waitingLabel = getApprovalWaitingLabel(target, hold);
       var fallback = processing?.status === 'replanning' ? 'approvalReplanningNow' : active ? 'approvalProcessingNow'
-        : state.approvalMode === 'delegate' && !state.isBusy ? (target ? 'approvalAutoStopped' : 'approvalAutoInactive')
-        : recoverable ? 'approvalInterrupted' : 'approvalAutoWaiting';
+        : recoverable ? 'approvalInterrupted'
+        : state.approvalMode === 'delegate' && !state.isBusy ? (target ? 'approvalAutoStopped' : 'approvalAutoInactive') : 'approvalAutoWaiting';
       if (target?.dependency) appendApprovalStateNote(notices, formatApprovalDependency(target.dependency));
       if (!target?.dependency || target.reason) {
-        var reason = getApprovalDisplayReason(target?.reason)
+        var reason = getApprovalDisplayReason(target?.reason || hold?.reason)
           || (denied && review ? review.rationale : undefined)
           || (review?.reviewState ? getApprovalDecisionLabel(review) : undefined);
-        appendApprovalStateNote(notices, reason || t(fallback), !reason && !recoverable);
+        var status = target?.status === 'insufficient_launch_evidence' ? t('approvalNeedsEvidence')
+          : waitingLabel && !headingShowsStatus ? t(waitingLabel) : '';
+        if (reason || status || !waitingLabel) {
+          appendApprovalStateNote(notices, [status, reason].filter(Boolean).join(' · ') || t(fallback), Boolean(waitingLabel) || (!reason && !recoverable));
+        }
       }
-      if (recoverable && !state.isBusy && !denied
-        && !['hard_blocked', 'identity_mismatch', 'missing', 'dependency_blocked'].includes(target?.status)) appendApprovalResumeAction(actions, 'approvalResumeProcessing');
-      return false;
+      if (recoverable && !denied && !getManualApprovalRows().some(function(manual) {
+        return manual.targetId === id && ['waiting', 'interrupted', 'paused'].includes(manual.status);
+      })) {
+        appendApprovalResumeAction(actions, waitingLabel ? 'approvalRecheckPaused' : 'approvalResumeProcessing', id);
+      }
     }
 
     function appendDraftRunActions(container, draftRun, notices, target, approvalBlocked, externalAuthorized, needsAuthorization) {
@@ -3447,10 +3495,8 @@ ${conversationsSessionListFragment.source}
       }
       if (statusValue === 'pending') {
         if (draftRun.spec?.restricted) return;
-        if (state.approvalMode !== 'ask') {
-          if (appendAutomaticApprovalState(notices, container, draftRun.id, draftRun.approvalReview)) {
-            container.append(createDraftRunActionButton(t('draftRunReject'), 'rejectDraftRun', draftRun, true));
-          }
+        if (state.approvalMode !== 'ask' || draftRun.approvalHold) {
+          appendAutomaticApprovalState(notices, container, draftRun.id, draftRun.approvalReview, draftRun.approvalHold, true);
           return;
         }
         if (approvalBlocked || isHeldDraftRunApproval(target) || (needsAuthorization && externalAuthorized)) {
@@ -3475,7 +3521,10 @@ ${conversationsSessionListFragment.source}
         var uncertainResult = ['failed', 'cancelled'].includes(statusValue)
           && !(draftRun.executionStarted === false && ['not_dispatched', 'spawn_failed'].includes(draftRun.executionPhase))
           && !(draftRun.executionStarted === true && draftRun.executionPhase === 'exited');
-        if (state.approvalMode !== 'delegate' && !draftRun.spec?.restricted && !draftRun.replacementDraftRunId && !uncertainResult) {
+        if (state.approvalMode === 'delegate' && draftRun.canReproposeUndispatchedApproval === true && !approvalBlocked
+          && draftRun.executionStarted === false && draftRun.executionPhase === 'not_dispatched') {
+          container.append(createDraftRunActionButton(t('approvalReproposeUndispatched'), 'cloneDraftRun', draftRun, true));
+        } else if (state.approvalMode !== 'delegate' && !draftRun.spec?.restricted && !draftRun.replacementDraftRunId && !uncertainResult) {
           container.append(createDraftRunActionButton(t('draftRunClone'), 'cloneDraftRun', draftRun, true));
         }
       }
@@ -3497,7 +3546,8 @@ ${conversationsSessionListFragment.source}
         button.dataset.autoContinue = autoContinue === true ? 'true' : 'false';
       }
       if (action === 'cloneDraftRun') {
-        button.title = t(draftRun.status === 'needs_replan' ? 'draftRunCloneForCorrectionHint' : 'draftRunCloneHint');
+        button.title = t(draftRun.canReproposeUndispatchedApproval === true ? 'approvalReproposeUndispatchedHint'
+          : draftRun.status === 'needs_replan' ? 'draftRunCloneForCorrectionHint' : 'draftRunCloneHint');
       }
       var allowWhileBusy = action === 'cancelDraftRun' || action === 'cancelDraftRunBatch' || action === 'openDraftRunTerminal';
       button.disabled = Boolean(forceDisabled)
@@ -3513,6 +3563,7 @@ ${conversationsSessionListFragment.source}
         case 'preparing': return t('draftRunTitlePreparing');
         case 'needs_replan': return t(notDispatched ? 'draftRunTitleNeedsReplan' : 'draftRunTitleCorrectionNeeded');
         case 'dependency_blocked': return t('draftRunTitleDependencyBlocked');
+        case 'waiting_prerequisite': return t('approvalWaitingPrerequisite');
         case 'needs_authorization': return t('draftRunTitleNeedsAuthorization');
         case 'not_dispatched': return t('draftRunTitleNotDispatched');
         case 'spawn_failed': return t('draftRunTitleSpawnFailed');
@@ -3588,7 +3639,7 @@ ${conversationsSessionListFragment.source}
 
     function formatDraftRunProcessResult(run) {
       if (run.executionStarted !== true || run.executionPhase !== 'exited') return '';
-      return [Number.isInteger(run.exitCode) ? t('draftRunExitCode', { code: run.exitCode }) : '',
+      return [t('draftRunProcessExited'), Number.isInteger(run.exitCode) ? t('draftRunExitCode', { code: run.exitCode }) : '',
         run.signal ? t('draftRunExitSignal', { signal: run.signal }) : ''].filter(Boolean).join(' · ');
     }
 
@@ -3599,6 +3650,8 @@ ${conversationsSessionListFragment.source}
         case 'needs_replan': return t('draftRunStatusNeedsReplan');
         case 'needs_authorization': return t('draftRunStatusNeedsAuthorization');
         case 'dependency_blocked': return t('draftRunStatusDependencyBlocked');
+        case 'waiting_prerequisite':
+        case 'waiting_approval': return t('draftRunStatusNotExecuted');
         case 'not_dispatched': return t('draftRunStatusNotExecuted');
         case 'spawn_failed': return t('draftRunStatusSpawnFailed');
         case 'result_unknown': return t('draftRunStatusResultUnknown');
@@ -3659,7 +3712,7 @@ ${conversationsSessionListFragment.source}
       setActions.className = 'change-set-actions';
       if (!historical) {
         if (applicableFiles.length >= 2 && state.approvalMode === 'ask') {
-          if (!applicableFiles.some(function(file) { return isApprovalSafetyDenied(file.approvalReview); })) {
+          if (!applicableFiles.some(function(file) { return isApprovalSafetyDenied(file.approvalReview) || isHeldDraftRunApproval(getApprovalTarget(file.id)); })) {
             setActions.append(createChangeSetActionButton(t('changeSetApplyAll', { count: applicableFiles.length }), 'applyChangeSet', changeSet.id, false));
           }
           setActions.append(createChangeSetActionButton(t('changeSetDiscardAll'), 'discardChangeSet', changeSet.id, true));
@@ -3723,7 +3776,9 @@ ${conversationsSessionListFragment.source}
       }
       if (allowActions && (edit.status === 'pending' || edit.status === 'apply_failed' || edit.status === 'interrupted')) {
         if (state.approvalMode === 'ask') {
-          if (!isApprovalSafetyDenied(edit.approvalReview)) actions.append(createEditActionButton(t('apply'), 'applyDraftEdit', edit.id, false));
+          if (!isApprovalSafetyDenied(edit.approvalReview) && !isHeldDraftRunApproval(getApprovalTarget(edit.id))) {
+            actions.append(createEditActionButton(t('apply'), 'applyDraftEdit', edit.id, false));
+          }
         } else appendAutomaticApprovalState(chip, actions, edit.id, edit.approvalReview);
         actions.append(createEditActionButton(t('discard'), 'discardDraftEdit', edit.id, true));
       } else if (allowActions && (edit.status === 'applied' || edit.status === 'revert_failed')) {
@@ -3743,11 +3798,16 @@ ${conversationsSessionListFragment.source}
 
     function formatApprovalReviewDetails(review) {
       var reviewerAttempted = review.decision !== 'unavailable' || !review.reviewState
-        || ['service_unavailable', 'timeout', 'invalid_response'].includes(review.reviewState);
+        || review.reviewAttempts > 0 || ['service_unavailable', 'timeout', 'invalid_response', 'scope_mismatch'].includes(review.reviewState);
       var model = review.approvalSource === 'auto_approval_review' && reviewerAttempted && review.reviewerModelId
         ? [review.reviewerSourceId, review.reviewerModelId].filter(Boolean).join(' / ') : '';
-      var risk = review.risk && review.decision !== 'unavailable' && !(review.approvalSource === 'local_policy' && review.reviewState)
+      var risk = review.risk && !review.riskUnassessed && review.decision !== 'unavailable' && !(review.approvalSource === 'local_policy' && review.reviewState)
         ? getApprovalRiskLabel(review.risk) : '';
+      var failures = Array.isArray(review.attemptFailures) ? review.attemptFailures.map(function(failure) {
+        return t('approvalReviewAttemptFailure', {
+          attempt: failure.attempt, category: failure.category, field: failure.field ? ' (' + failure.field + ')' : ''
+        });
+      }).join(', ') : '';
       return [
         t('approvalSourceLabel') + ': ' + getApprovalSourceLabel(review),
         model ? t('approvalReviewerModel') + ': ' + model : '',
@@ -3756,6 +3816,9 @@ ${conversationsSessionListFragment.source}
         t('approvalReviewReason') + ': ' + String(review.rationale || ''),
         Array.isArray(review.affectedTargets) && review.affectedTargets.length ? t('approvalAffectedTargets') + ': ' + review.affectedTargets.join(', ') : '',
         review.saferAlternative ? t('approvalSaferAlternative') + ': ' + review.saferAlternative : '',
+        Number.isInteger(review.policyVersion) ? t('approvalReviewPolicy', { version: review.policyVersion }) : '',
+        Number.isInteger(review.reviewAttempts) ? t('approvalReviewAttempts', { count: review.reviewAttempts }) : '',
+        failures,
         t('approvalReviewId') + ': ' + String(review.reviewId || '')
       ].filter(Boolean).join(' · ');
     }
@@ -3915,6 +3978,113 @@ ${conversationsSessionListFragment.source}
       }
     }
 
+    function getManualApprovalRows() {
+      return Array.isArray(state.manualToolApprovals) ? state.manualToolApprovals.filter(function(row) {
+        return row && row.sessionId === state.activeSessionId;
+      }) : [];
+    }
+
+    function createManualApprovalCard(manual) {
+      var waiting = manual.status === 'waiting';
+      var recoverable = ['interrupted', 'paused'].includes(manual.status);
+      var titleKey = waiting ? 'approvalWaitingUser' : recoverable ? 'approvalPaused'
+        : manual.status === 'approved' ? 'approvalUserApproved'
+        : manual.status === 'rejected' ? 'approvalCancelAction' : 'approvalCancelled';
+      var card = document.createElement('section');
+      card.className = 'draft-run-card manual-approval-card';
+      card.setAttribute('aria-label', t(titleKey));
+      var heading = document.createElement('div');
+      heading.className = 'draft-run-title';
+      heading.textContent = t(titleKey);
+      card.append(heading);
+      var label = document.createElement('div');
+      label.className = 'approval-operation-label';
+      label.textContent = manual.label;
+      card.append(label);
+
+      var reviewStateKey = 'approvalReviewState_' + manual.reviewState;
+      var reviewStateLabel = t(reviewStateKey);
+      if (manual.reviewState && reviewStateLabel !== reviewStateKey) {
+        appendApprovalStateNote(card, t('approvalReplyUnavailable') + ' · ' + reviewStateLabel);
+      } else if (manual.risk) {
+        appendApprovalStateNote(card, t('approvalReviewRisk') + ' · ' + getApprovalRiskLabel(manual.risk));
+      }
+      if (manual.reason) appendApprovalStateNote(card, manual.reason, waiting || recoverable);
+      if (manual.resolutionReason) {
+        var resolutionKey = 'approvalRequestReason_' + manual.resolutionReason;
+        var resolution = t(resolutionKey);
+        appendApprovalStateNote(card, t('approvalRequestReason', { reason: resolution === resolutionKey ? manual.resolutionReason : resolution }), recoverable);
+      }
+      if (waiting) appendApprovalStateNote(card, t('approvalManualPrompt'), true);
+      if (recoverable) appendApprovalStateNote(card, t('approvalInterrupted'), true);
+
+      var authorizationTargets = Array.isArray(manual.authorizationTargets) ? manual.authorizationTargets : [];
+      var affectedTargets = Array.isArray(manual.affectedTargets) ? manual.affectedTargets.filter(function(target) {
+        return !authorizationTargets.includes(target);
+      }) : [];
+      [
+        { title: 'approvalExactAuthorizationTargets', targets: authorizationTargets },
+        { title: 'approvalAffectedTargets', targets: affectedTargets }
+      ].forEach(function(group) {
+        if (!group.targets.length) return;
+        var scope = document.createElement('div');
+        scope.className = 'approval-exact-scope';
+        var scopeLabel = document.createElement('div');
+        scopeLabel.textContent = t(group.title);
+        var targets = document.createElement('ul');
+        group.targets.forEach(function(target) {
+          var item = document.createElement('li');
+          item.textContent = target;
+          targets.append(item);
+        });
+        scope.append(scopeLabel, targets);
+        card.append(scope);
+      });
+      var exactAction = manual.exactAction;
+      if (exactAction) {
+        var exact = document.createElement('details');
+        var title = document.createElement('summary');
+        title.textContent = t('approvalExactDetails');
+        var payload = document.createElement('pre');
+        payload.className = 'approval-exact-payload';
+        payload.textContent = typeof exactAction === 'string' ? exactAction : JSON.stringify(exactAction, null, 2);
+        exact.append(title, payload);
+        card.append(exact);
+      }
+
+      var actions = document.createElement('div');
+      actions.className = 'draft-run-actions';
+      if (recoverable && manual.canResume === true && manual.targetId) {
+        appendApprovalResumeAction(actions, 'approvalRecheckPaused', manual.targetId);
+      }
+      if (waiting && manual.canDecide === true) {
+        appendManualApprovalButton(actions, manual, 'approve', authorizationTargets.length ? 'approvalAuthorizeAndApproveOnce' : 'approvalConfirmOnce');
+        appendManualApprovalButton(actions, manual, 'reject', 'approvalCancelAction');
+      }
+      if (waiting && manual.canRetry === true) appendManualApprovalButton(actions, manual, 'retry', 'approvalRetryReview');
+      if (actions.children.length) card.append(actions);
+      return card;
+    }
+
+    function appendManualApprovalButton(actions, manual, decision, label) {
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.dataset.manualApprovalId = manual.id;
+      button.dataset.manualApprovalAction = decision;
+      button.disabled = pendingManualApprovalIds.has(manual.id) || !state.startup?.sideEffectsReady;
+      button.textContent = t(label);
+      button.addEventListener('click', function() {
+        if (button.disabled || pendingManualApprovalIds.has(manual.id)
+          || !getManualApprovalRows().includes(manual)) return;
+        pendingManualApprovalIds.add(manual.id);
+        for (var action of actions.querySelectorAll('button')) action.disabled = true;
+        var identity = { id: manual.id, sessionId: manual.sessionId, runtimeId: manual.runtimeId };
+        vscode.postMessage(decision === 'retry' ? { type: 'retryManualApproval', ...identity }
+          : { type: 'resolveValidationApproval', ...identity, approve: decision === 'approve' });
+      });
+      actions.append(button);
+    }
+
     function renderTranscript(changeSetProjection, draftRunProjection) {
       var shouldStick = transcript.scrollTop + transcript.clientHeight >= transcript.scrollHeight - 24;
       planRegion.remove();
@@ -3938,7 +4108,15 @@ ${conversationsSessionListFragment.source}
         transcript.append(loadOlder);
       }
 
-      if (!state.messages.length && !hasUnlinkedDrafts) {
+      var manualApprovals = getManualApprovalRows();
+      var waitingApprovalIds = new Set(manualApprovals.filter(function(row) {
+        return row.status === 'waiting' && (row.canDecide || row.canRetry);
+      })
+        .map(function(row) { return row.id; }));
+      for (var pendingId of pendingManualApprovalIds) {
+        if (!waitingApprovalIds.has(pendingId)) pendingManualApprovalIds.delete(pendingId);
+      }
+      if (!state.messages.length && !hasUnlinkedDrafts && !manualApprovals.length) {
         var empty = document.createElement('div');
         empty.className = 'transcript-empty';
         var icon = document.createElement('div');
@@ -4103,64 +4281,7 @@ ${conversationsSessionListFragment.source}
       }
 
       transcript.append(unlinkedChangeSetRegion);
-      var manual = state.manualToolApproval;
-      if (manual && manual.sessionId === state.activeSessionId) {
-        var authorizationTargets = Array.isArray(manual.authorizationTargets) ? manual.authorizationTargets : [];
-        var card = document.createElement('div');
-        card.className = 'draft-run-card';
-        var label = document.createElement('div');
-        label.className = 'approval-state-note';
-        label.textContent = t('approvalManualPrompt', { target: manual.label, reason: manual.reason });
-        card.setAttribute('role', 'region');
-        card.setAttribute('aria-label', t('approvalNeedsUser'));
-        card.append(label);
-        if (authorizationTargets.length) {
-          var scope = document.createElement('div');
-          scope.className = 'approval-exact-scope';
-          var scopeLabel = document.createElement('div');
-          scopeLabel.textContent = t('approvalExactAuthorizationTargets');
-          var targets = document.createElement('ul');
-          authorizationTargets.forEach(function(target) {
-            var item = document.createElement('li');
-            item.textContent = target;
-            targets.append(item);
-          });
-          scope.append(scopeLabel, targets);
-          card.append(scope);
-        }
-        if (manual.request?.exactAction) {
-          var exact = document.createElement('details');
-          var title = document.createElement('summary'); title.textContent = t('approvalExactDetails');
-          var payload = document.createElement('pre'); payload.className = 'approval-exact-payload';
-          payload.textContent = JSON.stringify(manual.request.exactAction, null, 2);
-          exact.append(title, payload); card.append(exact);
-        }
-        var actions = document.createElement('div');
-        actions.className = 'draft-run-actions';
-        [true, false].forEach(function(approve) {
-          var button = document.createElement('button');
-          button.type = 'button';
-          button.dataset.manualApprovalId = manual.id;
-          button.dataset.manualApprovalAction = approve ? 'approve' : 'reject';
-          button.disabled = pendingManualApprovalDecisionId === manual.id;
-          button.textContent = t(approve ? (authorizationTargets.length ? 'approvalAuthorizeAndApproveOnce' : 'approvalConfirmOnce') : 'approvalCancelAction');
-          button.addEventListener('click', function() {
-            if (button.disabled || pendingManualApprovalDecisionId === manual.id
-              || state.manualToolApproval?.id !== manual.id || state.activeSessionId !== manual.sessionId) return;
-            pendingManualApprovalDecisionId = manual.id;
-            for (var action of actions.querySelectorAll('button')) action.disabled = true;
-            vscode.postMessage({ type: 'resolveValidationApproval', id: manual.id, approve: approve });
-          });
-          actions.append(button);
-        });
-        card.append(actions);
-        transcript.append(card);
-      }
-      if (!manual && state.pendingApproval?.status === 'interrupted') {
-        var recovered = document.createElement('div'); recovered.className = 'approval-state-note';
-        recovered.textContent = t('approvalInterrupted') + ' ' + state.pendingApproval.label + ' · ' + state.pendingApproval.reason;
-        transcript.append(recovered);
-      }
+      manualApprovals.forEach(function(manual) { transcript.append(createManualApprovalCard(manual)); });
       renderUnlinkedChangeSets(changeSetProjection.unlinked, draftRunProjection.unlinked);
 
       if (shouldStick) {

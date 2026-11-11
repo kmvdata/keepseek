@@ -1,7 +1,7 @@
 import { OUTPUT_BUDGET_POLICY_VERSION } from '../shared/outputBudget';
 import { normalizeRequestBudget, type RequestBudgetSnapshot } from './requestBudget';
 import { createHash, randomUUID } from 'node:crypto';
-import { CURRENT_AGENT_PROTOCOL_VERSION } from './protocol';
+import { CURRENT_AGENT_PROTOCOL_VERSION, READ_WORKSPACE_FILE_RANGE_TOOL_NAME, READ_WORKSPACE_FILE_TOOL_NAME, RUN_VALIDATION_TOOL_NAME } from './protocol';
 import type { ActivatedSkill, AgentRequest, AgentToolRound, DraftEdit, DraftRunProposal, RepairLoopState } from '../shared/types';
 import type { DeepSeekAssistantMessage, DeepSeekMessage, DeepSeekUsage } from './deepseek/types';
 import type { ProviderNativeRunState } from './runner';
@@ -27,6 +27,15 @@ export interface PluginSkillProgress {
 export type StopReason = 'user_stop' | 'time_budget' | 'tool_timeout' | 'connection_interrupted'
   | 'provider_error' | 'extension_restart' | 'waiting_for_user' | 'budget_pause' | 'budget_exhausted' | 'completed' | 'storage_failure' | 'resource_limit'
   | 'output_truncated' | 'cost_limit' | 'no_progress_loop' | 'uncertain_tool_result';
+
+/** Records an accepted tool call awaiting a fresh decision. It grants no authority. */
+export interface PendingToolApproval {
+  toolCallId: string;
+  actionHash: string;
+  scopeFingerprint: string;
+  priorReviewId?: string;
+  status: 'reviewing' | 'waiting' | 'paused';
+}
 
 export interface RunCheckpoint {
   version: 2;
@@ -105,6 +114,8 @@ export interface RunCheckpoint {
     repairLoop: RepairLoopState;
     /** Internal Provider context segmentation. */
     epoch?: ContextEpochState;
+    /** Scoped evidence references for results owed to the next real user message. */
+    reviewedEvidenceRefs?: string[];
     budgetStopReason?: 'tool_budget_exhausted' | 'tool_round_budget_exhausted' | 'tool_call_budget_exhausted';
     budgetStopInstructionQueued?: boolean;
     /** Complete response plus individual completed tool results. Never a delta. */
@@ -112,6 +123,7 @@ export interface RunCheckpoint {
       response: { message: DeepSeekAssistantMessage; finishReason?: string | null; usage?: DeepSeekUsage | null };
       results: Record<string, string>;
       executing?: { id: string; name: string; evidenceRef?: string };
+      approval?: PendingToolApproval;
       dsmlToolCalls?: true;
       commandRecoveryResponse?: CommandRecoveryResponse;
     };
@@ -185,6 +197,10 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
       || !Array.isArray(cp.state.messages) || !Array.isArray(cp.state.toolRounds)
       || !Array.isArray(cp.state.draftEdits) || !Array.isArray(cp.state.draftRuns)
       || !Number.isInteger(cp.state.turn) || cp.state.turn < 0)) return undefined;
+    if (cp.state?.reviewedEvidenceRefs !== undefined && (!Array.isArray(cp.state.reviewedEvidenceRefs)
+      || cp.state.reviewedEvidenceRefs.length > 4_096
+      || !cp.state.reviewedEvidenceRefs.every(ref => typeof ref === 'string' && /^ev_[a-f0-9]{40}\.[a-f0-9]{24}$/u.test(ref))
+      || new Set(cp.state.reviewedEvidenceRefs).size !== cp.state.reviewedEvidenceRefs.length)) return undefined;
     if (cp.state?.continuation && (typeof cp.state.continuation.content !== 'string'
       || (cp.state.continuation.lastSegment !== undefined && typeof cp.state.continuation.lastSegment !== 'string')
       || typeof cp.state.continuation.inFlight !== 'boolean'
@@ -198,6 +214,18 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
         if (!call.id || !call.function?.name || typeof call.function.arguments !== 'string') return undefined;
         const args: unknown = JSON.parse(call.function.arguments);
         if (!args || typeof args !== 'object' || Array.isArray(args)) return undefined;
+      }
+      if (pending.approval !== undefined) {
+        const approval = pending.approval;
+        if (!approval || typeof approval.toolCallId !== 'string' || !approval.toolCallId
+          || cp.request.approvalMode !== 'delegate' || pending.executing?.id === approval.toolCallId
+          || !pending.response.message.tool_calls?.some(call => call.id === approval.toolCallId
+            && [READ_WORKSPACE_FILE_TOOL_NAME, READ_WORKSPACE_FILE_RANGE_TOOL_NAME, RUN_VALIDATION_TOOL_NAME].includes(call.function.name))
+          || Object.hasOwn(pending.results, approval.toolCallId)
+          || ![approval.actionHash, approval.scopeFingerprint].every(hash => typeof hash === 'string' && /^[a-f0-9]{64}$/u.test(hash))
+          || !['reviewing', 'waiting', 'paused'].includes(approval.status)
+          || (approval.priorReviewId !== undefined && (typeof approval.priorReviewId !== 'string'
+            || !approval.priorReviewId || approval.priorReviewId.length > 256))) return undefined;
       }
     }
     if (cp.commandRecoveryKeys !== undefined && !isCommandRecoveryKeyList(cp.commandRecoveryKeys)) return undefined;
@@ -245,6 +273,10 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
     if (recoveryContinuation) copy.request.commandRecoveryContinuation = recoveryContinuation;
     if (observations) copy.commandRecoveryObservations = observations;
     if (copy.state?.pending && recoveryResponse) copy.state.pending.commandRecoveryResponse = recoveryResponse;
+    if (copy.state?.pending?.approval) {
+      const { toolCallId, actionHash, scopeFingerprint, priorReviewId, status } = copy.state.pending.approval;
+      copy.state.pending.approval = { toolCallId, actionHash, scopeFingerprint, priorReviewId, status };
+    }
     for (const proposals of [copy.state?.draftRuns, copy.finalResponse?.draftRuns]) {
       if (proposals === undefined) continue;
       if (!Array.isArray(proposals)) return undefined;
@@ -372,7 +404,8 @@ export function recoveryBlocker(cp: RunCheckpoint, currentModel?: AgentRequest['
     return 'Child recovery lacks a valid controlled project/profile context; preserve the audit record and start a fresh delegation / 子任务恢复缺少有效项目与 Profile 继承证明，请保留审计记录并重新委派。';
   }
   if (cp.stopReason === 'no_progress_loop') return 'No-progress state is preserved. Provide new evidence, a changed scope or an explicit new instruction / 无进展状态已保留，请补充新证据、调整范围或发送新的明确指令。';
-  if (cp.stopReason === 'storage_failure' || cp.stopReason === 'resource_limit') return cp.error ?? cp.stopReason;
+  if (cp.stopReason === 'resource_limit' || (cp.stopReason === 'storage_failure' && !canRecoverToolApproval(cp))) return cp.error ?? cp.stopReason;
+  if (cp.stopReason === 'uncertain_tool_result' && cp.state?.pending?.approval) return cp.error ?? cp.stopReason;
   if (cp.status === 'completed') return 'Task already completed / 任务已完成';
   if (cp.maxExecutionMs > 0 && cp.usedMs >= cp.maxExecutionMs) return 'Time budget exhausted / 时间预算已用尽';
   if (isCostLimitExhausted(cp)) {
@@ -391,6 +424,10 @@ export function recoveryBlocker(cp: RunCheckpoint, currentModel?: AgentRequest['
     return cp.error ?? 'Logical run budget exhausted / 逻辑任务预算已用尽';
   }
   return undefined;
+}
+
+export function canRecoverToolApproval(cp: RunCheckpoint): boolean {
+  return Boolean(cp.state?.pending?.approval && !cp.state.pending.executing);
 }
 
 /** A real, persisted user turn may reopen a stopped task, but cannot grant a

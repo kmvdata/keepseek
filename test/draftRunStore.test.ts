@@ -14,7 +14,7 @@ import type {
 import { createDraftRunProposal, hashDraftRunSpec } from '../src/runs/draftRunProposal';
 import { DraftRunStore } from '../src/runs/draftRunStore';
 import { DraftRunAuthorizationService } from '../src/runs/draftRunAuthorization';
-import { ApprovalReviewStore } from '../src/approvals/approvalReviewStore';
+import { ApprovalAuditError, ApprovalReviewStore } from '../src/approvals/approvalReviewStore';
 import { createDraftRunReviewRequest } from '../src/approvals/approvalReviewSurface';
 import { APPROVAL_POLICY_VERSION, type ApprovalRecordMatch } from '../src/approvals/approvalReviewTypes';
 import type { DraftRun, DraftRunProposal, DraftRunSpec, ExecutionPermit } from '../src/shared/types';
@@ -29,6 +29,132 @@ test('delegated DraftRun records its approval source and consumes a single immut
     assert.equal(executor.executeCount, 1);
     assert.equal(executor.lastPermit?.source, 'delegated_approver');
     assert.equal(store.get(proposal.id)?.authorizationSource, 'delegated_approver');
+  });
+});
+
+test('manual holds and command dependencies survive restart without restoring approval authority', async () => {
+  await withDraftRunFixture(async ({ root, workspaceRoot, store, executor, approvalReviews }) => {
+    const probe = createProposal(workspaceRoot, { id: 'probe' });
+    const testRun = createProposal(workspaceRoot, { id: 'dependent-test' });
+    testRun.spec.prerequisites = [{ draftRunId: probe.id, specHash: probe.specHash, condition: 'completed' }];
+    testRun.specHash = hashDraftRunSpec(testRun.spec);
+    store.addProposals({ proposals: [probe, testRun], sessionId: 'session', agentRunId: 'segment' });
+    assert.equal(store.setPendingApproval(probe.id, probe.specHash,
+      { status: 'waiting_user', reason: 'Invalid approval reply', failureCode: 'invalid_response' }), true);
+    assert.equal(store.setPendingDependency(testRun.id, testRun.specHash,
+      { targetId: probe.id, label: 'probe', reason: 'Waiting for a verified result' }), true);
+    await store.flush();
+
+    const reloaded = new DraftRunStore(vscode.Uri.file(path.join(root, 'storage')) as never, executor,
+      new DraftRunAuthorizationService(approvalReviews));
+    try {
+      await reloaded.initialize();
+      const restored = reloaded.get(probe.id);
+      assert.equal(restored?.status, 'pending');
+      assert.equal(restored?.executionStarted, false);
+      assert.equal(restored?.executionPhase, 'not_dispatched');
+      assert.equal(restored?.approvalHold?.status, 'paused');
+      assert.equal(restored?.approvalHold?.pauseCause, 'host_interrupted');
+      assert.equal(restored?.approvalHold?.failureCode, 'invalid_response');
+      assert.equal(reloaded.get(testRun.id)?.status, 'pending');
+      assert.equal(reloaded.get(testRun.id)?.dependency?.targetId, probe.id);
+      assert.equal(await reloaded.approveAndRun(probe.id, new Set()), undefined);
+      assert.equal(await reloaded.approveAndRun(testRun.id, new Set()), undefined);
+      assert.equal(executor.executeCount, 0);
+      assert.equal(reloaded.getPendingProviderTail('session', 'en'), undefined);
+
+      assert.equal((await reloaded.preflightApproval(probe.id, new Set())).status, 'pending');
+      executor.outcome = { exitCode: 0, timedOut: false, cancelled: false, started: true, phase: 'exited' };
+      const approvalRecord = await addReviewerApproval(approvalReviews, probe, 'session', 'segment');
+      assert.equal((await reloaded.approveAndRun(probe.id, new Set(), { delegatedApproval: () => true, approvalRecord }))?.status, 'done');
+      assert.equal(reloaded.get(probe.id)?.approvalHold, undefined);
+      assert.equal(await reloaded.approveAndRun(probe.id, new Set(), { delegatedApproval: () => true, approvalRecord }), undefined);
+      assert.equal(executor.executeCount, 1);
+      assert.equal(reloaded.setPendingDependency(testRun.id, testRun.specHash), true);
+      const testApproval = await addReviewerApproval(approvalReviews, testRun, 'session', 'segment');
+      assert.equal((await reloaded.approveAndRun(testRun.id, new Set(), { delegatedApproval: () => true, approvalRecord: testApproval }))?.status, 'done');
+      assert.equal(executor.executeCount, 2);
+    } finally { reloaded.dispose(); }
+  });
+});
+
+test('an approval audit write failure pauses an unstarted run before the executor', async () => {
+  await withDraftRunFixture(async ({ workspaceRoot, store, executor, approvalReviews }) => {
+    const proposal = createProposal(workspaceRoot);
+    store.addProposals({ proposals: [proposal], agentRunId: 'segment', sessionId: 'session' });
+    const approvalRecord = await addReviewerApproval(approvalReviews, proposal, 'session', 'segment');
+    approvalReviews.consumeMatchingApproval = async () => { throw new ApprovalAuditError(new Error('Fixture audit fsync failed.')); };
+    const result = await store.approveAndRun(proposal.id, new Set(), { delegatedApproval: () => true, approvalRecord });
+    assert.equal(result?.status, 'pending');
+    assert.equal(result?.executionStarted, false);
+    assert.equal(result?.executionPhase, 'not_dispatched');
+    assert.equal(result?.approvalHold?.status, 'paused');
+    assert.equal(result?.approvalHold?.failureCode, 'audit_persistence_failed');
+    assert.equal(result?.approvalHold?.reason, 'Fixture audit fsync failed.');
+    assert.equal(await store.approveAndRun(proposal.id, new Set()), undefined);
+    assert.equal(executor.executeCount, 0);
+  });
+});
+
+test('a failed dispatch checkpoint consumes no review and requires a fresh decision', async () => {
+  await withDraftRunFixture(async ({ workspaceRoot, store, executor, approvalReviews }) => {
+    const proposal = createProposal(workspaceRoot);
+    store.addProposals({ proposals: [proposal], agentRunId: 'segment', sessionId: 'session' });
+    const approvalRecord = await addReviewerApproval(approvalReviews, proposal, 'session', 'segment');
+    const persistence = store as unknown as { persistNow(): Promise<void> };
+    const persist = persistence.persistNow.bind(store);
+    let writes = 0;
+    persistence.persistNow = async () => {
+      if (++writes === 2) throw new Error('Fixture command checkpoint fsync failed.');
+      await persist();
+    };
+    const result = await store.approveAndRun(proposal.id, new Set(), { delegatedApproval: () => true, approvalRecord });
+    assert.equal(result?.status, 'pending');
+    assert.equal(result?.executionPhase, 'not_dispatched');
+    assert.equal(result?.approvalHold?.failureCode, 'audit_persistence_failed');
+    assert.equal(result?.approvalHold?.reason, 'Fixture command checkpoint fsync failed.');
+    assert.equal(approvalReviews.get(approvalRecord.reviewId)?.consumedAt, undefined);
+    assert.equal(await store.approveAndRun(proposal.id, new Set()), undefined);
+    assert.equal(executor.executeCount, 0);
+  });
+});
+
+test('a historical unavailable approval can explicitly produce one fresh never-dispatched proposal', async () => {
+  await withDraftRunFixture(async ({ root, workspaceRoot, store, executor }) => {
+    const probe = createProposal(workspaceRoot, { id: 'legacy-probe' });
+    const [source] = store.addProposals({ proposals: [probe], agentRunId: 'segment', sessionId: 'session', messageId: 'assistant' });
+    const unavailable = { reviewId: 'old-review', runtimeId: 'old-runtime', sessionId: 'session', rootTaskId: 'task',
+      agentRunId: 'segment', targetId: source.id, actionKind: 'draft_run_execute', actionHash: source.specHash,
+      policyVersion: 6, approvalMode: 'delegate', approvalSource: 'auto_approval_review', decision: 'unavailable',
+      reviewState: 'invalid_response', risk: 'high', rationale: 'Approval reviewer response failed strict schema validation.',
+      policyRules: ['invalid_review_response'], createdAt: new Date().toISOString() };
+    const storageUri = vscode.Uri.file(path.join(root, 'storage')) as never;
+    await store.flush();
+    await writeFile(path.join(root, 'storage', 'approval-reviews.json'), JSON.stringify({ version: 1, records: [unavailable] }));
+    const historic = { ...source, status: 'failed', error: 'Old timeout', approvalReview: unavailable };
+    await writeFile(path.join(root, 'storage', 'draft-runs.json'), JSON.stringify({ version: 1, draftRuns: [historic] }));
+    const reviews = new ApprovalReviewStore(storageUri);
+    await reviews.initialize();
+    const reloaded = new DraftRunStore(storageUri, executor, new DraftRunAuthorizationService(reviews));
+    try {
+      await reloaded.initialize();
+      assert.equal(reloaded.toWebviewState('session')[0]?.canReproposeUndispatchedApproval, true);
+      assert.equal(reloaded.cloneAsPending(source.id), undefined);
+      const options = { sessionId: 'session', agentRunId: 'segment', isCurrent: () => true };
+      assert.equal(await reloaded.reproposeUndispatchedApproval(source.id, source.specHash, new Set(),
+        { ...options, sessionId: 'other' }), undefined);
+      const copies = await Promise.all([1, 2].map(() => reloaded.reproposeUndispatchedApproval(source.id, source.specHash, new Set(), options)));
+      assert.equal(copies.filter(Boolean).length, 1);
+      const copy = copies.find(Boolean)!;
+      assert.equal(copy.status, 'pending');
+      assert.equal(copy.specHash, source.specHash);
+      assert.equal(copy.reproposedFromDraftRunId, source.id);
+      assert.equal(copy.approvalReview, undefined);
+      assert.equal(await reloaded.approveAndRun(copy.id, new Set()), undefined);
+      assert.equal(reloaded.get(source.id)?.status, 'failed');
+      assert.equal(reloaded.get(source.id)?.approvalReview?.reviewId, unavailable.reviewId);
+      assert.equal(executor.executeCount, 0);
+    } finally { reloaded.dispose(); }
   });
 });
 

@@ -38,7 +38,7 @@
 | 父会话 request protocol | 15 | [providerRequestProjection.ts](../src/agent/providerRequestProjection.ts) 的 `CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION` | 仅接受当前协议，保存 `requestProtocol`；当前 lane 的前缀逐字节冻结 |
 | 父会话 tool schema | 15 | 同文件 `CURRENT_PROVIDER_TOOL_SCHEMA_VERSION`，schema 正文在 [protocol.ts](../src/agent/protocol.ts) | 仅当前 schema；工具集合与排序按会话冻结 |
 | 委托审批交付协议 | 13 | [approvalMode.ts](../src/agent/approvalMode.ts) 的 `DELEGATED_APPROVAL_PROTOCOL_VERSION` | 仅当前 ask/delegate；批准绑定当前策略与 runtime |
-| 审批策略 | 7 | [approvalReviewTypes.ts](../src/approvals/approvalReviewTypes.ts) 的 `APPROVAL_POLICY_VERSION` | 新授权仅用当前策略与 runtime，旧策略保留审计与适用的安全拒绝 |
+| 审批策略 | 8 | [approvalReviewTypes.ts](../src/approvals/approvalReviewTypes.ts) 的 `APPROVAL_POLICY_VERSION` | 新授权仅用当前策略与 runtime，旧策略保留审计与适用的安全拒绝 |
 | 审批审计存储 | 1 | [approvalReviewStore.ts](../src/approvals/approvalReviewStore.ts) 的 `approval-reviews.json` | 容器沿用当前格式，记录的策略版本单独校验 |
 | child runtime 协议 | 15 | [subagents/runtime.ts](../src/agent/subagents/runtime.ts) 的私有 `SUBAGENT_PROTOCOL_VERSION` | 与父会话共用当前协议常量，child 的上下文与状态仍独立 |
 | child 结果合同与 handoff | 合同 2、manifest 3 | [resultEnvelope.ts](../src/agent/subagents/resultEnvelope.ts)、[handoff.ts](../src/agent/subagents/handoff.ts)、[types.ts](../src/agent/subagents/types.ts) | 仅当前合同与 manifest；结果生命周期、结构验收和父采纳分别记录 |
@@ -55,7 +55,7 @@
 
 | 历史主题 | 证据入口 | 当前阅读边界 |
 | --- | --- | --- |
-| 审批迭代 | [审批安全](keepseek-approval-safety-verification.md)、[全自动审批](keepseek-zero-click-approval-verification.md)、[帮我审批交付](keepseek-approve-for-me-verification.md) | 前两份记录旧模式；最后一份含 v7 当前合同和分列的历史验证 |
+| 审批迭代 | [审批安全](keepseek-approval-safety-verification.md)、[全自动审批](keepseek-zero-click-approval-verification.md)、[帮我审批交付](keepseek-approve-for-me-verification.md) | 前两份记录旧模式；最后一份含 v8 当前合同和分列的历史验证 |
 | 长任务整改与续接 | [整改](long-task-performance-rectification.md)、[续接](long-task-rectification-resume-report.md)、[输出预算整改](model-output-budget-rectification.md) | 故障、测量与限制保留；最新状态机查 runtime/checkpoint/projection |
 | 子代理 P0/P1 | [P0 持久化](keepseek-p0-subagent-persistence.md)、[P1 可靠性](keepseek-p1-subagent-reliability.md)、[现场验收](keepseek-p1-field-acceptance.md) | 不将历史 V11 父协议说明当作当前父协议常量 |
 | 布局与计时修复 | [审批卡片](approval-card-layout-verification.md)、[计时与审批](keepseek-task-timing-approval-fix-20261102.md) | 保留当时截图/观察；当前菜单及计时口径查对应当前入口 |

@@ -34,6 +34,8 @@ export interface ToolEvidence {
   source?: ToolEvidenceSource;
   /** Host-only read journal, never projected into a tool response. */
   pluginSkillProgress?: import('../runCheckpoint').PluginSkillProgress;
+  /** The complete result is delivered at the approval continuation boundary. */
+  approvalResult?: { status: 'succeeded' | 'denied' | 'failed'; authorized: boolean; stopReason?: string };
   storageKind?: 'blob' | 'replayable-source';
   blobName?: string;
   providerEnvelope?: string;

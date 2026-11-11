@@ -670,6 +670,15 @@ export type DraftRunBatchDisplay = Pick<DraftRunBatchState,
   phase: DraftRunBatchState['phase'] | 'interrupted';
 };
 
+/** Recovery explanation only. No request token, approval or permit is stored here. */
+export interface DraftRunApprovalHold {
+  status: 'waiting_user' | 'paused';
+  reason?: string;
+  failureCode?: string;
+  updatedAt: string;
+  pauseCause?: 'host_interrupted';
+}
+
 export interface DraftRun extends DraftRunProposal {
   /** Host execution facts. Missing execution facts mean unknown. */
   executionStarted?: boolean;
@@ -685,6 +694,9 @@ export interface DraftRun extends DraftRunProposal {
   status: DraftRunStatus;
   authorizationSource?: ExecutionPermit['source'];
   approvalReview?: import('../approvals/approvalReviewTypes').ApprovalReviewDisplay;
+  approvalHold?: DraftRunApprovalHold;
+  /** Explicit reproposal of a historical approval failure. Never confers authority. */
+  reproposedFromDraftRunId?: string;
   replacementDraftRunId?: string;
   /** Host-verified explanation for a terminal, never-dispatched command. */
   commandRecoveryOutcome?: { kind: 'repeated'; priorDraftRunId: string } | { kind: 'git_tag_verified'; ref: string; commit: string };
@@ -975,6 +987,7 @@ export interface ChatSession {
   /** Durable edit/resend intent; actions stay blocked until it is reconciled. */
   pendingHistoryTruncation?: import('../sessions/historyTruncation').PendingHistoryTruncation;
   pendingApproval?: import('../approvals/manualApproval').ManualApprovalSnapshot;
+  pendingApprovals?: import('../approvals/manualApproval').ManualApprovalSnapshot[];
   userTaskBudgets?: Record<string, import('../sessions/userTaskBudget').UserTaskBudget>;
   approvalProcessing?: import('../approvals/approvalProcessing').ApprovalProcessingState;
   executionTime?: import('../sessions/executionTimeStats').SessionExecutionTime;

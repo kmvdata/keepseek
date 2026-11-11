@@ -1,5 +1,6 @@
 import * as assert from 'node:assert/strict';
 import { sessionUseFixture } from './sessionUseFixture';
+import { createWebviewDomHarness } from './webviewDomHarness';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -215,6 +216,9 @@ test('immutable evidence dependencies reject absent, cross-task, hash-changed, c
   const get = (id: string) => id === first.id ? first : id === second.id ? second : undefined;
   first.status = 'done';
   second.spec.prerequisites = [{ draftRunId: first.id, specHash: first.specHash, condition: 'completed' }];
+  assert.equal(inspectDraftRunDependencies(second, get).code, 'dependency_unsettled');
+  first.executionStarted = true;
+  first.executionPhase = 'exited';
   assert.equal(inspectDraftRunDependencies(second, get).allowed, true);
   assert.equal(inspectDraftRunDependencies(second, get, new Set([second.id])).code, 'dependency_identity');
   assert.equal(inspectDraftRunDependencies(second, () => undefined).code, 'dependency_missing');
@@ -607,7 +611,8 @@ class UiElement {
 }
 function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: 'en' | 'zh-CN') {
   const source = getScript();
-  const names = ['appendAutomaticApprovalState', 'getApprovalTarget', 'isHeldDraftRunApproval', 'getApprovalDisplayReason', 'formatApprovalDependency',
+  const names = ['appendAutomaticApprovalState', 'getApprovalTarget', 'isHeldDraftRunApproval', 'getApprovalWaitingLabel', 'getApprovalDisplayReason', 'formatApprovalDependency',
+    'canResumeApproval', 'getManualApprovalRows', 'createManualApprovalCard', 'appendManualApprovalButton',
     'appendApprovalStateNote', 'appendApprovalResumeAction', 'createDraftRunCard', 'appendDraftRunBatchControls', 'appendDraftRunActions', 'createDraftRunActionButton',
     'isDraftRunBatchActive', 'getDraftRunBatchMembers', 'createDraftRunTimelineItem', 'renderDraftRunItems',
     'captureDraftRunActionFocus', 'findDraftRunActionFocus', 'renderTranscript', 'handleDraftRunActionClick', 'handleChangeSetActionClick',
@@ -637,7 +642,7 @@ function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: '
   const composer = { text: '' };
   const context = { state, translations: WEBVIEW_TRANSLATIONS,
     document: { createElement: () => new UiElement() }, Element: UiElement, HTMLElement: UiElement,
-    pendingDraftRunBatchSnapshot: '', pendingManualApprovalDecisionId: '', pendingDraftRunActions: new Set(), pendingDraftRunApprovals: new Set(), pendingChangeActions: new Map(),
+    pendingDraftRunBatchSnapshot: '', pendingManualApprovalIds: new Set(), pendingDraftRunActions: new Set(), pendingDraftRunApprovals: new Set(), pendingChangeActions: new Map(),
     changeActionRequestSequence: 0,
     isPromptEmpty: () => !composer.text, getPromptEndRange: () => composer.text.length,
     setPromptSelectionRange: (end: number) => assert.equal(end, composer.text.length), savePromptSelection: () => {},
@@ -733,6 +738,7 @@ test('current delegate cards resume processing without granting scope', async ()
         { id: 'edit-A', kind: 'edit', status: 'needs_authorization', reason: 'Exact scope required' }]
     };
     ui.state.approvalProcessing = processing;
+    Object.assign(ui.state, { activeSessionId: 's', approvalRecovery: { sessionId: 's', runId: 'r', rootTaskId: 'task', canResume: true } });
     const render = () => elements([
       ui.api.createDraftRunCard(ui.state.draftRuns[0]),
       ui.api.createChangeSetCard({ id: 'set', files: [{ id: 'edit-A', status: 'pending', label: 'file.ts' }] })
@@ -741,7 +747,8 @@ test('current delegate cards resume processing without granting scope', async ()
     assert.equal(resumes().length, 2);
     resumes().forEach(button => button.click());
     assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.splice(0))), [
-      { type: 'resumeApprovalProcessing' }, { type: 'resumeApprovalProcessing' }
+      { type: 'resumeApprovalProcessing', sessionId: 's', runId: 'r', rootTaskId: 'task', targetId: 'A' },
+      { type: 'resumeApprovalProcessing', sessionId: 's', runId: 'r', rootTaskId: 'task', targetId: 'edit-A' }
     ]);
     ui.state.startup.sideEffectsReady = false;
     assert.ok(resumes().every(button => button.disabled));
@@ -813,12 +820,15 @@ test('Git draft cards bind diagnostics and expose only explicit current processi
     assert.equal(ui.messages.length, 0, 'copying argv to the composer must not send a request');
     processing.status = 'blocked';
     processing.canResume = true;
+    Object.assign(ui.state, { approvalRecovery: { sessionId: 's', runId: status.agentRunId, rootTaskId: 'task', canResume: true } });
     assert.equal(render(second).filter(node => node.type === 'button').length, 0);
     const resume = render(first).filter(node => node.type === 'button');
     assert.equal(resume.length, 1);
     assert.equal(ui.messages.length, 0, 'rendering cannot automatically resume a command');
     resume[0].click();
-    assert.deepEqual(JSON.parse(JSON.stringify(ui.messages)), [{ type: 'resumeApprovalProcessing' }]);
+    assert.deepEqual(JSON.parse(JSON.stringify(ui.messages)), [
+      { type: 'resumeApprovalProcessing', sessionId: 's', runId: status.agentRunId, rootTaskId: 'task', targetId: status.id }
+    ]);
     processing.canResume = false;
     processing.targets[0].reason = WEBVIEW_TRANSLATIONS[language === 'en' ? 'zh-CN' : 'en'].approvalReplanRepeated;
     const historical = render(first);
@@ -1511,22 +1521,138 @@ test('model refresh changing selection during batch handoff fails before restori
   assert.equal(host.selectedModelId, 'different'); assert.equal(session.messages.length, 0);
 }));
 
-test('Approve for me exposes one host request without a modal or per-draft bypass buttons', async () => fixture(async f => {
+test('Approve for me shows precise, host-bound waiting and retry actions in both languages', async () => fixture(async f => {
   f.add(['A']);
   for (const language of ['en', 'zh-CN'] as const) {
     const ui = renderHarness(f, language);
+    const live = {
+      id: 'host-runtime-token', sessionId: 's', runtimeId: 'host-runtime', targetId: 'A',
+      status: 'waiting', canDecide: true, canRetry: true,
+      label: 'python3 -c "print(1)"', reason: '<script>untrusted evidence stays literal</script>',
+      reviewState: 'invalid_response', risk: 'high',
+      exactAction: { kind: 'draft_run_execute', executable: 'python3', argv: ['-c', 'print(1)'], cwdUri: 'file:///temp/project' }
+    };
     Object.assign(ui.state, { approvalMode: 'delegate', activeSessionId: 's',
-      manualToolApproval: { id: 'host-runtime-token', sessionId: 's', label: 'file:///external/' + '长中文目标'.repeat(60),
-        reason: '<script>untrusted evidence stays literal</script>' } });
+      manualToolApprovals: [live, { ...live, id: 'different-session-token', sessionId: 'elsewhere' }],
+      approvalProcessing: { version: 2, runId: 'r', rootTaskId: 'task', mode: 'delegate', status: 'waiting_user', canResume: true,
+        targets: [{ id: 'A', kind: 'command', status: 'manual_required' }] } });
     const rendered = ui.render();
     const labels = WEBVIEW_TRANSLATIONS[language];
     const nodes = elements(rendered.cards);
     const approve = nodes.filter(node => node.type === 'button' && node.textContent === labels.approvalConfirmOnce);
     const reject = nodes.filter(node => node.type === 'button' && node.textContent === labels.approvalCancelAction);
-    assert.equal(approve.length, 1); assert.equal(reject.length, 1);
-    assert.ok(nodes.some(node => node.className === 'approval-state-note' && node.textContent.includes('<script>')));
+    const retry = nodes.filter(node => node.type === 'button' && node.textContent === labels.approvalRetryReview);
+    assert.equal(approve.length, 1); assert.equal(reject.length, 1); assert.equal(retry.length, 1);
+    const manual = elements(nodes.filter(node => node.className === 'draft-run-card manual-approval-card'));
+    assert.ok(manual.some(node => node.textContent === labels.approvalWaitingUser));
+    assert.ok(manual.some(node => node.className === 'approval-state-note' && node.textContent.includes('<script>')));
+    assert.ok(manual.some(node => node.textContent.includes(labels.approvalReplyUnavailable)));
+    assert.ok(manual.some(node => node.textContent.includes(labels.approvalReviewState_invalid_response)));
+    assert.ok(manual.some(node => node.className === 'approval-exact-payload' && node.textContent.includes('print(1)')));
+    assert.ok(!manual.some(node => node.textContent.includes(labels.approvalReviewRisk)), 'unavailable response has no risk decision');
+    assert.ok(nodes.some(node => node.textContent === labels.draftRunWaitingDispatchBadge));
+    assert.ok(!nodes.some(node => node.textContent === labels.draftRunNotDispatchedBadge));
     assert.ok(!nodes.some(node => node.dataset.draftRunAction === 'approveDraftRun'));
+    retry[0].click();
     approve[0].click();
-    assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.at(-1))), { type: 'resolveValidationApproval', id: 'host-runtime-token', approve: true });
+    assert.equal(ui.messages.length, 1);
+    assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.at(-1))), {
+      type: 'retryManualApproval', id: 'host-runtime-token', sessionId: 's', runtimeId: 'host-runtime'
+    });
+
+    Object.assign(ui.state, { manualToolApprovals: [{ ...live, id: 'new-token', reviewState: undefined, canRetry: false,
+      affectedTargets: ['file:///temp/project/results'] }] });
+    const highRisk = elements(ui.render().cards);
+    assert.ok(highRisk.some(node => node.textContent.includes(labels.approvalRiskHigh) && node.className === 'approval-state-note'));
+    assert.ok(highRisk.some(node => node.textContent === 'file:///temp/project/results'));
+    assert.ok(!highRisk.some(node => node.textContent === labels.approvalRetryReview));
+    highRisk.find(node => node.dataset.manualApprovalAction === 'approve')?.click();
+    assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.at(-1))), {
+      type: 'resolveValidationApproval', id: 'new-token', sessionId: 's', runtimeId: 'host-runtime', approve: true
+    });
   }
 }));
+
+test('recovered approval is visible but requires a current host capability to resume', async () => fixture(async f => {
+  f.add(['A', 'B']);
+  for (const language of ['en', 'zh-CN'] as const) {
+    const ui = renderHarness(f, language);
+    const labels = WEBVIEW_TRANSLATIONS[language];
+    const [draft, dependent] = ui.state.draftRuns;
+    const row = { id: 'old-token', sessionId: 's', targetId: draft.id, runtimeId: 'old-host',
+      label: 'Python probe', reason: 'Invalid approval reply', reviewState: 'invalid_response',
+      status: 'interrupted', resolutionReason: 'host_interrupted', canDecide: false, canRetry: false, canResume: true };
+    const processing = { version: 2, runId: draft.agentRunId, rootTaskId: 'task', mode: 'delegate', status: 'paused', canResume: true,
+      targets: [{ id: draft.id, kind: 'command', status: 'paused', canResume: true }, { id: dependent.id, kind: 'command',
+        status: 'dependency_blocked', dependency: { targetId: draft.id, label: 'Python probe' } }] };
+    Object.assign(ui.state, { approvalMode: 'delegate', activeSessionId: 's', approvalProcessing: processing,
+      approvalRecovery: null, manualToolApprovals: [row] });
+    const paused = elements(ui.render().cards);
+    assert.ok(paused.some(node => node.textContent === labels.approvalPaused));
+    assert.ok(paused.some(node => node.textContent.includes(labels.approvalRequestReason_host_interrupted)));
+    assert.ok(paused.some(node => node.textContent === labels.approvalWaitingPrerequisite));
+    assert.ok(!paused.some(node => node.dataset.manualApprovalAction || node.textContent === labels.approvalRecheckPaused));
+    const recovery = { sessionId: 's', runId: draft.agentRunId, rootTaskId: 'task', canResume: true };
+    Object.assign(ui.state, { approvalRecovery: recovery });
+    const restored = elements(ui.render().cards);
+    const resumes = restored.filter(node => node.type === 'button' && node.textContent === labels.approvalRecheckPaused);
+    assert.equal(resumes.length, 1);
+    resumes[0].click();
+    resumes[0].click();
+    assert.deepEqual(JSON.parse(JSON.stringify(ui.messages)), [{ type: 'resumeApprovalProcessing',
+      sessionId: 's', runId: draft.agentRunId, rootTaskId: 'task', targetId: draft.id }]);
+  }
+}));
+
+test('historical approval failure offers explicit re-proposal only with never-dispatched evidence', async () => fixture(async f => {
+  f.add(['A']);
+  for (const language of ['en', 'zh-CN'] as const) {
+    const ui = renderHarness(f, language);
+    ui.state.approvalMode = 'delegate';
+    const labels = WEBVIEW_TRANSLATIONS[language];
+    const draft = { ...ui.state.draftRuns[0], status: 'failed', executionStarted: false, executionPhase: 'not_dispatched',
+      canReproposeUndispatchedApproval: true, error: 'Invalid approval model response' };
+    const nodesFor = (value: unknown) => elements([ui.api.createDraftRunCard(value)]);
+    const nodes = nodesFor(draft);
+    assert.ok(nodes.some(node => node.textContent === labels.draftRunNotDispatchedBadge));
+    assert.ok(!nodes.some(node => node.className === 'draft-run-output'));
+    assert.ok(nodes.some(node => node.textContent.includes(draft.error)));
+    const repropose = nodes.find(node => node.textContent === labels.approvalReproposeUndispatched);
+    assert.ok(repropose);
+    ui.api.handleDraftRunActionClick({ target: repropose });
+    assert.deepEqual(JSON.parse(JSON.stringify(ui.messages)), [{ type: 'cloneDraftRun', id: draft.id }]);
+    for (const refused of [{ ...draft, canReproposeUndispatchedApproval: undefined },
+      { ...draft, executionPhase: 'result_unknown' },
+      { ...draft, approvalReview: { decision: 'deny', approvalSource: 'local_policy' } }]) {
+      assert.ok(!nodesFor(refused).some(node => node.textContent === labels.approvalReproposeUndispatched));
+    }
+  }
+}));
+
+test('a reopened Webview can handle current approval, and switching sessions invalidates the old button', () => {
+  const live = { id: 'live-token', sessionId: 'original', runtimeId: 'host', status: 'waiting',
+    canDecide: true, canRetry: false, label: 'Run precise operation', reason: 'Operator confirmation required' };
+  const project = (view: ReturnType<typeof createWebviewDomHarness>) => {
+    view.receive({ type: 'state', revision: 1, state: {
+      activeSessionId: 'original', approvalMode: 'delegate', manualToolApprovals: [live],
+      startup: { interactiveReady: true, sideEffectsReady: true }
+    } });
+    const button = view.element('transcript').querySelector('button[data-manual-approval-action="approve"]');
+    assert.ok(button && !button.disabled);
+    return button;
+  };
+  const original = createWebviewDomHarness();
+  const stale = project(original);
+  original.receive({ type: 'state', revision: 2, state: { activeSessionId: 'other' } });
+  assert.equal(original.element('transcript').querySelector('.manual-approval-card'), null);
+  stale.click();
+  assert.ok(!original.posted.some(message => message.type === 'resolveValidationApproval'));
+
+  const reopened = createWebviewDomHarness();
+  const approve = project(reopened);
+  approve.click();
+  approve.click();
+  assert.deepEqual(JSON.parse(JSON.stringify(reopened.posted.filter(message => message.type === 'resolveValidationApproval'))), [
+    { type: 'resolveValidationApproval', id: 'live-token', sessionId: 'original', runtimeId: 'host', approve: true }
+  ]);
+});

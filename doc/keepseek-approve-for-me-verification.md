@@ -1,6 +1,49 @@
 # KeepSeek「帮我审批」统一合同与验收
 
-## 2026-11-11 v7 当前合同
+## 2026-11-11 v8 当前合同
+
+实施基线为 `987b10caa2d55cd443afd73620cc30d43cec0b77`，KeepSeek 0.5.3，Asia/Shanghai。审批策略为 v8，审批审计容器仍为 v1，委托审批交付仍为 v13，父会话请求和工具 schema 仍为 v15。新 delegate 用户消息追加当前审批说明，已保存的请求字节沿用原文。
+
+| 环节 | 行为 |
+| --- | --- |
+| 请求批准 / Ask for approval | 走用户批准路径，reviewer 请求数为零。适用的宿主安全阻断与安全拒绝继续生效。 |
+| 帮我审批 / Approve for me | 宿主核验后由独立、无工具 reviewer 审查可信工程内的普通变更和启动。先 Apply 并完成落盘复核，再审查依赖本轮文件的实际命令版本。解释器内联代码按精确内容、实参、cwd 和效果审查。 |
+| 有效决定 | 自动批准仅签发当前动作的一次性授权。具体、可由用户确认的风险或精确授权缺口显示影响范围、风险和批准一次/拒绝入口。 |
+| 审查故障 | 协议校验保留字段和失败类别，同一次逻辑审查最多额外尝试一次，共用原请求期限和根任务预算。无效回复、超时、配置和服务故障经宿主资格复核后可选择重新审批或精确人工处理。范围不符先重新核验。不可用记录中的默认 high 表示审查缺失，不能签发执行许可。 |
+| 等待与恢复 | 批次发布持久化请求后释放审批执行槽。独立项继续，声明或可核验的依赖保持未派发等待。模型时限、人工等待、短时执行 permit 分别计算。关闭 Webview 保留当前宿主的请求。重启恢复等待意图、审计和依赖，显式恢复会重新核验并签发新请求。 |
+| 副作用 | 精确点击经重新核验和审计落盘后，文件沿用 SafeFileEditor，命令仍以一次性 permit 调用 `spawn(executable, args, { shell:false })`。已完成和效果未知的副作用均不重跑。旧策略终结的命令须有权威审查记录及从未派发的证据，才可显式创建新草稿。 |
+
+会话分片保留有界 `pendingApprovals` 摘要，包含请求、目标、审查、策略和 runtime 标识，以及决定时间和失效原因。审批审计追加有界的尝试类别、字段和时间。`draft-runs.json` 沿用 v1，保存未派发的 `approvalHold` 和显式重提的来源 ID。循环内固定验证及受审读取用当前 RunCheckpoint 中的待处理标记保存派发前证据。宿主中断后通过「继续任务」重新核验该工具。实时工具等待暂停任务执行计时，当前执行段保留到收到决定或中断。
+
+### 未启动命令回归
+
+2026-11-11 16:29:21（上海时间），历史 DraftRun `b4eeca97-53be-4ac6-a115-bb0e0f5cbabe` 对应在 `sisyphus/sisyphus_py` 中运行的 `python3 -c` 探测。v6 保存 `unavailable / invalid_response / invalid_review_response`，约 3600.783 秒后记录探测为 failed、后续测试为 cancelled。两条均为 `executionStarted=false / not_dispatched`，输出为零，前置 Apply 已完成。现场审计未记录具体取消来源或错误字段。流日志达到 20 MB 后出现 `trace_truncated`，审批审计、会话等待摘要和命令记录仍是状态证据。
+
+用隔离临时工程和可计数 reviewer 复现。先修改探测所需文件并验证落盘，再准备仅检查安全依赖的内联探测、显式依赖探测成功的测试、以及独立测试。第一次 review 返还带错误字段的结构，检查第二次请求的纠正内容。第二次仍无效时，核对手工请求的原错误、已完成 Apply、独立项结果和未派发的依赖项。用假时钟越过一小时后点击批准，核对精确探测只派发一次，依赖测试只在探测成功后启动。重复一次并改动启动身份或撤销范围，核对旧请求不能启动。重启时核对审计中的前请求和新请求 ID，分别记录实际派发、退出和输出。
+
+自动化入口为 `taskApprovalIntegration.test.ts` 的 Python probe 用例。临时文件已落盘时，受控模型对 `risk` 两次返回数字。夹具使用真实 Python 和 Node 进程，并从重新打开的审批存储读取被截断日志之外的审查记录。
+
+| 时点 | 真实派发顺序 | 持久化事实 |
+| --- | --- | --- |
+| 用户尚未决定 | 独立测试 | 探测和依赖测试均未派发，探测输出为零，Apply 已完成，审计保留 `invalid_response` 及 `risk` 字段。 |
+| 假时钟越过一小时，用户批准 | 独立测试 → Python 探测 → 依赖测试 | Python 从落盘文件读取结果，两个测试均有真实退出证据。重复点击无新增派发，探测审查仍为两次。 |
+
+### 本地与现场验证
+
+```bash
+bun run build:test
+node --require ./out-test/test/registerVscodeStub.js --test \
+  out-test/test/approvalMode.test.js out-test/test/approvalReviewer.test.js \
+  out-test/test/taskApprovalIntegration.test.js out-test/test/runnerValidationState.test.js \
+  out-test/test/draftRunStore.test.js out-test/test/draftRunBatch.test.js \
+  out-test/test/editUserPrompt.test.js
+```
+
+上述定向回归 296 项全部通过。macOS x86_64、Node v24.15.0、Bun 1.3.12 下，`bun run compile`、`bun run lint`、`bun run build:test` 和 `git diff --check` 通过。`bun run test` 共 1,648 项，1,647 通过，0 失败，0 取消。环境禁止绑定本地端口，故障服务器用例跳过 1 项。
+
+原生 VS Code F5 现场验收沿用下方工程夹具。以 v8 的故障恢复规则核对中英文等待卡、关闭重开、重载、手动拒绝、重新审批和实际进程次数。分别使用用户级无效固定审批模型和一个真实可用模型，核对配置故障与线上结构化回复。对 macOS、Windows 和 Linux 分别记录解释器实路径和实际 argv。
+
+## 2026-11-11 v7 历史合同
 
 实施基线为 `7c0aec40adb2ef4d4b30f07f77e0a78a54f16c94`，KeepSeek 0.5.3，Asia/Shanghai。审批策略升级为 v7，审计容器 `approval-reviews.json` 仍为 v1。父会话请求与工具 schema 仍为 v15，审批交付仍为 v13。
 

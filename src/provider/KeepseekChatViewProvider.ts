@@ -20,7 +20,7 @@ import { PYTHON_SYNTAX_ERROR_EXIT, recognizePythonSyntaxIntent } from '../runs/r
 import { redactSensitiveReviewText } from '../approvals/approvalPolicy';
 import { taskBudgetFromCheckpoint, type UserTaskBudget } from '../sessions/userTaskBudget';
 import { inspectDraftRunScope, ExactOperationGrants, draftRunIdentity, inspectAutomaticRunAuthorization, evaluateAutomaticRunAuthorization, assertAutomaticRunAuthorization, inspectAutomaticEditAuthorization, analyzeCommand, inspectGitCommandReplan, InvalidGitCommitError, type GitCommandReplan } from '../approvals/authorization';
-import { createApprovalProcessing, invalidateApprovalStateForHistory, isCompletedApprovalBatch, type ApprovalDependency, type DraftRunReplanResult } from '../approvals/approvalProcessing';
+import { createApprovalProcessing, invalidateApprovalStateForHistory, isCompletedApprovalBatch, type DraftRunReplanResult } from '../approvals/approvalProcessing';
 import { createHistoryTruncationPlan, executeHistoryTruncation, recoverPendingHistoryTruncation, type HistoryTruncationScope, type PendingHistoryTruncation } from '../sessions/historyTruncation';
 import { reconcileTruncatedContext } from '../sessions/historyTruncationContext';
 import { executionSegmentId, taskForSegment, taskGoal, type UserTaskLink } from '../sessions/userTask';
@@ -93,7 +93,7 @@ import {
   toSessionContextUsageEstimate
 } from '../agent/contextUsage';
 import { ChangeSetStore, type PendingDeleteTarget } from '../edits/changeSetStore';
-import { DraftRunStore, type DraftRunStoreEvent } from '../runs/draftRunStore';
+import { DraftRunStore, type DraftRunStoreEvent, type WebviewDraftRun } from '../runs/draftRunStore';
 import { gitReleaseIntent } from '../runs/gitTaskIntent';
 import { checkGitRemotePrerequisite, gitBatchKind, gitReleasePrerequisite, missingGitTaskOutcome, orderGitReleaseBatch } from '../runs/gitReleaseBatch';
 import { authorizeGitRemote, type GitReleaseGrant, type GitRemoteLaunch } from '../runs/gitReleaseAuthorization';
@@ -121,11 +121,12 @@ import { canIsolateDraftRunFailure, draftRunEditDependencyTargets, inspectDraftR
 import { commandCapabilityReplan, commandRecoveryKey, findCommandRecoveryObservation,
   mergeCommandRecoveryObservations, observeCommandRecovery, MAX_COMMAND_RECOVERY_KEYS } from '../runs/commandRecovery';
 import type { DraftRunBatchSnapshot, DraftRunBatchState } from '../shared/types';
-import { ApprovalReviewStore, toApprovalReviewDisplay } from '../approvals/approvalReviewStore';
+import { ApprovalAuditError, ApprovalReviewStore, toApprovalReviewDisplay } from '../approvals/approvalReviewStore';
 import { ApprovalReviewerService, type ApprovalReviewerModelContext } from '../approvals/approvalReviewer';
 import { ApprovalCircuitBreaker } from '../approvals/approvalCircuitBreaker';
 import { createDraftEditReviewRequest, createDraftRunReviewRequest } from '../approvals/approvalReviewSurface';
-import { type ApprovalAuthorizationSource, type ApprovalReviewOutcome, type ManualToolApproval, type ApprovalReviewRecord, type ApprovalReviewRequest } from '../approvals/approvalReviewTypes';
+import { APPROVAL_POLICY_VERSION, MANUAL_FALLBACK_STATES, type ApprovalAuthorizationSource, type ApprovalReviewOutcome, type ManualApprovalResolutionReason, type ManualToolApproval, type ApprovalReviewRecord, type ApprovalReviewRequest } from '../approvals/approvalReviewTypes';
+import { manualApprovalActionPreview, recordManualApproval, type ManualApprovalSnapshot } from '../approvals/manualApproval';
 import { hashDraftEditAction, hashDraftEditEffect, hashDraftRunEffect } from '../approvals/approvalReviewHash';
 import { createFullTextDraftEdit, getDraftEditBase } from '../edits/draftEdit';
 import { hashBytes } from '../edits/textPatch';
@@ -379,7 +380,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       contextReady: this.runContextReadiness === 'ready' || this.runContextReadiness === 'deferred',
       sessionRecoveryReady: this.sessionRecoveryReady,
       mainRunning: this.isBusy, contextRefreshing: this.runContextRefreshInFlight,
-      actionRunning: Boolean(this.activeDraftRunId || this.activeChangeActions?.size || this.delegatedApprovalInFlight || this.draftRunBatches?.locked || this.delegatedApprovals?.hasPending(sessionId)),
+      actionRunning: Boolean(this.activeDraftRunId || this.activeChangeActions?.size || this.delegatedApprovalInFlight
+        || this.reservingManualDecision || this.reservingApprovalResume || this.draftRunBatches?.locked || this.delegatedApprovals?.hasPending(sessionId)),
       backgroundRunning: this.hasActiveBackgroundRun(),
       cancellable: Boolean(this.currentRunAbortController && !this.currentRunAbortController.signal.aborted
         || this.changeActionAbortController && !this.changeActionAbortController.signal.aborted || this.activeDraftRunId),
@@ -410,96 +412,378 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private externalAuthorizationEpoch = 0;
   private manualToolApproval?: {
     view: ManualToolApproval;
-    configuration: string;
     ready: boolean;
-    decide: (approved: boolean, clicked?: boolean) => void;
+    decide: (reason: ManualApprovalResolutionReason) => void;
   };
+  private batchManualApprovals = new Map<string, {
+    snapshot: ManualApprovalSnapshot;
+    request: ApprovalReviewRequest;
+    epoch: number;
+    decision?: ManualApprovalResolutionReason;
+  }>();
+  private reservingManualDecision?: string;
+  private reservingApprovalResume = false;
+
+  private manualApprovalCurrent(session: ChatSession, request: ApprovalReviewRequest, runtimeId: string, epoch: number): boolean {
+    return vscode.workspace.isTrusted && this.approvalReviews.runtimeId === runtimeId && !session.pendingHistoryTruncation
+      && (this.externalAuthorizationEpoch ?? 0) === epoch && session.id === this.sessionStore.activeSessionId
+      && session.id === request.sessionId && request.approvalMode === 'delegate'
+      && normalizeApprovalMode(session.approvalMode) === 'delegate'
+      && normalizeExecutionMode(session.executionMode) === 'normal'
+      && latestApprovalSegmentId(session) === request.agentRunId
+      && taskForSegment(session, request.agentRunId)?.id === request.rootTaskId;
+  }
+
+  private async saveManualApproval(session: ChatSession, snapshot: ManualApprovalSnapshot): Promise<void> {
+    session.pendingApproval = snapshot;
+    session.pendingApprovals = recordManualApproval(session.pendingApprovals, snapshot);
+    try { await this.sessionStore.persist('manual_approval'); }
+    catch (error) { throw new ApprovalAuditError(error); }
+  }
+
+  private createManualApprovalSnapshot(view: ManualToolApproval, request: ApprovalReviewRequest): ManualApprovalSnapshot {
+    const review = view.priorReviewId ? this.approvalReviews.get?.(view.priorReviewId) : undefined;
+    return {
+      version: 1, id: view.id = randomUUID(), sessionId: request.sessionId,
+      runtimeId: view.runtimeId = this.approvalReviews.runtimeId, policyVersion: APPROVAL_POLICY_VERSION,
+      rootTaskId: request.rootTaskId, agentRunId: request.agentRunId, targetId: request.targetId,
+      actionHash: request.actionHash, scopeFingerprint: request.scopeFingerprint, priorReviewId: view.priorReviewId,
+      label: redactSensitiveReviewText(view.label, 8000), reason: redactSensitiveReviewText(view.reason, 4000),
+      authorizationTargets: view.authorizationTargets?.map(target => redactSensitiveReviewText(target, 800)),
+      affectedTargets: review?.affectedTargets?.slice(0, 32).map(target => redactSensitiveReviewText(target, 800)),
+      risk: review?.decision === 'unavailable' ? undefined : view.risk ?? review?.risk,
+      reviewState: view.reviewState ?? review?.reviewState, requestedAt: new Date().toISOString(), status: 'waiting'
+    };
+  }
+
+  private settleManualApproval(snapshot: ManualApprovalSnapshot, reason: ManualApprovalResolutionReason): void {
+    snapshot.resolutionReason = reason;
+    snapshot.decidedAt = new Date().toISOString();
+    snapshot.status = reason === 'user_approved' ? 'approved' : reason === 'user_rejected' ? 'rejected'
+      : reason === 'user_cancelled' ? 'cancelled' : 'interrupted';
+  }
 
   private async requestManualToolApproval(
     view: ManualToolApproval, signal?: AbortSignal, verifyCurrent?: () => Promise<void | boolean>
   ): Promise<boolean> {
     const session = this.sessionStore.getActiveSession();
     const request = view.request;
-    if (!request?.scopeFingerprint || !view.priorReviewId || this.manualToolApproval
-      || session.id !== view.sessionId || request.sessionId !== session.id || request.approvalMode !== 'delegate'
-      || normalizeApprovalMode(session.approvalMode) !== 'delegate') return false;
-    const id = view.id = randomUUID();
+    if (!request?.scopeFingerprint || !view.priorReviewId || this.manualToolApproval) return false;
     const runtimeId = this.approvalReviews.runtimeId;
     const epoch = this.externalAuthorizationEpoch ?? 0;
-    const config = this.approvalReviewerSettingKey();
-    const deadline = Date.now() + getConfiguredModelRequestTimeoutMs();
-    const valid = () => !signal?.aborted && Date.now() < deadline && vscode.workspace.isTrusted
-      && this.approvalReviews.runtimeId === runtimeId && !session.pendingHistoryTruncation
-      && (this.externalAuthorizationEpoch ?? 0) === epoch && session.id === this.sessionStore.activeSessionId
-      && normalizeApprovalMode(session.approvalMode) === 'delegate'
-      && normalizeExecutionMode(session.executionMode) === 'normal'
-      && config === this.approvalReviewerSettingKey()
-      && latestApprovalSegmentId(session) === request.agentRunId
-      && taskForSegment(session, request.agentRunId)?.id === request.rootTaskId;
+    const valid = () => !signal?.aborted && this.manualApprovalCurrent(session, request, runtimeId, epoch);
     if (!valid()) return false;
 
-    let decided = false;
-    let decide!: (approved: boolean, clicked?: boolean) => void;
-    const answer = new Promise<{ approved: boolean; clicked: boolean }>(resolve => {
-      decide = (approved, clicked = false) => {
-        if (decided || this.manualToolApproval !== owner || (clicked && !owner.ready)) return;
-        decided = true;
+    let decision: ManualApprovalResolutionReason | undefined;
+    let decide!: (reason: ManualApprovalResolutionReason) => void;
+    const answer = new Promise<ManualApprovalResolutionReason>(resolve => {
+      decide = reason => {
+        if (decision || this.manualToolApproval !== owner) return;
+        decision = reason;
         owner.ready = false;
-        resolve({ approved, clicked });
+        resolve(reason);
       };
     });
-    const owner = { view: { ...view, id, runtimeId, status: 'waiting' as const }, configuration: config, ready: false, decide };
+    const snapshot = this.createManualApprovalSnapshot(view, request);
+    const owner = { view: { ...view, status: 'waiting' as const }, ready: false, decide };
     this.manualToolApproval = owner;
-    const cancel = () => decide(false);
-    const expiration = setTimeout(cancel, Math.max(0, deadline - Date.now()));
-    expiration.unref?.();
-    signal?.addEventListener('abort', cancel, { once: true });
-    const snapshot: NonNullable<ChatSession['pendingApproval']> = {
-      version: 1, id, sessionId: session.id, rootTaskId: request.rootTaskId, agentRunId: request.agentRunId,
-      targetId: request.targetId, actionHash: request.actionHash, scopeFingerprint: request.scopeFingerprint,
-      priorReviewId: view.priorReviewId, label: view.label.slice(0, 8000), reason: view.reason.slice(0, 4000), status: 'waiting'
-    };
+    const abort = () => decide('user_cancelled');
+    signal?.addEventListener('abort', abort, { once: true });
+    let writing = false;
     try {
-      if ((verifyCurrent && await verifyCurrent() === false) || decided || !valid()) return false;
-      session.pendingApproval = snapshot;
-      await this.sessionStore.persist();
-      if (!decided && valid()) {
+      if ((verifyCurrent && await verifyCurrent() === false) || decision || !valid()) return false;
+      writing = true;
+      await this.saveManualApproval(session, snapshot);
+      writing = false;
+      if (!decision && valid()) {
         owner.ready = true;
         this.postState({ immediate: true, omitMessages: true });
-      } else cancel();
-      const decision = await answer;
-      const verified = !decision.approved || !decision.clicked || !valid() || !verifyCurrent
-        || await verifyCurrent() !== false;
-      view.status = snapshot.status = decision.clicked && verified && valid()
-        ? decision.approved ? 'approved' : 'rejected' : 'cancelled';
-      await this.sessionStore.persist();
-      return view.status === 'approved' && valid();
-    } finally {
-      clearTimeout(expiration);
-      signal?.removeEventListener('abort', cancel);
-      if (this.manualToolApproval === owner) this.manualToolApproval = undefined;
-      if (session.pendingApproval === snapshot && (snapshot.status === 'waiting' || (snapshot.status === 'approved' && !valid()))) {
-        view.status = snapshot.status = 'cancelled';
-        await this.sessionStore.persist();
+      } else decide('stale_request');
+
+      let result = await answer;
+      if (result === 'user_approved' || result === 'user_rejected') {
+        if (!valid() || (verifyCurrent && await verifyCurrent() === false) || !valid()) result = 'stale_request';
       }
+      this.settleManualApproval(snapshot, result);
+      view.status = snapshot.status;
+      view.resolutionReason = result;
+      writing = true;
+      await this.saveManualApproval(session, snapshot);
+      return result === 'user_approved' && valid();
+    } catch (error) {
+      const reason = writing ? 'storage_failed' : 'stale_request';
+      this.settleManualApproval(snapshot, reason);
+      view.status = snapshot.status;
+      view.resolutionReason = reason;
+      throw error;
+    } finally {
+      signal?.removeEventListener('abort', abort);
+      if (this.manualToolApproval === owner) this.manualToolApproval = undefined;
       this.postState({ immediate: true, omitMessages: true });
     }
   }
 
-  private async resumeApprovalProcessing(_authorizeTargetId?: string, _confirmTargetId?: string): Promise<void> {
-    // Recovery only rebuilds review/preflight. It never restores an old click or permit.
-    if (this.isBusy || this.isStartingRun || this.activeDraftRunId || this.delegatedApprovalInFlight || this.activeChangeActions?.size) return;
+  private async prepareBatchManualApproval(view: ManualToolApproval, verifyCurrent: () => Promise<void | boolean>,
+    signal?: AbortSignal): Promise<'pending' | 'approved' | 'rejected' | 'invalidated'> {
+    const request = view.request;
+    const session = this.sessionStore.getActiveSession();
+    if (!request?.scopeFingerprint || !view.priorReviewId) return 'invalidated';
+    const runtime = this.approvalReviews.runtimeId;
+    const epoch = this.externalAuthorizationEpoch ?? 0;
+    const valid = () => !signal?.aborted && this.manualApprovalCurrent(session, request, runtime, epoch);
+    this.batchManualApprovals ??= new Map();
+    const prior = [...this.batchManualApprovals.values()].find(item => item.request.sessionId === request.sessionId
+      && item.request.agentRunId === request.agentRunId && item.request.targetId === request.targetId);
+    const exact = prior?.epoch === epoch && prior.snapshot.runtimeId === runtime
+      && prior.snapshot.policyVersion === APPROVAL_POLICY_VERSION && prior.snapshot.priorReviewId === view.priorReviewId
+      && prior.request.rootTaskId === request.rootTaskId && prior.request.actionKind === request.actionKind
+      && prior.request.actionHash === request.actionHash && prior.request.scopeFingerprint === request.scopeFingerprint
+      && JSON.stringify(prior.request.externalAuthorization) === JSON.stringify(request.externalAuthorization);
+    try {
+      if (!valid() || await verifyCurrent() === false || !valid()) throw new Error(this.t('approvalIdentityMismatch'));
+    } catch (error) {
+      if (prior) {
+        this.batchManualApprovals.delete(prior.snapshot.id);
+        this.settleManualApproval(prior.snapshot, signal?.aborted ? 'user_cancelled' : 'stale_request');
+        await this.saveManualApproval(session, prior.snapshot);
+      }
+      throw error;
+    }
+    if (exact && prior && prior.decision !== 'retry_requested') {
+      view.id = prior.snapshot.id;
+      if (!prior.decision) return 'pending';
+      this.batchManualApprovals.delete(view.id);
+      this.settleManualApproval(prior.snapshot, prior.decision);
+      await this.saveManualApproval(session, prior.snapshot);
+      if (!valid()) return 'invalidated';
+      return prior.decision === 'user_approved' ? 'approved' : 'rejected';
+    }
+    if (prior) {
+      this.batchManualApprovals.delete(prior.snapshot.id);
+      if (prior.snapshot.status === 'waiting') {
+        this.settleManualApproval(prior.snapshot, 'stale_request');
+        await this.saveManualApproval(session, prior.snapshot);
+      }
+      if (prior.decision && prior.decision !== 'retry_requested') return 'invalidated';
+    }
+    if (!valid()) return 'invalidated';
+    const snapshot = this.createManualApprovalSnapshot(view, request);
+    try {
+      await this.saveManualApproval(session, snapshot);
+    } catch (error) {
+      this.settleManualApproval(snapshot, 'storage_failed');
+      throw error;
+    }
+    if (!valid()) {
+      this.settleManualApproval(snapshot, signal?.aborted ? 'user_cancelled' : 'stale_request');
+      await this.saveManualApproval(session, snapshot);
+      return 'invalidated';
+    }
+    this.batchManualApprovals.set(snapshot.id, { snapshot, request, epoch });
+    this.postState({ immediate: true, omitMessages: true });
+    return 'pending';
+  }
+
+  private invalidateManualApprovals(reason: ManualApprovalResolutionReason): void {
+    this.manualToolApproval?.decide(reason);
+    const active = this.sessionStore.getActiveSession();
+    const retired = new Map<ChatSession, ManualApprovalSnapshot[]>();
+    for (const { snapshot } of this.batchManualApprovals?.values() ?? []) {
+      if (snapshot.sessionId !== active.id && reason !== 'session_changed' && reason !== 'host_interrupted') continue;
+      this.batchManualApprovals.delete(snapshot.id);
+      const session = snapshot.sessionId === active.id ? active : this.sessionStore.getSessionById?.(snapshot.sessionId);
+      if (!session) continue;
+      this.settleManualApproval(snapshot, reason);
+      session.pendingApproval = snapshot;
+      session.pendingApprovals = recordManualApproval(session.pendingApprovals, snapshot);
+      const snapshots = retired.get(session) ?? [];
+      snapshots.push(snapshot);
+      retired.set(session, snapshots);
+    }
+    for (const [session, snapshots] of retired) {
+      void this.persistManualApprovalInvalidation(session, snapshots, reason).catch(error => {
+        this.interactionFailure = { sessionId: session.id, message: this.t('runStorageFailed') + ': ' + getErrorMessage(error) };
+        this.postState();
+      });
+    }
+  }
+
+  private async invalidateBatchManualRequest(session: ChatSession, targetId: string, reason: ManualApprovalResolutionReason): Promise<void> {
+    for (const [id, item] of this.batchManualApprovals ?? []) {
+      if (item.request.sessionId !== session.id || item.request.targetId !== targetId) continue;
+      this.batchManualApprovals.delete(id);
+      this.settleManualApproval(item.snapshot, reason);
+      await this.saveManualApproval(session, item.snapshot);
+    }
+  }
+
+  private async persistManualApprovalInvalidation(session: ChatSession, snapshots: ManualApprovalSnapshot[], reason: ManualApprovalResolutionReason): Promise<void> {
+    const processing = session.approvalProcessing;
+    if (processing && !this.delegatedApprovalInFlight) {
+      const cancelled = reason === 'user_cancelled';
+      for (const snapshot of snapshots) {
+        const target = processing.targets.find(t => t.id === snapshot.targetId && processing.runId === snapshot.agentRunId);
+        if (!target || !['manual_required', 'review_unavailable', 'paused'].includes(target.status)) continue;
+        const explanation = cancelled ? this.t('approvalManualCancelled') : target.reason;
+        if (target.kind === 'command') {
+          const run = this.draftRuns.get(target.id);
+          if (!run || run.sessionId !== session.id || run.agentRunId !== snapshot.agentRunId || run.status !== 'pending') continue;
+          const settled = cancelled ? this.draftRuns.markNotExecuted(run.id, run.specHash, { reason: explanation, status: 'cancelled' })
+            : this.draftRuns.setPendingApproval(run.id, run.specHash, { status: 'paused', reason: explanation, failureCode: reason });
+          if (!settled) continue;
+        } else if (cancelled) {
+          const edit = this.changeSets.getPendingEdit(target.id);
+          if (!edit || edit.sessionId !== session.id || edit.runId !== snapshot.agentRunId
+            || !this.changeSets.discardEdit(target.id, explanation ?? snapshot.reason)) continue;
+        }
+        target.status = cancelled ? 'cancelled' : 'paused';
+        target.canResume = !cancelled;
+        target.reason = explanation;
+        target.failureCode = reason;
+      }
+      processing.canResume = processing.targets.some(t => t.canResume);
+      processing.status = processing.targets.some(t => t.status === 'manual_required') ? 'waiting_user'
+        : processing.canResume ? 'paused' : 'stopped';
+      processing.updatedAt = new Date().toISOString();
+      await Promise.all([this.sessionStore.persist('manual_approval_invalidated'), this.changeSets.flush(), this.draftRuns.flush()]);
+    } else {
+      await this.sessionStore.persist('manual_approval_invalidated');
+    }
+    this.postState({ immediate: true, omitMessages: true });
+  }
+
+  private approvalRecovery(session: ChatSession) {
+    const state = session.approvalProcessing;
+    if (!state || session.approvalMode !== 'delegate' || !vscode.workspace.isTrusted
+      || normalizeExecutionMode(session.executionMode) !== 'normal' || !state.canResume
+      || session.pendingHistoryTruncation || latestApprovalSegmentId(session) !== state.runId
+      || taskForSegment(session, state.runId)?.id !== state.rootTaskId) return null;
+    return { sessionId: session.id, runId: state.runId, rootTaskId: state.rootTaskId,
+      canResume: !(this.isBusy || this.isStartingRun || this.activeDraftRunId || this.delegatedApprovalInFlight
+        || this.reservingApprovalResume || this.interactionCoordinator?.current || this.activeChangeActions?.size || this.runContextRefreshInFlight
+        || this.delegatedApprovals?.hasPending?.(session.id)) };
+  }
+
+  private manualApprovalViews(session: ChatSession) {
+    const recovery = this.approvalRecovery(session);
+    const rows = new Map<string, ManualApprovalSnapshot>();
+    for (const row of session.pendingApprovals ?? (session.pendingApproval ? [session.pendingApproval] : [])) {
+      if (row.agentRunId === latestApprovalSegmentId(session)) rows.set(row.targetId, row);
+    }
+    return [...rows.values()].flatMap(snapshot => {
+      if (['approved', 'rejected', 'cancelled'].includes(snapshot.status)) return [];
+      const inline = this.manualToolApproval;
+      const item = this.batchManualApprovals?.get(snapshot.id);
+      const live = Boolean(inline?.ready && inline.view.id === snapshot.id
+        || item && !item.decision && snapshot.status === 'waiting'
+          && this.manualApprovalCurrent(session, item.request, this.approvalReviews.runtimeId, item.epoch));
+      const canDecide = live && !this.reservingManualDecision && (inline?.ready && inline.view.id === snapshot.id || recovery?.canResume === true);
+      const canResume = !live && recovery?.canResume === true
+        && session.approvalProcessing?.targets.some(t => t.id === snapshot.targetId && !['denied', 'hard_blocked', 'cancelled'].includes(t.status));
+      return [{ ...snapshot, status: live ? 'waiting' as const : 'interrupted' as const,
+        exactAction: live ? manualApprovalActionPreview((item?.request ?? inline?.view.request)?.exactAction) : undefined,
+        canDecide, canRetry: canDecide && this.canRetryManualReview(snapshot), canResume: Boolean(canResume) }];
+    });
+  }
+
+  private canRetryManualReview(snapshot: ManualApprovalSnapshot): boolean {
+    return snapshot.reviewState !== undefined && MANUAL_FALLBACK_STATES.includes(snapshot.reviewState);
+  }
+
+  private async resolveManualApproval(message: { id: string; sessionId?: string; runtimeId?: string },
+    decision: ManualApprovalResolutionReason): Promise<void> {
+    const session = this.sessionStore.getActiveSession();
+    const runtime = this.approvalReviews.runtimeId;
+    if ((message.sessionId !== undefined && message.sessionId !== session.id)
+      || (message.runtimeId !== undefined && message.runtimeId !== runtime)) return;
+    const live = this.manualToolApproval;
+    const saved = session.pendingApproval;
+    if (live?.ready && live.view.id === message.id && live.view.sessionId === session.id && live.view.request
+      && live.view.runtimeId === runtime && saved?.status === 'waiting' && saved.id === live.view.id
+      && saved.rootTaskId === live.view.request.rootTaskId && saved.agentRunId === live.view.request.agentRunId
+      && saved.targetId === live.view.request.targetId && saved.actionHash === live.view.request.actionHash
+      && saved.scopeFingerprint === live.view.request.scopeFingerprint) {
+      if (decision === 'retry_requested' && !this.canRetryManualReview(saved)) return;
+      live.decide(decision);
+      return;
+    }
+    const item = this.batchManualApprovals?.get(message.id);
+    if (!item || item.decision || this.reservingManualDecision || item.snapshot.status !== 'waiting' || !item.snapshot.priorReviewId
+      || (decision === 'retry_requested' && !this.canRetryManualReview(item.snapshot))
+      || !this.approvalRecovery(session)?.canResume
+      || !this.manualApprovalCurrent(session, item.request, runtime, item.epoch)) {
+      this.postState({ immediate: true, omitMessages: true });
+      return;
+    }
+
+    // Reserve this one click before any await. Only a rebuilt, matching batch may consume it.
+    this.reservingManualDecision = message.id;
+    item.decision = decision;
+    if (decision === 'retry_requested') this.settleManualApproval(item.snapshot, decision);
+    try {
+      await this.saveManualApproval(session, item.snapshot);
+      if (this.batchManualApprovals.get(message.id) !== item
+        || !this.manualApprovalCurrent(session, item.request, runtime, item.epoch)) return;
+      if (decision === 'retry_requested') this.batchManualApprovals.delete(message.id);
+      await this.resumeApprovalProcessing(undefined, undefined, {
+        sessionId: session.id, runId: item.request.agentRunId, rootTaskId: item.request.rootTaskId,
+        targetId: item.request.targetId, priorReviewId: item.snapshot.priorReviewId, retry: decision === 'retry_requested'
+      });
+    } catch (error) {
+      this.batchManualApprovals.delete(message.id);
+      this.settleManualApproval(item.snapshot, 'storage_failed');
+      const processing = session.approvalProcessing;
+      const target = processing?.runId === item.request.agentRunId
+        ? processing.targets.find(t => t.id === item.request.targetId) : undefined;
+      if (processing && target) {
+        target.status = 'paused';
+        target.canResume = true;
+        target.failureCode = 'audit_persistence_failed';
+        target.reason = redactSensitiveReviewText(getErrorMessage(error), 2000);
+        processing.status = processing.targets.some(t => t.status === 'manual_required') ? 'waiting_user' : 'paused';
+        processing.canResume = true;
+        processing.reason = target.reason;
+        processing.updatedAt = new Date().toISOString();
+      }
+      throw error;
+    } finally {
+      if (this.reservingManualDecision === message.id) this.reservingManualDecision = undefined;
+      this.postState({ immediate: true, omitMessages: true });
+    }
+  }
+
+  private async resumeApprovalProcessing(authorizeTargetId?: string, confirmTargetId?: string,
+    identity?: { sessionId?: string; runId?: string; rootTaskId?: string; targetId?: string; priorReviewId?: string; retry?: boolean }): Promise<void> {
     const session = this.sessionStore.getActiveSession();
     const state = session.approvalProcessing;
-    if (session.approvalMode !== 'delegate' || !vscode.workspace.isTrusted || state?.version !== 2
-      || state.status !== 'blocked' || !state.canResume || latestApprovalSegmentId(session) !== state.runId
-      || taskForSegment(session, state.runId)?.id !== state.rootTaskId) return;
-    state.canResume = false;
-    this.delegatedApprovals.enqueue({ sessionId: session.id, runId: state.runId, rootTaskId: state.rootTaskId,
-      editIds: state.targets.filter(t => t.kind === 'edit').map(t => t.id),
-      draftRunIds: state.targets.filter(t => t.kind === 'command').map(t => t.id) });
-    await this.sessionStore.persist();
-    this.postState();
+    const recovery = this.approvalRecovery(session);
+    if (!state || !recovery?.canResume || (this.reservingManualDecision && !identity?.priorReviewId)
+      || (identity?.sessionId && identity.sessionId !== recovery.sessionId)
+      || (identity?.runId && identity.runId !== recovery.runId)
+      || (identity?.rootTaskId && identity.rootTaskId !== recovery.rootTaskId)) return;
+    const targetId = identity?.targetId ?? authorizeTargetId ?? confirmTargetId;
+    if (targetId && !state.targets.some(t => t.id === targetId
+      && ['manual_required', 'review_unavailable', 'dependency_blocked', 'needs_authorization',
+        'external_authorization_required', 'insufficient_launch_evidence', 'needs_replan', 'paused', 'pending'].includes(t.status))) return;
+    this.reservingApprovalResume = true;
+    const epoch = this.externalAuthorizationEpoch ?? 0;
+    try {
+      await this.sessionStore.persist('approval_resume');
+      if (this.sessionStore.activeSessionId !== session.id || session.approvalProcessing !== state
+        || latestApprovalSegmentId(session) !== state.runId || session.approvalMode !== 'delegate'
+        || !vscode.workspace.isTrusted || session.pendingHistoryTruncation
+        || (this.externalAuthorizationEpoch ?? 0) !== epoch) return;
+      this.delegatedApprovals.enqueue({ sessionId: session.id, runId: state.runId, rootTaskId: state.rootTaskId,
+        backgroundRunId: this.backgroundRunCoordinator?.getActiveRun()?.id === state.backgroundRunId ? state.backgroundRunId : undefined,
+        editIds: state.targets.filter(t => t.kind === 'edit').map(t => t.id),
+        draftRunIds: state.targets.filter(t => t.kind === 'command').map(t => t.id),
+        resume: true, resumeTargetId: targetId, manualAction: targetId && identity?.priorReviewId
+          ? { targetId, priorReviewId: identity.priorReviewId, retry: identity.retry } : undefined });
+      this.scheduleDraftRunAutoContinuation();
+    } finally {
+      this.reservingApprovalResume = false;
+      this.postState();
+    }
   }
 
   private async loadTaskBudget(session: ChatSession, link: UserTaskLink, titleOwnsLease = false): Promise<UserTaskBudget | undefined> {
@@ -729,7 +1013,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.sharedProjectSources?.dispose();
     this.pluginSkillPreviewRegistration?.dispose();
     this.pluginSkillPreviews.clear();
-    this.manualToolApproval?.decide(false);
+    this.invalidateManualApprovals('host_interrupted');
     this.changeActionAbortController?.abort();
     clearInterval(this.taskTimingTimer);
     this.taskClock?.dispose();
@@ -761,9 +1045,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     this.syncConfiguredState();
-    if (this.manualToolApproval && this.manualToolApproval.configuration !== this.approvalReviewerSettingKey()) {
-      this.manualToolApproval.decide(false);
-    }
     this.postState();
     void this.refreshModelSourceState().then(() => this.postState()).catch(() => undefined);
     void this.refreshSkills({ post: false }).then(() => this.postState()).catch(() => undefined);
@@ -787,6 +1068,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     try {
       await this.sessionInitialization;
       await this.historyTruncationRecovery;
+      this.invalidateManualApprovals('session_changed');
       if (!(await this.sessionStore.setWorkspaceScope(getCurrentWorkspaceSessionScope(), { fresh: true }))) return;
       const session = this.sessionStore.getActiveSession();
       this.interactions.update(operation, 'preparing_context', session.id);
@@ -1372,6 +1654,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
             this.postState();
             return;
           }
+          this.externalAuthorizationEpoch = (this.externalAuthorizationEpoch ?? 0) + 1;
+          this.invalidateManualApprovals('mode_changed');
           this.postState();
         }
         return;
@@ -1379,20 +1663,15 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         if (this.sessionStore.getActiveSession().approvalMode === 'delegate' && message.action === 'start_execution') return;
         await this.handlePlanDecision(message.planId, message.action);
         return;
-      case 'resolveValidationApproval': {
-        const session = this.sessionStore.getActiveSession();
-        const live = this.manualToolApproval?.view;
-        const saved = session.pendingApproval;
-        if (live?.id === message.id && live.sessionId === session.id && live.request
-          && live.runtimeId === this.approvalReviews.runtimeId && saved?.status === 'waiting'
-          && saved.id === live.id
-          && saved.rootTaskId === live.request.rootTaskId && saved.agentRunId === live.request.agentRunId
-          && saved.targetId === live.request.targetId && saved.actionHash === live.request.actionHash
-          && saved.scopeFingerprint === live.request.scopeFingerprint) this.manualToolApproval?.decide(message.approve === true, true);
+      case 'resolveValidationApproval':
+      case 'retryManualApproval':
+        await this.resolveManualApproval(message, message.type === 'retryManualApproval' ? 'retry_requested'
+          : message.approve ? 'user_approved' : 'user_rejected').catch(error => {
+          vscode.window.showWarningMessage(getErrorMessage(error));
+        });
         return;
-      }
       case 'resumeApprovalProcessing':
-        await this.resumeApprovalProcessing(message.authorizeTargetId, message.confirmTargetId).catch(error => {
+        await this.resumeApprovalProcessing(message.authorizeTargetId, message.confirmTargetId, message).catch(error => {
           vscode.window.showWarningMessage(getErrorMessage(error));
         });
         return;
@@ -1415,7 +1694,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           this.draftRunBatches?.cancel();
           this.delegatedApprovals.cancel();
           this.externalAuthorizationEpoch = (this.externalAuthorizationEpoch ?? 0) + 1;
-          this.manualToolApproval?.decide(false);
+          this.invalidateManualApprovals('mode_changed');
           this.externalEffectGrants?.clear();
           this.authorizedExternalExecutionUris?.clear();
           if (this.hasActiveBackgroundRun()) await this.stopBackgroundRun();
@@ -1817,14 +2096,18 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       case 'cloneDraftRun': {
         const session = this.sessionStore.getActiveSession();
         const feedback = { type: 'draftRunCloneFeedback', sourceDraftRunId: message.id, sessionId: session.id };
-        if (normalizeApprovalMode(session.approvalMode) !== 'ask' || this.isBusy || this.isStartingRun
-          || this.runContextRefreshInFlight || this.activeDraftRunId) {
+        if (this.isBusy || this.isStartingRun || this.runContextRefreshInFlight || this.activeDraftRunId || this.delegatedApprovalInFlight) {
           this.postToWebview({ ...feedback, success: false });
           return;
         }
         const source = this.draftRuns.get(message.id);
         if (!source || source.sessionId !== session.id || source.historyInvalidationId || source.historyOriginUnverified) {
           this.postToWebview({ ...feedback, success: false });
+          return;
+        }
+        if (session.approvalMode === 'delegate') {
+          const clone = await this.reproposeUndispatchedApproval(session, source);
+          this.postToWebview({ ...feedback, success: Boolean(clone), ...(clone ? { draftRunId: clone.id } : {}) });
           return;
         }
         if (source.status === 'needs_replan') {
@@ -2251,7 +2534,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.sessionRecoveryReady = false;
     this.updateRequestContextReadiness();
     this.externalAuthorizationEpoch = (this.externalAuthorizationEpoch ?? 0) + 1;
-    this.manualToolApproval?.decide(false);
+    this.invalidateManualApprovals('session_changed');
     this.changeActionAbortController?.abort();
     this.draftRunBatches?.cancel();
     this.delegatedApprovals.cancel();
@@ -4668,10 +4951,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   private abortPrompt(): void {
     this.externalAuthorizationEpoch = (this.externalAuthorizationEpoch ?? 0) + 1;
-    this.manualToolApproval?.decide(false);
+    this.invalidateManualApprovals('user_cancelled');
     this.changeActionAbortController?.abort();
     this.draftRunBatches?.cancel();
-    this.delegatedApprovals.cancel();
+    this.delegatedApprovals.cancel(Object.assign(new Error(this.t('approvalManualCancelled')), { code: 'user_cancelled' }));
     this.externalEffectGrants?.clear();
     this.authorizedExternalExecutionUris?.clear();
     this.currentRunAbortController?.abort();
@@ -4960,7 +5243,14 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     this.flushDraftRunOutputEvent();
-    this.postToWebview({ type: 'draftRunStateChanged', draftRun: event.draftRun });
+    this.postToWebview({ type: 'draftRunStateChanged', draftRun: this.projectDraftRunApprovalAction(event.draftRun) });
+  }
+
+  private projectDraftRunApprovalAction(run: WebviewDraftRun, session = this.sessionStore.getActiveSession()): WebviewDraftRun {
+    if (!run.canReproposeUndispatchedApproval) return run;
+    return vscode.workspace.isTrusted && run.sessionId === session.id && session.approvalMode === 'delegate'
+      && run.agentRunId === latestApprovalSegmentId(session) && normalizeExecutionMode(session.executionMode) === 'normal'
+      && !session.pendingHistoryTruncation ? run : { ...run, canReproposeUndispatchedApproval: undefined };
   }
 
   private flushDraftRunOutputEvent(): void {
@@ -5880,7 +6170,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       if (handoff && inherited?.id !== sendOptions.approvalRootTaskId) throw new Error(this.t('approvalIdentityMismatch'));
       if (!continuing && !inherited) {
         this.externalAuthorizationEpoch = (this.externalAuthorizationEpoch ?? 0) + 1;
-        this.manualToolApproval?.decide(false);
+        this.invalidateManualApprovals(sendOptions.replaceMessageId ? 'history_changed' : 'stale_request');
         this.delegatedApprovals.cancel(); this.externalEffectGrants?.clear();
       }
       const userMessageId = randomUUID();
@@ -5940,7 +6230,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       invalidateOperations: async (scope: HistoryTruncationScope) => {
         this.retireTruncatedTitleWork(session, scope.removedMessageIds);
         this.externalAuthorizationEpoch = (this.externalAuthorizationEpoch ?? 0) + 1;
-        this.manualToolApproval?.decide(false);
+        this.invalidateManualApprovals('history_changed');
         this.externalEffectGrants?.clear();
         this.authorizedExternalReferenceUris?.clear();
         this.authorizedExternalExecutionUris?.clear();
@@ -7580,7 +7870,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const contextPercent = contextUsage.usedPercent;
 
     const webviewChangeSets = this.changeSets.toWebviewState(activeSession.id);
-    const webviewDraftRuns = this.draftRuns.toWebviewState(activeSession.id);
+    const webviewDraftRuns = this.draftRuns.toWebviewState(activeSession.id).map(run => this.projectDraftRunApprovalAction(run, activeSession));
+    const manualToolApprovals = this.manualApprovalViews(activeSession);
     const visibleLimit = this.getVisibleMessageLimit(activeSession.id);
     const visibleMessages = options.omitMessages
       ? undefined
@@ -7675,8 +7966,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         planWorkflows: getPlanWorkflowViews(activeSession),
         approvalMode: normalizeApprovalMode(activeSession.approvalMode),
         approvalProcessing: activeSession.approvalProcessing,
-        manualToolApproval: this.manualToolApproval?.ready && this.manualToolApproval.view.sessionId === activeSession.id
-          ? this.manualToolApproval.view : null,
+        approvalRecovery: this.approvalRecovery(activeSession),
+        manualToolApprovals,
+        manualToolApproval: manualToolApprovals.find(row => this.manualToolApproval?.view.id === row.id) ?? null,
         pendingApproval: activeSession.pendingApproval,
         commandSettingsReadiness: { ...this.commandSettingsReadiness },
         startup: this.getStartupState(),
@@ -8261,6 +8553,34 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       { selectedProjectUri: session.projectScopeUri, authorizedUris });
   }
 
+  private async reproposeUndispatchedApproval(session: ChatSession, source: DraftRun): Promise<DraftRun | undefined> {
+    const task = taskForSegment(session, source.agentRunId);
+    if (!task || this.delegatedApprovals.hasPending(session.id) || this.findRunSafetyDenial(session, source)) return;
+    const epoch = this.externalAuthorizationEpoch;
+    const project = session.projectScopeUri;
+    const isCurrent = () => vscode.workspace.isTrusted && this.sessionStore.activeSessionId === session.id
+      && session.approvalMode === 'delegate' && normalizeExecutionMode(session.executionMode) === 'normal'
+      && !session.pendingHistoryTruncation && latestApprovalSegmentId(session) === source.agentRunId
+      && this.externalAuthorizationEpoch === epoch && session.projectScopeUri === project;
+    if (!isCurrent()) return;
+    const operation = this.interactions.begin('continuation', session.id, 'action');
+    if (!operation) return;
+    try {
+      const rootTaskRunIds = new Set(this.getRootTaskDraftRuns(session, task.id).map(run => run.id));
+      const clone = await this.draftRuns.reproposeUndispatchedApproval(source.id, source.specHash,
+        new Set(), { sessionId: session.id, agentRunId: source.agentRunId, rootTaskRunIds, selectedProjectUri: project, isCurrent });
+      if (clone && isCurrent()) {
+        this.delegatedApprovals.enqueue({ sessionId: session.id, runId: clone.agentRunId, rootTaskId: task.id,
+          editIds: [], draftRunIds: [clone.id], resume: true });
+        this.scheduleDraftRunAutoContinuation();
+      }
+      return clone;
+    } finally {
+      this.interactions.finish(operation);
+      this.postState();
+    }
+  }
+
   private async executeDelegatedApprovals(next: NonNullable<ReturnType<DelegatedApprovalQueue['take']>>): Promise<void> {
     let use: { release(): Promise<void> } | undefined;
     try {
@@ -8298,7 +8618,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const work = this.enterTaskWork(session, taskForSegment(session, batch.runId));
     const priorProcessing = session.approvalProcessing;
     const sameCompletedBatch = isCompletedApprovalBatch(priorProcessing, batch);
-    if (sameCompletedBatch) { work?.finish(); this.delegatedApprovals.finish(controller); return; }
+    if (sameCompletedBatch || !batch.resume && priorProcessing?.runId === batch.runId
+      && ['waiting_user', 'paused'].includes(priorProcessing.status)) {
+      work?.finish(); this.delegatedApprovals.finish(controller); return;
+    }
     const explicitCorrection = taskLinkForGoal?.reason === 'recovery'
       && session.messages.some(message => message.role === 'user' && message.userTask?.id === rootTaskId
         && message.userTask.reason === 'recovery' && requestsCommandCorrection(message.content));
@@ -8309,23 +8632,52 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     const processing = createApprovalProcessing(batch, rootTaskId, priorProcessing);
-    const held = (id: string) => {
-      const target = processing.targets.find(item => item.id === id);
-      return target?.status === 'hard_blocked' || (!!target && ['manual_required', 'denied'].includes(target.status)
-        && batch.confirmTargetId !== id);
-    };
+    const held = (id: string) => processing.targets.some(target => target.id === id && target.status !== 'pending');
     session.approvalProcessing = processing;
     const report = (id: string, status: typeof processing.targets[number]['status'], reason?: string, failureCode?: string) => {
       const target = processing.targets.find(target => target.id === id);
       const safeReason = reason && redactSensitiveReviewText(reason, 2000);
-      if (target) { target.status = status; target.reason = safeReason; target.failureCode = failureCode; }
+      if (target) {
+        target.status = status;
+        target.reason = safeReason;
+        target.failureCode = failureCode;
+        target.canResume = ['manual_required', 'paused', 'review_unavailable', 'external_authorization_required', 'insufficient_launch_evidence'].includes(status) || undefined;
+        if (status !== 'dependency_blocked') target.dependency = undefined;
+      }
       if (safeReason) processing.reason ??= safeReason;
       processing.updatedAt = new Date().toISOString();
     };
     const blocked = () => processing.targets.some(target => !['executed', 'already_processed'].includes(target.status));
+    const awaitDependency = (id: string, dependency: typeof processing.targets[number]['dependency'], reason?: string, code?: string) => {
+      const target = processing.targets.find(item => item.id === id)!;
+      target.dependency = dependency;
+      report(id, 'dependency_blocked', reason, code);
+      if (dependency && (!code || ['dependency_unsettled', 'dependency_independence_unverified'].includes(code))
+        && (this.draftRuns.get(dependency.targetId)?.status === 'pending'
+        || this.changeSets.getPendingEdit(dependency.targetId))) {
+        const prerequisite = processing.targets.find(item => item.id === dependency.targetId);
+        target.canResume = !prerequisite || prerequisite.canResume || prerequisite.status === 'pending' || undefined;
+      }
+    };
+    const pauseUnstarted = (target: typeof processing.targets[number], reason?: string, code?: string) => {
+      if (target.dependency && !processing.targets.some(prerequisite => prerequisite.id === target.dependency?.targetId
+        && ['executed', 'already_processed'].includes(prerequisite.status))) {
+        awaitDependency(target.id, target.dependency, target.reason ?? target.dependency.reason ?? this.t('approvalDependencyBlocked'));
+      } else report(target.id, 'paused', reason, code);
+    };
     const retireUnstarted = () => {
       for (const target of processing.targets) {
         if (['executed', 'already_processed', 'pending'].includes(target.status)) continue;
+        if (target.canResume || target.status === 'dependency_blocked') {
+          if (target.kind !== 'command') continue;
+          const run = this.draftRuns.get(target.id);
+          if (run?.sessionId !== batch.sessionId || run.agentRunId !== batch.runId || run.status !== 'pending') continue;
+          draftDispositionChanged = (target.status === 'dependency_blocked'
+            ? this.draftRuns.setPendingDependency(run.id, run.specHash, target.dependency)
+            : this.draftRuns.setPendingApproval(run.id, run.specHash, { status: target.status === 'manual_required' ? 'waiting_user' : 'paused',
+              reason: target.reason, failureCode: target.failureCode })) || draftDispositionChanged;
+          continue;
+        }
         if (target.kind === 'edit') {
           const edit = this.changeSets.getPendingEdit(target.id);
           if (edit?.sessionId === batch.sessionId && edit.runId === batch.runId) {
@@ -8336,7 +8688,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         const run = this.draftRuns.get(target.id);
         if (run?.sessionId === batch.sessionId && run.agentRunId === batch.runId && run.status === 'pending') {
           draftDispositionChanged = this.draftRuns.markNotExecuted(run.id, run.specHash, {
-            replan: target.replan, dependency: target.dependency, reason: target.reason ?? this.t('approvalAutoStopped')
+            replan: target.replan, dependency: target.dependency, reason: target.reason ?? this.t('approvalAutoStopped'),
+            status: target.status === 'denied' ? 'rejected' : target.status === 'cancelled' ? 'cancelled' : undefined
           }) || draftDispositionChanged;
         }
       }
@@ -8409,34 +8762,27 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       report(run.id, 'needs_replan', observation?.repeatedOf ? this.t('draftRunCorrectionStopped') : result.reason,
         observation?.repeatedOf ? 'command_correction_repeated' : undefined);
     };
-    const settleDependencies = (retire: boolean) => {
-      if (releaseBatch) return;
-      const blockerIndex = processing.targets.findIndex(target => !['executed', 'already_processed', 'pending'].includes(target.status));
-      const firstBlocker = processing.targets[blockerIndex];
-      const blockerRun = firstBlocker?.kind === 'command' ? this.draftRuns.get(firstBlocker.id) : undefined;
-      const dependency: ApprovalDependency | undefined = firstBlocker ? { targetId: firstBlocker.id,
-        label: blockerRun ? draftDependencyLabel(blockerRun) : this.t('approvalDependencyBlocked'), reason: firstBlocker.reason } : undefined;
-      for (const [index, target] of processing.targets.entries()) {
+    const settleDependencies = () => {
+      for (const target of processing.targets) {
         if (target.status !== 'pending') continue;
-        if (controller.signal.aborted) { target.status = 'cancelled'; continue; }
-        const precedingDependency = dependency && index > blockerIndex ? dependency : undefined;
-        if (!precedingDependency && !circuitBreakReason && !reviewerUnavailable) continue;
-        target.status = 'dependency_blocked';
-        target.dependency = precedingDependency;
-        const diagnosis = diagnoses.get(target.id);
-        target.replan = diagnosis ? { ...diagnosis, dependsOn: precedingDependency?.targetId } : undefined;
-        target.reason = target.replan?.reason;
-        if (target.kind !== 'command' || !precedingDependency) continue;
-        const run = this.draftRuns.get(target.id);
-        if (!run || run.sessionId !== batch.sessionId || run.agentRunId !== batch.runId) continue;
-        if (run.status === 'pending') {
-          const saved = retire
-            ? this.draftRuns.markNotExecuted(run.id, run.specHash, { replan: target.replan, dependency: precedingDependency })
-            : this.draftRuns.setPendingDependency(run.id, run.specHash, precedingDependency);
-          if (!saved && retire) throw new Error(this.t('approvalIdentityMismatch'));
-          draftDispositionChanged ||= saved;
-        }
+        target.replan ??= diagnoses.get(target.id);
+        if (!controller.signal.aborted && !circuitBreakReason && !editOutcomeUnknown && !processing.reason) continue;
+        const cancelled = controller.signal.aborted && controller.signal.reason?.code === 'user_cancelled';
+        const reason = processing.reason ?? circuitBreakReason ?? target.replan?.reason ?? this.t('approvalInterrupted');
+        if (cancelled) report(target.id, 'cancelled', reason, 'user_cancelled');
+        else pauseUnstarted(target, reason);
       }
+    };
+    const markRecoverableBatch = () => {
+      const waiting = processing.targets.some(target => target.status === 'manual_required');
+      const paused = processing.targets.some(target => target.canResume);
+      if (!waiting && !paused) return false;
+      processing.status = waiting ? 'waiting_user' : 'paused';
+      processing.canResume = true;
+      processing.pausedAt ??= new Date(Date.now()).toISOString();
+      processing.reason = processing.targets.find(target => target.status === 'manual_required')?.reason
+        ?? processing.targets.find(target => target.canResume)?.reason ?? processing.reason;
+      return true;
     };
     let safetyClock: ExecutionClock | undefined;
     let releaseSafety: (() => void) | undefined;
@@ -8492,6 +8838,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         costBudget = new ExecutionCostBudget(safety.maxCost ?? 0, safety.usedCostByCurrency);
         if (safety.budgetLimits) runBudget = new LogicalRunBudget(safety.runBudget, safety.budgetLimits,
           new SharedUpstreamTokenBudget(safety.budgetLimits.maxTreeUpstreamTokens, safety.runBudget?.treeUpstreamTokens ?? 0), safety.maxExecutionMs);
+        const now = Date.now();
+        const pausedAt = batch.resume && priorProcessing?.runId === batch.runId && priorProcessing.pausedAt
+          ? Date.parse(priorProcessing.pausedAt) : undefined;
+        if (runBudget && pausedAt !== undefined && pausedAt <= now && runBudget.deadlineAt !== undefined && safety.maxExecutionMs > 0) {
+          const remainingMs = Math.max(0, Math.min(runBudget.deadlineAt - pausedAt, safety.maxExecutionMs - safety.usedMs));
+          runBudget.state.deadlineAt = new Date(now + remainingMs).toISOString();
+        }
       }
       // Persist the complete review surface before the first effect.
       await this.changeSets.flush();
@@ -8500,8 +8853,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       await this.sessionStore.persist();
       const pendingEditIds = circuitBreakReason ? [] : batch.editIds;
       const reviewerConfiguration = async (request: ApprovalReviewRequest, record: ApprovalReviewRecord) => {
-        const context = await this.getApprovalReviewerModelContext(batch.runId);
-        await this.approvalReviewer.assertReviewerConfiguration(request, context, record);
+        if (record.approvalSource === 'auto_approval_review') {
+          const context = await this.getApprovalReviewerModelContext(batch.runId);
+          await this.approvalReviewer.assertReviewerConfiguration(request, context, record);
+        }
         if (!isAuthorized()) throw new Error(this.t('approvalIdentityMismatch'));
       };
       const reviewAction = async (
@@ -8519,86 +8874,132 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         if (!isAuthorized()) return undefined;
         const denied = this.approvalReviews.findSafetyDenial(request)
           ?? this.approvalReviews.findDenialForAction(request);
-        if (denied) return { record: denied, reviewerRecord: denied, reused: true };
+        if (denied) {
+          if (batch.manualAction?.targetId === request.targetId) await this.invalidateBatchManualRequest(session, request.targetId, 'stale_request');
+          return { record: denied, reviewerRecord: denied, reused: true };
+        }
         this.setAgentActivity({ base: 'thinking', phase: 'reviewing_tool_result',
           detail: this.t('approvalAutoReviewingTarget', { target: label }) });
-        const context = await this.getApprovalReviewerModelContext(batch.runId);
-        if (!isAuthorized()) return undefined;
-        let inProgress: ApprovalReviewRecord | undefined;
         let outcome: ApprovalReviewOutcome;
-        try {
-          outcome = await this.approvalReviewer.review(request, {
-            ...context, taskCostBudget: costBudget, taskRunBudget: runBudget
-          }, controller.signal, record => {
-            inProgress = record;
-            this.attachApprovalReviewToRunDetails(record);
-            this.postState();
-          });
-        } catch (error) {
-          if (inProgress) this.attachApprovalReviewToRunDetails({ ...inProgress, reviewState: 'interrupted' });
-          throw error;
+        const manualAction = batch.manualAction?.targetId === request.targetId ? batch.manualAction : undefined;
+        if (manualAction && !this.approvalReviews.matchesSnapshot(manualAction.priorReviewId, request)) {
+          await this.invalidateBatchManualRequest(session, request.targetId, 'stale_request');
+          report(request.targetId, 'paused', this.t('approvalIdentityMismatch'), 'request_invalidated');
+          return undefined;
+        }
+        if (manualAction && !manualAction.retry) {
+          const prior = this.approvalReviews.get(manualAction.priorReviewId);
+          if (!prior) return undefined;
+          outcome = { record: prior, status: prior.decision === 'unavailable' ? 'unavailable' : 'reviewed' };
+        } else {
+          const context = await this.getApprovalReviewerModelContext(batch.runId);
+          if (!isAuthorized()) return undefined;
+          const previousId = batch.resume && !manualAction ? this.approvalReviews.getLatestForTarget(request.targetId)?.reviewId : undefined;
+          const previous = previousId ? this.approvalReviews.get(previousId) : undefined;
+          const original = previous?.approvalSource === 'user_click' && previous.priorReviewId
+            ? this.approvalReviews.get(previous.priorReviewId) : previous;
+          const draft = request.actionKind === 'draft_run_execute' ? this.draftRuns.get(request.targetId) : undefined;
+          const unstarted = draft ? draft.status === 'pending' && draft.executionStarted === false && draft.executionPhase === 'not_dispatched'
+            : !!this.changeSets.getPendingEdit(request.targetId);
+          const recovered = original?.approvalSource === 'auto_approval_review' && original.decision !== 'deny'
+            && original.actionHash === request.actionHash && unstarted;
+          const retry = manualAction ? { retryOf: manualAction.priorReviewId } : recovered
+            ? { retryOf: original.reviewId, recovery: 'not_dispatched' as const } : undefined;
+          let inProgress: ApprovalReviewRecord | undefined;
+          try {
+            outcome = await this.approvalReviewer.review(request, {
+              ...context, taskCostBudget: costBudget, taskRunBudget: runBudget
+            }, controller.signal, record => {
+              inProgress = record;
+              this.attachApprovalReviewToRunDetails(record);
+              this.postState();
+            }, retry);
+          } catch (error) {
+            if (inProgress) this.attachApprovalReviewToRunDetails({ ...inProgress, reviewState: 'interrupted' });
+            throw error;
+          }
         }
         const reviewerRecord = outcome.record;
         this.attachApprovalReviewToRunDetails(reviewerRecord);
+        const target = processing.targets.find(item => item.id === request.targetId);
+        if (target) target.reviewId = reviewerRecord.reviewId;
         if (!isAuthorized()) return undefined;
         const disposition = approvalDisposition(reviewerRecord);
         const needsGrant = Boolean(options?.targets?.length);
-        if (!outcome.circuitBreakReason && disposition === 'execute' && !needsGrant) {
+        if (!outcome.circuitBreakReason && disposition === 'execute' && !needsGrant && (!manualAction || manualAction.retry)) {
           return { ...outcome, reviewerRecord, reused: false, source: 'auto_approval_review' as const };
         }
-        if (!options?.modelOnly && !outcome.circuitBreakReason
-          && options?.targets?.length && (disposition === 'request_user' || disposition === 'execute')) {
-          const reason = this.t('approvalExternalRequired', { target: options.targets.join(', ') }) + ' · ' + reviewerRecord.rationale;
-          processing.status = 'waiting_user';
-          report(request.targetId, 'manual_required', reason);
+        if (!options?.modelOnly && !outcome.circuitBreakReason && (disposition === 'request_user'
+          || disposition === 'execute' && (needsGrant || manualAction && !manualAction.retry))) {
+          const reason = (needsGrant ? this.t('approvalExternalRequired', { target: options!.targets!.join(', ') }) + ' · ' : '')
+            + reviewerRecord.rationale;
+          report(request.targetId, 'manual_required', reason, reviewerRecord.reviewState ?? reviewerRecord.policyRules[0]);
+          if (target?.kind === 'edit') this.changeSets.attachApprovalReview(request.targetId, reviewerRecord);
+          if (target?.kind === 'command') {
+            this.draftRuns.attachApprovalReview(request.targetId, reviewerRecord);
+            if (!this.draftRuns.setPendingApproval(request.targetId, request.actionHash, { status: 'waiting_user', reason,
+              failureCode: reviewerRecord.reviewState ?? reviewerRecord.policyRules[0] })) throw new Error(this.t('approvalIdentityMismatch'));
+          }
+          try {
+            if (target?.kind === 'command') await this.draftRuns.flush();
+            else await this.changeSets.flush();
+          } catch (error) { throw new ApprovalAuditError(error); }
           saveSafety();
-          work?.setActive(false); releaseSafety?.(); releaseSafety = undefined;
-          this.setAgentActivity({ base: 'waiting', phase: 'awaiting_manual_approval', detail: reason });
           const manual: ManualToolApproval = { id: '', sessionId: batch.sessionId, label, reason, request,
             priorReviewId: reviewerRecord.reviewId, authorizationTargets: options?.targets };
-          const verifyClick = async () => {
-            await reviewerConfiguration(request, reviewerRecord);
-            await verifyCurrent();
-          };
-          const approved = await this.requestManualToolApproval(manual, controller.signal, verifyClick);
+          const answer = await this.prepareBatchManualApproval(manual, verifyCurrent, controller.signal);
           if (!isAuthorized()) return undefined;
-          processing.status = 'processing'; work?.setActive(true); releaseSafety = safetyClock?.enter();
-          if (!approved) {
-            if (manual.status === 'rejected') {
+          if (answer !== 'approved') {
+            if (answer === 'rejected') {
               const rejection = await this.approvalReviewer.createUserRejection(request, { priorReviewId: reviewerRecord.reviewId, userRequestId: manual.id });
               this.attachApprovalReviewToRunDetails(rejection);
-              report(request.targetId, 'denied', this.t('approvalUserRejected'));
-            } else report(request.targetId, 'cancelled', this.t('approvalInterrupted'));
+              reviewResults.push(toReviewResult(rejection));
+              if (target) target.reviewId = rejection.reviewId;
+              report(request.targetId, 'denied', this.t('approvalUserRejected'), 'user_rejected');
+            } else if (answer === 'invalidated') report(request.targetId, 'paused', this.t('approvalIdentityMismatch'), 'request_invalidated');
             return undefined;
           }
           await options?.authorize?.();
-          await reviewerConfiguration(request, reviewerRecord);
+          if (!isAuthorized()) return undefined;
           const user = await this.approvalReviewer.createUserApproval(request, { priorReviewId: reviewerRecord.reviewId, userRequestId: manual.id });
+          if (target) target.reviewId = user.record.reviewId;
           return { ...user, reviewerRecord, reused: false, source: 'user_click' as const };
         }
         return { ...outcome, reviewerRecord, reused: false };
       };
       const statusForReview = (record: ApprovalReviewRecord): typeof processing.targets[number]['status'] => {
-        if (record.reviewState === 'insufficient_evidence' && record.policyRules[0] !== 'review_affected_scope_mismatch') {
-          return record.actionKind === 'draft_run_execute' ? 'insufficient_launch_evidence' : 'hard_blocked';
+        if (record.reviewState === 'insufficient_evidence' || record.reviewState === 'scope_mismatch'
+          || record.policyRules.includes('review_affected_scope_mismatch')) {
+          return record.actionKind === 'draft_run_execute' ? 'insufficient_launch_evidence' : 'paused';
         }
         if (record.approvalSource === 'local_policy' || record.reviewState === 'budget_stopped') return 'hard_blocked';
         if (record.decision === 'needs_user') return 'hard_blocked';
         return record.decision === 'unavailable' ? 'review_unavailable' : 'denied';
       };
+      const invalidateManualAction = async (id: string) => {
+        if (batch.manualAction?.targetId === id) await this.invalidateBatchManualRequest(session, id, 'stale_request');
+      };
       const editPaths = new Map<string, readonly string[]>();
       for (const id of pendingEditIds) {
         if (!isAuthorized()) return;
         if (circuitBreakReason || editOutcomeUnknown) break;
-        if (held(id)) continue;
         const pending = this.changeSets.getPendingEdit(id);
+        if (held(id)) {
+          if (pending?.runId === batch.runId && pending.sessionId === batch.sessionId) {
+            const scope = await inspectAutomaticEditAuthorization(pending, this.externalEffectGrants, selectedProjectUri).catch(() => undefined);
+            editPaths.set(id, scope?.canonicalTargets ?? []);
+          }
+          continue;
+        }
         if (!pending) {
+          await invalidateManualAction(id);
           const prior = this.changeSets.toWebviewState(batch.sessionId).filter(set => set.runId === batch.runId)
             .flatMap(set => set.files).find(file => file.id === id);
           report(id, prior?.status === 'applied' ? 'already_processed' : 'missing', prior?.status === 'applied' ? undefined : this.t('approvalTargetMissing'));
           continue;
         }
         if (pending.runId !== batch.runId || pending.sessionId !== batch.sessionId) {
+          await invalidateManualAction(id);
           report(id, 'identity_mismatch', this.t('approvalIdentityMismatch')); continue;
         }
         const file = pending.edit;
@@ -8610,21 +9011,22 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           continue;
         }
         const config = this.approvalReviewerSettingKey();
+        let verifyModelConfiguration = false;
         const fileAuthorization: DelegatedEditApproval = {
           authorizedUri: file.uri, authorizedUris: [], skillScaffold: pending.skillScaffold,
-          isAuthorized: () => isAuthorized() && config === this.approvalReviewerSettingKey()
+          isAuthorized: () => isAuthorized() && (!verifyModelConfiguration || config === this.approvalReviewerSettingKey())
         };
         let editAuthorization: Awaited<ReturnType<typeof inspectAutomaticEditAuthorization>>;
         try { editAuthorization = await inspectAutomaticEditAuthorization(pending, this.externalEffectGrants, selectedProjectUri); }
-        catch (error) { report(id, 'hard_blocked', getErrorMessage(error)); continue; }
+        catch (error) { await invalidateManualAction(id); report(id, 'hard_blocked', getErrorMessage(error)); continue; }
         const canonicalTargets = editAuthorization.canonicalTargets;
         editPaths.set(id, canonicalTargets);
         const overlap = processing.targets.find(target => target.kind === 'edit' && target.id !== id
           && !['pending', 'executed', 'already_processed'].includes(target.status)
-          && editPaths.get(target.id)?.some(value => canonicalTargets.includes(value)));
+          && editPaths.has(target.id) && (!editPaths.get(target.id)!.length
+            || editPaths.get(target.id)!.some(value => canonicalTargets.includes(value))));
         if (overlap) {
-          processing.targets.find(target => target.id === id)!.dependency = { targetId: overlap.id, label: file.label, reason: overlap.reason };
-          report(id, 'dependency_blocked', this.t('approvalDependencyBlocked'));
+          awaitDependency(id, { targetId: overlap.id, label: file.label, reason: overlap.reason }, this.t('approvalDependencyBlocked'));
           continue;
         }
         const externalTargets = editAuthorization.scope.externalUris;
@@ -8633,7 +9035,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
         let preflight: Awaited<ReturnType<ChangeSetStore['preflightEdit']>> | undefined;
         let outputInspected = false;
-        const verifyEdit = async (requireGrant: boolean) => {
+        const verifyEdit = async (requireGrant: boolean, verifyBaseline = false) => {
           const current = this.changeSets.getPendingEdit(id);
           if (!current || current.runId !== batch.runId || current.sessionId !== batch.sessionId
             || hashDraftEditAction(current.edit) !== editAuthorization.identity.actionHash || !fileAuthorization.isAuthorized()) {
@@ -8648,11 +9050,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           }
           // Reuse bounded evidence for an unchanged scope. SafeFileEditor
           // revalidates the actual byte baseline before preparing its journal.
-          if (live.allowed && !preflight) preflight = await this.changeSets.preflightEdit(id, fileAuthorization);
+          if (live.allowed && (!preflight || verifyBaseline)) preflight = await this.changeSets.preflightEdit(id, fileAuthorization);
           if (!fileAuthorization.isAuthorized()) throw new Error(this.t('approvalIdentityMismatch'));
         };
         try { await verifyEdit(!needsGrant); }
         catch (error) {
+          await invalidateManualAction(id);
           editResults.push({ id, applied: false, errors: [getErrorMessage(error)] });
           report(id, 'hard_blocked', getErrorMessage(error));
           continue;
@@ -8666,13 +9069,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         verifiedProjectOperation: editAuthorization.verifiedProjectOperation ? 'file_change' as const : undefined,
         externalAuthorization: { required: needsGrant, targets: externalTargets } };
         const label = redactSensitiveReviewText(file.kind === 'move_v1' ? file.sourceUri + ' → ' + file.targetUri : file.uri);
-        const liveEditPreflight = async (requireGrant: boolean) => {
-          try { await verifyEdit(requireGrant); }
+        const liveEditPreflight = async (requireGrant: boolean, verifyBaseline = false) => {
+          try { await verifyEdit(requireGrant, verifyBaseline); }
           catch (error) { throw new ApprovalPreflightChangedError(getErrorMessage(error), { cause: error }); }
         };
         let review: Awaited<ReturnType<typeof reviewAction>>;
         try {
-          review = await reviewAction(request, label, () => liveEditPreflight(!needsGrant), needsGrant ? {
+          review = await reviewAction(request, label, () => liveEditPreflight(!needsGrant, Boolean(batch.manualAction)), needsGrant ? {
             targets: externalTargets,
             authorize: async () => {
               this.externalEffectGrants.grant(editAuthorization.identity, editAuthorization.scope);
@@ -8685,6 +9088,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         } catch (error) {
           if (!isAuthorized()) return;
           if (!(error instanceof ApprovalPreflightChangedError)) throw error;
+          await invalidateManualAction(id);
           report(id, 'hard_blocked', getErrorMessage(error));
           continue;
         }
@@ -8708,8 +9112,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           continue;
         }
         fileAuthorization.source = review.source === 'user_click' ? 'user_click' : 'model_reviewer';
+        verifyModelConfiguration = review.source === 'auto_approval_review';
         fileAuthorization.verifyScope = async () => {
-          await reviewerConfiguration(request, review.reviewerRecord);
+          await reviewerConfiguration(request, review.record);
           // SafeFileEditor repeats byte-level checks around its journal. Here
           // the scope callback is also used after the journal is prepared.
           const live = await inspectAutomaticEditAuthorization(pending, this.externalEffectGrants, selectedProjectUri);
@@ -8719,7 +9124,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         };
         try {
           await liveEditPreflight(true);
-          await reviewerConfiguration(request, review.reviewerRecord);
+          await reviewerConfiguration(request, review.record);
         } catch (error) {
           if (!isAuthorized()) return;
           report(id, 'hard_blocked', getErrorMessage(error));
@@ -8765,13 +9170,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           if (!isAuthorized()) return;
           const preceding = new Set(attempted);
           attempted.add(id);
+          if (held(id)) continue;
           const draftRun = this.draftRuns.get(id);
           if (!draftRun) { report(id, 'missing', this.t('approvalTargetMissing')); continue; }
           if (draftRun.sessionId !== batch.sessionId || draftRun.agentRunId !== batch.runId) {
             report(id, 'identity_mismatch', this.t('approvalIdentityMismatch')); continue;
           }
-          const index = processing.targets.findIndex(target => target.id === id);
-          if (!held(id) && !this.findRunSafetyDenial(session, draftRun)) {
+          if (!this.findRunSafetyDenial(session, draftRun)) {
             const capability = commandCapabilityReplan(draftRun, rootTaskId);
             if (capability) {
               if (capability.candidateArgs && requiresExactCommandArgv(originalGoal)) {
@@ -8783,8 +9188,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           const requirements = inspectDraftRunDependencies(draftRun, targetId => this.draftRuns.get(targetId),
             new Set(this.getRootTaskDraftRuns(session, rootTaskId).map(run => run.id)));
           if (!requirements.allowed) {
-            processing.targets[index].dependency = requirements.dependency;
-            report(id, 'dependency_blocked', requirements.reason, requirements.code);
+            const dependency = requirements.dependency;
+            const prerequisite = dependency && this.draftRuns.get(dependency.targetId);
+            awaitDependency(id, dependency && prerequisite ? { ...dependency, label: draftDependencyLabel(prerequisite) } : dependency,
+              requirements.reason, requirements.code);
             continue;
           }
           const checkEditDependencies = (scope?: Awaited<ReturnType<typeof inspectDraftRunScope>>, uris?: ReadonlySet<string>) =>
@@ -8793,16 +9200,14 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           try { editDependencies = await checkEditDependencies(); }
           catch (error) { report(id, 'hard_blocked', getErrorMessage(error)); continue; }
           if (!editDependencies.allowed) {
-            processing.targets[index].dependency = editDependencies.dependency;
-            report(id, 'dependency_blocked', editDependencies.dependency?.reason ?? this.t('approvalDependencyBlocked'));
+            awaitDependency(id, editDependencies.dependency, editDependencies.dependency?.reason ?? this.t('approvalDependencyBlocked'));
             continue;
           }
           const kind = gitBatchKind(draftRun);
           const ancestorRequirement = await inspectGitAncestorPrerequisite(draftRun,
             this.getRootTaskDraftRuns(session, rootTaskId), this.authorizedExternalExecutionUris, selectedProjectUri);
           if (!ancestorRequirement.allowed) {
-            processing.targets[index].dependency = ancestorRequirement.dependency;
-            report(id, 'dependency_blocked', ancestorRequirement.reason, ancestorRequirement.code);
+            awaitDependency(id, ancestorRequirement.dependency, ancestorRequirement.reason, ancestorRequirement.code);
             continue;
           }
           const blockers = processing.targets.filter(target => (target.kind === 'edit' || preceding.has(target.id))
@@ -8819,18 +9224,21 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
                 executionPhase: 'not_dispatched' as const } : prior] : [];
             }), this.authorizedExternalExecutionUris);
           const requiresScopeIsolation = independentCheck && !independentGit && !isolatedCheck;
+          const unresolvedIndependence = this.language === 'en'
+            ? 'The host could not verify that this command has a separate scope and needs no result from the unresolved operation.'
+            : '宿主尚未核实此命令的作用范围独立，以及它是否依赖未完成操作的结果。';
           if (requiresScopeIsolation && releaseBatch) {
             if (prerequisite || blockers.length) {
               const blocker = prerequisite ?? blockers[0];
               const blockedRun = this.draftRuns.get(blocker.id);
-              processing.targets[index].dependency = { targetId: blocker.id,
-                label: blockedRun ? draftDependencyLabel(blockedRun) : this.t('approvalDependencyBlocked'), reason: blocker.reason };
-              report(id, 'dependency_blocked', this.t('approvalDependencyBlocked'));
+              awaitDependency(id, { targetId: blocker.id,
+                label: blockedRun ? draftDependencyLabel(blockedRun) : this.t('approvalDependencyBlocked'), reason: blocker.reason },
+              prerequisite ? this.t('approvalDependencyBlocked') : unresolvedIndependence,
+              prerequisite ? undefined : 'dependency_independence_unverified');
             }
             continue;
           }
           const astTarget = recognizePythonSyntaxIntent(draftRun.spec);
-          if (held(id)) continue;
           if (draftRun.replacementDraftRunId) {
             const replacement = this.draftRuns.get(draftRun.replacementDraftRunId);
             const completed = replacement?.status === 'done';
@@ -8861,15 +9269,14 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
             continue;
           }
           if (draftRun.dependency) {
-            const currentIndex = processing.targets.findIndex(target => target.id === id);
-            const prerequisite = (releaseBatch ? processing.targets.filter(target => preceding.has(target.id) || target.kind === 'edit')
-              : processing.targets.slice(0, currentIndex)).find(target => target.id === draftRun.dependency?.targetId);
-            if (!prerequisite || !['executed', 'already_processed'].includes(prerequisite.status)
+            const prerequisite = processing.targets.find(target => target.id === draftRun.dependency?.targetId);
+            const boundAndVerified = draftRun.spec.prerequisites?.some(reference => reference.draftRunId === draftRun.dependency?.targetId);
+            if ((!boundAndVerified && (!prerequisite || !['executed', 'already_processed'].includes(prerequisite.status)))
               || !this.draftRuns.setPendingDependency(id, draftRun.specHash)) {
-              processing.targets[currentIndex].dependency = draftRun.dependency;
-              report(id, 'dependency_blocked');
+              awaitDependency(id, draftRun.dependency, draftRun.dependency.reason ?? this.t('approvalDependencyBlocked'));
               continue;
             }
+            draftDispositionChanged = true;
           }
           let authorization: Awaited<ReturnType<typeof inspectAutomaticRunAuthorization>>;
           let commit: Awaited<ReturnType<typeof prepareLocalGitCommit>>;
@@ -8909,13 +9316,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
             authorization = await inspectAutomaticRunAuthorization(draftRun, this.externalEffectGrants, approvalMode,
               remoteCommand ? 'metadata' : false, selectedProjectUri);
             if (!authorization.reviewable) {
+              await invalidateManualAction(id);
               report(id, authorization.refusal?.code ?? 'hard_blocked', authorization.refusal?.reason ?? authorization.reason);
               continue;
             }
             editDependencies = await checkEditDependencies(authorization.scope, authorization.authorizedUris);
             if (!editDependencies.allowed || editDependencies.pendingExternalProof && authorization.allowed) {
-              processing.targets[index].dependency = editDependencies.dependency;
-              report(id, 'dependency_blocked', editDependencies.dependency?.reason ?? this.t('approvalDependencyBlocked'));
+              awaitDependency(id, editDependencies.dependency, editDependencies.dependency?.reason ?? this.t('approvalDependencyBlocked'));
               continue;
             }
             if (requiresScopeIsolation) {
@@ -8928,9 +9335,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
               if (!disjointUnstartedScript) {
                 const blocker = blockers[0];
                 const blockedRun = this.draftRuns.get(blocker.id);
-                processing.targets[index].dependency = { targetId: blocker.id,
-                  label: blockedRun ? draftDependencyLabel(blockedRun) : this.t('approvalDependencyBlocked'), reason: blocker.reason };
-                report(id, 'dependency_blocked', this.t('approvalDependencyBlocked'));
+                awaitDependency(id, { targetId: blocker.id,
+                  label: blockedRun ? draftDependencyLabel(blockedRun) : this.t('approvalDependencyBlocked'), reason: blocker.reason },
+                unresolvedIndependence, 'dependency_independence_unverified');
                 continue;
               }
             }
@@ -8978,7 +9385,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
               && sameOperation(prior)
               && ((prior.startedAt && !verifiedReadRetry && !semantics.gitTagCreate && remoteCommand?.kind !== 'push' && !semantics.gitCommit
                 && !(needsCommit && semantics.gitStage))
-                || prior.approvalReview?.decision === 'unavailable' || prior.approvalReview?.decision === 'deny'
+                || prior.approvalReview?.decision === 'unavailable' && !(explicitCorrection && prior.executionStarted === false
+                  && prior.executionPhase === 'not_dispatched') || prior.approvalReview?.decision === 'deny'
                 || this.approvalReviews.findDenialForAction({ sessionId: prior.sessionId, rootTaskId,
                   actionKind: 'draft_run_execute', actionHash: prior.specHash })
                 || (prior.replacementDraftRunId && this.draftRuns.get(prior.replacementDraftRunId)?.approvalReview?.decision !== 'approve')))) {
@@ -9115,6 +9523,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
               continue;
             }
             const diagnosis = diagnoses.get(id);
+            await invalidateManualAction(id);
             if (diagnosis) processing.targets.find(target => target.id === id)!.replan = diagnosis;
             editResults.push({ id, applied: false, errors: [getErrorMessage(error)] });
             report(id, 'hard_blocked', getErrorMessage(error));
@@ -9164,7 +9573,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           const actual = restrictedRun ?? draftRun;
           const verifyRun = async (requireGrant: boolean, pending: boolean,
             inspectScope?: () => Promise<Awaited<ReturnType<typeof inspectDraftRunScope>>>) => {
-            if (!isAuthorized() || config !== this.approvalReviewerSettingKey()) {
+            if (!isAuthorized()) {
               throw new Error(this.t('approvalIdentityMismatch'));
             }
             const candidate = this.draftRuns.get(actual.id);
@@ -9203,7 +9612,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
               await assertLocalGitCommitSnapshot(draftRun, commit.snapshot, controller.signal, live.scope);
             }
             await release?.beforeLaunch();
-            if (!isAuthorized() || config !== this.approvalReviewerSettingKey()) {
+            if (!isAuthorized()) {
               throw new Error(this.t('approvalIdentityMismatch'));
             }
             return launch;
@@ -9252,6 +9661,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           } catch (error) {
             if (!isAuthorized()) return;
             if (!(error instanceof ApprovalPreflightChangedError)) throw error;
+            await invalidateManualAction(id);
             report(id, 'hard_blocked', getErrorMessage(error));
             if (actual.spec.restricted) break;
             continue;
@@ -9289,7 +9699,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           }
           if (commit?.outcome === 'ready' || release?.pushAttempt) {
             try {
-              await reviewerConfiguration(reviewRequest, review.reviewerRecord);
+              await reviewerConfiguration(reviewRequest, review.record);
               await livePreflight(true);
             } catch (error) {
               revokeRunGrant?.();
@@ -9307,11 +9717,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           this.activeDraftRunId = actual.id;
           this.setAgentActivity({ base: 'executing', phase: 'running_draft_run', detail: actual.spec.executable });
           const result = await this.draftRuns.approveAndRun(actual.id, actual.spec.restricted ? new Set() : authorization.scopeUris, {
-            delegatedApproval: () => isAuthorized() && config === this.approvalReviewerSettingKey(),
+            delegatedApproval: () => isAuthorized() && (review.source !== 'auto_approval_review' || config === this.approvalReviewerSettingKey()),
             rootTaskRunIds: rootRunIds(),
             selectedProjectUri,
             verifyScope: async inspectScope => {
-              await reviewerConfiguration(reviewRequest, review.reviewerRecord);
+              await reviewerConfiguration(reviewRequest, review.record);
               return await verifyRun(true, false, inspectScope);
             },
             approvalRecord: toApprovalRecordMatch(review.record, review.source),
@@ -9323,6 +9733,16 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
             this.attachApprovalReviewToRunDetails(consumedReview);
           }
           this.activeDraftRunId = undefined;
+          if (result?.status === 'pending' && result.approvalHold?.status === 'paused') {
+            const cancelled = controller.signal.aborted && controller.signal.reason?.code === 'user_cancelled';
+            report(id, cancelled ? 'cancelled' : 'paused', result.approvalHold.reason,
+              cancelled ? 'user_cancelled' : result.approvalHold.failureCode);
+            if (result.approvalHold.failureCode === 'audit_persistence_failed') {
+              processing.reason = result.approvalHold.reason ?? this.t('runStorageFailed');
+              break;
+            }
+            continue;
+          }
           if (restrictedRun) {
             const completed = result?.status === 'done';
             syntaxFailure = result?.status === 'failed' && result.exitCode === PYTHON_SYNTAX_ERROR_EXIT
@@ -9426,9 +9846,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           }
         }
       }
-      settleDependencies(true);
+      settleDependencies();
       retireUnstarted();
       if (draftDispositionChanged) { await this.draftRuns.flush(); await this.changeSets.flush(); draftDispositionChanged = false; }
+      if (markRecoverableBatch()) {
+        await this.sessionStore.persist();
+        return;
+      }
       if (!await this.awaitRunContextRefresh()) return;
       await this.sessionStore.persist();
       if (!isAuthorized()) return;
@@ -9579,46 +10003,58 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         }
       }
     } catch (error) {
-      processing.status = terminalStatus; processing.reason = getErrorMessage(error);
+      processing.reason = redactSensitiveReviewText(getErrorMessage(error), 2000);
+      if (error instanceof ApprovalAuditError) {
+        for (const target of processing.targets) if (target.status === 'pending' || target.status === 'manual_required') {
+          pauseUnstarted(target, processing.reason, 'audit_persistence_failed');
+        }
+      }
+      processing.status = terminalStatus;
       if (!controller.signal.aborted) vscode.window.showWarningMessage(this.t('delegatedApprovalFailed', { error: getErrorMessage(error) }));
     } finally {
-      for (const revoke of revokeTemporaryGrants) revoke();
-      if (restrictedRun) {
-        await this.draftRuns.settleUnstartedRestrictedRun(restrictedRun.id,
-          processing.reason ?? this.t('approvalResultUnknown'), !isAuthorized()).catch(error => {
-          processing.status = terminalStatus;
-          processing.reason = getErrorMessage(error);
-        });
-      }
-      settleDependencies(false);
-      for (const target of processing.targets) if (target.status === 'pending' || target.status === 'manual_required' && !this.manualToolApproval) {
-        target.status = controller.signal.aborted ? 'cancelled' : 'failed';
-        target.reason = diagnoses.get(target.id)?.reason;
-      }
-      retireUnstarted();
-      if (['processing', 'replanning', 'waiting_user'].includes(processing.status)) processing.status = terminalStatus;
-      releaseSafety?.(); saveSafety(); safetyClock?.dispose();
-      work?.finish();
-      this.interactions.update(operation, 'saving');
-      this.postState({ immediate: true, omitMessages: true });
       try {
+        for (const revoke of revokeTemporaryGrants) revoke();
+        if (restrictedRun) {
+          await this.draftRuns.settleUnstartedRestrictedRun(restrictedRun.id,
+            processing.reason ?? this.t('approvalResultUnknown'), !isAuthorized());
+        }
+        settleDependencies();
+        for (const target of processing.targets) if (target.status === 'pending') {
+          pauseUnstarted(target, this.t('approvalInterrupted'), 'approval_interrupted');
+        }
+        retireUnstarted();
+        if (!markRecoverableBatch() && ['processing', 'replanning', 'waiting_user'].includes(processing.status)) processing.status = terminalStatus;
+        releaseSafety?.(); releaseSafety = undefined; saveSafety(); safetyClock?.dispose(); safetyClock = undefined;
+        work?.finish();
+        this.interactions.update(operation, 'saving');
+        this.postState({ immediate: true, omitMessages: true });
         if (draftDispositionChanged) { await this.draftRuns.flush(); await this.changeSets.flush(); }
         await this.sessionStore.persist();
-      } catch (error) { processing.status = terminalStatus; processing.reason = getErrorMessage(error);
+      } catch (error) {
+        processing.reason = redactSensitiveReviewText(getErrorMessage(error), 2000);
+        for (const target of processing.targets) if (target.status === 'pending') {
+          pauseUnstarted(target, processing.reason, 'audit_persistence_failed');
+        }
+        if (!markRecoverableBatch()) processing.status = terminalStatus;
         this.interactionFailure = { sessionId: session.id, message: this.t('runStorageFailed') + ': ' + getErrorMessage(error) };
-        vscode.window.showErrorMessage(this.interactionFailure.message); }
+        vscode.window.showErrorMessage(this.interactionFailure.message);
+      } finally {
+        releaseSafety?.(); safetyClock?.dispose(); work?.finish();
+        this.delegatedApprovals.finish(controller);
+        this.interactions.finish(operation);
+        this.delegatedApprovalInFlight = false;
+        this.activeDraftRunId = undefined;
+        if (this.currentRunAbortController === controller) this.currentRunAbortController = undefined;
+      }
+      if (processing.status === 'waiting_user' || processing.status === 'paused') {
+        this.setAgentActivity({ base: 'waiting', phase: 'awaiting_manual_approval', detail: processing.reason });
+      }
       if (processing.status === 'stopped') {
         this.setAgentActivity({ base: 'stopped', phase: 'finalizing', detail: processing.reason ?? this.t('approvalAutoStopped') });
         if (batch.backgroundRunId && this.backgroundRunCoordinator.getActiveRun()?.id === batch.backgroundRunId && this.hasActiveBackgroundRun()) {
           this.backgroundRunCoordinator.fail(processing.reason ?? this.t('approvalAutoStopped'));
         }
       }
-      this.delegatedApprovals.finish(controller);
-      this.interactions.finish(operation);
-      this.delegatedApprovalInFlight = false;
-      this.activeDraftRunId = undefined;
-
-      if (this.currentRunAbortController === controller) this.currentRunAbortController = undefined;
       this.postState();
     }
   }
@@ -9658,10 +10094,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private isHeldApprovalTarget(session: ChatSession, id: string, run?: DraftRun): boolean {
+    if (run?.approvalHold) return true;
     const processing = session.approvalProcessing;
-    if ((processing && ['blocked', 'stopped'].includes(processing.status) && processing.targets.some(target => target.id === id
+    if ((processing && ['blocked', 'stopped', 'paused', 'waiting_user'].includes(processing.status) && processing.targets.some(target => target.id === id
       && !['executed', 'already_processed'].includes(target.status)))
-      || ['deny', 'unavailable'].includes(this.approvalReviews?.getLatestForTarget(id)?.decision ?? '')) return true;
+      || ['deny', 'unavailable', 'needs_user'].includes(this.approvalReviews?.getLatestForTarget(id)?.decision ?? '')) return true;
     return !!run && !!this.findRunSafetyDenial(session, run);
   }
 
@@ -9848,6 +10285,7 @@ function isApprovalMutationMessage(type: WebviewMessage['type']): boolean {
     'authorizeDraftRunCwd',
     'resumeApprovalProcessing',
     'resolveValidationApproval',
+    'retryManualApproval',
     'resolvePlanDecision'
   ]).has(type);
 }

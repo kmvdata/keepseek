@@ -8,6 +8,8 @@ import {
   APPROVAL_POLICY_VERSION,
   VERIFIED_PROJECT_OPERATION_RULE,
   approvalDisposition,
+  normalizeApprovalAttemptFailures,
+  normalizeApprovalReviewAttempts,
   normalizeApprovalReviewState,
   type ApprovalRecordMatch,
   type ApprovalReviewDisplay,
@@ -97,7 +99,7 @@ export class ApprovalReviewStore {
     return structuredClone(record);
   }
 
-  public async claimAutomaticReview(input: ReviewRecordInput): Promise<
+  public async claimAutomaticReview(input: ReviewRecordInput, retryOf?: string, recovery?: 'not_dispatched'): Promise<
     { status: 'claimed' | 'duplicate' | 'denied'; record: ApprovalReviewRecord }
   > {
     if (input.policyVersion !== APPROVAL_POLICY_VERSION || input.approvalMode !== 'delegate'
@@ -114,8 +116,24 @@ export class ApprovalReviewStore {
       duplicate = [...records.values()].reverse().find(prior => !prior.historyInvalidatedBy
         && prior.approvalSource === 'auto_approval_review' && prior.sessionId === input.sessionId
         && prior.rootTaskId === input.rootTaskId && prior.agentRunId === input.agentRunId
+        && (prior.policyVersion === APPROVAL_POLICY_VERSION || prior.reviewId === retryOf)
         && (prior.targetId === input.targetId || (prior.actionKind === input.actionKind && prior.actionHash === input.actionHash
           && prior.scopeFingerprint === input.scopeFingerprint)));
+      if (retryOf) {
+        const provenNotDispatched = recovery === 'not_dispatched';
+        const decided = [...records.values()].find(prior => prior.approvalSource === 'user_click' && prior.priorReviewId === retryOf);
+        if (!duplicate || duplicate.reviewId !== retryOf
+          || !(provenNotDispatched ? sameReviewAction(duplicate, input) : sameReviewIdentity(duplicate, input))
+          || (duplicate.consumedAt && !provenNotDispatched) || duplicate.supersededByReviewId || duplicate.decision === 'deny'
+          || this.activeReviewIds.has(duplicate.reviewId)
+          || (decided && (decided.decision === 'deny' || !provenNotDispatched))
+          || (duplicate.runtimeId === this.runtimeId && !['request_user', 'execute'].includes(approvalDisposition(duplicate))
+            && !['in_progress', 'interrupted', 'cancelled', 'scope_mismatch', 'insufficient_evidence'].includes(duplicate.reviewState ?? ''))) {
+          throw new ApprovalRecordConflictError('The exact approval review cannot be retried from this state.');
+        }
+        records.set(retryOf, { ...duplicate, supersededByReviewId: record.reviewId });
+        duplicate = undefined;
+      }
       if (duplicate) return false;
       records.set(record.reviewId, record);
       return true;
@@ -176,12 +194,8 @@ export class ApprovalReviewStore {
     return this.liveRecordIds.has(record.reviewId) && !this.consumptionClaims.has(record.reviewId)
       && !record.historyInvalidatedBy && !record.consumedAt
       && record.runtimeId === this.runtimeId && record.approvalSource === 'auto_approval_review'
-      && record.sessionId === request.sessionId && record.rootTaskId === request.rootTaskId
-      && record.agentRunId === request.agentRunId && record.targetId === request.targetId
-      && record.actionKind === request.actionKind && record.actionHash === request.actionHash
-      && record.effectHash === request.effectHash
-      && record.approvalMode === 'delegate' && record.approvalMode === request.approvalMode
-      && !!record.reviewerConfigFingerprint && record.scopeFingerprint === request.scopeFingerprint
+      && sameReviewIdentity(record, request) && record.approvalMode === 'delegate'
+      && !!record.reviewerConfigFingerprint && !!record.scopeFingerprint
       && record.policyVersion === APPROVAL_POLICY_VERSION
       && ['execute', 'request_user'].includes(approvalDisposition(record));
   }
@@ -232,6 +246,7 @@ export class ApprovalReviewStore {
     let consumed: ApprovalReviewRecord | undefined;
     await this.persist(records => {
       const record = records.get(input.reviewId);
+      const priorReview = record?.priorReviewId ? records.get(record.priorReviewId) : undefined;
       if (!record || !this.liveRecordIds.has(record.reviewId) || this.consumptionClaims.has(record.reviewId)
       || record.historyInvalidatedBy || record.runtimeId !== this.runtimeId || record.consumedAt
       || record.sessionId !== input.sessionId || record.rootTaskId !== input.rootTaskId || record.agentRunId !== input.agentRunId
@@ -243,7 +258,8 @@ export class ApprovalReviewStore {
       || input.approvalMode !== 'delegate' || record.approvalMode !== input.approvalMode
       || !record.scopeFingerprint || record.scopeFingerprint !== input.scopeFingerprint
       || !input.reviewerConfigFingerprint || record.reviewerConfigFingerprint !== input.reviewerConfigFingerprint
-      || (input.expectedSource === 'user_click' && (!record.priorReviewId || !record.userRequestId))
+      || (input.expectedSource === 'user_click' && (!priorReview || !record.userRequestId
+        || !this.isCurrentReviewerSnapshot(priorReview, record)))
       || (input.expectedSource === 'auto_approval_review'
         && (!record.reviewerModelId || !record.reviewerSourceId || !['low', 'medium'].includes(record.risk)))
       || findSafetyDenial(records, record)) {
@@ -318,7 +334,8 @@ export class ApprovalReviewStore {
         const prior = merged.get(record.reviewId);
         if (prior) merged.set(record.reviewId, { ...(this.liveRecordIds.has(record.reviewId) ? record : prior),
           historyInvalidatedBy: prior.historyInvalidatedBy ?? record.historyInvalidatedBy,
-          consumedAt: prior.consumedAt ?? record.consumedAt });
+          consumedAt: prior.consumedAt ?? record.consumedAt,
+          supersededByReviewId: prior.supersededByReviewId ?? record.supersededByReviewId });
         else if (this.knownRecordIds.has(record.reviewId)) merged.set(record.reviewId, record);
       }
       const shouldWrite = update?.(merged) ?? true;
@@ -343,6 +360,16 @@ export class ApprovalReviewStore {
 type SafetyDenialIdentity = Pick<ApprovalReviewRequest, 'sessionId' | 'actionKind' | 'actionHash' | 'effectHash'>;
 type ReviewSnapshotIdentity = Pick<ApprovalReviewRequest, 'sessionId' | 'rootTaskId' | 'agentRunId' | 'targetId'
   | 'actionKind' | 'actionHash' | 'effectHash' | 'approvalMode' | 'scopeFingerprint'>;
+
+function sameReviewIdentity(a: ReviewSnapshotIdentity, b: ReviewSnapshotIdentity): boolean {
+  return sameReviewAction(a, b) && a.effectHash === b.effectHash && a.scopeFingerprint === b.scopeFingerprint;
+}
+
+function sameReviewAction(a: ReviewSnapshotIdentity, b: ReviewSnapshotIdentity): boolean {
+  return a.sessionId === b.sessionId && a.rootTaskId === b.rootTaskId && a.agentRunId === b.agentRunId
+    && a.targetId === b.targetId && a.actionKind === b.actionKind && a.actionHash === b.actionHash
+    && a.approvalMode === b.approvalMode;
+}
 
 function findSafetyDenial(records: Map<string, ApprovalReviewRecord>, input: SafetyDenialIdentity): ApprovalReviewRecord | undefined {
   // Truncation revokes live history membership, never the safety finding for an equivalent operation.
@@ -377,11 +404,13 @@ function toDisplay(record: ApprovalReviewRecord): ApprovalReviewDisplay {
     decision: record.decision,
     reviewState: record.reviewState,
     risk: record.risk,
+    riskUnassessed: record.riskUnassessed,
     rationale: record.rationale,
     saferAlternative: record.saferAlternative,
     affectedTargets: record.affectedTargets,
     createdAt: record.createdAt,
     priorReviewId: record.priorReviewId, userRequestId: record.userRequestId,
+    reviewAttempts: record.reviewAttempts, attemptFailures: record.attemptFailures,
     consumedAt: record.consumedAt
   });
 }
@@ -402,9 +431,13 @@ function normalizeRecord(value: unknown): ApprovalReviewRecord | undefined {
     ...record,
     projectApproval: hasVerifiedProjectApproval(record) ? true : undefined,
     reviewState: normalizeApprovalReviewState(record.reviewState),
+    riskUnassessed: record.riskUnassessed === true ? true : undefined,
     effectHash: typeof record.effectHash === 'string' && /^[a-f0-9]{64}$/u.test(record.effectHash) ? record.effectHash : undefined,
     priorReviewId: typeof record.priorReviewId === 'string' ? record.priorReviewId.slice(0, 300) : undefined,
     userRequestId: typeof record.userRequestId === 'string' ? record.userRequestId.slice(0, 300) : undefined,
+    supersededByReviewId: typeof record.supersededByReviewId === 'string' ? record.supersededByReviewId.slice(0, 300) : undefined,
+    reviewAttempts: normalizeApprovalReviewAttempts(record.reviewAttempts),
+    attemptFailures: normalizeApprovalAttemptFailures(record.attemptFailures),
     historyInvalidatedBy: typeof record.historyInvalidatedBy === 'string' && record.historyInvalidatedBy.length > 0
       ? record.historyInvalidatedBy.slice(0, 300) : undefined,
     osIsolation: record.osIsolation === 'none' ? record.osIsolation : undefined,

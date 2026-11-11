@@ -74,6 +74,11 @@ export function inspectDraftRunDependencies(run: DraftRun, get: (id: string) => 
       if (!nested.allowed) return nested;
       if (prior.status !== 'done') return reject('dependency_unsettled', prior.id,
         'The required command has not completed successfully. / 所需命令尚未成功完成。');
+      if (!(prior.executionStarted === true && prior.executionPhase === 'exited')
+        && prior.gitCommitEvidence?.outcome !== 'verified' && !prior.gitStageEvidence && !prior.gitReleaseEvidence?.executed) {
+        return reject('dependency_unsettled', prior.id,
+          'The required command has no verified completion evidence. / 所需命令缺少已核验的完成证据。');
+      }
       if (prior.gitQueryResult?.errorCode || prior.gitQueryResult?.kind === 'ancestor' && prior.gitQueryResult.predicate === false
         || reference.condition === 'predicate_true' && prior.gitQueryResult?.predicate !== true) {
         return reject('dependency_condition', prior.id,

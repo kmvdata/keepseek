@@ -1172,6 +1172,11 @@ ${conversationsStylesFragment.source}
       padding-inline-start: 18px;
     }
 
+    .approval-operation-label {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
     .approval-state-note {
       min-width: 0;
       max-width: 100%;

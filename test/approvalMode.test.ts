@@ -28,7 +28,8 @@ import type { ApprovalMode, ChatMessage, ChatSession } from '../src/shared/types
 import * as vscode from './stubs/vscode';
 import { normalizeStoredSessions } from '../src/sessions/chatSessionStore';
 import { invalidateApprovalStateForHistory, normalizeApprovalProcessing } from '../src/approvals/approvalProcessing';
-import { APPROVAL_POLICY_VERSION } from '../src/approvals/approvalReviewTypes';
+import { APPROVAL_POLICY_VERSION, type ApprovalReviewRequest, type ManualToolApproval } from '../src/approvals/approvalReviewTypes';
+import { normalizeManualApprovals } from '../src/approvals/manualApproval';
 import type { HistoryTruncationScope } from '../src/sessions/historyTruncation';
 
 test('draft receipt and host authorization text describe the actual mode without claiming execution', () => {
@@ -65,6 +66,79 @@ test('approval defaults fail closed and queue cannot replay, cross sessions, or 
   assert.equal(queue.take('s'), undefined);
   assert.equal(new DelegatedApprovalQueue().take('s'), undefined);
 });
+
+test('manual tool approval survives one hour and consumes only a current click once', async ({ mock }) => {
+  mock.timers.enable({ apis: ['Date', 'setTimeout'] });
+  const { host, session, view } = manualApprovalFixture();
+  let verifications = 0;
+  const result = host.requestManualToolApproval(view, undefined, async () => { verifications++; return true; });
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(host.manualApprovalViews(session)[0]?.canDecide, true);
+  mock.timers.tick(3_600_001);
+  assert.equal(session.pendingApproval?.status, 'waiting');
+  const identity = { id: view.id, sessionId: session.id, runtimeId: 'runtime' };
+  await host.resolveManualApproval({ ...identity, runtimeId: 'old-runtime' }, 'user_approved');
+  await host.resolveManualApproval({ ...identity, sessionId: 'other' }, 'user_approved');
+  assert.equal(session.pendingApproval?.status, 'waiting');
+  await Promise.all([host.resolveManualApproval(identity, 'user_approved'), host.resolveManualApproval(identity, 'user_rejected')]);
+  assert.equal(await result, true);
+  assert.equal(verifications, 2);
+  assert.equal(session.pendingApproval?.status, 'approved');
+  assert.equal(session.pendingApproval?.resolutionReason, 'user_approved');
+});
+
+test('batch approval survives host reload as explanation and requires a new request', async () => {
+  const { host, session, view } = manualApprovalFixture();
+  assert.equal(await host.prepareBatchManualApproval(view, async () => true), 'pending');
+  const saved = normalizeManualApprovals(JSON.parse(JSON.stringify(session.pendingApprovals)), session.id);
+  assert.equal(saved?.[0]?.status, 'interrupted');
+  assert.equal(saved?.[0]?.resolutionReason, 'host_interrupted');
+  assert.equal(saved?.[0]?.request, undefined);
+  const restarted = manualApprovalFixture('new-runtime');
+  restarted.session.pendingApprovals = saved;
+  await restarted.host.resolveManualApproval({ id: view.id, runtimeId: 'runtime' }, 'user_approved');
+  assert.equal(restarted.queue.take(session.id), undefined);
+  assert.equal(await restarted.host.prepareBatchManualApproval(restarted.view, async () => true), 'pending');
+  assert.notEqual(restarted.view.id, view.id);
+});
+
+test('manual confirmation is rechecked and cancellation is recorded separately', async () => {
+  for (const cancel of [false, true]) {
+    const { host, session, view } = manualApprovalFixture();
+    const controller = new AbortController();
+    let scopeMatches = true;
+    const result = host.requestManualToolApproval(view, controller.signal, async () => scopeMatches);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(session.pendingApproval?.status, 'waiting');
+    scopeMatches = false;
+    if (cancel) controller.abort();
+    await host.resolveManualApproval({ id: view.id, sessionId: session.id, runtimeId: 'runtime' }, 'user_approved');
+    assert.equal(await result, false);
+    assert.equal(session.pendingApproval?.status, cancel ? 'cancelled' : 'interrupted');
+    assert.equal(session.pendingApproval?.resolutionReason, cancel ? 'user_cancelled' : 'stale_request');
+  }
+});
+
+function manualApprovalFixture(runtimeId = 'runtime') {
+  type Host = {
+    requestManualToolApproval(view: ManualToolApproval, signal?: AbortSignal, verify?: () => Promise<boolean>): Promise<boolean>;
+    prepareBatchManualApproval(view: ManualToolApproval, verify: () => Promise<boolean>): Promise<string>;
+    resolveManualApproval(message: { id: string; sessionId?: string; runtimeId?: string }, decision: 'user_approved' | 'user_rejected'): Promise<void>;
+    manualApprovalViews(session: ChatSession): Array<{ canDecide: boolean }>;
+  };
+  const queue = new DelegatedApprovalQueue();
+  const session = { id: 'session', approvalMode: 'delegate', executionMode: 'normal', messages: [{ id: 'reply', role: 'assistant',
+    userTask: { id: 'task' }, runCheckpointArchive: { summary: { taskId: 'segment' } } }] } as ChatSession;
+  const view: ManualToolApproval = { id: '', sessionId: session.id, priorReviewId: 'review', label: 'probe', reason: 'Invalid reply',
+    request: { sessionId: session.id, targetId: 'probe', agentRunId: 'segment', rootTaskId: 'task', approvalMode: 'delegate',
+      actionKind: 'draft_run_execute', actionHash: 'hash', scopeFingerprint: 'scope' } as ApprovalReviewRequest };
+  vscode.workspace.isTrusted = true;
+  const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
+    approvalReviews: { runtimeId }, delegatedApprovals: queue, postState: () => {},
+    sessionStore: { activeSessionId: session.id, getActiveSession: () => session, persist: async () => {} }
+  }) as Host;
+  return { host, session, view, queue };
+}
 
 test('history truncation cancels only the matching queued or active approval segment', () => {
   const scope: HistoryTruncationScope = { id: 'edit-resend', sessionId: 's', removedMessageIds: ['removed'],
@@ -498,12 +572,14 @@ test('model denial never spawns a DraftRun', async () => {
   assert.match(fixture.prompts[0] ?? '', /"decision":"deny"/u);
 });
 
-test('a proven unavailable reviewer stops remaining actions that require that reviewer', async () => {
+test('a reviewer outage delivered at the previous tool boundary preserves undispatched work', async () => {
   const fixture = workflowFixture({ mode: 'delegate', unavailableBeforeEffects: true });
   await fixture.run();
-  assert.deepEqual(fixture.effects, ['stopped']);
-  assert.equal(fixture.prompts.length, 1);
-  assert.match(fixture.prompts[0], /reviewer unavailable/u);
+  assert.deepEqual(fixture.effects, []);
+  assert.deepEqual(fixture.prompts, []);
+  assert.equal(fixture.session.approvalProcessing?.status, 'paused');
+  assert.equal(fixture.session.approvalProcessing?.canResume, true);
+  assert.match(fixture.session.approvalProcessing?.reason ?? '', /reviewer unavailable/u);
 });
 
 test('an interrupted Git correction stays stopped without replaying a restored draft', async () => {
@@ -712,6 +788,7 @@ function workflowFixture(options: {
       get: (id: string) => draftRun(id),
       preflightApproval: async (id: string) => draftRun(id),
       setPendingDependency: () => true,
+      setPendingApproval: () => true,
       markNotExecuted: () => true,
       getRunsForSegments: () => (options.draftRunIds ?? ['d1', 'd2']).map(draftRun),
       attachApprovalReview: () => true,

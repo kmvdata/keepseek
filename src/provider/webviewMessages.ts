@@ -20,8 +20,9 @@ export interface DroppedFileReferenceInput {
 }
 
 export type WebviewMessage =
-  | { type: 'resumeApprovalProcessing'; authorizeTargetId?: string; confirmTargetId?: string }
-  | { type: 'resolveValidationApproval'; id: string; approve: boolean }
+  | { type: 'resumeApprovalProcessing'; sessionId?: string; runId?: string; rootTaskId?: string; targetId?: string; authorizeTargetId?: string; confirmTargetId?: string }
+  | { type: 'resolveValidationApproval'; id: string; sessionId?: string; runtimeId?: string; approve: boolean }
+  | { type: 'retryManualApproval'; id: string; sessionId?: string; runtimeId?: string }
   | { type: 'setApprovalMode'; mode: ApprovalMode }
   | { type: 'setExecutionMode'; mode: ExecutionMode }
   | { type: 'resolvePlanDecision'; planId: string; action: 'start_execution' | 'revise_plan' | 'exit_plan' }

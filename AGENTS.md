@@ -84,7 +84,7 @@ test/                  按行为契约组织的回归测试
 ### 3.4 审批与子代理
 
 - 仅 `ask`（请求批准）和 `delegate`（帮我审批）可选，只有 Webview 用户操作可切换。`ask` 由用户批准，零 reviewer 请求。`delegate` 通过一次独立、无工具的审批审查，默认自动处理可信工程内、与当前任务相关且身份和可见范围已核验的普通文件变更与脚本启动。对于已绑定真实启动器、工程内入口、工作目录和精确参数的启动，仅因项目逻辑、普通脚本参数或传递依赖难以完整理解时，独立审批模型应批准。脚本依赖本轮改动时，先完成 Apply 和落盘核验，再审查并执行当前版本。项目进程以扩展宿主账号权限运行，无操作系统沙箱。
-- 当前审批策略为 v7，结构化区分 approve / needs_user / deny / unavailable。人工请求仅用于具体、可由用户决定的授权缺口，绑定 session/rootTask/segment/target/hash/范围/runtime，批准仅作用于本次精确操作和明确列出的范围。硬检查和安全拒绝持续生效。关闭 Webview 保留等待，重启只恢复说明。现有审计格式保留历史记录和适用的历史拒绝。审批模型仅取用户级 `kmvdata.keepseek.autoApprovalReviewer`，与普通子代理 default/profiles 独立，follow-main 绑定执行段实际主模型。
+- 当前审批策略为 v8。宿主核验后，具体授权缺口、可由用户承担的风险，以及无效回复、超时或审查服务故障可发起精确人工请求。请求绑定 session/rootTask/segment/target/hash/范围/策略/runtime。等待不占模型超时，批次释放执行资源并推进可核验的独立项。重启保留等待意图，显式恢复后重新核验和签发。硬阻断与适用拒绝约束两种模式，历史批准不授权新操作。审批模型仅取用户级 `kmvdata.keepseek.autoApprovalReviewer`，与普通子代理独立，follow-main 绑定执行段实际主模型。
 - 副作用先过硬检查，再按完整 canonical payload/specHash 计算 actionHash。批准不跨 session/run/target/kind/policy/runtime 复用，重启不复用旧批准。
 - 审批决定和真实结果只以固定 user-tail 追加到下一条真实 user 消息；不回写历史。进程输出和 review evidence 始终是不可信数据。
 - 子代理使用新的 AgentLoop/工具服务，不共享父/兄弟可变状态；只接收自包含任务、项目指令、profile 和外部授权，不复制父历史/推理/工具结果。

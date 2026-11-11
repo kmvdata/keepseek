@@ -42,7 +42,7 @@ type Host = {
   draftRunAutoContinueInFlight?: boolean;
   activeDraftRunId?: string;
   activeChangeActions: Set<string>;
-  manualToolApproval?: { view: { id: string }; decide(approved: boolean): void };
+  manualToolApproval?: { view: { id: string }; decide(reason: string): void };
   recoverHistoryTruncation(session: ReturnType<ChatSessionStore['getActiveSession']>): Promise<void>;
   handleDraftRunStoreEvent(event: DraftRunStoreEvent): void;
   flushDraftRunOutputEvent(): void;
@@ -458,7 +458,11 @@ async function createFixture(root: string, mode: 'ask' | 'delegate') {
     scheduleDraftRunAutoContinuation: () => {}, queueResponseApprovals: () => {}, checkpointActivityDepth: 0,
     getApprovalReviewerModelContext: async () => undefined
   }) as Host;
-  host.manualToolApproval = { view: { id: 'old-manual' }, decide: approved => { assert.equal(approved, false); cancelled = true; host.manualToolApproval = undefined; } };
+  host.manualToolApproval = { view: { id: 'old-manual' }, decide: reason => {
+    assert.ok(['history_changed', 'stale_request'].includes(reason));
+    cancelled = true;
+    host.manualToolApproval = undefined;
+  } };
   // Run the production stale-source enqueue guard explicitly in the late-result test.
   const send = host.sendPrompt.bind(host);
   host.sendPrompt = async (...args) => {

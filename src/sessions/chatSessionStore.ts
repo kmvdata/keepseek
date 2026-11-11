@@ -1,7 +1,7 @@
 import { normalizeProviderReplay } from './providerReplayNormalization';
 import { normalizePendingHistoryTruncation } from './historyTruncation';
-import { normalizeManualApproval } from '../approvals/manualApproval';
-import { normalizeApprovalReviewState } from '../approvals/approvalReviewTypes';
+import { normalizeManualApproval, normalizeManualApprovals } from '../approvals/manualApproval';
+import { normalizeApprovalAttemptFailures, normalizeApprovalReviewAttempts, normalizeApprovalReviewState } from '../approvals/approvalReviewTypes';
 import { normalizeUserTaskBudgets } from './userTaskBudget';
 import { normalizeApprovalProcessing } from '../approvals/approvalProcessing';
 import { normalizeUserTask } from './userTask';
@@ -453,6 +453,9 @@ export class ChatSessionStore {
     const copied: ChatSession = {
       ...source,
       pendingHistoryTruncation: undefined,
+      pendingApproval: undefined,
+      pendingApprovals: undefined,
+      approvalProcessing: undefined,
       approvalMode: this.approvalModeValue,
       executionMode: 'normal',
       planWorkflows: undefined,
@@ -1208,6 +1211,7 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
       messages,
       approvalMode: normalizeStoredApprovalMode(item.approvalMode),
       pendingApproval: normalizeManualApproval(item.pendingApproval),
+      pendingApprovals: normalizeManualApprovals(item.pendingApprovals, item.id),
       pendingHistoryTruncation: normalizePendingHistoryTruncation(item.pendingHistoryTruncation, item.id, normalizeStoredMessage),
       executionMode: normalizeExecutionMode(item.executionMode),
       planWorkflows: normalizePlanWorkflowRecords(item.planWorkflows, item.id),
@@ -1512,6 +1516,9 @@ function normalizeRunDetails(value: unknown, restoring = false): ChatMessage['ru
           reviewerProvider: typeof review.reviewerProvider === 'string' ? review.reviewerProvider : '',
           decision: (review.decision === 'approve' || review.decision === 'needs_user' || review.decision === 'deny' ? review.decision : 'unavailable') as import('../approvals/approvalReviewTypes').ApprovalReviewDisplay['decision'],
           reviewState: restoring && review.reviewState === 'in_progress' ? 'interrupted' as const : normalizeApprovalReviewState(review.reviewState),
+          reviewAttempts: normalizeApprovalReviewAttempts(review.reviewAttempts),
+          attemptFailures: normalizeApprovalAttemptFailures(review.attemptFailures),
+          riskUnassessed: review.riskUnassessed === true ? true as const : undefined,
           risk: (review.risk === 'low' || review.risk === 'medium' || review.risk === 'critical' ? review.risk : 'high') as import('../approvals/approvalReviewTypes').ApprovalReviewRisk,
           rationale: typeof review.rationale === 'string' ? review.rationale.slice(0, 800) : '',
           affectedTargets: Array.isArray(review.affectedTargets)

@@ -113,6 +113,7 @@ export interface DeepSeekChatRequestBody {
   max_tokens?: number;
   temperature?: number;
   top_p?: number;
+  response_format?: { type: 'json_object' };
   stream_options?: {
     include_usage?: boolean;
   };

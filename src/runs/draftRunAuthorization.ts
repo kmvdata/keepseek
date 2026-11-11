@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { DraftRun, ExecutionPermit } from '../shared/types';
-import type { ApprovalRecordMatch } from '../approvals/approvalReviewTypes';
+import { APPROVAL_POLICY_VERSION, type ApprovalRecordMatch } from '../approvals/approvalReviewTypes';
 import { hashDraftRunEffect } from '../approvals/approvalReviewHash';
 import type { ApprovalReviewStore } from '../approvals/approvalReviewStore';
 import { assertValidGitCommitArguments } from '../approvals/authorization/executionBoundary';
@@ -34,10 +34,7 @@ export class DraftRunAuthorizationService {
   public createUserClickPermit(draftRun: DraftRun): ExecutionPermit {
     if (draftRun.historyInvalidationId || draftRun.historyOriginUnverified) throw new Error('DraftRun was detached by editing its source history.');
     assertValidGitCommitArguments(draftRun.spec);
-    const denial = this.approvalReviews?.findSafetyDenial({
-      sessionId: draftRun.sessionId, actionKind: 'draft_run_execute', actionHash: draftRun.specHash, effectHash: hashDraftRunEffect(draftRun)
-    })
-      ?? (draftRun.spec.restricted && this.approvalReviews?.findHardRunDenial(draftRun.sessionId, draftRun.spec.restricted.originalSpecHash));
+    const denial = this.findSafetyDenial(draftRun);
     if (denial) throw new Error(denial.rationale);
     return {
       draftRunId: draftRun.id,
@@ -48,5 +45,20 @@ export class DraftRunAuthorizationService {
       expiresAt: Date.now() + PERMIT_TTL_MS,
       nonce: randomUUID()
     };
+  }
+
+  public hasHistoricalUnavailableReview(draftRun: DraftRun): boolean {
+    const review = draftRun.approvalReview && this.approvalReviews?.get(draftRun.approvalReview.reviewId);
+    return !!review && review.policyVersion < APPROVAL_POLICY_VERSION && review.decision === 'unavailable'
+      && review.approvalSource === 'auto_approval_review' && !review.historyInvalidatedBy
+      && review.sessionId === draftRun.sessionId && review.agentRunId === draftRun.agentRunId
+      && review.targetId === draftRun.id && review.actionKind === 'draft_run_execute'
+      && review.actionHash === draftRun.specHash && !this.findSafetyDenial(draftRun);
+  }
+
+  private findSafetyDenial(draftRun: DraftRun) {
+    return this.approvalReviews?.findSafetyDenial({
+      sessionId: draftRun.sessionId, actionKind: 'draft_run_execute', actionHash: draftRun.specHash, effectHash: hashDraftRunEffect(draftRun)
+    }) ?? (draftRun.spec.restricted && this.approvalReviews?.findHardRunDenial(draftRun.sessionId, draftRun.spec.restricted.originalSpecHash));
   }
 }

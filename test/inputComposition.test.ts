@@ -42,10 +42,11 @@ function readyView(language = 'en') {
 
 test('exact approval presents combined scope, preserves focus, and posts one response across rerenders', () => {
   const view = readyView('en');
-  const manual = { id: 'exact-approval', sessionId: 'A', label: 'Read reference.txt', reason: 'External scope required',
+  const manual = { id: 'exact-approval', sessionId: 'A', runtimeId: 'runtime', status: 'waiting', canDecide: true,
+    label: 'Read reference.txt', reason: 'External scope required',
     authorizationTargets: ['file:///outside/reference.txt'],
-    request: { exactAction: { kind: 'external_file_access', uri: 'file:///outside/reference.txt', access: 'read' } } };
-  view.receive({ type: 'state', revision: 2, state: { approvalMode: 'delegate', manualToolApproval: manual } });
+    exactAction: { kind: 'external_file_access', uri: 'file:///outside/reference.txt', access: 'read' } };
+  view.receive({ type: 'state', revision: 2, state: { approvalMode: 'delegate', manualToolApprovals: [manual] } });
   const transcript = view.element('transcript');
   const approveButton = () => transcript.querySelector('button[data-manual-approval-action="approve"]');
   assert.equal(view.state.startup.interactiveReady, true);
@@ -65,10 +66,13 @@ test('exact approval presents combined scope, preserves focus, and posts one res
   const responses = view.posted.filter(message => message.type === 'resolveValidationApproval');
   assert.equal(responses.length, 1);
   assert.equal(responses[0].id, manual.id);
+  assert.equal(responses[0].sessionId, manual.sessionId);
+  assert.equal(responses[0].runtimeId, manual.runtimeId);
   assert.equal(responses[0].approve, true);
 
   const restarted = readyView();
-  restarted.receive({ type: 'state', revision: 2, state: { pendingApproval: { status: 'interrupted', label: manual.label, reason: manual.reason } } });
+  restarted.receive({ type: 'state', revision: 2, state: { manualToolApprovals: [{ id: manual.id, sessionId: 'A',
+    status: 'interrupted', label: manual.label, reason: manual.reason, canDecide: false }] } });
   assert.match(restarted.element('transcript').textContent, /Approval processing was interrupted/u);
   assert.equal(restarted.element('transcript').querySelector('button[data-manual-approval-action]'), null);
   assert.doesNotMatch(restarted.element('transcript').textContent, /file:\/\/\/outside/u);
