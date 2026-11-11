@@ -31,7 +31,8 @@ flowchart TD
 | [html.ts](../src/webview/html.ts) | CSP、nonce、资源 URI、首次 ready bootstrap | ready 之前的消息暂存和初始化门禁 |
 | [script.ts](../src/webview/script.ts) | transcript、会话、状态/设置渲染、Host 消息监听 | DOM id、状态投影、编辑重发、Apply/Discard |
 | [input/composition.ts](../src/webview/input/composition.ts) | 输入模板、样式、脚本 fragment 固定拼装顺序 | 同一 IIFE 的词法依赖和监听顺序；优先保持生成字节 |
-| [richTextShortcuts.ts](../src/webview/richTextShortcuts.ts) | 两个编辑器共享快捷键 | 输入框与编辑重发的键盘/焦点行为 |
+| [richTextShortcuts.ts](../src/webview/richTextShortcuts.ts) | 两个编辑器共享 Emacs 命令、内存杀环与 yank-pop 边界 | 输入框与编辑重发的键盘/焦点行为 |
+| [richTextContextMenu.ts](../src/webview/richTextContextMenu.ts)、[richTextContextMenuStyles.ts](../src/webview/richTextContextMenuStyles.ts) | 编辑器右键菜单、主题与焦点；调用共享命令 | C-w / M-w / C-y / M-y 提示与真实行为一致 |
 
 Webview 是字符串生成的页面，不是独立前端应用。`input/composer/` 管编辑/序列化，`references/` 管引用与拖拽，`commandMenu/` 管菜单，`usage/` 管用量详情，`dialogs/` 管各设置对话框。样式、模板、行为保持各自 fragment 所有权。
 

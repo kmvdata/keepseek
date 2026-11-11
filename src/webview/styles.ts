@@ -1,5 +1,6 @@
 import { getInputStyles } from './input/styles';
 import { conversationsStylesFragment } from './conversations/styles';
+import { getRichTextContextMenuStyles } from './richTextContextMenuStyles';
 
 export function getStyles(): string {
   return `
@@ -209,6 +210,7 @@ export function getStyles(): string {
     }
 
     ${getInputStyles()}
+    ${getRichTextContextMenuStyles()}
 
     .settings-model-default-slot {
       display: inline-grid;

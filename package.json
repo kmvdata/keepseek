@@ -3,7 +3,7 @@
   "displayName": "KeepSeek",
   "description": "AI-powered coding agent for VS Code",
   "publisher": "keepseek",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "license": "MIT",
   "icon": "resources/keepseek.png",
   "homepage": "https://github.com/kmvdata/keepseek#readme",
@@ -195,6 +195,45 @@
         "kmvdata.keepseek.patch.maxDiffBytes": {
           "type": "integer", "default": 4194304, "minimum": 65536, "maximum": 67108864, "scope": "window",
           "markdownDescription": "Maximum file size for a normal full diff preview; larger patch edits use a hunk-only review document."
+        },
+        "kmvdata.keepseek.trace.enabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "markdownDescription": "Record interaction logs for the current workspace. Toggled by the Debug mode menu item. / 为当前工作区记录交互日志，由“调试模式”菜单项切换。"
+        },
+        "kmvdata.keepseek.trace.level": {
+          "type": "string",
+          "default": "full",
+          "enum": [
+            "metadata",
+            "request",
+            "full"
+          ],
+          "scope": "window",
+          "markdownDescription": "Interaction log detail level: metadata only, request, or full payload. / 交互日志详细程度：仅元数据、请求、完整内容。"
+        },
+        "kmvdata.keepseek.trace.logRawStream": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "Record raw streamed response chunks in interaction logs. / 在交互日志中记录原始流式响应分片。"
+        },
+        "kmvdata.keepseek.trace.retentionDays": {
+          "type": "integer",
+          "default": 7,
+          "minimum": 1,
+          "maximum": 60,
+          "scope": "window",
+          "markdownDescription": "Days an interaction log is retained before it becomes eligible for cleanup. / 交互日志可被清理前的保留天数。"
+        },
+        "kmvdata.keepseek.trace.maxFileBytes": {
+          "type": "integer",
+          "default": 20000000,
+          "minimum": 1000000,
+          "maximum": 1000000000,
+          "scope": "window",
+          "markdownDescription": "Maximum bytes retained for one interaction log file. / 单个交互日志文件的最大保留字节数。"
         },
         "kmvdata.keepseek.providerInlineResultMaxChars": {
           "type": "integer", "default": 48000, "minimum": 1024, "maximum": 1000000, "scope": "window",

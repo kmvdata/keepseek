@@ -133,6 +133,8 @@ export const composerStatusFragment: WebviewFragment = {
       }
 
       function clearPrompt() {
+        promptShortcutController.invalidateYank();
+        promptShortcutController.closeContextMenu();
         closeCommandMenu();
         closeExecutionModeMenu(false);
         closeReferenceMenu(false);

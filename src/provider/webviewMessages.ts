@@ -105,7 +105,7 @@ export type WebviewMessage =
   | { type: 'setSkillWorkspaceDefault'; skillId: string; enabled: boolean }
   | { type: 'createSkillDraft'; name: string; description: string; allowImplicit: boolean }
   | { type: 'requestClipboardText'; requestId: string }
-  | { type: 'writeClipboardText'; text: string }
+  | { type: 'writeClipboardText'; text: string; requestId?: string }
   | { type: 'readPath'; path: string }
   | { type: 'openFileReference'; path: string; startLine: number; endLine: number; startColumn: number; endColumn: number }
   | { type: 'openDirectoryReference'; path: string }

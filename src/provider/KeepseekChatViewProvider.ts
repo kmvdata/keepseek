@@ -1701,7 +1701,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         await this.postClipboardText(message.requestId);
         return;
       case 'writeClipboardText':
-        await this.writeClipboardText(message.text);
+        await this.writeClipboardText(message.text, message.requestId);
         return;
       case 'readPath':
         await this.readPathToContext(message.path);
@@ -3458,11 +3458,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async writeClipboardText(text: string): Promise<void> {
+  private async writeClipboardText(text: string, requestId?: string): Promise<void> {
     try {
       await vscode.env.clipboard.writeText(text);
+      if (requestId) { this.postToWebview({ type: 'clipboardWriteResult', requestId, ok: true }); }
     } catch {
-      // Clipboard writes are best-effort for shortcut compatibility.
+      if (requestId) { this.postToWebview({ type: 'clipboardWriteResult', requestId, ok: false }); }
     }
   }
 
@@ -4392,7 +4393,15 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
     const debugMode = enabled === true;
     const config = vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE);
-    await config.update('trace.enabled', debugMode, vscode.ConfigurationTarget.Global);
+    try {
+      await config.update('trace.enabled', debugMode, vscode.ConfigurationTarget.Global);
+    } catch (error) {
+      // A rejected settings write must not be reported as an enabled debug mode.
+      // Resync the webview with the value VS Code actually holds and explain how
+      // to repair a stale installed manifest instead of the raw rejection.
+      this.postState();
+      throw withConfigurationRegistrationHelp(error, this.language);
+    }
     this.postState();
     vscode.window.showInformationMessage(this.t(debugMode ? 'debugModeEnabled' : 'debugModeDisabled'));
   }

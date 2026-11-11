@@ -45,6 +45,22 @@ test('native storage remains file-backed independently of VS Code virtual storag
   assert.match(extension, /affectsConfiguration\(KEEPSEEK_CONFIGURATION_NAMESPACE\)/u);
 });
 
+test('declares every interaction-trace setting the runtime reads or writes', () => {
+  const manifest = JSON.parse(readFileSync('package.json', 'utf8'));
+  const properties = manifest.contributes.configuration.properties as Record<string, { type?: string }>;
+  const sources = [readFileSync('src/provider/KeepseekChatViewProvider.ts', 'utf8'),
+    readFileSync('src/shared/config.ts', 'utf8')].join('\n');
+  const keys = new Set([...sources.matchAll(/\.(?:get|update)(?:<[^>]*>)?\('(trace\.[A-Za-z]+)'/gu)].map(match => match[1]));
+  assert.deepEqual([...keys].sort(),
+    ['trace.enabled', 'trace.level', 'trace.logRawStream', 'trace.maxFileBytes', 'trace.retentionDays']);
+  for (const key of keys) {
+    // VS Code rejects Configuration.update() for a key the installed manifest
+    // does not contribute, which silently makes the Debug mode toggle unusable.
+    assert.ok(Object.hasOwn(properties, `kmvdata.keepseek.${key}`), `${key} is not contributed`);
+  }
+  assert.equal(properties['kmvdata.keepseek.trace.enabled']?.type, 'boolean');
+});
+
 test('current settings ignore the old namespace in every workspace and save only into the new namespace', async () => {
   const original = vscode.workspace.getConfiguration;
   const oldSettings: Record<string, unknown> = {

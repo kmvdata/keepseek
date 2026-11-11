@@ -206,6 +206,8 @@ export function getScript(): string {
 
     function changeVisibleSession(previousSessionId, nextSessionId) {
       if (previousSessionId === nextSessionId) return;
+      inlineShortcutController.invalidateYank();
+      inlineShortcutController.closeContextMenu();
       var startupDraft = !previousSessionId && promptInput ? promptInput.innerHTML : '';
       if (previousSessionId && promptInput && !historyCleanupDeletedSessionIds.has(previousSessionId)) sessionPromptDrafts.set(previousSessionId, promptInput.innerHTML);
       stopAgentStatusRotation(); agentStatusRotationKey = ''; reconnectStatusActive = false;
@@ -612,6 +614,8 @@ ${conversationsStateFragment.source}
     let editReferenceResourceRequestId = '';
     const inlineShortcutController = window.keepseekRichTextShortcuts.createController({
       getEditor: function() { return getActiveInlineEditor(); },
+      getContextId: function() { return state.activeSessionId + ':' + editingMessageId; },
+      translate: t,
       isRangeInside: function(range, editor) { return isRangeInsideInlineEditor(range, editor); },
       isNodeInside: function(node, editor) { return isNodeInsideInlineEditor(node, editor); },
       setSelectionRange: function(editor, range) { setInlineEditorSelectionRange(editor, range); },
@@ -750,7 +754,21 @@ ${conversationsStateFragment.source}
       var target = event.target instanceof Element ? event.target : null;
       var editor = target?.closest('.message-edit-input');
       if (!editor || !transcript.contains(editor)) return;
+      inlineShortcutController.invalidateYank();
       refreshInlineEditorAfterEdit(editor);
+    });
+
+    transcript.addEventListener('contextmenu', function(event) {
+      var target = event.target instanceof Element ? event.target : null;
+      var editor = target?.closest('.message-edit-input');
+      if (!editor || !transcript.contains(editor)) return;
+      inlineShortcutController.handleContextMenu(event);
+    });
+
+    transcript.addEventListener('focusin', function(event) {
+      var target = event.target instanceof Element ? event.target : null;
+      var editor = target?.closest('.message-edit-input');
+      if (editor && transcript.contains(editor)) { inlineShortcutController.handleFocus(); }
     });
 
     transcript.addEventListener('paste', function(event) {
@@ -827,7 +845,7 @@ ${conversationsStateFragment.source}
       var target = event.target instanceof Element ? event.target : null;
       var editor = target?.closest('.message-edit-input');
       if (!editor || !transcript.contains(editor)) return;
-      inlineShortcutController.deactivateMark();
+      if (event.button !== 2) { inlineShortcutController.invalidateYank(); inlineShortcutController.deactivateMark(); }
       saveEditSelection(editor);
       syncEditReferenceMenuFromEditor(editor);
     });

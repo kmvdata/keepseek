@@ -39,6 +39,134 @@ function readyView(language = 'en') {
   return view;
 }
 
+for (const platform of ['Win32', 'Linux x86_64', 'MacIntel']) {
+  test(`${platform} uses the same Emacs clipboard commands in both editors before host dispatch`, () => {
+    const view = createWebviewDomHarness(platform);
+    view.receive({ type: 'state', revision: 1, state: {
+      activeSessionId: 'A', isMac: platform !== 'MacIntel',
+      startup: { interactiveReady: true, sideEffectsReady: true }, interaction: interaction('A', 1),
+      messages: [{ id: 'user-a', role: 'user', content: 'original', createdAt: '2026-11-11T00:00:00.000Z' }]
+    } });
+    const prompt = view.element('promptInput');
+    prompt.textContent = 'main draft';
+    const transcript = view.element('transcript');
+    transcript.dispatchEvent({ type: 'click', target: transcript.querySelector('button[data-message-action="edit"]') });
+    const inline = transcript.querySelector('.message-edit-input');
+    assert.ok(inline);
+    inline.textContent = 'inline draft';
+
+    for (const editor of [prompt, inline]) {
+      editor.focus();
+      editor.scrollTop = 0;
+      editor.scrollHeight = 400;
+      const dispatch = (event: Record<string, unknown>) => (editor === prompt ? prompt : transcript).dispatchEvent({ target: editor, ...event });
+      for (const [key, ctrlKey, altKey] of [['w', true, false], ['w', false, true], ['y', true, false], ['y', false, true]] as const) {
+        let prevented = false;
+        let stopped = false;
+        dispatch({ type: 'keydown', key, code: 'Key' + key.toUpperCase(), ctrlKey, altKey, metaKey: false, shiftKey: false,
+          preventDefault: () => { prevented = true; }, stopPropagation: () => { stopped = true; } });
+        assert.equal(prevented, true, `Emacs ${key} must be handled locally`);
+        assert.equal(stopped, true, `Emacs ${key} must not reach a host shortcut`);
+      }
+      // Restore Emacs C-v page-down on every platform; no Windows clipboard exception.
+      let pagePrevented = false;
+      dispatch({ type: 'keydown', key: 'v', code: 'KeyV', ctrlKey: true, altKey: false, metaKey: false, shiftKey: false,
+        preventDefault: () => { pagePrevented = true; } });
+      assert.equal(pagePrevented, true);
+      assert.equal(editor.scrollTop, 120);
+      let composingPrevented = false;
+      dispatch({ type: 'keydown', key: 'y', code: 'KeyY', ctrlKey: true, isComposing: true,
+        preventDefault: () => { composingPrevented = true; } });
+      assert.equal(composingPrevented, false);
+    }
+    assert.equal(view.posted.some(message => ['sendPrompt', 'editUserPrompt'].includes(message.type)), false);
+  });
+
+  test(`${platform} context menus advertise and dispatch Emacs commands in both editors`, () => {
+    const view = createWebviewDomHarness(platform);
+    view.receive({ type: 'state', revision: 1, state: {
+      activeSessionId: 'A', language: 'en', startup: { interactiveReady: true, sideEffectsReady: true }, interaction: interaction('A', 1),
+      messages: [{ id: 'user-a', role: 'user', content: 'original', createdAt: '2026-11-11T00:00:00.000Z' }]
+    } });
+    const prompt = view.element('promptInput');
+    const transcript = view.element('transcript');
+    transcript.dispatchEvent({ type: 'click', target: transcript.querySelector('button[data-message-action="edit"]') });
+    const inline = transcript.querySelector('.message-edit-input');
+    assert.ok(inline);
+    for (const editor of [prompt, inline]) {
+      editor.focus();
+      let prevented = false;
+      let stopped = false;
+      (editor === prompt ? prompt : transcript).dispatchEvent({ type: 'contextmenu', target: editor, clientX: 80, clientY: 90,
+        preventDefault: () => { prevented = true; }, stopPropagation: () => { stopped = true; } });
+      assert.equal(prevented, true);
+      assert.equal(stopped, true);
+      const menu = view.element('keepseek-editor-context-menu');
+      assert.ok(menu);
+      assert.equal(menu.getAttribute('role'), 'menu');
+      assert.deepEqual(menu.querySelectorAll('kbd').map(item => item.textContent), ['C-w', 'M-w', 'C-y', 'M-y']);
+      const buttons = menu.querySelectorAll('button');
+      assert.deepEqual(buttons.map(item => item.title), ['kill-region', 'kill-ring-save', 'yank', 'yank-pop']);
+      assert.deepEqual(buttons.map(item => item.firstChild?.textContent), ['Cut', 'Copy', 'Paste', 'Cycle kill ring']);
+      assert.equal(buttons[0]?.disabled, true, 'Cut needs a selected region');
+      assert.equal(buttons[1]?.disabled, true, 'Copy needs a selected region');
+      assert.equal(buttons[3]?.disabled, true, 'Yank-pop needs an immediately preceding yank');
+      assert.doesNotMatch(menu.textContent, /Ctrl\+[XCV]|Cmd\+[XCV]/u);
+      const before = view.posted.filter(message => message.type === 'requestClipboardText').length;
+      buttons[2]!.click();
+      assert.equal(view.element('keepseek-editor-context-menu'), null);
+      assert.equal(view.document.activeElement, editor);
+      assert.equal(view.posted.filter(message => message.type === 'requestClipboardText').length, before + 1);
+    }
+  });
+}
+
+test('Emacs context menu localizes labels and supports keyboard and outside dismissal', () => {
+  const view = readyView('zh-CN');
+  const prompt = view.element('promptInput');
+  prompt.focus();
+  prompt.dispatchEvent({ type: 'contextmenu', target: prompt });
+  let menu = view.element('keepseek-editor-context-menu');
+  assert.ok(menu);
+  assert.deepEqual(menu.querySelectorAll('button').map(item => item.firstChild?.textContent), ['剪切', '复制', '粘贴', '轮换杀环历史']);
+  const yank = menu.querySelector('[data-emacs-command="yank"]');
+  assert.equal(view.document.activeElement, yank);
+  menu.dispatchEvent({ type: 'keydown', key: 'ArrowUp' });
+  assert.equal(view.document.activeElement, yank, 'navigation skips unavailable commands');
+  menu.dispatchEvent({ type: 'keydown', key: 'Escape' });
+  assert.equal(view.element('keepseek-editor-context-menu'), null);
+  assert.equal(view.document.activeElement, prompt);
+  prompt.dispatchEvent({ type: 'contextmenu', target: prompt });
+  menu = view.element('keepseek-editor-context-menu');
+  assert.ok(menu);
+  const requests = view.posted.filter(message => message.type === 'requestClipboardText').length;
+  menu.dispatchEvent({ type: 'keydown', key: 'Enter' });
+  assert.equal(view.element('keepseek-editor-context-menu'), null);
+  assert.equal(view.posted.filter(message => message.type === 'requestClipboardText').length, requests + 1);
+  prompt.dispatchEvent({ type: 'contextmenu', target: prompt });
+  assert.ok(view.element('keepseek-editor-context-menu'));
+  view.document.dispatchEvent({ type: 'mousedown', target: view.document.body });
+  assert.equal(view.element('keepseek-editor-context-menu'), null);
+  let unrelatedPrevented = false;
+  view.element('statusText').dispatchEvent({ type: 'contextmenu', preventDefault: () => { unrelatedPrevented = true; } });
+  assert.equal(unrelatedPrevented, false, 'unrelated UI keeps its normal context menu');
+});
+
+test('a context menu opened in a previous session cannot paste into the reused prompt', () => {
+  const view = readyView();
+  const prompt = view.element('promptInput');
+  prompt.dispatchEvent({ type: 'contextmenu', target: prompt });
+  const menu = view.element('keepseek-editor-context-menu');
+  assert.ok(menu);
+  const paste = menu.querySelector('[data-emacs-command="yank"]');
+  assert.ok(paste);
+  const requests = view.posted.filter(message => message.type === 'requestClipboardText').length;
+  view.receive({ type: 'state', revision: 2, state: { activeSessionId: 'B', interaction: interaction('B', 2) } });
+  paste.click();
+  assert.equal(view.posted.filter(message => message.type === 'requestClipboardText').length, requests);
+  assert.equal(view.element('keepseek-editor-context-menu'), null);
+});
+
 test('a draft typed during startup survives the first authoritative session identity', () => {
   const view = createWebviewDomHarness();
   view.receive({ type: 'state', revision: 1, state: { activeSessionId: '', interaction: interaction('', 1, 'loading_session') } });
@@ -211,7 +339,8 @@ test('input feature fragments compose deterministically and exactly once', () =>
 });
 
 test('modular input assembly preserves the reviewed generated bytes', () => {
-  assert.equal(hash(getInputScript()), '309301e4fe26a141b1bbecc4eeddfb4fbd7614752dd3d53a3c1794aa0888be17');
+  // Emacs command/context-menu bindings deliberately change the reviewed script.
+  assert.equal(hash(getInputScript()), 'ae6016fd72b691b387aa46a986e5a7106111fb77bec21d15737e85d28901a04f');
   // Initial storage baseline: remove obsolete cleanup-source and legacy usage UI.
   // Current DOM behavior is verified below and by the history/usage harnesses.
   assert.equal(hash(getInputStyles()), 'c5a2b88bbe0da4171a69770e7f77ff3725efdb103efa02fca71545dda954a39b');

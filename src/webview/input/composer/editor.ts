@@ -5,6 +5,8 @@ export const editorControllerFragment: WebviewFragment = {
   source: `
       var promptShortcutController = window.keepseekRichTextShortcuts.createController({
         getEditor: function() { return promptInput; },
+        getContextId: function() { return state.activeSessionId; },
+        translate: t,
         isRangeInside: function(range) { return isRangeInsidePrompt(range); },
         isNodeInside: function(node) { return isNodeInsidePrompt(node); },
         setSelectionRange: function(_editor, range) { setPromptSelectionRange(range); },
@@ -84,6 +86,7 @@ export const editorBindingsFragment: WebviewFragment = {
       });
 
       promptInput.addEventListener('input', function() {
+        promptShortcutController.invalidateYank();
         sanitizePromptContent();
         updatePromptVisualState();
         savePromptSelection();
@@ -91,11 +94,17 @@ export const editorBindingsFragment: WebviewFragment = {
       });
 
       promptInput.addEventListener('keyup', savePromptSelection);
-      promptInput.addEventListener('mouseup', function() {
-        promptShortcutController.deactivateMark();
+      promptInput.addEventListener('mouseup', function(event) {
+        if (event.button !== 2) { promptShortcutController.invalidateYank(); promptShortcutController.deactivateMark(); }
         savePromptSelection();
       });
-      promptInput.addEventListener('focus', savePromptSelection);
+      promptInput.addEventListener('focus', function() {
+        promptShortcutController.handleFocus();
+        savePromptSelection();
+      });
+      promptInput.addEventListener('contextmenu', function(event) {
+        promptShortcutController.handleContextMenu(event);
+      });
 
 `.slice(1)
 };

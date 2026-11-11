@@ -154,7 +154,7 @@ function parseHtml(html: string, parent: WebviewNode, owner?: WebviewNode): void
   }
 }
 
-export function createWebviewDomHarness() {
+export function createWebviewDomHarness(platform = 'MacIntel') {
   let now = 0;
   let timerSequence = 0;
   const timers = new Map<number, { at: number; interval: number; callback: () => void }>();
@@ -192,7 +192,7 @@ export function createWebviewDomHarness() {
     Node: Object.assign(WebviewNode, { ELEMENT_NODE: 1, TEXT_NODE: 3, DOCUMENT_FRAGMENT_NODE: 11 }),
     NodeFilter: { SHOW_TEXT: 4, SHOW_ELEMENT: 1, FILTER_ACCEPT: 1, FILTER_SKIP: 3 },
     URL, TextEncoder, TextDecoder, performance, console, Intl,
-    navigator: { platform: 'MacIntel', userAgent: 'test' },
+    navigator: { platform, userAgent: 'test' },
     getComputedStyle: () => ({ lineHeight: '16px', fontSize: '14px' }),
     setTimeout: (callback: () => void, delay: number) => schedule(callback, delay),
     clearTimeout: (id: number) => timers.delete(id),

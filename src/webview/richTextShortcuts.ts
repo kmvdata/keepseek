@@ -1,17 +1,59 @@
+import { getRichTextContextMenuScript } from './richTextContextMenu';
+
 export function getRichTextShortcutsScript(): string {
   return `
     window.keepseekRichTextShortcuts = (function() {
       var clipboardRequestSequence = 0;
       var clipboardRequests = Object.create(null);
+      var clipboardWrites = Object.create(null);
+      var pendingClipboardWrite = null;
+      var clipboardWriteVersion = 0;
+      // Shared only by this Webview's editors; never serialized into a session or request.
+      var killRing = [];
+      var commandGeneration = 0;
+      var killRingLimit = 60;
+      var focusedEditor = null;
+
+      ${getRichTextContextMenuScript()}
+
+      function rememberKill(text) {
+        if (!text) { return; }
+        if (killRing[0] !== text) {
+          killRing.unshift(text);
+          if (killRing.length > killRingLimit) { killRing.length = killRingLimit; }
+        }
+      }
 
       function writeClipboardText(text) {
-        if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-          return navigator.clipboard.writeText(text).catch(function() {
-            vscode.postMessage({ type: 'writeClipboardText', text: text });
-          });
+        var version = ++clipboardWriteVersion;
+        function write() {
+          if (version !== clipboardWriteVersion) { return Promise.resolve(); }
+          if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+            return navigator.clipboard.writeText(text).catch(function() {
+              return requestClipboardWrite(text);
+            });
+          }
+          return requestClipboardWrite(text);
         }
-        vscode.postMessage({ type: 'writeClipboardText', text: text });
-        return Promise.resolve();
+        // Preserve command order when a second kill/copy arrives before the first write settles.
+        var operation = pendingClipboardWrite ? pendingClipboardWrite.catch(function() {}).then(write) : write();
+        pendingClipboardWrite = operation;
+        function settled() { if (pendingClipboardWrite === operation) { pendingClipboardWrite = null; } }
+        operation.then(settled, settled);
+        return operation;
+      }
+
+      function requestClipboardWrite(text) {
+        clipboardRequestSequence += 1;
+        var requestId = 'clipboardWrite:' + clipboardRequestSequence + ':' + Date.now();
+        return new Promise(function(resolve, reject) {
+          var timeout = setTimeout(function() {
+            delete clipboardWrites[requestId];
+            reject(new Error('Clipboard write timed out'));
+          }, 5000);
+          clipboardWrites[requestId] = { resolve: resolve, reject: reject, timeout: timeout };
+          vscode.postMessage({ type: 'writeClipboardText', text: text, requestId: requestId });
+        });
       }
 
       function readClipboardText(callback) {
@@ -33,17 +75,29 @@ export function getRichTextShortcutsScript(): string {
 
       window.addEventListener('message', function(event) {
         var message = event.data;
+        if (message && message.type === 'clipboardWriteResult') {
+          var pendingWrite = clipboardWrites[message.requestId];
+          if (pendingWrite) {
+            clearTimeout(pendingWrite.timeout);
+            delete clipboardWrites[message.requestId];
+            if (message.ok === true) { pendingWrite.resolve(); }
+            else { pendingWrite.reject(new Error('Clipboard write failed')); }
+          }
+          return;
+        }
         if (!message || message.type !== 'clipboardText') { return; }
         var requestId = message.requestId || '';
         var callback = clipboardRequests[requestId];
         delete clipboardRequests[requestId];
         if (callback) {
-          callback(message.text || '');
+          callback(message.text || '', Boolean(message.error));
         }
       });
 
       function createController(options) {
         var markActive = false;
+        var lastYank = null;
+        var contextMenu = null;
 
         function getEditor() {
           return options.getEditor ? options.getEditor() : null;
@@ -51,7 +105,70 @@ export function getRichTextShortcutsScript(): string {
 
         function handleKeydown(event) {
           if (!event || event.isComposing || event.keyCode === 229) { return false; }
+          var isYank = !event.metaKey && !event.shiftKey &&
+            ((event.ctrlKey && !event.altKey) || (event.altKey && !event.ctrlKey)) && isShortcutKey(event, 'y');
+          if (!isYank && !['Control', 'Alt', 'Meta', 'Shift'].includes(event.key)) { invalidateYank(); }
           return handleSystemShortcut(event) || handleEmacsShortcut(event);
+        }
+
+        function handleContextMenu(event) {
+          var editor = getEditor();
+          if (!editor) { return; }
+          if (!contextMenu) { contextMenu = createEmacsContextMenu(controller, options); }
+          contextMenu.open(event, editor);
+        }
+
+        function closeContextMenu() {
+          if (contextMenu) { contextMenu.close(false); }
+        }
+
+        function invalidateYank() {
+          lastYank = null;
+          commandGeneration += 1;
+        }
+
+        function handleFocus() {
+          var editor = getEditor();
+          if (focusedEditor && focusedEditor !== editor) { invalidateYank(); }
+          focusedEditor = editor;
+        }
+
+        function getContextId() {
+          return options.getContextId ? options.getContextId() : '';
+        }
+
+        function canRunCommand(command) {
+          var editor = getEditor();
+          if (!editor) { return false; }
+          if (command === 'copy') {
+            var selection = getSelection(editor);
+            return Boolean(selection && !selection.isCollapsed);
+          }
+          if (editor.getAttribute('contenteditable') === 'false') { return false; }
+          if (command === 'cut') {
+            var cutSelection = getSelection(editor);
+            return Boolean(cutSelection && !cutSelection.isCollapsed);
+          }
+          if (command === 'yank') { return true; }
+          if (command === 'yank-pop') {
+            var caret = getSelection(editor);
+            return Boolean(lastYank && lastYank.editor === editor && lastYank.contextId === getContextId() &&
+              lastYank.generation === commandGeneration && editor.innerHTML === lastYank.snapshot &&
+              isRangeInside(lastYank.range, editor) && caret && caret.isCollapsed &&
+              caret.focusNode === lastYank.caretNode && caret.focusOffset === lastYank.caretOffset && killRing.length);
+          }
+          return false;
+        }
+
+        function runCommand(command) {
+          if (!canRunCommand(command)) { return false; }
+          if (command === 'yank-pop') { return yankPop(); }
+          invalidateYank();
+          if (command === 'cut') { cutSelection(); }
+          else if (command === 'copy') { copySelection(); }
+          else if (command === 'yank') { pasteClipboardText(); }
+          else { return false; }
+          return true;
         }
 
         function handleSystemShortcut(event) {
@@ -76,7 +193,10 @@ export function getRichTextShortcutsScript(): string {
             return runShortcut(event, setMark);
           }
           if (event.altKey && !event.ctrlKey && !event.shiftKey && isShortcutKey(event, 'w')) {
-            return runShortcut(event, copySelection);
+            return runShortcut(event, function() { runCommand('copy'); });
+          }
+          if (event.altKey && !event.ctrlKey && !event.shiftKey && isShortcutKey(event, 'y')) {
+            return runShortcut(event, function() { runCommand('yank-pop'); });
           }
           if (!event.ctrlKey || event.altKey || event.shiftKey) { return false; }
 
@@ -114,10 +234,10 @@ export function getRichTextShortcutsScript(): string {
             return runShortcut(event, killLine);
           }
           if (isShortcutKey(event, 'w')) {
-            return runShortcut(event, cutSelection);
+            return runShortcut(event, function() { runCommand('cut'); });
           }
           if (isShortcutKey(event, 'y')) {
-            return runShortcut(event, pasteClipboardText);
+            return runShortcut(event, function() { runCommand('yank'); });
           }
           return false;
         }
@@ -196,6 +316,7 @@ export function getRichTextShortcutsScript(): string {
         }
 
         function notifyEdited(editor) {
+          invalidateYank();
           deactivateMark();
           if (editor && options.onEdited) {
             options.onEdited(editor);
@@ -342,23 +463,19 @@ export function getRichTextShortcutsScript(): string {
           var editor = getEditor();
           var selection = getSelection(editor);
           if (!editor || !selection || selection.isCollapsed) { return; }
-          if (execEditCommand(editor, 'cut')) { return; }
-
-          var range = selection.getRangeAt(0).cloneRange();
           var text = selection.toString();
-          writeClipboardText(text).then(function() {
-            if (editor !== getEditor() || !isRangeInside(range, editor)) { return; }
-            setSelectionRange(editor, range);
-            saveSelection(editor);
-            execEditCommand(editor, 'delete');
-          }).catch(function() {});
+          if (!text) { return; }
+          // The full text is recoverable from the ring before removing any selection.
+          rememberKill(text);
+          execEditCommand(editor, 'delete');
+          writeClipboardText(text).catch(function() {});
         }
 
         function copySelection() {
           var editor = getEditor();
           var selection = getSelection(editor);
           if (!editor || !selection || selection.isCollapsed) { return; }
-          if (execClipboardCommand('copy')) { return; }
+          rememberKill(selection.toString());
           writeClipboardText(selection.toString()).catch(function() {});
         }
 
@@ -366,19 +483,51 @@ export function getRichTextShortcutsScript(): string {
           var editor = getEditor();
           if (!editor || !options.getInsertionRange || !options.insertText) { return; }
           var range = options.getInsertionRange(editor).cloneRange();
-          readClipboardText(function(text) {
-            insertClipboardTextAtRange(editor, range, text);
-          });
+          var generation = commandGeneration;
+          var contextId = getContextId();
+          var snapshot = editor.innerHTML;
+          var caret = getSelection(editor);
+          var caretNode = caret && caret.focusNode;
+          var caretOffset = caret && caret.focusOffset;
+          var fallback = killRing[0] || '';
+          function accept(text, failed) {
+            var currentSelection = getSelection(editor);
+            var value = !failed && text ? text : fallback;
+            if (!value || generation !== commandGeneration || editor !== getEditor() || contextId !== getContextId() ||
+                editor.innerHTML !== snapshot || !currentSelection || currentSelection.focusNode !== caretNode ||
+                currentSelection.focusOffset !== caretOffset) { return; }
+            rememberKill(value);
+            insertYankAtRange(editor, range, value, 0);
+          }
+          function read() { readClipboardText(accept); }
+          if (pendingClipboardWrite) { pendingClipboardWrite.then(read, function() { accept('', true); }); }
+          else { read(); }
         }
 
-        function insertClipboardTextAtRange(editor, range, text) {
-          if (!text || editor !== getEditor()) { return; }
-          if (range && isRangeInside(range, editor)) {
-            setSelectionRange(editor, range);
-            saveSelection(editor);
-          }
+        function insertYankAtRange(editor, range, text, index) {
+          if (!text || editor !== getEditor() || !isRangeInside(range, editor)) { return; }
+          var start = range.cloneRange();
+          start.collapse(true);
+          setSelectionRange(editor, range);
+          saveSelection(editor);
           deactivateMark();
           options.insertText(editor, text);
+          var selection = getSelection(editor);
+          if (!selection || !selection.isCollapsed) { return; }
+          var end = selection.getRangeAt(0);
+          start.setEnd(end.endContainer, end.endOffset);
+          if (!isRangeInside(start, editor)) { return; }
+          lastYank = { editor: editor, range: start.cloneRange(), index: index,
+            snapshot: editor.innerHTML, caretNode: selection.focusNode, caretOffset: selection.focusOffset,
+            contextId: getContextId(), generation: commandGeneration };
+        }
+
+        function yankPop() {
+          if (!canRunCommand('yank-pop')) { return false; }
+          var previous = lastYank;
+          var index = (previous.index + 1) % killRing.length;
+          insertYankAtRange(previous.editor, previous.range.cloneRange(), killRing[index], index);
+          return true;
         }
 
         function setMark() {
@@ -402,6 +551,8 @@ export function getRichTextShortcutsScript(): string {
 
         function deactivateMark() {
           markActive = false;
+          // Background empty-editor normalization must not invalidate a sibling's yank.
+          lastYank = null;
         }
 
         function collapseSelectionToFocus(editor) {
@@ -742,11 +893,18 @@ export function getRichTextShortcutsScript(): string {
           return true;
         }
 
-        return {
+        var controller = {
           handleKeydown: handleKeydown,
+          handleContextMenu: handleContextMenu,
+          handleFocus: handleFocus,
+          closeContextMenu: closeContextMenu,
+          runCommand: runCommand,
+          canRunCommand: canRunCommand,
+          invalidateYank: invalidateYank,
           deactivateMark: deactivateMark,
           isMarkActive: function() { return markActive; }
         };
+        return controller;
       }
 
       return {

@@ -1,6 +1,6 @@
-> **⚠️ Back up your account details before upgrading to 0.5.2**
+> **⚠️ Back up your account details before upgrading to 0.5.3**
 >
-> Version 0.5.2 redesigns the file layout and configuration structure and **no longer supports the previous version's history or account configurations**. After upgrading, configure your accounts again; earlier conversation history is not kept. This trade-off prepares KeepSeek for asynchronous multi-agent support, and we apologize for the inconvenience.
+> Version 0.5.3 redesigns the file layout and configuration structure and **no longer supports the previous version's history or account configurations**. After upgrading, configure your accounts again; earlier conversation history is not kept. This trade-off prepares KeepSeek for asynchronous multi-agent support, and we apologize for the inconvenience.
 
 > **English: This document | 中文：[README.md](./README.md)**
 
@@ -10,7 +10,7 @@
 
 # KeepSeek
 
-Version 0.5.2 starts a fresh baseline under `kmvdata.keepseek`; earlier data and settings are not imported. See the [storage baseline](doc/keepseek-storage-baseline.md) for account backup, data locations, and reset instructions.
+Version 0.5.3 starts a fresh baseline under `kmvdata.keepseek`; earlier data and settings are not imported. See the [storage baseline](doc/keepseek-storage-baseline.md) for account backup, data locations, and reset instructions.
 
 ## 1. Turn the Model You Choose into an Agent That Gets Real Work Done
 
