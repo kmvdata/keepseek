@@ -122,8 +122,9 @@ test('exact removed targets leave approval state for other targets in the same r
 });
 
 test('an interrupted correction retains diagnostics and requires an explicit resume without restoring the approval queue', () => {
+  const replanKeys = ['a', 'b', 'c'].map(key => key.repeat(64));
   const state = normalizeApprovalProcessing({ version: 2, runId: 'segment', rootTaskId: 'task', mode: 'delegate',
-    status: 'replanning', replanKeys: ['a'.repeat(64)], targets: [{ id: 'run', kind: 'command', status: 'needs_replan',
+    status: 'replanning', replanKeys, targets: [{ id: 'run', kind: 'command', status: 'needs_replan',
       replan: { draftRunId: 'run', specHash: 'hash', rootTaskId: 'task', executionSegmentId: 'segment',
         phase: 'preflight', code: 'git_status_pager_override', reason: 'Use controlled status.', executed: false }
     }, { id: 'dependent', kind: 'command', status: 'dependency_blocked', reason: 'Malformed -m.',
@@ -131,7 +132,7 @@ test('an interrupted correction retains diagnostics and requires an explicit res
     }] });
   assert.equal(state?.status, 'blocked');
   assert.equal(state?.canResume, true);
-  assert.deepEqual(state?.replanKeys, ['a'.repeat(64)]);
+  assert.deepEqual(state?.replanKeys, replanKeys);
   assert.equal(state?.targets[0].replan?.executed, false);
   assert.equal(state?.targets[1].reason, 'Malformed -m.');
   assert.equal(state?.targets[1].dependency?.targetId, 'run');

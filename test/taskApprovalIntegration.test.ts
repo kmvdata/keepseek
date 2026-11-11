@@ -40,6 +40,7 @@ import { executionSegmentId } from '../src/sessions/userTask';
 import type { AgentRequest, AgentResponse, ChatMessage, ChatSession, DraftEdit } from '../src/shared/types';
 import type { RunCheckpoint } from '../src/agent/runCheckpoint';
 import type { DraftRunExecutorAdapter } from '../src/runs/draftRunExecutor';
+import { localize } from '../src/shared/i18n';
 
 type Host = {
   saveAgentCheckpoint(s: ChatSession, m: ChatMessage, cp: RunCheckpoint): Promise<void>;
@@ -2158,6 +2159,52 @@ test('capability recovery keeps one root-cause limit across fresh IDs, argv vari
     assert.equal(f.session.approvalProcessing?.replanKeys?.length, 1);
     assert.match(f.session.approvalProcessing?.reason ?? '', /repeat|same kind|重复/iu);
     assert.equal(f.session.approvalProcessing?.rootTaskId, f.message.userTask?.id);
+  });
+});
+
+test('distinct preflight root causes can continue the same task until a previously seen cause repeats', async () => {
+  await fixture('delegate', async f => {
+    const cases = [
+      { args: ['--future-fixture-one'], code: 'host_unsupported_option' },
+      { args: ['-n'], code: 'host_missing_option_value' },
+      { args: ['-n', 'not-a-count'], code: 'host_invalid_argv' },
+      { args: ['--future-fixture-two'], code: 'host_unsupported_option' },
+      { executable: 'cat', args: ['--future-sibling'], code: 'host_unsupported_option' }
+    ];
+    const proposals = await Promise.all(cases.map(({ executable = 'head', args }) =>
+      createDraftRunProposal({ executable, args, reason: 'Read requested data' })));
+    f.response.draftEdits = []; f.response.draftRuns = [proposals[0]];
+    let turns = 0;
+    Object.assign(f.host, { hasActiveBackgroundRun: () => false, sendPrompt: async () => {
+      assert.equal(f.session.approvalProcessing?.status, 'replanning');
+      assert.equal(f.session.approvalProcessing?.targets[0].replan?.code, cases[turns].code);
+      assert.equal(f.session.approvalProcessing?.replanKeys?.length, ++turns);
+      assert.ok(turns <= 3, 'a fresh sibling cannot hide the repeated first root');
+      const assistant: ChatMessage = { id: `root-cause-segment-${turns}`, role: 'assistant', content: '', createdAt: f.message.createdAt,
+        userTask: { ...f.message.userTask!, reason: 'approval' as const } };
+      f.session.messages.push(assistant);
+      const response: AgentResponse = { ...f.response, draftRuns: turns === 3 ? proposals.slice(turns) : [proposals[turns]] };
+      const checkpoint = createRunCheckpoint(f.cp.request as AgentRequest, 0, 'same task, new segment', f.scope.folderUris);
+      checkpoint.status = 'completed'; checkpoint.finalResponse = response;
+      await f.host.saveAgentCheckpoint(f.session, assistant, checkpoint);
+      f.host.queueResponseApprovals(f.session, assistant, response);
+      return response;
+    } });
+    await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+    f.host.queueResponseApprovals(f.session, f.message, f.response);
+    await f.host.maybeAutoContinueDraftRun();
+    const processing = f.session.approvalProcessing;
+    assert.equal(turns, 3, JSON.stringify(processing));
+    assert.equal(processing?.rootTaskId, f.message.userTask?.id);
+    assert.equal(processing?.status, 'stopped');
+    assert.equal(processing?.replanKeys?.length, 3);
+    assert.equal(processing?.targets[0].replan?.code, cases[3].code);
+    assert.equal(processing?.reason, localize('en', 'approvalReplanRepeated'));
+    assert.equal(processing?.targets[0].reason, processing?.reason);
+    assert.equal(processing?.targets[1].id, proposals[4].id);
+    assert.notEqual(processing?.targets[1].reason, processing?.reason);
+    assert.equal(f.executions(), 0); assert.equal(f.reviews(), 0); assert.equal(f.manualRequests(), 0);
+    assert.ok(proposals.every(proposal => f.runs.get(proposal.id)?.status === 'needs_replan'));
   });
 });
 

@@ -3,6 +3,15 @@ import type { DraftRun } from '../shared/types';
 import type { DraftRunReplanResult } from '../approvals/approvalProcessing';
 import { analyzeCommandCapability } from '../approvals/authorization/commandCapability';
 
+// A storage sanity bound, not a retry quota. Never truncate the root-cause
+// ledger: forgetting an earlier key could grant another correction attempt.
+export const MAX_COMMAND_RECOVERY_KEYS = 4_096;
+
+export function isCommandRecoveryKeyList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length <= MAX_COMMAND_RECOVERY_KEYS
+    && value.every(key => typeof key === 'string' && /^[a-f0-9]{64}$/u.test(key));
+}
+
 /** Static diagnostics are observations, not permission. Only a current never-dispatched
  * proposal is eligible; restored records without this evidence cannot restart work. */
 export function commandCapabilityReplan(run: DraftRun, rootTaskId: string): DraftRunReplanResult | undefined {

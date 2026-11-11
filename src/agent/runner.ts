@@ -206,7 +206,7 @@ import { DelegationTracker } from './delegation';
 import { createChangeSet } from '../edits/changeSet';
 import { RepairLoopTracker, RunValidationStateTracker } from './repairLoop';
 import { RunDetailsBuilder } from './logging/runDetails';
-import { commandCapabilityReplan, commandRecoveryKey } from '../runs/commandRecovery';
+import { commandCapabilityReplan, commandRecoveryKey, MAX_COMMAND_RECOVERY_KEYS } from '../runs/commandRecovery';
 import { analyzeCommandCapability } from '../approvals/authorization/commandCapability';
 import { normalizeDraftRunPlan } from '../runs/draftRunProposal';
 import { createDraftRunProposal } from '../runs/draftRunProposal';
@@ -2141,7 +2141,8 @@ export class AgentLoop {
             }
           }
         } catch (error) {
-          if (request.signal?.aborted || checkpoint.stopReason === 'storage_failure' || checkpoint.stopReason === 'resource_limit') throw error;
+          if (request.signal?.aborted || checkpoint.stopReason === 'storage_failure' || checkpoint.stopReason === 'resource_limit'
+            || error instanceof AgentInterruptedError && error.reason === 'resource_limit') throw error;
           rawToolResult = JSON.stringify({
             ok: false,
             errorType: 'tool_execution_failed',
@@ -2538,7 +2539,7 @@ export class AgentLoop {
       checkpoint.lastStepAt = new Date().toISOString();
       await saveStep();
       if (checkpoint.commandRecoveryExhausted) {
-        throw new AgentInterruptedError('no_progress_loop', 'Command correction stopped: the same root cause repeated or the task correction budget was exhausted. Diagnostics and successful work are saved. / 命令纠错已停止：同根因重复或任务纠错预算耗尽，诊断及已完成工作已保存。');
+        throw new AgentInterruptedError('no_progress_loop', 'Command correction stopped: the same root cause repeated. Diagnostics and successful work are saved. / 命令纠错已停止：同根因重复，诊断及已完成工作已保存。');
       }
       if (noProgressStopAfterBatch) {
         throw new AgentInterruptedError('no_progress_loop', request.language === 'en'
@@ -3989,6 +3990,7 @@ ${launch.evidence.content}`;
           });
       }
     } catch (error) {
+      if (error instanceof AgentInterruptedError && error.reason === 'resource_limit') throw error;
       return JSON.stringify({
         ok: false,
         error: error instanceof Error ? error.message : String(error)
@@ -4133,16 +4135,25 @@ ${launch.evidence.content}`;
       const recoveryBatch = commandRecovery?.commandRecoveryBatch;
       const sameBatch = recoveryBatch && recoveryBatch.id === commandRecoveryBatchId ? recoveryBatch.keys : [];
       const observed = sameBatch.includes(key);
-      const exhausted = !observed && (keys.includes(key) || keys.length >= 2);
+      // Deduplicate root causes across model responses; time, cost and request
+      // budgets govern how long distinct corrections may continue.
+      const exhausted = !observed && keys.includes(key);
       if (commandRecovery) {
-        if (!exhausted && !observed) { keys.push(key); sameBatch.push(key); }
+        if (!exhausted && !observed) {
+          if (keys.length >= MAX_COMMAND_RECOVERY_KEYS) {
+            throw new AgentInterruptedError('resource_limit', 'Command correction ledger resource limit / 命令纠错记录超过存储上限');
+          }
+          keys.push(key);
+          sameBatch.push(key);
+        }
         if (commandRecoveryBatchId) commandRecovery.commandRecoveryBatch = { id: commandRecoveryBatchId, keys: sameBatch };
         commandRecovery.commandRecoveryKeys = keys;
-        commandRecovery.commandRecoveryExhausted = exhausted || undefined;
+        // A different root cause later in the same response cannot clear a stop.
+        commandRecovery.commandRecoveryExhausted = commandRecovery.commandRecoveryExhausted || exhausted || undefined;
       }
       return JSON.stringify({ ok: false, status: 'needs_replan', executed: false, started: false,
         draftRunId: draftRun.id, specHash: draftRun.specHash, proposalPersisted: persistProposal, diagnostic: draftRun.capabilityDiagnostic,
-        recovery: { allowed: !exhausted, reason: exhausted ? 'command_recovery_limit' : 'fresh_proposal_required', remaining: Math.max(0, 2 - keys.length) },
+        recovery: { allowed: !exhausted, reason: exhausted ? 'command_recovery_repeated' : 'fresh_proposal_required' },
         capability: { version: draftRun.capabilityDiagnostic.capabilityVersion,
           supportedForms: analyzeCommandCapability(draftRun.spec).supportedForms,
           scope: 'Finite host argv grammar; dynamic executable, repository, scope and authorization checks still apply.' },

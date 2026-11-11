@@ -7,7 +7,7 @@
 1. `commandSemantics` 解析有限 argv、参数角色与效果；`commandCapability` 是版本 1 的静态诊断入口。展示、草稿创建、审批前与启动前使用同一解析权威。静态通过不代表 executable、仓库或权限核验通过。
 2. `AgentLoop.createDraftRun` 在原工具循环内返回 `ok:false / needs_replan`、错误码、capability 阶段、`started:false`、argv 索引/token、恢复类别、相关有限能力和确切候选。原提案保留审计；`DraftRunStore` 将已知不可执行提案保存为待调整，避免长期 pending。工具 intent、完整 evidence/hash、固定 envelope 仍按既有顺序持久化。
 3. 模型准备新 ID/hash 的草稿；V15 可用 `replacesDraftRun` 明确关联原 ID/hash，并保留所有原 `prerequisites`。替代关系只记录来源，永不移植审批或 permit。旧协议不接收这些字段，异常传入时拒绝整条提案，不会丢弃前置条件后继续执行。
-4. `commandRecovery` 将能力/argv 缺口归入既有 `needs_replan`；Provider 使用真实 continuation 回到原任务。键绑定 rootTask、cwd、executable、程序/子命令、阶段、错误根因与环境，不使用新草稿 ID、reason 或轻微 argv 改动。每任务最多两个纠错根因；同根因在模型有机会调整后仍重复则停止。同一响应中的兄弟工具调用合并观察，检查点保存观察身份。时间、费用、请求、纠错计数跨 segment/epoch/恢复保留。
+4. `commandRecovery` 将能力/argv 缺口归入既有 `needs_replan`；Provider 使用真实 continuation 回到原任务。键绑定 rootTask、cwd、executable、程序/子命令、阶段、错误根因与环境，不使用新草稿 ID、reason 或轻微 argv 改动。同根因在模型有机会调整后仍重复则停止；不同根因不共用纠错次数配额，继续受任务的时间、费用及请求预算约束。同一响应中的兄弟工具调用合并观察，检查点保存观察身份。时间、费用、请求及根因记录跨 segment/epoch/恢复保留。
 5. ask 的新草稿仍需新的用户批准。delegate 先过宿主硬检查，正常有限查询走 `host_policy`，其他既有可审查操作仍走独立 reviewer/必要的一次性人工决定。普通 Git 查询缺少仓库/启动证据单独归为 `insufficient_launch_evidence`，不把补证当成安全拒绝；原命令仍未获准。真正 deny、外部精确授权、信任、hash、启动身份、保护路径和取消均不因纠错放宽。
 6. `draftRunDependencies` 核对 hash、session/rootTask、来源有效性、循环、替代、事实真假与快照；按有限拓扑串行推进。经过实时核验的独立只读检查可在前序局部失败后继续；未知/已启动写操作保持保守。假祖先不能继续同仓库后续 mutation，缺失标签只表示查询结果为空。原 `git_status_pager_override`、`git_commit_*`、tag sort 缺参纳入通用诊断/恢复并保留稳定细分码；Git release、受限 Python AST、commit reconciliation 保留各自的专用证据边界。
 7. `DraftRunStore` 在审批前、permit 前后和 dispatch 前重核依赖及执行身份；`SpawnDraftRunExecutor` 继续使用 literal argv、`shell:false`、短时一次性 permit。结果追加到真实结果渠道，不回写旧 user、system、contextInstructions 或 replay 前缀。
@@ -17,6 +17,8 @@
 | 情况 | 宿主结论 |
 | --- | --- |
 | `log --no-decorate` / `--decorate=no` | 等价参数；不自动改写原 argv |
+| `log -S <value>` / `-G <value>`（也支持短选项附值） | 只读模式值，不是路径或修订；值须非空、无 NUL，最多 4096 UTF-8 字节；`-S` 可用 `--pickaxe-regex` |
+| `git --no-pager log -p --oneline -- <path>` | 可验证的只读替代，用于检查路径的补丁历史；不自动替换原命令 |
 | `tag --list pattern` 退出 0、空输出 | 查询完成，`predicate:false`；tag 不存在 |
 | `merge-base --is-ancestor A B` 退出 0 / 1 | 查询完成，真 / 假；原退出码保留，假不满足前置条件 |
 | `rev-parse HEAD^{tree} HEAD tag^{commit}` | 有限本地对象解析，参数是 revision，不是文件 |
@@ -28,7 +30,7 @@
 
 查询事实绑定实时 scope fingerprint，包括 executable、环境、仓库、HEAD/index/config/hook 和完整有界本地 refs 快照。HEAD、非当前分支或 loose tag 改变会使旧事实失效。refs 快照使用宿主固定只读 probe，4 MiB 上限，超限拒绝，不调用模型生成的 shell。裸 log 参数若实际命中工作区或索引中的路径（含已删除的 tracked 文件），仍过真实路径守卫；不会借 revision 身份读取受保护文件。
 
-已启动只读查询失败仅允许在明确退出、当前语义/范围和预算核验后，回主模型做有界处理；已完成操作不被恢复重跑，写操作结果未知先核验。UI 区分待调整、依赖阻塞、启动失败、执行失败、结果未知与被替代，保留原命令、实际输出和新旧关联。
+已启动只读查询失败仅允许在明确退出、当前语义/范围和预算核验后，回主模型做有界处理；已完成操作不被恢复重跑，写操作结果未知先核验。UI 区分待调整、依赖阻塞、启动失败、执行失败、结果未知与被替代，保留原命令、实际输出和新旧关联。明确记录为未派发的终态卡显示「未执行 · 已终结 · 无进程输出」，正常待批准卡仍显示预期风险。「请求批准」下可把受阻草稿的参数复制到输入框修正，原草稿仍是终态，复制不会提交请求。「帮我审批」不会出现此入口；只有确实可恢复的中断会显示原有的继续处理按钮。能力版本保留 v1：pickaxe 只扩展有限语法，既有诊断字段和拦截判定不变，历史 v1 卡继续展示原错误码和参数位置。
 
 旧记录缺少 executionStarted/phase 时按未知展示和读取；不把历史 hard_blocked 批量迁为可恢复。重启只恢复说明/结果，运行中记录变为中断未知，不恢复队列、审批或 permit。关闭 Webview、切换会话/模式、取消和编辑重发继续走原生命周期边界。
 

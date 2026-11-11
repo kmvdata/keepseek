@@ -87,6 +87,84 @@ test('finite Git queries distinguish revisions, ranges, peeling and explicit pat
   assert.equal(analyzeCommand(createSpec('git', ['show', '0.5.0^{commit}'])).arguments.at(-1)?.role, 'revision');
 });
 
+test('Git log pickaxe keeps bounded patterns out of path and revision scope', () => {
+  for (const patternArgs of [
+    ['-S', 'trace.enabled'], ['-Strace.enabled'], ['-G', 'trace[.]enabled'], ['-Gtrace[.]enabled'],
+    ['-S', 'trace[.]enabled', '--pickaxe-regex'], ['-Strace[.]enabled', '--pickaxe-regex'],
+    ['-S', 'HEAD'], ['-G', '../external/file.ts'], ['-S', 'x'.repeat(4_096)]
+  ]) {
+    const args = ['log', '--oneline', ...patternArgs, '--', 'package.json'];
+    const spec = createSpec('git', args);
+    const before = JSON.stringify(spec);
+    const analysis = analyzeCommandCapability(spec);
+    assert.equal(analysis.supported, true, JSON.stringify(patternArgs));
+    assert.deepEqual(analysis.semantics.gitLocalQuery, { kind: 'log', revisions: [] });
+    assert.deepEqual(analysis.semantics.effects, ['workspace_read']);
+    assert.deepEqual(analysis.semantics.reasons.map(item => item.code), ['git_runtime']);
+    assert.equal(analysis.diagnostics.some(item => item.blocking), false);
+    assert.deepEqual(analysis.semantics.arguments.filter(item => item.role === 'read_path').map(item => item.value), ['package.json']);
+    const value = patternArgs[0].length > 2 ? patternArgs[0].slice(2) : patternArgs[1];
+    assert.ok(analysis.semantics.arguments.some(item => item.role === 'option_value' && item.value === value));
+    assert.equal(JSON.stringify(spec), before);
+  }
+  const revisions = analyzeCommandCapability(createSpec('git', ['log', '-S', 'HEAD', '0.5.0..HEAD', '--', 'package.json']));
+  assert.deepEqual(revisions.semantics.gitLocalQuery, { kind: 'log', revisions: ['0.5.0..HEAD'] });
+});
+
+test('Git log pickaxe rejects missing or invalid values without admitting other options', () => {
+  for (const option of ['-S', '-G']) {
+    for (const args of [['log', option], ['log', option, '--', 'package.json']]) {
+      const missing = analyzeCommandCapability(createSpec('git', args));
+      assert.equal(missing.supported, false);
+      assert.equal(missing.semantics.gitLocalQuery, undefined);
+      assert.deepEqual(missing.diagnostics.filter(item => item.blocking).map(item => ({
+        code: item.code, category: item.category, index: item.argumentIndex, token: item.token
+      })), [{ code: 'host_missing_option_value', category: 'invalid_argv', index: 1, token: option }]);
+    }
+    for (const value of ['', '  ', 'bad\0pattern', 'x'.repeat(4_097), '中'.repeat(1_366), 'x'.repeat(10_000)]) {
+      for (const attached of value ? [false, true] : [false]) {
+        const args = ['log', '--oneline', ...(attached ? [option + value] : [option, value]), '--', 'package.json'];
+        const invalid = analyzeCommandCapability(createSpec('git', args));
+        assert.equal(invalid.supported, false);
+        assert.equal(invalid.semantics.gitLocalQuery, undefined);
+        const diagnostic = invalid.diagnostics.find(item => item.blocking)!;
+        assert.equal(diagnostic.code, 'host_invalid_argv');
+        assert.equal(diagnostic.category, 'invalid_argv');
+        assert.equal(diagnostic.argumentIndex, attached ? 2 : 3);
+        assert.equal(diagnostic.token, attached ? option + value : value);
+        assert.deepEqual(normalizeCommandCapabilityDiagnostic(diagnostic), diagnostic);
+      }
+    }
+  }
+  for (const option of ['--follow', '--since', '--until', '--author']) {
+    const analysis = analyzeCommandCapability(createSpec('git', ['log', '--oneline', option, '--', 'x']));
+    assert.equal(analysis.supported, false, option);
+    assert.ok(analysis.diagnostics.some(item => item.blocking && item.code === 'host_unsupported_option' && item.argumentIndex === 2));
+  }
+  assert.equal(analyzeCommandCapability(createSpec('git', ['diff', '-S', 'pattern'])).supported, false);
+  assert.equal(analyzeCommandCapability(createSpec('git', ['show', '--pickaxe-regex'])).supported, false);
+});
+
+test('Git log diagnostics offer a validated patch query while preserving old v1 pickaxe diagnostics', () => {
+  const analysis = analyzeCommandCapability(createSpec('git', ['log', '--future-option']));
+  assert.ok(analysis.supportedForms.some(form => form.includes('-S <value>') && form.includes('-G<value>')));
+  assert.ok(analysis.supportedForms.includes('git --no-pager log -p --oneline -- <path>'));
+  const alternative = analyzeCommandCapability(createSpec('git', ['--no-pager', 'log', '-p', '--oneline', '--', 'package.json']));
+  assert.equal(alternative.supported, true);
+  assert.deepEqual(alternative.semantics.gitLocalQuery, { kind: 'log', revisions: [] });
+  assert.deepEqual(alternative.semantics.effects, ['workspace_read']);
+  assert.deepEqual(alternative.semantics.reasons.map(item => item.code), ['git_runtime']);
+  // A stored pre-extension diagnostic remains historical evidence even though
+  // a newly proposed -S query is now syntactically supported.
+  const persisted = { code: 'host_unsupported_option', phase: 'capability', started: false,
+    category: 'capability', argumentIndex: 2, token: '-S',
+    reason: 'This argument or behavior is outside the host command grammar. / 该参数或行为不在宿主命令语法内。',
+    capabilityVersion: 1, blocking: true };
+  const restored = normalizeCommandCapabilityDiagnostic(JSON.parse(JSON.stringify(persisted)));
+  assert.ok(restored);
+  assert.deepEqual({ ...restored, candidateArgs: undefined }, { ...persisted, candidateArgs: undefined });
+});
+
 test('capability diagnostics preserve exact argv and never invent generic flag deletion', () => {
   const spec = createSpec('git', ['log', '--oneline', '--future-option', '0.5.0..HEAD']);
   const before = JSON.stringify(spec);

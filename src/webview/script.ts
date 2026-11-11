@@ -970,6 +970,24 @@ ${conversationsStateFragment.source}
 
     transcript.addEventListener('click', handleDraftRunActionClick);
 
+    function handleDraftRunCloneFeedback(message) {
+      if (message.sessionId && message.sessionId !== state.activeSessionId) return;
+      if (message.sourceDraftRunId && pendingDraftRunActions.delete('cloneDraftRun:' + message.sourceDraftRunId)) render();
+      if (message.success && message.correction && message.sessionId === state.activeSessionId) {
+        var newline = String.fromCharCode(10);
+        var separator = isPromptEmpty() ? '' : newline + newline;
+        setPromptSelectionRange(getPromptEndRange());
+        savePromptSelection();
+        insertPlainText(separator + t('draftRunCloneForCorrectionPrompt') + newline + JSON.stringify(message.correction, null, 2));
+        setTransientStatus(t('draftRunCloneForCorrectionCreated'));
+      } else if (message.success && message.draftRunId) {
+        setTransientStatus(t('draftRunCloneCreated'));
+        focusDraftRunCard(String(message.draftRunId));
+      } else {
+        setTransientStatus(t('draftRunCloneUnavailable'));
+      }
+    }
+
     function focusDraftRunCard(draftRunId) {
       setTimeout(function() {
         var cards = document.querySelectorAll('.draft-run-card[data-draft-run-id]');
@@ -1404,12 +1422,7 @@ ${conversationsMenuDismissFragment.source}
         pendingDraftRunBatchSnapshot = '';
         render();
       } else if (message.type === 'draftRunCloneFeedback') {
-        if (message.success && message.draftRunId) {
-          setTransientStatus(t('draftRunCloneCreated'));
-          focusDraftRunCard(String(message.draftRunId));
-        } else {
-          setTransientStatus(t('draftRunCloneUnavailable'));
-        }
+        handleDraftRunCloneFeedback(message);
       } else if (message.type === 'changeActionFeedback') {
         handleChangeActionFeedback(message);
       } else if (message.type === 'sessionChanged') {
@@ -3078,6 +3091,8 @@ ${conversationsSessionListFragment.source}
 
     function createDraftRunCard(draftRun) {
       var statusValue = String(draftRun.status || 'pending');
+      var notDispatched = draftRun.executionStarted === false && draftRun.executionPhase === 'not_dispatched';
+      var terminalNotDispatched = notDispatched && ['rejected', 'done', 'cancelled', 'failed', 'needs_replan', 'no_changes'].includes(statusValue);
       var spec = draftRun.spec || {};
       var target = getApprovalTarget(draftRun.id);
       var dependency = draftRun.dependency || target?.dependency;
@@ -3091,7 +3106,7 @@ ${conversationsSessionListFragment.source}
       } else if (statusValue === 'failed' || statusValue === 'cancelled') {
         if (draftRun.executionPhase === 'spawn_failed' && draftRun.executionStarted === false) {
           displayStatus = 'spawn_failed';
-        } else if (draftRun.executionPhase === 'not_dispatched' && draftRun.executionStarted === false) {
+        } else if (notDispatched) {
           displayStatus = 'not_dispatched';
         } else if (draftRun.executionPhase !== 'exited' || draftRun.executionStarted !== true) {
           displayStatus = 'result_unknown';
@@ -3131,7 +3146,14 @@ ${conversationsSessionListFragment.source}
       } else if (draftRun.authorizationSource === 'user_click') {
         meta.textContent += ' · ' + t('approvalSourceLabel') + ': ' + t('approvalSourceUser');
       }
-      heading.append(title, meta);
+      heading.append(title);
+      if (terminalNotDispatched) {
+        var badge = document.createElement('div');
+        badge.className = 'draft-run-not-dispatched-badge';
+        badge.textContent = t('draftRunNotDispatchedBadge');
+        heading.append(badge);
+      }
+      heading.append(meta);
       if (draftRun.gitCommitEvidence?.outcome === 'verified') {
         var receipt = document.createElement('div');
         var head = String(draftRun.gitCommitEvidence.head || '');
@@ -3181,7 +3203,7 @@ ${conversationsSessionListFragment.source}
       if (target?.status === 'needs_replan' && target.reason && target.reason !== diagnostic) {
         appendApprovalStateNote(header, target.reason);
       }
-      if (!dependency && !['needs_replan', 'superseded'].includes(displayStatus) && target?.status !== 'dependency_blocked') {
+      if (!dependency && displayStatus !== 'superseded' && target?.status !== 'dependency_blocked') {
         appendDraftRunActions(actions, draftRun, header, target, approvalBlocked);
       }
       var processing = state.approvalProcessing;
@@ -3203,20 +3225,25 @@ ${conversationsSessionListFragment.source}
         : cwdDisplay || cwdUri, true);
       appendDraftRunField(fields, t('draftRunTimeout'), formatDuration(Number(spec.timeoutMs) || 0), false);
 
-      var assessment = draftRun.effectAssessment || {};
       var risk = document.createElement('div');
-      risk.className = 'draft-run-risk draft-run-risk-' + String(assessment.verdict || 'unknown');
-      var effects = Array.isArray(assessment.effects)
-        ? assessment.effects.map(getDraftRunEffectLabel).join(', ')
-        : getDraftRunEffectLabel('unknown');
-      var evidence = Array.isArray(assessment.evidence) ? assessment.evidence.join(' ') : '';
-      var verdictKey = assessment.verdict === 'likely_readonly'
-        ? 'draftRunRiskLikelyReadonly'
-        : assessment.verdict === 'mutating_or_sensitive'
-          ? 'draftRunRiskSensitive'
-          : 'draftRunRiskUnknown';
-      risk.textContent = t('draftRunRisk', { effects: effects }) + ' · ' + t(verdictKey);
-      if (evidence) risk.title = evidence;
+      if (terminalNotDispatched) {
+        risk.className = 'draft-run-output-notice';
+        risk.textContent = t(statusValue === 'needs_replan' ? 'draftRunPreflightNoEffects' : 'draftRunNotDispatchedNoEffects');
+      } else {
+        var assessment = draftRun.effectAssessment || {};
+        risk.className = 'draft-run-risk draft-run-risk-' + String(assessment.verdict || 'unknown');
+        var effects = Array.isArray(assessment.effects)
+          ? assessment.effects.map(getDraftRunEffectLabel).join(', ')
+          : getDraftRunEffectLabel('unknown');
+        var evidence = Array.isArray(assessment.evidence) ? assessment.evidence.join(' ') : '';
+        var verdictKey = assessment.verdict === 'likely_readonly'
+          ? 'draftRunRiskLikelyReadonly'
+          : assessment.verdict === 'mutating_or_sensitive'
+            ? 'draftRunRiskSensitive'
+            : 'draftRunRiskUnknown';
+        risk.textContent = t('draftRunRisk', { effects: effects }) + ' · ' + t(verdictKey);
+        if (evidence) risk.title = evidence;
+      }
 
       card.append(header, fields, risk);
       if (draftRun.approvalReview) {
@@ -3364,6 +3391,13 @@ ${conversationsSessionListFragment.source}
       var externalAuthorized = !draftRun.spec?.externalCwd
         || (Array.isArray(state.authorizedExternalExecutionUris)
           && state.authorizedExternalExecutionUris.includes(String(draftRun.spec?.cwdUri || '')));
+      if (statusValue === 'needs_replan' || target?.status === 'needs_replan') {
+        if (statusValue === 'needs_replan' && state.approvalMode === 'ask' && !approvalBlocked
+          && !draftRun.spec?.restricted && !draftRun.replacementDraftRunId) {
+          container.append(createDraftRunActionButton(t('draftRunCloneForCorrection'), 'cloneDraftRun', draftRun, true));
+        }
+        return;
+      }
       if (statusValue === 'pending') {
         if (draftRun.spec?.restricted) return;
         if (state.approvalMode !== 'ask') {
@@ -3415,7 +3449,7 @@ ${conversationsSessionListFragment.source}
         button.dataset.autoContinue = autoContinue === true ? 'true' : 'false';
       }
       if (action === 'cloneDraftRun') {
-        button.title = t('draftRunCloneHint');
+        button.title = t(draftRun.status === 'needs_replan' ? 'draftRunCloneForCorrectionHint' : 'draftRunCloneHint');
       }
       var allowWhileBusy = action === 'cancelDraftRun' || action === 'cancelDraftRunBatch' || action === 'openDraftRunTerminal';
       button.disabled = Boolean(forceDisabled)

@@ -118,7 +118,7 @@ import {
 import { DraftRunAuthorizationService } from '../runs/draftRunAuthorization';
 import { DraftRunBatchCoordinator } from '../runs/draftRunBatchCoordinator';
 import { canIsolateDraftRunFailure, inspectDraftRunDependencies, inspectGitAncestorPrerequisite, isIndependentDraftRunCheck, orderDraftRunDependencies } from '../runs/draftRunDependencies';
-import { commandCapabilityReplan, commandRecoveryKey } from '../runs/commandRecovery';
+import { commandCapabilityReplan, commandRecoveryKey, MAX_COMMAND_RECOVERY_KEYS } from '../runs/commandRecovery';
 import type { DraftRunBatchSnapshot, DraftRunBatchState } from '../shared/types';
 import { ApprovalReviewStore, toApprovalReviewDisplay } from '../approvals/approvalReviewStore';
 import { ApprovalReviewerService, type ApprovalReviewerModelContext } from '../approvals/approvalReviewer';
@@ -1230,7 +1230,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       vscode.window.showWarningMessage(getErrorMessage(error));
       if (isChangeActionMessage(message)) this.postChangeActionFeedback(message, 'failed', getErrorMessage(error));
       if (message.type === 'approveDraftRunBatch') this.postToWebview({ type: 'draftRunBatchFeedback', success: false });
-      if (message.type === 'cloneDraftRun') this.postToWebview({ type: 'draftRunCloneFeedback', success: false });
+      if (message.type === 'cloneDraftRun') this.postToWebview({ type: 'draftRunCloneFeedback', sourceDraftRunId: message.id, success: false });
       this.postState({ immediate: true, forceFull: true });
     } finally { if (use) await this.releaseHistorySessionUse(useSessionId, use); }
   }
@@ -1780,17 +1780,37 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         }
         this.draftRuns.cancel(message.id);
         return;
-      case 'cloneDraftRun':
-        if (this.sessionStore.getActiveSession().approvalMode !== 'delegate' && !this.isBusy && !this.isStartingRun && !this.runContextRefreshInFlight && !this.activeDraftRunId) {
-          const clone = this.draftRuns.cloneAsPending(message.id);
-          this.postState();
-          this.postToWebview({
-            type: 'draftRunCloneFeedback',
-            success: Boolean(clone),
-            draftRunId: clone?.id
-          });
+      case 'cloneDraftRun': {
+        const session = this.sessionStore.getActiveSession();
+        const feedback = { type: 'draftRunCloneFeedback', sourceDraftRunId: message.id, sessionId: session.id };
+        if (normalizeApprovalMode(session.approvalMode) !== 'ask' || this.isBusy || this.isStartingRun
+          || this.runContextRefreshInFlight || this.activeDraftRunId) {
+          this.postToWebview({ ...feedback, success: false });
+          return;
         }
+        const source = this.draftRuns.get(message.id);
+        if (!source || source.sessionId !== session.id || source.historyInvalidationId || source.historyOriginUnverified) {
+          this.postToWebview({ ...feedback, success: false });
+          return;
+        }
+        if (source.status === 'needs_replan') {
+          const target = session.approvalProcessing?.targets.find(item => item.id === source.id);
+          if (source.spec.restricted || source.replacementDraftRunId || source.dependency
+            || target?.dependency || target?.status === 'dependency_blocked') {
+            this.postToWebview({ ...feedback, success: false });
+            return;
+          }
+          // Copy the original argv into the editable composer, without creating a
+          // runnable draft, sending a prompt, or changing the blocked audit entry.
+          const { executable, args, cwdUri, reason } = source.spec;
+          this.postToWebview({ ...feedback, success: true, correction: { executable, args, cwdUri, reason } });
+          return;
+        }
+        const clone = this.draftRuns.cloneAsPending(source.id);
+        this.postState();
+        this.postToWebview({ ...feedback, success: Boolean(clone), draftRunId: clone?.id });
         return;
+      }
       case 'authorizeDraftRunCwd':
         if (this.sessionStore.getActiveSession().approvalMode === 'delegate' || this.isBusy || this.isStartingRun || this.activeDraftRunId) {
           return;
@@ -8288,7 +8308,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
       safety = await this.loadTaskBudget(session, taskLink);
       if (safety) {
-        processing.replanKeys = [...new Set([...(safety.commandRecoveryKeys ?? []), ...(processing.replanKeys ?? [])])].slice(0, 2);
+        const recoveryKeys = [...new Set([...(safety.commandRecoveryKeys ?? []), ...(processing.replanKeys ?? [])])];
+        if (recoveryKeys.length > MAX_COMMAND_RECOVERY_KEYS) {
+          throw new Error('Command correction ledger resource limit / 命令纠错记录超过存储上限');
+        }
+        processing.replanKeys = recoveryKeys;
         safetyClock = new ExecutionClock(safety.maxExecutionMs, safety.usedMs);
         safetyClock.signal.addEventListener('abort', () => controller.abort(safetyClock?.signal.reason), { once: true });
         releaseSafety = safetyClock.enter();
@@ -9006,29 +9030,36 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       const repairOutcome = replan && processing.targets.every(target => ['executed', 'already_processed', 'needs_replan', 'dependency_blocked'].includes(target.status))
         && !reviewerUnavailable && !circuitBreakReason && !reusedDeniedAction && currentReviews().every(result => result.decision === 'approve');
       if (automaticRecovery || readFailureRecovery || (repairOutcome && replan)) {
-        if (safety?.commandRecoveryExhausted) {
-          processing.status = terminalStatus;
-          processing.reason = this.t('approvalReplanLimit');
-          return;
-        }
-        const run = replan && this.draftRuns.get(replan.draftRunId);
-        const key = replan ? commandRecoveryKey(run, replan) : readFailureRecovery
-          ? createHash('sha256').update(JSON.stringify(failedReadRuns.map(failed => commandRecoveryKey(failed,
-            { rootTaskId, phase: 'preflight', code: 'readonly_execution_failure' })).sort())).digest('hex')
-          : createHash('sha256').update(JSON.stringify([rootTaskId,
-            processing.targets.filter(target => ['external_authorization_required', 'insufficient_launch_evidence', 'review_unavailable', 'denied']
-              .includes(target.status)).map(target => [target.kind, target.status])])).digest('hex');
+        const observations: Array<{ key: string; targetId?: string }> = replan
+          ? processing.targets.flatMap(target => target.status === 'needs_replan' && target.replan
+            ? [{ key: commandRecoveryKey(this.draftRuns.get(target.id), target.replan), targetId: target.id }] : [])
+          : [{ key: readFailureRecovery
+            ? createHash('sha256').update(JSON.stringify(failedReadRuns.map(failed => commandRecoveryKey(failed,
+              { rootTaskId, phase: 'preflight', code: 'readonly_execution_failure' })).sort())).digest('hex')
+            : createHash('sha256').update(JSON.stringify([rootTaskId,
+              processing.targets.filter(target => ['external_authorization_required', 'insufficient_launch_evidence', 'review_unavailable', 'denied']
+                .includes(target.status)).map(target => [target.kind, target.status])])).digest('hex') }];
         const keys = processing.replanKeys!;
-        const interruptedRepair = priorProcessing?.canResume && priorProcessing.runId === batch.runId
-          && priorProcessing.targets.some(target => target.id === replan?.draftRunId && target.status === 'needs_replan');
-        if (!interruptedRepair && (keys.includes(key) || keys.length >= 2)) {
+        const interruptedTargets = priorProcessing?.canResume && priorProcessing.runId === batch.runId
+          ? new Set(priorProcessing.targets.filter(target => target.status === 'needs_replan').map(target => target.id))
+          : undefined;
+        const interruptedKeys = new Set(observations.filter(item => item.targetId && interruptedTargets?.has(item.targetId))
+          .map(item => item.key));
+        // Deduplicate roots across batches, including when a new sibling
+        // appears after a repeated diagnosis. Dispatch budgets limit total work.
+        const repeated = observations.find(item => keys.includes(item.key) && !interruptedKeys.has(item.key));
+        if (safety?.commandRecoveryExhausted || repeated) {
           processing.status = terminalStatus;
-          processing.reason = this.t(keys.includes(key) ? 'approvalReplanRepeated' : 'approvalReplanLimit');
-          const target = processing.targets.find(item => item.id === replan?.draftRunId);
+          processing.reason = this.t('approvalReplanRepeated');
+          const target = processing.targets.find(item => item.id === (repeated?.targetId ?? replan?.draftRunId));
           if (target) target.reason = processing.reason;
           return;
         }
-        if (!keys.includes(key)) keys.push(key);
+        const newKeys = [...new Set(observations.map(item => item.key))].filter(key => !keys.includes(key));
+        if (keys.length + newKeys.length > MAX_COMMAND_RECOVERY_KEYS) {
+          throw new Error('Command correction ledger resource limit / 命令纠错记录超过存储上限');
+        }
+        keys.push(...newKeys);
         if (safety) safety.commandRecoveryKeys = keys.slice();
         if (costBudget?.exhausted) throw new LogicalBudgetExceededError('provider_cost_budget_exhausted');
         runBudget?.assertCanDispatch();

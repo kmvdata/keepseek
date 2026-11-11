@@ -913,6 +913,17 @@ ${conversationsStylesFragment.source}
       font-weight: 600;
     }
 
+    .draft-run-not-dispatched-badge {
+      justify-self: start;
+      padding: 2px 6px;
+      border-radius: 4px;
+      color: var(--vscode-badge-foreground);
+      background: var(--vscode-badge-background);
+      font-size: 11px;
+      font-weight: 600;
+      line-height: 1.4;
+    }
+
     .draft-run-meta,
     .draft-run-output-notice {
       color: var(--vscode-descriptionForeground);

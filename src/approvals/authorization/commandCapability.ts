@@ -2,6 +2,8 @@ import type { DraftRunSpec } from '../../shared/types';
 import { analyzeCommand, type CommandSemantics } from './commandSemantics';
 
 /** Change only when the deterministic host grammar/diagnostic contract changes.
+ * Pickaxe extends accepted syntax only: diagnostic shape and blocking decisions
+ * for existing diagnostics stay unchanged, so retain v1 and its persisted detail.
  * This is not the tool protocol or an authorization-policy version. */
 export const COMMAND_CAPABILITY_VERSION = 1 as const;
 
@@ -91,7 +93,12 @@ export function analyzeCommandCapability(spec: DraftRunSpec): CommandCapabilityA
       replacement: item.value === '--no-decorate' ? '--decorate=no' : '--no-decorate'
     })) : [];
   const forms: Record<string, string[]> = {
-    'git/log': ['git log --oneline [--no-decorate|--decorate=no] [-n N] [revision|A..B] [-- paths...]'],
+    'git/log': [
+      'git log --oneline [--no-decorate|--decorate=no] [-n N] [(-S <value>|-S<value>) [--pickaxe-regex]|-G <value>|-G<value>] [revision|A..B] [-- paths...]',
+      // Verified bounded alternative: inspect patches for the requested path.
+      // It is a separate query, not an argv rewrite or an exact equivalent.
+      'git --no-pager log -p --oneline -- <path>'
+    ],
     'git/tag': ['git tag --list [pattern]', 'git tag --list --sort=version:refname [pattern]'],
     'git/merge-base': ['git merge-base --is-ancestor commit commit'],
     'git/rev-parse': ['git rev-parse revision[^{commit}|^{tree}] ... (1-16 objects)'],

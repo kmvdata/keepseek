@@ -12,7 +12,7 @@ import { DraftRunStore } from '../src/runs/draftRunStore';
 import { DraftRunAuthorizationService } from '../src/runs/draftRunAuthorization';
 import { hashDraftRunSpec } from '../src/runs/draftRunProposal';
 import { getConfiguredDraftRunMaxTranscriptBytes } from '../src/shared/config';
-import { analyzeDraftRunEffects } from '../src/approvals/authorization';
+import { analyzeCommandCapability, analyzeDraftRunEffects } from '../src/approvals/authorization';
 import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
 import type { InteractionSnapshot } from '../src/provider/interactionState';
 import { DelegatedApprovalQueue } from '../src/agent/approvalMode';
@@ -428,6 +428,42 @@ function hostFixture(f: Awaited<ReturnType<typeof createFixture>>) {
   return { host, states, session };
 }
 
+test('clone after preflight refusal copies editable argv only and leaves the original terminal', async () => fixture(async f => {
+  const { host, states, session } = hostFixture(f);
+  const messages: unknown[] = [];
+  Object.assign(host, { postToWebview: (message: unknown) => messages.push(message) });
+  const proposal = f.proposal('blocked', { executable: 'head', args: ['-n'], env: [] });
+  const diagnostic = analyzeCommandCapability(proposal.spec).diagnostics.find(item => item.blocking)!;
+  const blocked = { ...proposal, capabilityDiagnostic: diagnostic };
+  f.store.addProposals({ proposals: [blocked], sessionId: session.id, agentRunId: 'r' });
+  f.store.addProposals({ proposals: [{ ...blocked, id: 'other-session' }], sessionId: 'other', agentRunId: 'r' });
+
+  const original = f.store.get(blocked.id);
+  assert.equal(original?.status, 'needs_replan');
+  assert.equal(f.store.cloneAsPending(blocked.id), undefined);
+  await host.handleMessage({ type: 'cloneDraftRun', id: blocked.id });
+  assert.deepEqual(messages.splice(0), [{
+    type: 'draftRunCloneFeedback', sourceDraftRunId: blocked.id, sessionId: session.id, success: true,
+    correction: { executable: 'head', args: ['-n'], cwdUri: proposal.spec.cwdUri, reason: proposal.spec.reason }
+  }]);
+  assert.deepEqual(f.store.get(blocked.id), original);
+  assert.deepEqual(f.store.toWebviewState(session.id).map(run => run.status), ['needs_replan']);
+  const verifyRefusal = async (id: string) => {
+    await host.handleMessage({ type: 'cloneDraftRun', id });
+    assert.deepEqual(messages.splice(0), [{ type: 'draftRunCloneFeedback', sourceDraftRunId: id, sessionId: session.id, success: false }]);
+  };
+  await verifyRefusal('other-session');
+  session.approvalMode = 'delegate';
+  await verifyRefusal(blocked.id);
+  session.approvalMode = 'ask';
+  const replacement = f.proposal('fixed', { executable: 'head', args: ['-n', '1', 'test.txt'], env: [],
+    replacesDraftRun: { draftRunId: blocked.id, specHash: blocked.specHash } });
+  f.store.addProposals({ proposals: [replacement], sessionId: session.id, agentRunId: 'r' });
+  await verifyRefusal(blocked.id);
+  assert.equal(f.executor.calls.length, 0);
+  assert.equal(states.sends, 0);
+}));
+
 test('Provider holds the batch lock across all commands and blocks duplicate messages, single approval and models', async () => fixture(async (f) => {
   f.add(['A', 'B', 'C']); const { host, states } = hostFixture(f);
   const immediateMembership: string[][] = [];
@@ -534,14 +570,14 @@ function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: '
     'getDraftRunTitle', 'appendDraftRunField', 'formatShellCommand', 'formatShellWord', 'getDraftRunStatusLabel', 'getDraftRunEffectLabel',
     'createChangeSetCard', 'createChangeSetFileRow', 'createEditActionButton', 'createEditOpenFileButton',
     'createChangeSetActionButton', 'getChangeSetStatusLabel', 'getChangeFileStatusLabel', 'isChangeSetActionable',
-    'renderUnlinkedChangeSets', 'buildDraftRunTimelineProjection'];
+    'renderUnlinkedChangeSets', 'buildDraftRunTimelineProjection', 'handleDraftRunCloneFeedback'];
   const functions = names.map((name) => {
     const start = source.indexOf('    function ' + name + '(');
     assert.ok(start >= 0);
     const end = source.indexOf('\n    function ', start + 1);
     return source.slice(start, end);
   }).join('\n');
-  const state = { draftRuns: f.store.toWebviewState('s'), draftRunBatchSnapshots: f.batch.snapshots('s'),
+  const state = { activeSessionId: undefined as string | undefined, draftRuns: f.store.toWebviewState('s'), draftRunBatchSnapshots: f.batch.snapshots('s'),
     draftRunBatch: f.batch.state, draftRunBatchHistory: f.store.toBatchDisplayHistory('s'), approvalMode: 'ask', isBusy: false, activeDraftRunId: '',
     startup: { sideEffectsReady: true },
     approvalProcessing: undefined as import('../src/approvals/approvalProcessing').ApprovalProcessingState | undefined,
@@ -552,9 +588,13 @@ function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: '
   const transcript = new UiElement();
   const unlinkedRegion = new UiElement(); unlinkedRegion.append(unlinked);
   const messages: unknown[] = [];
+  const composer = { text: '' };
   const context = { state, document: { createElement: () => new UiElement() }, Element: UiElement, HTMLElement: UiElement,
     pendingDraftRunBatchSnapshot: '', pendingDraftRunActions: new Set(), pendingDraftRunApprovals: new Set(), pendingChangeActions: new Map(),
     changeActionRequestSequence: 0,
+    isPromptEmpty: () => !composer.text, getPromptEndRange: () => composer.text.length,
+    setPromptSelectionRange: (end: number) => assert.equal(end, composer.text.length), savePromptSelection: () => {},
+    insertPlainText: (text: string) => { composer.text += text; },
     formatDuration: String, createDraftEditActionIcon: () => new UiElement(),
     createApprovalSourceSummary: () => new UiElement(), getEditApprovalSourceLabel: String,
     unlinkedChangeSetList: unlinked, unlinkedChangeSetRegion: unlinkedRegion,
@@ -567,7 +607,8 @@ function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: '
       return (translations[key] ?? key).replace(/\{(\w+)\}/gu, (_, name) => String(values[name] ?? ''));
     }
   };
-  const api = new Script(functions + '\n({ appendAutomaticApprovalState, createDraftRunCard, createChangeSetCard, renderUnlinkedChangeSets, buildDraftRunTimelineProjection, renderTranscript, captureDraftRunActionFocus, findDraftRunActionFocus, handleDraftRunActionClick, handleChangeSetActionClick });').runInNewContext(context) as {
+  const api = new Script(functions + '\n({ appendAutomaticApprovalState, createDraftRunCard, createChangeSetCard, renderUnlinkedChangeSets, buildDraftRunTimelineProjection, renderTranscript, captureDraftRunActionFocus, findDraftRunActionFocus, handleDraftRunActionClick, handleChangeSetActionClick, handleDraftRunCloneFeedback });').runInNewContext(context) as {
+    handleDraftRunCloneFeedback(message: unknown): void;
     appendAutomaticApprovalState(notices: UiElement, actions: UiElement, id: string, review?: unknown): void;
     createDraftRunCard(run: unknown): UiElement; createChangeSetCard(set: unknown): UiElement;
     renderUnlinkedChangeSets(sets: unknown[], runs: unknown[]): void;
@@ -591,7 +632,7 @@ function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: '
     return renderCurrentState(edits);
   };
   context.render = () => { renderCurrentState(); };
-  return { api, state, unlinked, transcript, context, messages, render, renderCurrentState };
+  return { api, state, unlinked, transcript, context, messages, render, renderCurrentState, composer };
 }
 function elements(cards: UiElement[]): UiElement[] { return cards.flatMap((card) => [card, ...elements(card.children)]); }
 
@@ -700,9 +741,29 @@ test('Git draft cards bind diagnostics and expose only explicit current processi
       assert.deepEqual(texts(statusCard), [labels.approvalCommandReplanReason.replace('{reason}', statusReason)]);
       assert.deepEqual(texts(commitCard), [labels.approvalCommandDependency.replace('{target}', `git status (${status.id})`) + ' · ' + statusReason,
         labels.approvalCommandReplanReason.replace('{reason}', commitReason)]);
-      assert.ok(![...statusCard, ...commitCard].some(node => node.type === 'button'));
+      const buttons = [...statusCard, ...commitCard].filter(node => node.type === 'button');
+      if (mode === 'delegate') assert.equal(buttons.length, 0);
+      else {
+        assert.deepEqual(buttons.map(button => button.dataset.draftRunAction), ['cloneDraftRun']);
+        assert.equal(buttons[0].textContent, labels.draftRunCloneForCorrection);
+        ui.api.renderUnlinkedChangeSets([], [{ draftRun: first }]);
+        assert.deepEqual(elements(ui.unlinked.children).filter(node => node.type === 'button')
+          .map(node => node.dataset.draftRunAction), ['cloneDraftRun']);
+        for (const draft of [{ ...first, spec: { ...first.spec, restricted: {} } },
+          { ...first, replacementDraftRunId: 'replacement' }, { ...first, status: 'pending' }]) {
+          assert.ok(!render(draft).some(node => node.type === 'button'));
+        }
+      }
     }
     ui.state.approvalMode = 'delegate';
+    const correction = { executable: 'git', args: ['log', '--future-option', '<script>literal</script>'], cwdUri: 'file:///workspace' };
+    ui.state.activeSessionId = 's';
+    ui.composer.text = 'Keep existing input';
+    ui.api.handleDraftRunCloneFeedback({ success: true, correction, sessionId: 'different-session' });
+    assert.equal(ui.composer.text, 'Keep existing input');
+    ui.api.handleDraftRunCloneFeedback({ success: true, correction, sessionId: 's' });
+    assert.equal(ui.composer.text, 'Keep existing input\n\n' + labels.draftRunCloneForCorrectionPrompt + '\n' + JSON.stringify(correction, null, 2));
+    assert.equal(ui.messages.length, 0, 'copying argv to the composer must not send a request');
     processing.status = 'blocked';
     processing.canResume = true;
     assert.equal(render(second).filter(node => node.type === 'button').length, 0);
@@ -759,21 +820,30 @@ test('command cards distinguish launch facts, capability corrections and predica
       assert.ok(nodes.some(node => node.className === 'draft-run-title' && node.textContent === item.title));
       assert.ok(nodes.some(node => node.className === 'draft-run-meta' && node.textContent.startsWith(item.status)));
       assert.ok(nodes.some(node => node.className === 'draft-run-output' && node.textContent.includes('saved output') && node.textContent.includes('specific failure')));
+      if (item.title !== labels.draftRunTitleNotDispatched) {
+        assert.ok(!nodes.some(node => node.className === 'draft-run-not-dispatched-badge'));
+        assert.ok(nodes.some(node => node.className.startsWith('draft-run-risk')));
+      }
       if (item.title === labels.draftRunTitleResultUnknown) {
         assert.ok(!nodes.some(node => node.dataset.draftRunAction === 'cloneDraftRun'), 'unknown effects require verification before a retry');
       }
       assert.equal(JSON.stringify(value), before, 'presentation preserves the recorded execution outcome');
     }
-    const capability = { code: 'unsupported_option', phase: 'capability', started: false, category: 'capability',
-      blocking: true, argumentIndex: 1, token: '--future-option', capabilityVersion: 1,
+    const capability = { code: 'host_unsupported_option', phase: 'capability', started: false, category: 'capability',
+      blocking: true, argumentIndex: 2, token: '-S', capabilityVersion: 1,
       reason: '<script>Literal diagnostic</script>', candidateArgs: ['--version'] };
     const correction = { ...draft, status: 'needs_replan', executionStarted: false, executionPhase: 'not_dispatched', capabilityDiagnostic: capability };
     const correctedNodes = nodesFor(correction);
     assert.ok(correctedNodes.some(node => node.className === 'draft-run-meta' && node.textContent.startsWith(labels.draftRunStatusNeedsReplan)));
-    assert.ok(correctedNodes.some(node => node.textContent.includes('args[1]') && node.textContent.includes('--future-option')));
+    assert.ok(correctedNodes.some(node => node.className === 'draft-run-not-dispatched-badge' && node.textContent === labels.draftRunNotDispatchedBadge));
+    assert.ok(correctedNodes.some(node => node.textContent === labels.draftRunPreflightNoEffects));
+    assert.ok(!correctedNodes.some(node => node.className.startsWith('draft-run-risk') || node.className === 'draft-run-output'));
+    assert.ok(correctedNodes.some(node => node.textContent === labels.draftRunCapabilityVersion.replace('{version}', '1')
+      + ' · host_unsupported_option · args[2] · -S'));
     assert.ok(correctedNodes.some(node => node.textContent === labels.approvalCommandReplanReason.replace('{reason}', capability.reason)));
     assert.ok(correctedNodes.some(node => node.textContent.startsWith(labels.draftRunCorrectionCandidate.split('{command}')[0])));
-    assert.ok(!correctedNodes.some(node => node.type === 'button'), 'a correction diagnostic grants no execution action');
+    assert.deepEqual(correctedNodes.filter(node => node.type === 'button').map(node => node.dataset.draftRunAction),
+      ['cloneDraftRun'], 'a correction diagnostic grants no execution action');
     const dependentNodes = nodesFor({ ...draft, status: 'cancelled', executionStarted: false, executionPhase: 'not_dispatched',
       dependency: { targetId: 'prerequisite', label: 'tag check' } });
     assert.ok(dependentNodes.some(node => node.className === 'draft-run-meta' && node.textContent.startsWith(labels.draftRunStatusDependencyBlocked)));
@@ -785,6 +855,9 @@ test('command cards distinguish launch facts, capability corrections and predica
     const falseNodes = nodesFor({ ...draft, status: 'done', exitCode: 1, executionStarted: true, executionPhase: 'exited', gitQueryResult: { predicate: false } });
     assert.ok(falseNodes.some(node => node.className === 'draft-run-meta' && node.textContent.includes(labels.draftRunPredicateFalse)));
     assert.ok(falseNodes.some(node => node.textContent === labels.draftRunTitleDone));
+    const pendingNodes = nodesFor(draft);
+    assert.ok(!pendingNodes.some(node => node.className === 'draft-run-not-dispatched-badge'), 'a pending draft is not terminal');
+    assert.ok(pendingNodes.some(node => node.className.startsWith('draft-run-risk')), 'pending drafts still show the risks of approving them');
   }
 }));
 

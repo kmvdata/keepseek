@@ -706,7 +706,9 @@ export class DraftRunStore {
 
   public cloneAsPending(id: string): DraftRun | undefined {
     const source = this.draftRuns.get(id);
-    if (!source || isHistoryInactive(source) || !TERMINAL_STATUSES.has(source.status) || source.replan || source.dependency || source.spec.restricted || source.replacementDraftRunId) {
+    // Correction copies are editable text in the composer, never pending runs.
+    if (!source || isHistoryInactive(source) || !TERMINAL_STATUSES.has(source.status) || source.status === 'needs_replan'
+      || source.replan || source.dependency || source.spec.restricted || source.replacementDraftRunId) {
       return undefined;
     }
     if (source.executionPhase === 'result_unknown'

@@ -157,7 +157,7 @@ test('a new execution segment inherits command correction, time, cost and reques
   });
 });
 
-test('same-response sibling capability gaps share one observation before the model can react', async () => {
+test('same-response sibling gaps deduplicate one root cause without capping distinct causes', async () => {
   await inWorkspace(async (_root, storage) => {
     const originalFetch = globalThis.fetch;
     let dispatches = 0;
@@ -165,8 +165,9 @@ test('same-response sibling capability gaps share one observation before the mod
     globalThis.fetch = (async (_url, init) => {
       dispatches++;
       if (dispatches === 1) {
-        const calls = ['one', 'two'].map((id, index) => call(id, {
-          executable: 'cat', args: [`--future-${index}`], reason: `Sibling observation ${index}`
+        const cases = [['--future-one'], ['--future-two'], ['-n'], ['-n', 'not-a-count']];
+        const calls = cases.map((args, index) => call(`sibling-${index}`, {
+          executable: 'head', args, reason: `Sibling observation ${index}`
         }));
         const event = { choices: [{ delta: { tool_calls: calls.map((tool, index) => ({
           index, id: tool.id, type: 'function', function: { name: tool.name, arguments: tool.arguments }
@@ -175,8 +176,8 @@ test('same-response sibling capability gaps share one observation before the mod
           { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
       }
       const diagnostics = toolPayloads(JSON.parse(String(init?.body))).filter(value => value.status === 'needs_replan');
-      assert.equal(diagnostics.length, 2, 'each sibling has its own immutable audited diagnostic');
-      assert.equal(new Set(diagnostics.map(value => value.draftRunId)).size, 2);
+      assert.equal(diagnostics.length, 4, 'each sibling has its own immutable audited diagnostic');
+      assert.equal(new Set(diagnostics.map(value => value.draftRunId)).size, 4);
       for (const diagnostic of diagnostics) assert.equal((diagnostic.recovery as { allowed: boolean }).allowed, true);
       return streaming('chat');
     }) as typeof fetch;
@@ -185,12 +186,16 @@ test('same-response sibling capability gaps share one observation before the mod
         storage as unknown as import('vscode').Uri).run(request('chat', 'sibling-gaps'),
         { onCheckpoint: async next => { checkpoint = checkpointCopy(next); } });
       assert.equal(dispatches, 2, 'the model gets one opportunity to react after the sibling batch');
-      assert.equal(result.draftRuns?.length, 2);
-      assert.equal(checkpoint.commandRecoveryKeys?.length, 1);
-      assert.equal(checkpoint.commandRecoveryBatch?.keys.length, 1);
+      assert.equal(result.draftRuns?.length, 4);
+      assert.equal(checkpoint.commandRecoveryKeys?.length, 3);
+      assert.deepEqual(checkpoint.commandRecoveryBatch?.keys, checkpoint.commandRecoveryKeys);
       assert.equal(checkpoint.commandRecoveryExhausted, undefined);
-      assert.equal(checkpoint.runBudget?.toolCalls, 2);
-      assert.ok(normalizeRunCheckpoint(JSON.parse(JSON.stringify(checkpoint))));
+      assert.equal(checkpoint.runBudget?.toolCalls, 4);
+      const restored = normalizeRunCheckpoint(JSON.parse(JSON.stringify(checkpoint)));
+      assert.deepEqual(restored?.commandRecoveryKeys, checkpoint.commandRecoveryKeys);
+      assert.deepEqual(restored?.commandRecoveryBatch, checkpoint.commandRecoveryBatch);
+      const taskBudget = normalizeUserTaskBudgets(JSON.parse(JSON.stringify({ root: taskBudgetFromCheckpoint(checkpoint) }))).root;
+      assert.deepEqual(taskBudget?.commandRecoveryKeys, checkpoint.commandRecoveryKeys);
       assert.equal(normalizeRunCheckpoint({ ...checkpoint, commandRecoveryBatch: { id: 'not-a-hash', keys: [] } }), undefined);
     } finally { globalThis.fetch = originalFetch; }
   });

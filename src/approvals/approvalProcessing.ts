@@ -1,4 +1,5 @@
 import { normalizeCommandCapabilityDiagnostic } from './authorization/commandCapability';
+import { isCommandRecoveryKeyList } from '../runs/commandRecovery';
 import type { ChatSession } from '../shared/types';
 import type { HistoryTruncationScope } from '../sessions/historyTruncation';
 
@@ -56,7 +57,7 @@ export interface ApprovalProcessingState {
     dependency?: ApprovalDependency; replan?: DraftRunReplanResult }>;
   reason?: string;
   canResume?: boolean;
-  /** Persist the bounded correction history across execution segments. */
+  /** Persist distinct root causes across execution segments; no correction quota. */
   replanKeys?: string[];
   localGitCompletionRetried?: boolean;
   updatedAt: string;
@@ -122,7 +123,8 @@ export function normalizeApprovalProcessing(value: unknown): ApprovalProcessingS
   const v = value as ApprovalProcessingState | undefined;
   if (v?.version !== 2 || typeof v.runId !== 'string' || typeof v.rootTaskId !== 'string'
     || v.mode !== 'delegate' || !Array.isArray(v.targets)
-    || !['processing', 'completed', 'blocked', 'waiting_user', 'replanning', 'stopped'].includes(v.status)) return undefined;
+    || !['processing', 'completed', 'blocked', 'waiting_user', 'replanning', 'stopped'].includes(v.status)
+    || v.replanKeys !== undefined && !isCommandRecoveryKeyList(v.replanKeys)) return undefined;
   const interrupted = v.status === 'processing' || v.status === 'replanning' || v.status === 'waiting_user';
   const targets = v.targets.filter(t => t && typeof t.id === 'string' && ['edit', 'command'].includes(t.kind)
     && ['pending', 'executed', 'denied', 'manual_required', 'review_unavailable', 'hard_blocked', 'needs_authorization', 'failed', 'cancelled', 'already_processed', 'identity_mismatch', 'missing', 'needs_replan', 'dependency_blocked', 'external_authorization_required', 'insufficient_launch_evidence'].includes(t.status))
@@ -139,7 +141,7 @@ export function normalizeApprovalProcessing(value: unknown): ApprovalProcessingS
     canResume: (interrupted || v.canResume === true)
       && !targets.some(target => ['denied', 'hard_blocked', 'identity_mismatch', 'missing', 'failed'].includes(target.status)) || undefined,
     localGitCompletionRetried: v.localGitCompletionRetried === true || undefined,
-    replanKeys: Array.isArray(v.replanKeys) ? v.replanKeys.filter(key => typeof key === 'string' && /^[a-f0-9]{64}$/u.test(key)).slice(0, 2) : undefined,
+    replanKeys: v.replanKeys?.slice(),
     reason: interrupted ? 'Interrupted; explicitly resume processing. / 处理已中断，请明确恢复。' : approvalReason(v.reason),
     updatedAt: typeof v.updatedAt === 'string' ? v.updatedAt : '' };
 }

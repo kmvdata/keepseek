@@ -168,9 +168,9 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
       '此受支持查询的参数无效或不完整。');
     if (argumentIndex !== undefined) result.reasons.at(-1)!.argumentIndex = argumentIndex;
   };
-  const valueAfter = (index: number, role: ArgumentRole): number => {
+  const valueAfter = (index: number, role: ArgumentRole, stopAtSeparator = false): number => {
     arg(index, 'option');
-    if (index + 1 >= args.length) {
+    if (index + 1 >= args.length || (stopAtSeparator && args[index + 1] === '--')) {
       reason('missing_option_value', args[index], 'Missing option value.', '缺少选项值。');
       result.reasons.at(-1)!.argumentIndex = index;
       return index;
@@ -346,6 +346,24 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
         unsupported(token, i);
         if (token === '-O') i = valueAfter(i, 'read_path');
         else arg(i, 'read_path', token.slice(2));
+      } else if (subcommand === 'log' && (token.startsWith('-S') || token.startsWith('-G'))) {
+        // Pickaxe patterns are text option values, never revisions/pathspecs.
+        // Bound the raw UTF-8 value without changing the argv sent to Git.
+        const optionIndex = i;
+        const attached = token.length > 2;
+        if (attached) arg(i, 'option_value', token.slice(2));
+        else i = valueAfter(i, 'option_value', true);
+        if (attached || i !== optionIndex) {
+          const value = attached ? token.slice(2) : args[i];
+          if (!value.trim() || value.includes('\0') || Buffer.byteLength(value, 'utf8') > 4_096) {
+            reason('invalid_argv', token.slice(0, 2),
+              'Git pickaxe requires a nonblank pattern of at most 4096 UTF-8 bytes without NUL.',
+              'Git pickaxe 的模式不能为空白、不能含 NUL，且不能超过 4096 个 UTF-8 字节。');
+            result.reasons.at(-1)!.argumentIndex = i;
+          }
+        }
+      } else if (subcommand === 'log' && token === '--pickaxe-regex') {
+        arg(i, 'option');
       } else if (['-n', '--max-count', '-U', '--unified'].includes(token)) {
         i = valueAfter(i, 'option_value');
         if (!/^\d+$/u.test(args[i])) invalid(args[i] ?? token, i);
