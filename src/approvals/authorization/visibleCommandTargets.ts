@@ -31,7 +31,7 @@ export function assertCommandTarget(target: string, writes: boolean): void {
 /** Extract visible targets from explicit shell and interpreter arguments. This
  * provides concrete denial evidence. Dynamic subprocess effects remain unknown. */
 export function inspectVisibleCommandTargets(semantics: CommandSemantics,
-  collectNetworkTarget?: (value: string) => void): Array<{ value: string; write: boolean }> {
+  collectNetworkTarget?: (value: string) => void, isolated = false): Array<{ value: string; write: boolean }> {
   const targets: Array<{ value: string; write: boolean }> = [];
   const fail = () => { throw new Error('Protected command or credential target. Nothing executed. / 操作涉及受保护的命令或凭据目标，尚未执行。'); };
   if (forbiddenProgram.test(semantics.program)) fail();
@@ -72,10 +72,10 @@ export function inspectVisibleCommandTargets(semantics: CommandSemantics,
         targets.push({ value: value.startsWith('~') ? path.join(homedir(), value.slice(2)) : value, write: writes });
       }
     }
-    if (/\bgit\b[^\n;&|]*(?:\b(?:push|fetch|pull|clone|worktree|reset|rebase|filter-branch|commit|config)\b|\s(?:-C|-c|--git-dir|--work-tree|--exec-path)\b)/u.test(code)
+    if (!isolated && (/\bgit\b[^\n;&|]*(?:\b(?:push|fetch|pull|clone|worktree|reset|rebase|filter-branch|commit|config)\b|\s(?:-C|-c|--git-dir|--work-tree|--exec-path)\b)/u.test(code)
       || /\b(?:curl|wget|scp|sftp|ssh)\b[^\n;&|]*(?:https?:\/\/|@)/iu.test(code)
       || /\b(?:npm|pnpm|yarn|bun)\b[^\n;&|]*\bpublish\b|\b(?:socket\.create_connection|child_process\.execSync)\s*\(\s*['"](?:curl|wget|ssh)\b/u.test(code)
-      || /\bsocket\.create_connection\s*\(\s*\(\s*['"](?!localhost['"]|127\.0\.0\.1['"]|::1['"])/u.test(code)) fail();
+      || /\bsocket\.create_connection\s*\(\s*\(\s*['"](?!localhost['"]|127\.0\.0\.1['"]|::1['"])/u.test(code))) fail();
     for (const match of code.matchAll(/\b(?:writeFile(?:Sync)?|appendFile(?:Sync)?|unlink(?:Sync)?|rmtree|mkdir(?:Sync)?|rmSync|removeSync)\s*\(\s*(['"])([^'"]+)\1/gu)) {
       targets.push({ value: match[2], write: true });
     }

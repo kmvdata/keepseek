@@ -1,6 +1,150 @@
 # KeepSeek「帮我审批」统一合同与验收
 
-## 2026-11-11 v8 当前合同
+## 2026-11-11 v9 当前合同
+
+实施基线为 `50938ef6c0b66ee735d4fdb5406400a3ad021d08`。审批策略为 v9，审批审计容器仍为 v1，委托审批交付仍为 v13，父会话请求和工具 schema 仍为 v15。
+
+| 环节 | 当前行为 |
+| --- | --- |
+| 审批 | `delegate` 使用独立 reviewer。已知命令语义用于影响说明和结果核验。未知参数进入审查，实际启动器、工作区信任、权限范围、依赖与取消由宿主核验。`ask` 继续由用户批准。 |
+| 执行 | `kmvdata.keepseek.projectExecution` 从用户设置读取，默认 `isolated`。审批绑定具体执行边界与一次性许可。用户可显式选 `host`，进程会使用 VS Code 扩展宿主账号的权限。 |
+| 发布 | 明确的任务目标和用户级授权提供仓库及远端权限。宿主核实实际目的地、引用和源对象，审批模型决定本次操作。精确的 `--force-with-lease=<ref>:<expected>` 在授权充分时可保留高影响级别并获模型批准。 |
+| 等待 | 服务无有效决定时保留审计及未派发原因。用户补充精确目标授权后再交给模型决定。显式恢复重新核验，独立操作可推进。 |
+| 追溯 | 审计保留准确提案、执行环境、审批来源与真实结果。等待、终结前未启动、启动失败和已退出分别记录。结果未知时先核验实际状态。 |
+
+执行段在审批交接前中断时，可以从草稿卡恢复该段的待处理编辑和命令。恢复先完成所需 Apply 与落盘核验，再重新审批依赖命令。已完成的草稿复用结果。通过静态纠错生成的替代草稿如果遇到审批服务故障，也保留可证实未派发的原草稿身份，恢复时重新审查。
+
+仅当模型返回 `needs_user`、且结构化规则只表示 `project_behavior_unknown` 时，才使用同一次逻辑审查中的一次纠正机会。有效 `deny` 始终保存为拒绝，即使模型使用了该未知行为规则码；不再发起纠正请求，换草稿 ID 或理由也不解除拒绝。/ The bounded project-policy correction applies only to `needs_user` with the sole structured rule `project_behavior_unknown`. A valid `deny` remains a refusal, receives no correction request, and cannot be bypassed by changing a draft ID or reason.
+
+### 执行环境 / Execution environment
+
+| 扩展宿主 | 隔离条件 |
+| --- | --- |
+| macOS | 系统 Seatbelt 可建立进程沙箱。工作区与专用临时目录可写，受控系统工具链可读。 |
+| Linux / WSL 扩展宿主 | 系统 `bwrap` 和用户命名空间可用，架构为 x64 或 arm64。工作区与临时目录可写，工具链以只读方式挂载。网络命名空间和 seccomp 限制项目进程的套接字访问。 |
+| 原生 Windows | Docker Desktop Linux 引擎可用，且用户设置 `kmvdata.keepseek.projectExecutionContainerImage` 指向可信的本机镜像 `sha256:<64 位十六进制>`。镜像需提供 `/usr/bin/env`、GNU `/usr/bin/timeout` 和所需 Linux 工具链，例如 Node、npm 和 Git。命令的工作目录映射到容器内，CLI 路径应适配容器环境。 |
+
+通用隔离进程及其子进程使用受控工具和环境，无外部网络。Git 发布使用独立的受控传输。`host` 适用于愿意主动授权扩展宿主账号权限的可信开发环境。隔离不可用时会记录具体缺失条件。
+
+原生 Windows 的容器只提供镜像里的 Linux 工具。如果任务依赖 Windows 原生 `.exe`、批处理或工程外的 Git 工作树元数据，须选用支持这些依赖的执行环境。
+
+在 VS Code 的用户设置中搜索 `KeepSeek: Project Execution`。原生 Windows 还可搜索 `KeepSeek: Project Execution Container Image`。容器中使用已安装的 Linux 工具及项目相对路径。仓库设置无法切换这些执行条件。
+
+Windows 上可运行 `docker image inspect --format '{{.Id}}' <本机工具链镜像>`，把返回的 `sha256:…` 填入用户设置。镜像内应预装项目所需工具和依赖。通用隔离进程无法访问包仓库或发布服务，当前受控远端通道覆盖 Git 查询与推送。
+
+支持原生隔离的 macOS 和 Linux 上可用以下命令运行回归。隔离后端不可用时，测试会报告失败。
+
+```bash
+bun run build:test
+KEEPSEEK_REQUIRE_NATIVE_ISOLATION=1 node --test out-test/test/projectExecutionIsolation.test.js
+```
+
+原生 Windows 的隔离回归使用预装 Node 的 Linux 镜像。在 PowerShell 中指定镜像 ID，再运行对应测试。
+
+```powershell
+$env:KEEPSEEK_TEST_DOCKER_IMAGE = 'sha256:<本机镜像 ID>'
+bun run build:test
+node --test out-test/test/projectExecutionWindows.test.js
+```
+
+常规停止和超时会终止启动的进程组。Windows 同时强制移除本次容器，并由容器内的截止时间约束扩展宿主异常退出后的业务命令。macOS 自行建立独立会话的子进程仍继承 Seatbelt 权限，可能在父进程组收到停止信号后继续运行。文件边界以实际路径和挂载为基础，工程中预先存在的同卷硬链接与其工程外别名共享 inode。需要排除这类写入时，使用独立的工程副本。启动包装器后应按实际退出和业务证据判断命令结果。
+
+### 远端授权 / Remote authorization
+
+在用户设置中以真实仓库和有效远端配置 `kmvdata.keepseek.gitReleaseGrants`。`read` 指定核验用的分支或标签，`push` 指定可推送引用或限定名称前缀，`rewrite` 可指定已授权改写的精确分支。任务仍需提出实际推送目标。明确写出有效远端和目标引用的任务也可提供本次目标权限。HTTPS 私有仓库可通过 `credentialEnvironment` 引用宿主的仓库专用令牌变量，并用 `credentialUsername` 指定公开用户名，默认 `x-access-token`。用户设置只保存变量名。发布审查和验收使用临时裸仓库或自有测试远端。
+
+常设授权服从用户在当前任务里明确指定的目的地、引用和改写条件。任务首次核实的有效目的地随原始用户任务保存，重启后仍按该目的地核验。每次推送最多绑定 30 个目标引用，审查材料另含仓库和目的地。审批模型会在有界审查材料中保留最近三条真实任务指令，优先采用最新适用约束。
+
+用户级设置示例
+
+```json
+{
+  "kmvdata.keepseek.gitReleaseGrants": [
+    {
+      "repository": "D:\\Projects\\example",
+      "destination": "https://github.com/example-owner/example.git",
+      "read": ["refs/heads/main"],
+      "push": ["refs/heads/main"],
+      "credentialEnvironment": "KEEPSEEK_EXAMPLE_GIT_TOKEN"
+    }
+  ]
+}
+```
+
+传输前解析 Git 配置中的推送 URL 和改写规则，并将解析后的唯一目的地交给模型。实际发送使用隔离的临时 Git 元数据，HTTPS 强制证书验证并关闭重定向。原生 Windows 支持 HTTPS 和符合条件的本地裸仓库。直连 SSH 由支持的 POSIX 宿主提供。
+
+### 现场验收 / Field acceptance
+
+1. 在各目标平台的可信临时仓库选择「帮我审批」。用受控 reviewer 或可审计的测试模型执行 `git ls-files -s -- game_pywin.log game_pywin.log.1 game_pywin.log.2 game_pywin.log.3`、`git log --oneline --all -- game_pywin.log`、`git log --oneline -- game_pywin.log`、`git status --porcelain=v1`。放置一个干净的已跟踪日志文件，并让一个日志提交只存在于另一条分支。
+2. 准备带未知业务参数的本地脚本，再准备一个独立读取。记录每个命令的 exact argv、review、启动、退出及影响。再让脚本的子进程尝试访问工程外的夹具或网络；检查外部标记、系统文件和未经授权远端均无变化。
+3. 明确授权一次精确分支推送至隔离远端。核对授权来源、实际目标、源提交、模型决定、远端 ref read-back 和人工卡次数。审查后改绑远端或移动源提交，核对旧决定失效。
+4. 模拟 reviewer 无效回复、超时、显式拒绝和宿主重启。检查等待项及依赖未派发，已完成项的进程不重跑，恢复先验证当前权限、状态与模型决定。
+
+当前开发环境为受限 macOS 宿主。`/usr/bin/sandbox-exec -p '(version 1) (allow default)' /usr/bin/true` 返回 `sandbox_apply: Operation not permitted`，Docker daemon socket 连接也返回 `Operation not permitted`。此环境还拒绝绑定用于 HTTPS Git 回归的本地端口。平台原生隔离及线上传输结果应由支持的扩展宿主按上述步骤记录。带显式 `host` 设置的测试夹具只能证明审批及真实派发行为。
+
+### 固定验证回归 / Fixed validation regression
+
+原生 F5 验收补充 / Native F5 checks:
+
+| 中文 | English |
+| --- | --- |
+| 默认隔离环境就绪后，打开可信临时工程，选择「帮我审批」。创建或修改带空格、Unicode 路径的 JS/Python 入口，再运行；核对 Apply/read-back 在启动审查前完成，进程只启动一次，人工卡为零。Windows 容器使用镜像内的 Linux 解释器及项目相对路径。 | With isolation ready, open a trusted temporary project and select **Approve for me**. Create or edit JS/Python entries with spaces and Unicode paths, then run them. Verify Apply/read-back precedes launch review, one process starts, and no manual card appears. On Windows, use the container's Linux interpreter and project-relative paths. |
+| 隔离环境缺失时核对明确的未派发原因，不能静默回退到宿主。仅在愿意使用宿主权限时，由用户在用户级设置中选择 `projectExecution=host` 后重复上述用例。 | If isolation is unavailable, check the explicit non-dispatch reason and absence of a silent host fallback. Repeat with the user-level `projectExecution=host` setting only when host privileges are intentionally selected. |
+| 用受控 reviewer 返回有效 `deny`，即便规则码为 `project_behavior_unknown`，也应只有一次请求且零副作用。改草稿 ID、理由或切换 ask 后重复，仍不能绕过该拒绝。 | Return a valid `deny` from a controlled reviewer, even with `project_behavior_unknown`. Expect one request and zero effects. A changed draft ID, reason, or switch to ask must not bypass the refusal. |
+
+```bash
+bun run build:test
+node --require ./out-test/test/registerVscodeStub.js --test \
+  out-test/test/validationAvailability.test.js out-test/test/runnerValidationState.test.js
+```
+
+真实 npm 夹具核对了 `compile`、`lint`、`test` 的审批与执行结果。模拟用户补充授权后，验证在独立模型第二次审查批准前无标记文件，随后只写一次。另测第二次审查不可用、执行环境更改、外部 URI 改绑，均验证无受影响动作派发。
+
+固定验证保留脚本的实际参数语义。`sh -c` 的命令文本可以进入审批。隔离模式下，工程内 `.npmrc` 进入本次快照哈希，配置内容不会发送给审批模型。审批暂停时，已有不可变证据的独立分页读取可先完成并持久化，恢复时复用该页。
+
+### v9 本次复核证据 / Verification evidence
+
+复核以 `50938ef6c0b66ee735d4fdb5406400a3ad021d08` 及当前未提交 v9 改动为基础，保留并行会话的实现。补充修正了有效 `deny` 被未知行为纠正路径再次送审的问题。对应行为回归还检查改目标 ID 和理由不能绕过该拒绝。
+
+以下临时工程使用真实 SafeFileEditor 和 SpawnDraftRunExecutor，reviewer 由受控响应桩驱动，显式选择宿主执行。计数代表回归夹具，不代表线上模型或原生隔离已验收。
+
+| 场景 | Apply | 真实进程启动 | 逻辑审查 | reviewer 调用（桩） | 人工弹窗 |
+| --- | --- | --- | --- | --- | --- |
+| delegate：48 KiB Node 入口、空格与 Unicode、一次未知行为纠正 | 1 | 1 | 2 | 3 | 0 |
+| delegate：Python 修改后使用真实 `.venv` 启动 | 1 | 1 | 2 | 2 | 0 |
+| ask：同类 Node/Python 操作，点击前（各用例） | 0 | 0 | 0 | 0 | 0 |
+| ask：显式点击后（各用例） | 1 | 1 | 0 | 0 | 0 |
+
+上述回归检查落盘内容、精确 argv、read-back 在启动审查前完成，以及重复提交无新增进程。Git 查询回归另实际启动 21 次（20 次 delegate、1 次 ask），其中 9 次为 verify 查询；历史结果重放启动数为零。
+
+对 `7c0aec40adb2ef4d4b30f07f77e0a78a54f16c94` 使用相同 TypeScript 编译选项加载后逐字节比较：英文 system 11,064 字节、中文 system 9,601 字节、工具 JSON 26,375 字节，全部一致；工具 SHA-256 为 `5eedfab6cb618ad1c27c9491247b50c65a2932ad1db4b8499deecea4493450d5`。当前策略 v9，审批审计容器 v1，交付协议 v13，请求与工具 schema v15。
+
+本次执行环境为 macOS、Node v24.15.0、Bun 1.3.12。
+
+| 命令 | 退出码 | 本次实测 |
+| --- | --- | --- |
+| `bun run compile` | 0 | 编译通过 |
+| `bun run lint` | 0 | 静态检查通过 |
+| `bun run build:test` | 0 | 测试构建通过 |
+| `bun run test` | 0 | 1,660 项：1,658 通过、0 失败、2 跳过、0 取消；701.358 秒 |
+| `git diff --check` | 0 | 补丁格式检查通过 |
+
+两项跳过分别为原生 Seatbelt 隔离进程和本地故障服务器：当前工具宿主禁止创建相应沙箱或绑定监听端口。原生 VS Code F5、Windows/Linux 实机、线上审批模型及真实外部传输未在本轮验收。本文的 v7 I/O 对照仍为当时的历史计数，不能当作新增平台隔离后的 v9 性能数字。
+
+### 2026-11-12 交付复验
+
+基于 `50938ef` 的最终工作树通过 `bun run compile`、`bun run lint`、`bun run build:test`、`git diff --check` 和 `bun run test`。全量 1,669 项，1,666 通过、0 失败、3 跳过。跳过项为本宿主禁止创建的 Seatbelt 子沙箱、需要原生 Windows 的 Docker Desktop 用例，以及本宿主禁止绑定端口的本地故障服务器。
+
+| 场景 | 实测 |
+| --- | --- |
+| 现场四条 Git 查询 | 精确 argv 对应四次独立审查和四次真实启动，人工确认零次。索引返回干净的已跟踪日志，`--all` 返回另一分支的提交。 |
+| 同一任务连续审批 | 原样送审精确 pager 查询。格式错误的提交先修正，再执行一次有效提交。连续批次沿用任务身份和累计预算。 |
+| 受控 Git 发布 | 临时裸仓库验证普通推送、精确租约、原子分支与标签、远端改绑和结果丢失后的 ref 核验。 |
+| 暂停与恢复 | 未入队编辑和命令恢复后按依赖审批。Python 替代草稿复审后实际启动一次。固定验证等待期间保存独立证据分页，恢复时复用。 |
+
+审批模型使用受控响应，命令与 Git 夹具使用真实进程。原生 VS Code F5、原生平台隔离、线上审批模型以及外部 HTTPS/SSH 仍需现场验收。
+
+## 2026-11-11 v8 历史合同
 
 实施基线为 `987b10caa2d55cd443afd73620cc30d43cec0b77`，KeepSeek 0.5.3，Asia/Shanghai。审批策略为 v8，审批审计容器仍为 v1，委托审批交付仍为 v13，父会话请求和工具 schema 仍为 v15。新 delegate 用户消息追加当前审批说明，已保存的请求字节沿用原文。
 

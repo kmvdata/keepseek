@@ -12,6 +12,7 @@ import * as vscode from 'vscode';
 import { getConfiguredDraftRunMaxTranscriptBytes } from '../shared/config';
 import type { KeepseekLanguage } from '../shared/i18n';
 import type {
+  ApprovalMode,
   DraftRun,
   DraftRunApprovalHold,
   DraftRunBatchDisplay,
@@ -130,8 +131,8 @@ export class DraftRunStore {
         if (!draftRun || (draftRun.sessionId && await new SessionDeletionAuthority(this.globalStorageUri).isSessionIdDeleted(draftRun.sessionId))) {
           continue;
         }
-        if (!draftRun.spec.restricted && hasNeverDispatched(draftRun)
-          && (draftRun.status === 'approved' || draftRun.approvalHold?.status === 'waiting_user')) {
+        if (hasNeverDispatched(draftRun) && (draftRun.status === 'approved'
+          || draftRun.approvalHold?.status === 'waiting_user' || draftRun.status === 'pending' && draftRun.spec.restricted)) {
           // The persisted running boundary precedes all adapter calls. Approved
           // records with an explicit no-dispatch fact can request a fresh decision.
           const directAsk = draftRun.authorizationSource === 'user_click' && !draftRun.approvalReview && !draftRun.approvalHold;
@@ -206,6 +207,7 @@ export class DraftRunStore {
     sessionId?: string;
     messageId?: string;
     rootTaskRunIds?: ReadonlySet<string>;
+    approvalMode?: ApprovalMode;
   }): DraftRun[] {
     if (this.findHistoryInvalidation(input.sessionId ?? '', input.messageId ?? '', input.agentRunId)) return [];
     const now = new Date().toISOString();
@@ -230,7 +232,7 @@ export class DraftRunStore {
       const replacement = draftRun.spec.replacesDraftRun;
       if (replacement) {
         if (draftRun.status === 'pending') {
-          const diagnostic = analyzeCommandCapability(draftRun.spec).diagnostics.find(item => item.blocking);
+          const diagnostic = analyzeCommandCapability(draftRun.spec, undefined, input.approvalMode).diagnostics.find(item => item.blocking);
           if (diagnostic) {
             draftRun.status = 'needs_replan'; draftRun.capabilityDiagnostic = diagnostic; draftRun.finishedAt = now;
           }
@@ -586,7 +588,7 @@ export class DraftRunStore {
   }
 
   public async preflightApproval(id: string, authorizedExternalReferenceUris: ReadonlySet<string>, rootTaskRunIds?: ReadonlySet<string>,
-    scope?: CommandScope, selectedProjectUri?: string): Promise<DraftRun> {
+    scope?: CommandScope, selectedProjectUri?: string, approvalMode?: ApprovalMode): Promise<DraftRun> {
     const owner = this.draftRuns.get(id)?.sessionId;
     if (owner) await new SessionDeletionAuthority(this.globalStorageUri).assertSessionIdWritable(owner);
     const draftRun = this.draftRuns.get(id);
@@ -594,7 +596,7 @@ export class DraftRunStore {
       throw new Error('Pending executable DraftRun was not found.');
     }
     await this.assertDependencyFacts(draftRun, authorizedExternalReferenceUris, rootTaskRunIds, selectedProjectUri);
-    await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris, scope);
+    await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris, scope, approvalMode);
     if (isHistoryInactive(draftRun) || this.draftRuns.get(id) !== draftRun || draftRun.status !== 'pending') throw new Error('DraftRun history changed during approval.');
     return cloneDraftRun(draftRun);
   }
@@ -663,10 +665,11 @@ export class DraftRunStore {
           || options.approvalRecord.scopeFingerprint !== restricted.boundaryFingerprint
           || !options.verifyScope)) throw new Error('Restricted validation requires its own automatic approval.');
         let fingerprint: string | undefined;
+        const approvalMode = options.delegatedApproval ? 'delegate' : 'ask';
         const verifyScope = async () => {
           await this.assertDependencyFacts(draftRun, authorizedExternalReferenceUris, options.rootTaskRunIds, options.selectedProjectUri);
           let inspection: Promise<CommandScope> | undefined;
-          const inspectScope = () => inspection ??= inspectDraftRunScope(draftRun, false, undefined, false, options.selectedProjectUri);
+          const inspectScope = () => inspection ??= inspectDraftRunScope(draftRun, false, undefined, false, options.selectedProjectUri, approvalMode);
           if (restricted && original) {
             await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris);
             await options.verifyScope?.(inspectScope);
@@ -674,7 +677,7 @@ export class DraftRunStore {
           }
           const verifiedRemoteLaunch = await options.verifyScope?.(inspectScope);
           const current = await inspectScope();
-          await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris, current);
+          await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris, current, approvalMode);
           const approvalFingerprint = options.approvalRecord?.scopeFingerprint;
           const boundFingerprint = verifiedRemoteLaunch?.gitRemote ? verifiedRemoteLaunch.fingerprint : current.fingerprint;
           if ((fingerprint !== undefined && fingerprint !== current.fingerprint)
@@ -685,11 +688,20 @@ export class DraftRunStore {
           fingerprint ??= current.fingerprint;
           return { scope: current, verifiedRemoteLaunch };
         };
-        await verifyScope();
+        const approvedScope = await verifyScope();
         assertAuthorized();
+        const transport = approvedScope.verifiedRemoteLaunch;
+        const profile = approvedScope.scope?.projectExecution;
+        draftRun.dispatch = normalizeDraftRunDispatch(transport ? {
+          boundary: 'git_transport', executable: transport.executable, args: transport.args
+        } : {
+          boundary: approvedScope.restrictedLaunch ? 'restricted_python' : profile?.kind ?? 'host',
+          executable: approvedScope.restrictedLaunch?.executable
+            ?? (profile?.kind === 'container' ? profile.containerCommand : approvedScope.scope?.boundLauncher),
+          containerImage: profile?.kind === 'container' ? profile.image : undefined
+        });
         draftRun.status = 'approved';
-        draftRun.authorizationSource = options.delegatedApproval && options.approvalRecord?.expectedSource !== 'user_click'
-          ? 'delegated_approver' : 'user_click';
+        draftRun.authorizationSource = options.delegatedApproval ? 'delegated_approver' : 'user_click';
         draftRun.approvedAt = new Date().toISOString();
         draftRun.updatedAt = draftRun.approvedAt;
         this.emitState(draftRun);
@@ -730,8 +742,13 @@ export class DraftRunStore {
           permit,
           restrictedLaunch,
           verifiedLaunch: verifiedRemoteLaunch || (verifiedScope?.boundLauncher
-            ? { executable: verifiedScope.boundLauncher, cwd: vscode.Uri.parse(verifiedScope.cwd).fsPath, env: verifiedScope.environment }
+            ? { executable: verifiedScope.boundLauncher, cwd: vscode.Uri.parse(verifiedScope.cwd).fsPath,
+              env: verifiedScope.environment, projectExecution: verifiedScope.projectExecution }
             : undefined),
+          assertBeforeLaunch: verifiedRemoteLaunch ? async () => {
+            await verifyScope();
+            assertAuthorized();
+          } : assertAuthorized,
           signal: abortController.signal,
           onOutput: (chunk) => this.recordOutput(draftRun, chunk)
         });
@@ -743,7 +760,7 @@ export class DraftRunStore {
         draftRun.executionStarted = outcome.started;
         draftRun.executionPhase = outcome.phase ?? (outcome.started === false ? 'not_dispatched' : 'result_unknown');
         draftRun.gitQueryResult = normalizeGitQueryResult(outcome.queryResult
-          ? { ...outcome.queryResult, scopeFingerprint: verifiedScope?.fingerprint } : undefined);
+          ? { ...outcome.queryResult, scopeFingerprint: verifiedScope?.factsFingerprint } : undefined);
         const successful = isSuccessfulDraftRunOutcome(outcome);
         draftRun.exitCode = outcome.exitCode;
         draftRun.signal = outcome.signal;
@@ -1334,6 +1351,7 @@ function cloneProposal(proposal: DraftRunProposal): DraftRunProposal {
 
 function cloneDraftRun(draftRun: DraftRun): DraftRun {
   return { ...draftRun, ...cloneProposal(draftRun),
+    dispatch: normalizeDraftRunDispatch(draftRun.dispatch),
     approvalReview: draftRun.approvalReview && structuredClone(draftRun.approvalReview),
     approvalHold: draftRun.approvalHold && { ...draftRun.approvalHold },
     commandRecoveryOutcome: normalizeCommandRecoveryOutcome(draftRun),
@@ -1346,6 +1364,18 @@ function cloneDraftRun(draftRun: DraftRun): DraftRun {
     gitPushAttempt: draftRun.gitPushAttempt ? structuredClone(draftRun.gitPushAttempt) : undefined,
     gitReleaseEvidence: draftRun.gitReleaseEvidence ? structuredClone(draftRun.gitReleaseEvidence) : undefined,
     gitStageEvidence: draftRun.gitStageEvidence ? structuredClone(draftRun.gitStageEvidence) : undefined };
+}
+
+function normalizeDraftRunDispatch(value: unknown): DraftRun['dispatch'] {
+  if (!value || typeof value !== 'object') return undefined;
+  const { boundary, executable, args, containerImage } = value as NonNullable<DraftRun['dispatch']>;
+  if (!['host', 'seatbelt', 'bubblewrap', 'container', 'git_transport', 'restricted_python'].includes(boundary)) return undefined;
+  return { boundary,
+    executable: typeof executable === 'string' ? redactSensitiveReviewText(executable, 4096) : undefined,
+    args: Array.isArray(args) && args.length <= 256 && args.every(arg => typeof arg === 'string')
+      ? args.map(arg => redactSensitiveReviewText(arg, 4096)) : undefined,
+    containerImage: boundary === 'container' && typeof containerImage === 'string' && /^sha256:[a-f0-9]{64}$/u.test(containerImage)
+      ? containerImage : undefined };
 }
 
 function hasNeverDispatched(run: Partial<DraftRun>): boolean {

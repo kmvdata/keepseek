@@ -2,8 +2,9 @@ import { analyzeDraftRunEffects } from './authorization/commandEffects';
 import { taskGoal } from '../sessions/userTask';
 import * as vscode from 'vscode';
 import type { AgentRequest, ChatMessage, DraftEdit, DraftRun, SafeNpmScript } from '../shared/types';
-import { createBoundedReviewText, hashApprovalText, hashApprovalValue, hashDraftEditAction, hashDraftRunAction } from './approvalReviewHash';
-import type { ApprovalReviewRequest } from './approvalReviewTypes';
+import { createBoundedReviewText, hashApprovalText, hashApprovalValue, hashDraftEditAction, hashDraftRunAction,
+  hashExternalFileReviewAction } from './approvalReviewHash';
+import { normalizeApprovalExecutionIsolation, type ApprovalReviewRequest } from './approvalReviewTypes';
 import { getDraftEditBase, getDraftEditFullText, getDraftEditKind, getDraftEditResult } from '../edits/draftEdit';
 import type { CommandScope } from './authorization/commandScope';
 import { redactSensitiveReviewText } from './approvalPolicy';
@@ -82,6 +83,10 @@ export function createDraftRunReviewRequest(input: {
 }): ApprovalReviewRequest {
   const plan = input.draftRun.spec.restricted;
   const original = input.originalDraftRun;
+  const boundary = input.scope?.projectExecution;
+  const osIsolation = normalizeApprovalExecutionIsolation(boundary?.kind) ?? 'none';
+  const verifiedProjectOperation = plan ? undefined : input.scope?.trustedProjectScript ? 'script_launch'
+    : boundary && input.scope?.verifiedProjectCommand ? 'project_process' : undefined;
   const assessment = plan ? input.draftRun.effectAssessment : analyzeDraftRunEffects(input.draftRun.spec, input.scope);
   return createBaseRequest({
     sessionId: input.draftRun.sessionId,
@@ -90,7 +95,7 @@ export function createDraftRunReviewRequest(input: {
     actionKind: 'draft_run_execute',
     targetId: input.draftRun.id,
     actionHash: hashDraftRunAction(input.draftRun),
-    verifiedProjectOperation: !plan && input.scope?.trustedProjectScript ? 'script_launch' : undefined,
+    verifiedProjectOperation,
     history: input.history,
     purpose: input.draftRun.spec.reason,
     staticRiskAnalysis: [
@@ -98,7 +103,7 @@ export function createDraftRunReviewRequest(input: {
       ...assessment.effects.map((effect) => `effect:${effect}`),
       ...assessment.evidence,
       ...(plan ? ['Host-constrained fixed parser, one UTF-8 snapshot via stdin, empty environment, bounded input and timeout.'] : []),
-      ...(input.scope?.trustedProjectScript ? ['trusted_project_script', 'Runs verified project code with extension-host privileges.'] : []),
+      ...(verifiedProjectOperation && osIsolation === 'none' ? ['Runs verified project code with extension-host privileges.'] : []),
       'The host checks exact external authorization independently.'
     ],
     exactAction: {
@@ -113,7 +118,9 @@ export function createDraftRunReviewRequest(input: {
           launcherTrust: input.scope.verifiedLauncher ? 'verified_runtime' : 'identity_only',
           projectEntryUri: input.scope.projectScriptEntryUri,
           networkTargets: input.scope.semantics?.networkTargets?.map(target => redactSensitiveReviewText(target)),
-          osIsolation: 'none', environmentNames: input.scope.environmentNames, paths: input.scope.paths },
+          osIsolation, projectRootUri: boundary ? vscode.Uri.file(boundary.root).toString() : undefined,
+          containerRuntime: boundary?.kind === 'container' ? { image: boundary.image, command: boundary.containerCommand } : undefined,
+          environmentNames: input.scope.environmentNames, paths: input.scope.paths },
       restricted: plan && original && { kind: plan.kind, original: {
         id: original.id, specHash: original.specHash, executable: original.spec.executable,
         argv: [...original.spec.args], cwdUri: original.spec.cwdUri, executed: false
@@ -135,22 +142,28 @@ export function createValidationReviewRequest(input: {
   workspaceRootId: string;
   snapshot: import('../agent/tools/validationSnapshot').ValidationSnapshot;
 }): ApprovalReviewRequest {
+  const osIsolation = normalizeApprovalExecutionIsolation(input.snapshot.projectExecution?.kind) ?? 'none';
+  const boundary = input.snapshot.projectExecution;
+  const actionHash = hashApprovalValue([input.script, input.workspaceRootId, input.snapshot.fingerprint]);
   return createBaseRequest({
     sessionId: input.request.sessionId ?? '',
     rootTaskId: input.request.approvalRootTaskId ?? input.request.checkpoint?.taskId ?? input.agentRunId,
     agentRunId: input.agentRunId,
     actionKind: 'validation_run',
     targetId: input.targetId,
-    actionHash: hashApprovalValue([input.script, input.workspaceRootId, input.snapshot.fingerprint]),
+    actionHash,
+    historicalActionHashes: input.snapshot.historicalFingerprint
+      ? [hashApprovalValue([input.script, input.workspaceRootId, input.snapshot.historicalFingerprint])] : undefined,
     verifiedProjectOperation: input.snapshot.evidenceComplete ? 'fixed_validation' : undefined,
     history: input.request.history,
     purpose: `Run the fixed ${input.script} validation requested by the main model.`,
     staticRiskAnalysis: ['registered_validation_tool', `fixed_script:${input.script}`,
-      'Runs repository code and installed dependencies with extension-host privileges.',
+      ...(osIsolation === 'none' ? ['Runs repository code and installed dependencies with extension-host privileges.'] : []),
       ...input.snapshot.configNames.map(name => `launch configuration present: ${name}`)],
     exactAction: { kind: 'validation_run', script: input.script, workspaceRootId: input.workspaceRootId,
       launch: { cwdUri: input.snapshot.cwdUri, executable: input.snapshot.executable, argv: [...input.snapshot.argv],
-        envNames: Object.keys(input.snapshot.env), scripts: input.snapshot.evidence } },
+        envNames: Object.keys(input.snapshot.env), scripts: input.snapshot.evidence, osIsolation,
+        containerRuntime: boundary?.kind === 'container' ? { image: boundary.image, command: boundary.containerCommand } : undefined } },
     language: input.request.language
   });
 }
@@ -181,7 +194,7 @@ export function createExternalFileReviewRequest(input: {
     agentRunId: input.agentRunId,
     actionKind: 'external_file_access',
     targetId: input.targetId,
-    actionHash: hashApprovalValue({ ...effect, fingerprint: input.fingerprint, readLimits }),
+    actionHash: hashExternalFileReviewAction({ ...effect, readLimits }, input.fingerprint),
     effectHash: hashApprovalValue(effect),
     historicalActionHashes,
     hideToolResultBodies: true,
@@ -215,6 +228,9 @@ function createBaseRequest(input: {
   language: 'zh-CN' | 'en';
 }): ApprovalReviewRequest {
   const firstUser = taskGoal(input.history, input.rootTaskId);
+  const taskConstraints = input.history.filter(message => message.role === 'user' && !message.contextMeta?.displayKind
+    && message.userTask?.id === input.rootTaskId && (message.userTask.reason === 'user' || message.userTask.reason === 'recovery'))
+    .slice(-3).map(message => boundTaskConstraint(message.content));
   return deepFreeze({
     version: 1,
     sessionId: input.sessionId,
@@ -227,6 +243,7 @@ function createBaseRequest(input: {
     historicalActionHashes: input.historicalActionHashes,
     verifiedProjectOperation: input.verifiedProjectOperation,
     originalGoalSummary: compact(redactSensitiveReviewText(firstUser), 1_200),
+    taskConstraints: taskConstraints.length ? taskConstraints : undefined,
     evidenceIncomplete: input.evidenceIncomplete === true || firstUser !== redactSensitiveReviewText(firstUser) || input.purpose.length > 1_200
       || input.staticRiskAnalysis.some(item => item.length > 1_000),
     visibleSessionEvidence: boundedTaskEvidence(input.history, input.rootTaskId, input.targetId, input.hideToolResultBodies),
@@ -239,13 +256,17 @@ function createBaseRequest(input: {
   });
 }
 
-/** Public user constraints and host-produced results only; never reasoning or another task. */
+function boundTaskConstraint(content: string): string {
+  const redacted = redactSensitiveReviewText(content, content.length).replace(/\s+/gu, ' ').trim();
+  const edgeSize = 760;
+  return redacted.length <= 1_600 ? redacted
+    : `${redacted.slice(0, edgeSize)} [Middle omitted by host.] ${redacted.slice(-edgeSize)}`;
+}
+
+/** Host-produced results for this task only. */
 export function boundedTaskEvidence(history: readonly ChatMessage[], rootTaskId: string, targetId: string, hideToolResultBodies = false): string[] {
   const items: string[] = [];
   for (const message of history.filter(item => item.userTask?.id === rootTaskId)) {
-    if (message.role === 'user' && message.userTask?.reason === 'user') {
-      items.push('user_constraint: ' + compact(redactSensitiveReviewText(message.content, 1600), 1600));
-    }
     for (const review of message.runDetails?.approvalReviews ?? []) {
       if (review.targetId === targetId || review.decision !== 'approve') items.push(JSON.stringify({
         type: 'prior_approval', targetId: review.targetId, decision: review.decision,

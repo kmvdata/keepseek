@@ -33,6 +33,8 @@ import './currentRunContext.test';
 import './draftEditRange.test';
 import './deleteDraftEdit.test';
 import './draftRunExecutor.test';
+import './projectExecutionIsolation.test';
+import './projectExecutionWindows.test';
 import './draftRunQueryIntegration.test';
 import './draftRunRisk.test';
 import './commandCapabilityRuntime.test';

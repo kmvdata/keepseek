@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { getConfiguredDraftRunTimeoutMs } from '../shared/config';
 import type {
+  ApprovalMode,
   DraftRunEnvironmentEntry,
   DraftRunProposal,
   DraftRunSpec,
@@ -25,7 +26,7 @@ export interface DraftRunProposalInput {
   replacesDraftRun?: { draftRunId: string; specHash: string };
 }
 
-export async function createDraftRunProposal(input: DraftRunProposalInput): Promise<DraftRunProposal> {
+export async function createDraftRunProposal(input: DraftRunProposalInput, mode?: ApprovalMode): Promise<DraftRunProposal> {
   const executable = validateText(input.executable, 'executable', 16_384);
   if (input.args.length > 4_096) {
     throw new Error('DraftRun cannot contain more than 4096 arguments.');
@@ -69,7 +70,7 @@ export async function createDraftRunProposal(input: DraftRunProposalInput): Prom
     spec,
     specHash: hashDraftRunSpec(spec),
     effectAssessment: analyzeDraftRunEffects(spec),
-    capabilityDiagnostic: analyzeCommandCapability(spec).diagnostics.find(item => item.blocking)
+    capabilityDiagnostic: analyzeCommandCapability(spec, undefined, mode).diagnostics.find(item => item.blocking)
   };
 }
 

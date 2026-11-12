@@ -16,30 +16,33 @@ export class DraftRunAuthorizationService {
     match?: ApprovalRecordMatch
   ): Promise<ExecutionPermit> {
     if (draftRun.historyInvalidationId || draftRun.historyOriginUnverified) throw new Error('DraftRun was detached by editing its source history.');
-    assertValidGitCommitArguments(draftRun.spec);
     if (!isAuthorized()) throw new Error('Delegated approval was revoked or is no longer authorized.');
     if (!this.approvalReviews || !match) {
       throw new Error('Delegated permit requires a persisted matching approval record.');
     }
     if (match.targetId !== draftRun.id || match.actionHash !== draftRun.specHash
       || match.sessionId !== draftRun.sessionId || match.agentRunId !== draftRun.agentRunId
-      || match.actionKind !== 'draft_run_execute') {
+      || match.actionKind !== 'draft_run_execute' || match.expectedSource !== 'auto_approval_review') {
       throw new Error('Delegated approval record does not match the immutable DraftRun.');
     }
     await this.approvalReviews.consumeMatchingApproval(match);
     if (!isAuthorized()) throw new Error('Delegated approval was revoked before permit issuance.');
-    return { ...this.createUserClickPermit(draftRun), source: match.expectedSource === 'user_click' ? 'user_click' : 'delegated_approver' };
+    return this.createPermit(draftRun, 'delegated_approver');
   }
 
   public createUserClickPermit(draftRun: DraftRun): ExecutionPermit {
     if (draftRun.historyInvalidationId || draftRun.historyOriginUnverified) throw new Error('DraftRun was detached by editing its source history.');
     assertValidGitCommitArguments(draftRun.spec);
+    return this.createPermit(draftRun, 'user_click');
+  }
+
+  private createPermit(draftRun: DraftRun, source: ExecutionPermit['source']): ExecutionPermit {
     const denial = this.findSafetyDenial(draftRun);
     if (denial) throw new Error(denial.rationale);
     return {
       draftRunId: draftRun.id,
       specHash: draftRun.specHash,
-      source: 'user_click',
+      source,
       allowedEffects: [...draftRun.effectAssessment.effects],
       policyVersion: 1,
       expiresAt: Date.now() + PERMIT_TTL_MS,

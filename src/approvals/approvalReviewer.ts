@@ -12,13 +12,15 @@ import { resolveConfiguredSubagentModel, UnavailableSubagentModelError } from '.
 import type { AgentRequest, KeepseekModel, ProviderUsageLedgerRecord, UsageEvent } from '../shared/types';
 import { AUTO_APPROVAL_REVIEWER_SYSTEM_PROMPT, PROJECT_POLICY_CORRECTION, ApprovalAffectedScopeError, ApprovalResponseFormatError,
   findDeterministicReviewDenial, isProjectBehaviorOnlyEscalation, isVerifiedProjectOperation, parseAutoApprovalReviewerJson,
-  prepareAutomaticReviewEvidence, redactSensitiveReviewText, reviewResponseCorrection } from './approvalPolicy';
+  prepareAutomaticReviewEvidence, redactSensitiveReviewText, reviewResponseCorrection, verifiedBusinessAuthorization } from './approvalPolicy';
 import { requestApprovalReviewText } from './oneShotTextRequest';
-import { APPROVAL_POLICY_VERSION, EXACT_USER_AUTHORIZATION_RULE, PROJECT_BEHAVIOR_UNKNOWN_RULE, VERIFIED_PROJECT_OPERATION_RULE,
+import { APPROVAL_POLICY_VERSION, AUTHORIZED_BUSINESS_EFFECT_RULE, EXACT_USER_AUTHORIZATION_RULE,
+  PROJECT_BEHAVIOR_UNKNOWN_RULE, VERIFIED_PROJECT_OPERATION_RULE,
   USER_CONFIRMABLE_RISK_RULE, type ApprovalReviewAttemptFailure,
   approvalDisposition, type ApprovalAuthorizationSource, type ApprovalReviewerJson, type ApprovalReviewOutcome,
-  type ApprovalReviewRecord, type ApprovalReviewRequest, type ApprovalReviewState } from './approvalReviewTypes';
+  type ApprovalReviewRecord, type ApprovalReviewRequest, type ApprovalReviewState, type ApprovalUserAuthorizationReceipt } from './approvalReviewTypes';
 import { ApprovalAuditError, ApprovalReviewStore } from './approvalReviewStore';
+import { hashApprovalValue, hashExternalFileReviewAction } from './approvalReviewHash';
 import type { ApprovalCircuitBreaker } from './approvalCircuitBreaker';
 
 export interface ApprovalReviewerModelContext {
@@ -38,7 +40,7 @@ export interface ApprovalReviewerAdapter {
   review(request: ApprovalReviewRequest, modelContext?: ApprovalReviewerModelContext, signal?: AbortSignal,
     onStart?: (record: ApprovalReviewRecord) => void, options?: ApprovalReviewRetry): Promise<ApprovalReviewOutcome>;
   findHistoricalDenial?(request: ApprovalReviewRequest): ApprovalReviewRecord | undefined;
-  createUserApproval?(request: ApprovalReviewRequest, link: { priorReviewId?: string; userRequestId: string }): Promise<ApprovalReviewOutcome>;
+  createUserAuthorization?(request: ApprovalReviewRequest, link: { priorReviewId?: string; userRequestId: string }): Promise<ApprovalUserAuthorizationReceipt>;
   createUserRejection?(request: ApprovalReviewRequest, link: { priorReviewId?: string; userRequestId: string }): Promise<ApprovalReviewRecord>;
   assertReviewerConfiguration?(request: ApprovalReviewRequest, context: ApprovalReviewerModelContext | undefined, record: ApprovalReviewRecord): Promise<void>;
   consumeApproval(record: ApprovalReviewRecord, expectedSource: ApprovalAuthorizationSource): Promise<void>;
@@ -127,6 +129,16 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
     if (deterministicDenial) {
       return this.withCircuit(request, 'reviewed', await this.createLocalDenial(request, deterministicDenial));
     }
+    if (request.externalAuthorization?.required && !hasExactUserAuthorizationGap(request)) {
+      return this.createPause(request, 'scope_mismatch', 'missing_authorization_target', request.responseLanguage === 'en'
+        ? 'The required authorization target could not be established. Nothing executed.'
+        : '无法确定待授权的精确目标，尚未执行。');
+    }
+    if (request.businessAuthorization && (!verifiedBusinessAuthorization(request) || !this.matchesUserAuthorization(request, options))) {
+      return this.createPause(request, 'scope_mismatch', 'unverified_business_authorization', request.responseLanguage === 'en'
+        ? 'The exact business authorization could not be verified. Nothing executed.'
+        : '无法核实本次精确业务授权，尚未执行。');
+    }
     const serialized = prepareAutomaticReviewEvidence(request);
     if (!serialized) {
       return this.createPause(request, 'insufficient_evidence', 'insufficient_evidence', request.responseLanguage === 'en'
@@ -213,8 +225,9 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
         });
         throwIfCancelled(signal);
         decision = parseAutoApprovalReviewerJson(raw, request);
-        if (decision.decision !== 'deny') assertReviewDeadline(modelContext, deadlineAt);
-        if (isProjectBehaviorOnlyEscalation(decision, request)) {
+        const uncertainProjectBehavior = isProjectBehaviorOnlyEscalation(decision, request);
+        if (decision.decision !== 'deny' || uncertainProjectBehavior) assertReviewDeadline(modelContext, deadlineAt);
+        if (uncertainProjectBehavior) {
           noteAttemptFailure(attempts, 'project_behavior_unknown', 'policyRules');
           if (!attempt) {
             correction = PROJECT_POLICY_CORRECTION;
@@ -271,6 +284,7 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
         reviewerModelId: resolved.model.id, reviewerProvider: resolved.sourceConfig.provider,
         decision: outcome.decision, risk: outcome.risk, rationale: redactSensitiveReviewText(outcome.reason, 800),
         projectApproval: outcome.projectApproval,
+        businessAuthorization: outcome.decision === 'approve' ? verifiedBusinessAuthorization(request) : undefined,
         policyRules: outcome.policyRules, affectedTargets: outcome.affectedTargets?.map(target => redactSensitiveReviewText(target, 300)),
         saferAlternative: outcome.saferAlternative ? redactSensitiveReviewText(outcome.saferAlternative) : undefined,
         reviewState: outcome.reviewState, ...attempts
@@ -311,7 +325,7 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
     const record = await this.options.store.add({
       ...reviewIdentity(request), approvalSource: 'local_policy', reviewerSourceId: '', reviewerModelId: '',
       reviewerProvider: 'local_policy', decision: 'needs_user', risk: 'high', rationale: redactSensitiveReviewText(reason),
-      policyRules: [rule], reviewState, ...attempts
+      riskUnassessed: true, policyRules: [rule], reviewState, ...attempts
     });
     return { status: 'reviewed', record };
   }
@@ -331,7 +345,7 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
     return { ...stopped, circuitBreakReason: reason };
   }
 
-  public async createUserApproval(request: ApprovalReviewRequest, link: { priorReviewId?: string; userRequestId: string }): Promise<ApprovalReviewOutcome> {
+  public async createUserAuthorization(request: ApprovalReviewRequest, link: { priorReviewId?: string; userRequestId: string }): Promise<ApprovalUserAuthorizationReceipt> {
     const reviewed = link.priorReviewId ? this.options.store.get(link.priorReviewId) : undefined;
     if (!link.userRequestId || !reviewed || reviewed.runtimeId !== this.options.store.runtimeId
       || !this.options.store.matchesSnapshot(reviewed.reviewId, request)
@@ -339,19 +353,50 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
       throw new Error('No live matching user request review exists. Nothing executed. / 缺少本次人工请求的有效审查记录，未执行。');
     }
     const prior = this.findHistoricalDenial(request);
-    if (prior) return this.blockPreviouslyDenied(request, prior);
+    if (prior) throw new Error(prior.rationale);
     const denial = !request.workspaceTrusted || !vscode.workspace.isTrusted ? 'workspace_untrusted' : findDeterministicReviewDenial(request);
-    if (denial) return { status: 'reviewed', record: await this.createLocalDenial(request, denial) };
+    if (denial) throw new Error((await this.createLocalDenial(request, denial)).rationale);
+    const targets = [...new Set(request.externalAuthorization?.required ? request.externalAuthorization.targets : reviewed.affectedTargets)];
+    if (!targets.length) throw new Error('The exact user authorization has no verified targets. / 精确用户授权缺少可核验的目标。');
     const record = await this.options.store.add({
       ...reviewIdentity(request), ...link,
       approvalSource: 'user_click', reviewerSourceId: '', reviewerModelId: '', reviewerProvider: 'user_click',
       reviewerConfigFingerprint: reviewed.reviewerConfigFingerprint,
-      decision: 'approve', risk: reviewed.risk, policyRules: ['user_confirmed_exact_action'],
-      riskUnassessed: reviewed.decision === 'unavailable' ? true : undefined,
-      affectedTargets: reviewed.affectedTargets,
-      rationale: request.responseLanguage === 'en' ? 'User confirmed this exact operation once.' : '用户已对该精确操作作出单次确认。'
+      decision: 'needs_user', risk: reviewed.risk, policyRules: ['user_authorized_exact_scope'],
+      affectedTargets: targets,
+      rationale: request.responseLanguage === 'en' ? 'The user authorized this exact scope. Independent review is still required.'
+        : '用户已授权此精确范围，仍需独立审批模型作出决定。'
     });
-    return { status: 'reviewed', record };
+    return { record, authorization: { kind: 'confirmed_action', authority: 'user_confirmation', targets, receiptId: record.reviewId } };
+  }
+
+  private matchesUserAuthorization(request: ApprovalReviewRequest, retry?: ApprovalReviewRetry): boolean {
+    const authorization = request.businessAuthorization;
+    if (authorization?.kind !== 'confirmed_action') return true;
+    const receipt = this.options.store.get(authorization.receiptId);
+    return !!receipt && receipt.runtimeId === this.options.store.runtimeId && !receipt.historyInvalidatedBy
+      && receipt.approvalSource === 'user_click' && receipt.decision === 'needs_user'
+      && receipt.policyRules.includes('user_authorized_exact_scope') && receipt.priorReviewId === retry?.retryOf
+      && receipt.sessionId === request.sessionId && receipt.rootTaskId === request.rootTaskId && receipt.agentRunId === request.agentRunId
+      && receipt.targetId === request.targetId && receipt.actionKind === request.actionKind && receipt.actionHash === request.actionHash
+      && receipt.effectHash === request.effectHash && !!receipt.affectedTargets
+      && receipt.affectedTargets.length === authorization.targets.length
+      && authorization.targets.every(target => receipt.affectedTargets!.includes(target))
+      && (receipt.scopeFingerprint === request.scopeFingerprint || this.matchesExternalReadRefinement(receipt, request, retry));
+  }
+
+  private matchesExternalReadRefinement(receipt: ApprovalReviewRecord, request: ApprovalReviewRequest, retry?: ApprovalReviewRetry): boolean {
+    const action = request.exactAction;
+    if (action.kind !== 'external_file_access' || action.access !== 'read' || !receipt.authorizationPending
+      || retry?.recovery !== 'not_dispatched' || request.externalAuthorization?.required !== false
+      || receipt.affectedTargets?.length !== 1 || receipt.affectedTargets[0] !== action.uri
+      || request.externalAuthorization.targets.length !== 1 || request.externalAuthorization.targets[0] !== action.uri
+      || !request.scopeFingerprint || !/^[a-f0-9]{64}$/u.test(request.scopeFingerprint)) return false;
+    // A one-shot read is initially scoped to the literal URI. Only after the
+    // exact grant can the workspace service resolve and stat that same file.
+    const provisional = hashApprovalValue({ uri: action.uri, access: action.access });
+    return receipt.scopeFingerprint === provisional && receipt.effectHash === provisional
+      && receipt.actionHash === hashExternalFileReviewAction(action, provisional);
   }
 
   public async createUserRejection(request: ApprovalReviewRequest, link: { priorReviewId?: string; userRequestId: string }): Promise<ApprovalReviewRecord> {
@@ -429,19 +474,21 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
 }
 
 function reviewIdentity(request: ApprovalReviewRequest) {
+  const action = request.exactAction;
   return {
     sessionId: request.sessionId, rootTaskId: request.rootTaskId, agentRunId: request.agentRunId,
     targetId: request.targetId, actionKind: request.actionKind, actionHash: request.actionHash, effectHash: request.effectHash,
     policyVersion: APPROVAL_POLICY_VERSION, approvalMode: request.approvalMode, scopeFingerprint: request.scopeFingerprint,
     originalActionHash: originalActionHash(request),
-    osIsolation: request.actionKind === 'draft_run_execute' || request.actionKind === 'validation_run' ? 'none' as const : undefined
+    authorizationPending: hasExactUserAuthorizationGap(request) ? true as const : undefined,
+    osIsolation: action.kind === 'draft_run_execute' ? action.scope?.osIsolation ?? 'none' as const
+      : action.kind === 'validation_run' ? action.launch?.osIsolation ?? 'none' as const : undefined
   };
 }
 
 function canUseManualReview(reviewed: ApprovalReviewRecord, request: ApprovalReviewRequest): boolean {
   if (request.exactAction.kind === 'draft_run_execute' && request.exactAction.restricted) return false;
-  const disposition = approvalDisposition(reviewed);
-  return disposition === 'request_user' || (disposition === 'execute' && hasExactUserAuthorizationGap(request));
+  return approvalDisposition(reviewed) === 'request_user';
 }
 
 function throwIfCancelled(signal?: AbortSignal): void {
@@ -483,8 +530,14 @@ function noteAttemptFailure(attempts: ReviewAttempts, category: ApprovalReviewAt
 
 function applyHostDecisionPolicy(decision: ApprovalReviewerJson, request: ApprovalReviewRequest): HostReviewDecision {
   if (decision.decision === 'deny') return decision;
-  const highRisk = decision.risk === 'high' || decision.risk === 'critical';
-  if (decision.policyRules.includes('concrete_danger')) return { ...decision, decision: 'deny' };
+  const highRisk = decision.risk === 'high';
+  if (decision.risk === 'critical' || decision.policyRules.includes('concrete_danger')) return { ...decision, decision: 'deny' };
+  const businessAuthorization = verifiedBusinessAuthorization(request);
+  if (decision.policyRules.includes(AUTHORIZED_BUSINESS_EFFECT_RULE) && !businessAuthorization) return {
+    ...decision, decision: 'unavailable', reviewState: 'scope_mismatch', policyRules: ['unverified_business_authorization'],
+    reason: request.responseLanguage === 'en' ? 'The review cited an authorization the host did not establish.'
+      : '审批模型引用了宿主尚未核验的业务授权。'
+  };
   const hasUnknownScope = decision.policyRules.includes(VERIFIED_PROJECT_OPERATION_RULE) && !isVerifiedProjectOperation(request);
   if (hasUnknownScope) return {
     ...decision, decision: 'unavailable', reviewState: 'scope_mismatch',
@@ -494,15 +547,19 @@ function applyHostDecisionPolicy(decision: ApprovalReviewerJson, request: Approv
       : '审批模型引用了宿主尚未核验的工程范围。'
   };
   const exactGap = decision.policyRules.includes(EXACT_USER_AUTHORIZATION_RULE);
+  const authorizationRequired = hasExactUserAuthorizationGap(request);
   const insufficientEvidence = decision.policyRules.includes('insufficient_evidence')
     || decision.policyRules.includes(PROJECT_BEHAVIOR_UNKNOWN_RULE)
-    || (exactGap && !hasExactUserAuthorizationGap(request));
+    || (exactGap && !authorizationRequired);
   if (decision.decision === 'needs_user') {
-    const confirmableRisk = highRisk && decision.policyRules.includes(USER_CONFIRMABLE_RISK_RULE);
+    const confirmableRisk = highRisk && !businessAuthorization && decision.policyRules.includes(USER_CONFIRMABLE_RISK_RULE);
     return { ...decision, reviewState: !insufficientEvidence && (exactGap || confirmableRisk) ? undefined : 'insufficient_evidence' };
   }
   if (insufficientEvidence) return { ...decision, decision: 'needs_user', reviewState: 'insufficient_evidence' };
-  if (highRisk) {
+  if (authorizationRequired) {
+    return { ...decision, decision: 'needs_user', policyRules: prependPolicyRule(decision, EXACT_USER_AUTHORIZATION_RULE) };
+  }
+  if (highRisk && !businessAuthorization) {
     return {
       ...decision, decision: 'needs_user',
       policyRules: prependPolicyRule(decision, USER_CONFIRMABLE_RISK_RULE),
@@ -511,6 +568,7 @@ function applyHostDecisionPolicy(decision: ApprovalReviewerJson, request: Approv
         : `审查报告的风险需要你对本次精确操作作出确认。${decision.reason}`
     };
   }
+  if (highRisk) decision = { ...decision, policyRules: prependPolicyRule(decision, AUTHORIZED_BUSINESS_EFFECT_RULE) };
   if (isVerifiedProjectOperation(request)) {
     return { ...decision, projectApproval: true, policyRules: prependPolicyRule(decision, VERIFIED_PROJECT_OPERATION_RULE) };
   }
@@ -532,7 +590,6 @@ function formatLocalPolicyRationale(rule: string, language: ApprovalReviewReques
     previously_denied_action: { en: 'this exact action was already denied', zh: '这项精确操作此前已被拒绝' },
     suspected_credential_material: { en: 'the request may contain credential material', zh: '申请中可能包含凭据材料' },
     suspected_credential_probe: { en: 'the action may probe credentials or authentication files', zh: '操作可能探测凭据或认证文件' },
-    approval_bypass_attempt: { en: 'the action may bypass or weaken approval safeguards', zh: '操作可能绕过或削弱审批保护' },
     unregistered_approval_action: { en: 'the action kind is not registered', zh: '操作类型未注册' },
     invalid_approval_identity: { en: 'the approval identity is incomplete', zh: '审批身份字段不完整' },
     approval_action_kind_mismatch: { en: 'the action kind does not match its exact payload', zh: '操作类型与精确内容不匹配' },

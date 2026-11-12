@@ -11,11 +11,13 @@ import { ApprovalReviewerService } from '../src/approvals/approvalReviewer';
 import { ApprovalReviewStore } from '../src/approvals/approvalReviewStore';
 import { createDraftRunReviewRequest } from '../src/approvals/approvalReviewSurface';
 import { analyzeCommand, analyzeDraftRunEffects, assertAutomaticRunAuthorization, draftRunIdentity,
-  ExactOperationGrants, inspectAutomaticRunAuthorization, inspectGitCommandReplan } from '../src/approvals/authorization';
+  evaluateAutomaticRunAuthorization, ExactOperationGrants, inspectAutomaticRunAuthorization, inspectGitCommandReplan,
+  validateDraftRunBeforeApproval } from '../src/approvals/authorization';
 import { analyzeCommandCapability, normalizeCommandCapabilityDiagnostic } from '../src/approvals/authorization/commandCapability';
 import { inspectLocalGitScope } from '../src/approvals/authorization/localGitScope';
 import { hasValidationBlockingRisk } from '../src/agent/tools/validationRisk';
 import { DraftRunAuthorizationService } from '../src/runs/draftRunAuthorization';
+import { isIndependentDraftRunCheck } from '../src/runs/draftRunDependencies';
 import { SpawnDraftRunExecutor } from '../src/runs/draftRunExecutor';
 import { createDraftRunProposal, type DraftRunProposalInput } from '../src/runs/draftRunProposal';
 import { DraftRunStore } from '../src/runs/draftRunStore';
@@ -28,6 +30,83 @@ test('DraftRun read-only analysis is conservative advice rather than authorizati
   assert.equal(assessment.verdict, 'likely_readonly');
   assert.deepEqual(assessment.effects, ['workspace_read']);
   assert.match(assessment.evidence.join(' '), /advisory, not a safety proof/u);
+});
+
+test('delegate preserves literal Git argv and verifies independent repository reads', async t => {
+  const commands = [
+    ['ls-files', '-s', '--', 'game_pywin.log', 'game_pywin.log.1', 'game_pywin.log.2', 'game_pywin.log.3'],
+    ['log', '--oneline', '--all', '--', 'game_pywin.log'],
+    ['log', '--oneline', '--', 'game_pywin.log'],
+    ['status', '--porcelain=v1']
+  ];
+  for (const args of [...commands, ['log', '--first-parent', '--oneline', 'HEAD']]) {
+    const spec = createSpec('git', args);
+    const advice = analyzeCommandCapability(spec, undefined, 'delegate');
+    assert.equal(advice.supported, true);
+    assert.ok(advice.diagnostics.every(item => !item.blocking));
+    assert.deepEqual(spec.args, args);
+  }
+  assert.equal(analyzeCommandCapability(createSpec('git', ['log', '--first-parent', 'HEAD']), undefined, 'ask').supported, false);
+  if (process.platform === 'win32') return;
+  const { workspace, createRun } = await projectScriptFixture(t);
+  execFileSync('/usr/bin/git', ['init', '-q'], { cwd: workspace });
+  const grants = new ExactOperationGrants();
+  for (const args of commands) {
+    const input = { executable: '/usr/bin/git', args, reason: 'Inspect project logs.' };
+    const proposal = await createDraftRunProposal(input, 'delegate');
+    assert.equal(proposal.capabilityDiagnostic, undefined);
+    const run = { ...await createRun(input.executable, args), ...proposal };
+    const decision = await inspectAutomaticRunAuthorization(run, grants, 'delegate');
+    assert.equal(decision.reviewable, true, decision.refusal?.reason);
+    assert.equal(decision.allowed, true);
+    assert.equal(decision.scope.verifiedProjectCommand, true);
+    assert.deepEqual(run.spec.args, args);
+    assert.equal(await isIndependentDraftRunCheck(run, decision.authorizedUris), true);
+    await validateDraftRunBeforeApproval(run, decision.authorizedUris, decision.scope, 'delegate');
+    const missingBoundary = { ...decision.scope, projectExecution: undefined };
+    assert.equal(evaluateAutomaticRunAuthorization(run, grants, 'delegate', false, missingBoundary).reviewable, false);
+    await assert.rejects(validateDraftRunBeforeApproval(run, decision.authorizedUris, missingBoundary, 'delegate'), /execution boundary/u);
+  }
+  const mirror = await createRun('/usr/bin/git', ['push', '--mirror', 'origin']);
+  const blocked = await inspectAutomaticRunAuthorization(mirror, grants, 'delegate');
+  assert.equal(blocked.refusal?.code, 'hard_blocked');
+});
+
+test('Git log --all does not claim independent scope when linked worktree refs are present', async t => {
+  if (process.platform === 'win32') return t.skip('POSIX Git fixture');
+  const { root, workspace, createRun } = await projectScriptFixture(t);
+  const git = (...args: string[]) => execFileSync('/usr/bin/git', args, { cwd: workspace, stdio: 'pipe' });
+  git('init', '-q');
+  git('-c', 'user.name=Scope Fixture', '-c', 'user.email=scope@example.invalid', '-c', 'commit.gpgsign=false',
+    'commit', '--allow-empty', '-m', 'baseline');
+  git('worktree', 'add', '--detach', path.join(root, 'linked'));
+  const run = await createRun('/usr/bin/git', ['log', '--oneline', '--all']);
+  const decision = await inspectAutomaticRunAuthorization(run, new ExactOperationGrants(), 'delegate');
+  assert.equal(decision.reviewable, false);
+  assert.match(decision.refusal?.reason ?? '', /linked worktree refs/u);
+  assert.equal(await isIndependentDraftRunCheck(run, decision.authorizedUris), false);
+  const ordinary = await createRun('/usr/bin/git', ['log', '--oneline', 'HEAD']);
+  assert.equal(await isIndependentDraftRunCheck(ordinary, new Set()), true);
+});
+
+test('explicit network and file targets remain visible for unfamiliar command options', async t => {
+  if (process.platform === 'win32') return t.skip('POSIX system tool fixture');
+  const { root, createRun } = await projectScriptFixture(t);
+  const grants = new ExactOperationGrants();
+  const url = 'https://example.invalid/target';
+  const file = vscode.Uri.file(path.join(root, 'external target.txt')).toString();
+  const args = [`--target=${url}`, `--input=${file}`];
+  const run = await createRun('/usr/bin/make', args);
+  const decision = await inspectAutomaticRunAuthorization(run, grants, 'delegate');
+  assert.equal(decision.reviewable, true, decision.refusal?.reason);
+  assert.equal(decision.allowed, false);
+  assert.equal(decision.requiresNetworkGrant, true);
+  assert.deepEqual(decision.scope.semantics?.networkTargets, [url]);
+  assert.deepEqual(decision.scope.externalUris, [file]);
+  assert.deepEqual(run.spec.args, args);
+  assert.deepEqual(analyzeCommand(createSpec('echo', [url])).networkTargets, undefined);
+  const systemOutput = await createRun('/usr/bin/make', ['--output=file:///etc/keepseek-sentinel']);
+  await assert.rejects(inspectAutomaticRunAuthorization(systemOutput, grants, 'delegate'), /Protected credential|system target/u);
 });
 
 test('inline shell programs expose execution and unknown scope without pretending to parse shell text', () => {
@@ -303,6 +382,7 @@ test('bare Git log refs retain protected path checks for real worktree/index mat
   git('add', '--', 'credentials', 'cookies', 'README.md');
   git('-c', 'user.name=Scope Fixture', '-c', 'user.email=scope@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-m', 'public fixture');
   git('tag', '0.5.0');
+  git('branch', 'README.md/feature');
   await rm(path.join(workspace, 'cookies')); // Still indexed: absence on disk is not absence of a path operand.
   const grants = new ExactOperationGrants();
   for (const operand of ['credentials', 'cookies']) {
@@ -311,7 +391,7 @@ test('bare Git log refs retain protected path checks for real worktree/index mat
     assert.throws(() => git('rev-parse', '--verify', '--end-of-options', `${operand}^{object}`));
     await assert.rejects(inspectAutomaticRunAuthorization(await createRun('/usr/bin/git', ['log', '--oneline', operand]), grants, 'delegate'), /Protected credential/u);
   }
-  for (const operand of ['0.5.0', '0.5.0..HEAD', '0.5.0^{commit}']) {
+  for (const operand of ['0.5.0', '0.5.0..HEAD', '0.5.0^{commit}', 'README.md/feature']) {
     const authorization = await inspectAutomaticRunAuthorization(await createRun('/usr/bin/git', ['log', '--oneline', operand]), grants, 'delegate');
     assert.equal(authorization.allowed, true, operand);
     assert.equal(authorization.reviewable, true, operand);
@@ -341,6 +421,11 @@ test('missing Git repository evidence is recoverable diagnosis while the origina
   const granted = await inspectAutomaticRunAuthorization(run, grants, 'delegate');
   assert.equal(granted.allowed, false);
   assert.equal(granted.refusal?.code, 'insufficient_launch_evidence');
+
+  const pager = await createRun('/usr/bin/git', ['-c', 'core.pager=cat', 'status', '--porcelain=v1']);
+  const pagerDecision = await inspectAutomaticRunAuthorization(pager, grants, 'delegate');
+  assert.equal(pagerDecision.reviewable, false);
+  assert.equal(pagerDecision.refusal?.code, 'insufficient_launch_evidence');
 });
 
 test('missing Git evidence never downgrades explicit configuration or helper restrictions', async t => {
@@ -414,13 +499,20 @@ test('Git remote pregrant inspection binds local metadata and leaves bare config
   await assertAutomaticRunAuthorization(run, grants, currentMetadata.scope.fingerprint, 'delegate', true);
 });
 
-test('Git remote argv only recognizes bounded reads and non-forced explicit push refs', () => {
+test('Git remote argv recognizes bounded reads, current-branch pushes, and exact leases', () => {
   const spec = (args: string[]) => analyzeCommand(createSpec('git', args)).gitRemote;
   assert.deepEqual(spec(['ls-remote', '--tags', 'upstream']), { kind: 'query', remote: 'upstream', namespace: 'tags', refs: [] });
   assert.deepEqual(spec(['push', '--atomic', 'upstream', 'refs/heads/trunk', 'refs/tags/release-1:refs/tags/release-1']),
-    { kind: 'push', remote: 'upstream', refs: ['refs/heads/trunk', 'refs/tags/release-1'] });
+    { kind: 'push', remote: 'upstream', refs: ['refs/heads/trunk', 'refs/tags/release-1'], atomic: true });
+  assert.deepEqual(spec(['push']), { kind: 'push', remote: '', refs: [], currentBranch: true });
+  assert.deepEqual(spec(['push', 'upstream']), { kind: 'push', remote: 'upstream', refs: [], currentBranch: true });
+  const expected = 'a'.repeat(40);
+  assert.deepEqual(spec(['push', `--force-with-lease=refs/heads/trunk:${expected}`, 'upstream', 'refs/heads/trunk']),
+    { kind: 'push', remote: 'upstream', refs: ['refs/heads/trunk'], lease: { ref: 'refs/heads/trunk', expected } });
   for (const args of [
-    ['push', 'upstream'], ['push', '--tags', 'upstream'], ['push', '--force', 'upstream', 'refs/tags/release-1'],
+    ['push', '--tags', 'upstream'], ['push', '--force', 'upstream', 'refs/tags/release-1'],
+    ['push', '--force-with-lease', 'upstream', 'refs/heads/trunk'],
+    ['push', `--force-with-lease=refs/heads/other:${expected}`, 'upstream', 'refs/heads/trunk'],
     ['push', 'upstream', '+refs/tags/release-1'], ['push', 'upstream', ':refs/tags/release-1'],
     ['push', 'upstream', 'refs/tags/release-1:refs/tags/release-2'], ['push', 'upstream', 'refs/tags/release-*'],
     ['push', 'upstream', 'refs/heads/trunk', 'refs/tags/release-1'], ['ls-remote', 'upstream'],
@@ -490,12 +582,14 @@ test('writes, helpers, configuration overrides and unsupported Git syntax cannot
   assert.ok(analyzeDraftRunEffects(createSpec('git', ['show', '--ext-diff'])).effects.includes('arbitrary_code'));
 });
 
-test('Git replanning recognizes the exact pager query and keeps its original configuration override unapproved', () => {
+test('Git replanning keeps the exact pager correction for ask mode', () => {
   const spec = createSpec('git', ['-c', 'core.pager=cat', 'status', '--porcelain=v1']);
   const diagnosis = inspectGitCommandReplan(spec);
   assert.equal(diagnosis?.code, 'git_status_pager_override');
   assert.deepEqual(diagnosis?.candidateArgs, ['--no-pager', '--no-optional-locks', 'status', '--porcelain=v1']);
   assert.ok(analyzeCommand(spec).reasons.some(reason => reason.code === 'git_configuration'));
+  assert.equal(analyzeCommandCapability(spec, undefined, 'ask').supported, false);
+  assert.equal(analyzeCommandCapability(spec, undefined, 'delegate').supported, true);
   assert.deepEqual(analyzeCommand({ ...spec, args: diagnosis!.candidateArgs! }).reasons.map(reason => reason.code), ['git_runtime']);
 
   for (const args of [

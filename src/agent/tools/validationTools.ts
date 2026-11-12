@@ -1,6 +1,8 @@
 import { redactSensitiveReviewText } from '../../approvals/approvalPolicy';
+import { APPROVAL_POLICY_VERSION } from '../../approvals/approvalReviewTypes';
 import { spawn } from 'node:child_process';
 import { terminateProcessTree } from '../../runs/draftRunExecutor';
+import { getProjectExecutionMode, prepareProjectExecution, ProjectExecutionUnavailableError } from '../../runs/projectExecutionIsolation';
 import { inspectValidationSnapshot, ValidationUnavailableError, type ValidationSnapshot } from './validationSnapshot';
 import * as vscode from 'vscode';
 import {
@@ -8,6 +10,7 @@ import {
 } from '../../shared/config';
 import type { KeepseekLanguage } from '../../shared/i18n';
 import type {
+  ApprovalMode,
   SafeNpmScript,
   ToolAuthorizationDecision,
   ValidationToolResult,
@@ -31,6 +34,7 @@ export interface ValidationToolAdapter {
     runDeadlineAt?: number;
     authorization: ToolAuthorizationDecision;
     expectedSnapshot?: string;
+    approvalMode?: ApprovalMode;
   }): Promise<string>;
 }
 
@@ -47,6 +51,7 @@ export class ValidationToolService implements ValidationToolAdapter {
     runDeadlineAt?: number;
     authorization: ToolAuthorizationDecision;
     expectedSnapshot?: string;
+    approvalMode?: ApprovalMode;
   }): Promise<string> {
     const startedAt = Date.now();
     const createResult = (result: Partial<ValidationToolResult>): ValidationToolResult => ({
@@ -88,10 +93,14 @@ export class ValidationToolService implements ValidationToolAdapter {
     }
 
     const expectedScope = input.script === 'test' ? 'validation_test' : 'validation_compile_lint';
+    const review = input.authorization.approvalReview;
+    const approvalMode = input.authorization.source === 'model_reviewer' ? 'delegate' : input.approvalMode;
     if (!input.authorization.allowed
       || input.authorization.toolName !== RUN_VALIDATION_TOOL_NAME
       || input.authorization.riskLevel !== 'medium'
-      || input.authorization.scope !== expectedScope) {
+      || input.authorization.scope !== expectedScope
+      || (approvalMode === 'delegate' && (review?.decision !== 'approve' || review.policyVersion !== APPROVAL_POLICY_VERSION
+        || review.approvalSource !== 'auto_approval_review' || review.reviewState || !input.expectedSnapshot))) {
       return JSON.stringify(createResult({
         workspaceFolder: workspaceFolder.name,
         authorization: input.authorization,
@@ -117,7 +126,7 @@ export class ValidationToolService implements ValidationToolAdapter {
 
     const taskName = `KeepSeek: npm run ${input.script}`;
     try {
-      const snapshot = await inspectValidationSnapshot(workspaceFolder, input.script);
+      const snapshot = await inspectValidationSnapshot(workspaceFolder, input.script, approvalMode);
       if (!vscode.workspace.isTrusted || input.signal?.aborted || !vscode.workspace.workspaceFolders?.includes(workspaceFolder)
         || !snapshot.evidenceComplete
         || (input.expectedSnapshot && input.expectedSnapshot !== snapshot.fingerprint)
@@ -126,7 +135,11 @@ export class ValidationToolService implements ValidationToolAdapter {
       }
       const remainingMs = input.runDeadlineAt === undefined ? timeoutMs : Math.min(timeoutMs, input.runDeadlineAt - Date.now());
       if (remainingMs <= 0) throw new Error(localizeValidation(input.language, 'timedOut'));
-      const outcome = await executeValidation(snapshot, remainingMs, input.signal);
+      const outcome = await executeValidation(snapshot, remainingMs, input.signal, async () => {
+        if (!vscode.workspace.workspaceFolders?.includes(workspaceFolder)) return false;
+        const current = await inspectValidationSnapshot(workspaceFolder, input.script, approvalMode);
+        return current.fingerprint === snapshot.fingerprint;
+      }, input.language);
       const diagnostics = createWorkspaceDiagnosticSummary();
       const ok = !outcome.timedOut && !outcome.aborted && outcome.exitCode === 0;
       return JSON.stringify(createResult({
@@ -175,7 +188,7 @@ export class ValidationToolService implements ValidationToolAdapter {
   }
 }
 
-export async function getAvailableSafeValidationScripts(): Promise<SafeNpmScript[]> {
+export async function getAvailableSafeValidationScripts(approvalMode?: ApprovalMode): Promise<SafeNpmScript[]> {
   if (!vscode.workspace.isTrusted) {
     return [];
   }
@@ -184,10 +197,11 @@ export async function getAvailableSafeValidationScripts(): Promise<SafeNpmScript
     return [];
   }
   const scripts = await readNpmScripts(workspaceFolder);
+  const isolated = approvalMode === 'delegate' && getProjectExecutionMode() === 'isolated';
   const definitions = SAFE_NPM_SCRIPT_ORDER.map((script) => ({ script, definition: scripts?.[script] }));
   return definitions
     .filter((entry): entry is { script: SafeNpmScript; definition: string } =>
-      typeof entry.definition === 'string' && !hasValidationBlockingRisk(entry.definition)
+      typeof entry.definition === 'string' && (isolated || !hasValidationBlockingRisk(entry.definition))
     )
     .map(({ script }) => script);
 }
@@ -222,6 +236,7 @@ export async function preflightSafeValidation(input: {
   script: SafeNpmScript;
   workspaceFolder?: string;
   language: KeepseekLanguage;
+  approvalMode?: ApprovalMode;
 }): Promise<ValidationPreflightResult> {
   if (!SAFE_NPM_SCRIPTS.has(input.script)) {
     return { status: 'blocked', error: localizeValidation(input.language, 'unsupportedScript', input.script) };
@@ -234,7 +249,7 @@ export async function preflightSafeValidation(input: {
     return { status: 'blocked', error: localizeValidation(input.language, 'workspaceMissing') };
   }
   try {
-    const snapshot = await inspectValidationSnapshot(workspaceFolder, input.script);
+    const snapshot = await inspectValidationSnapshot(workspaceFolder, input.script, input.approvalMode);
     if (!snapshot.evidenceComplete) return { status: 'blocked', failureCode: 'insufficient_launch_evidence',
       error: input.language === 'en' ? 'The fixed validation launch is missing required evidence. Nothing executed.'
         : '固定验证的启动证据不足，尚未执行。' };
@@ -244,7 +259,8 @@ export async function preflightSafeValidation(input: {
     if (error instanceof ValidationUnavailableError) {
       return { status: 'unavailable', script: input.script, error: unavailableValidationMessage(input.language, input.script, error) };
     }
-    return { status: 'blocked', error: error instanceof Error ? error.message : String(error) };
+    return { status: 'blocked', failureCode: error instanceof ProjectExecutionUnavailableError ? 'insufficient_launch_evidence' : undefined,
+      error: error instanceof Error ? error.message : String(error) };
   }
 }
 
@@ -338,38 +354,55 @@ function findWorkspaceFolder(requested: string | undefined): vscode.WorkspaceFol
   );
 }
 
-function executeValidation(snapshot: ValidationSnapshot, timeoutMs: number, signal?: AbortSignal):
+async function executeValidation(snapshot: ValidationSnapshot, timeoutMs: number, signal: AbortSignal | undefined,
+  verifySnapshot: () => Promise<boolean>, language: KeepseekLanguage):
 Promise<{ exitCode?: number; timedOut: boolean; aborted: boolean; output?: string }> {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) { resolve({ timedOut: false, aborted: true }); return; }
-    const child = spawn(snapshot.executable, snapshot.argv, {
-      cwd: snapshot.cwd, env: snapshot.env, shell: false, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32'
+  if (signal?.aborted) return { timedOut: false, aborted: true };
+  const deadline = Date.now() + timeoutMs;
+  const prepared = snapshot.projectExecution
+    ? await prepareProjectExecution(snapshot.projectExecution, snapshot.executable, snapshot.argv, snapshot.env, signal, timeoutMs)
+    : undefined;
+  try {
+    if (signal?.aborted) return { timedOut: false, aborted: true };
+    if ((prepared && !await verifySnapshot()) || !vscode.workspace.isTrusted) {
+      throw new Error(localizeValidation(language, 'snapshotChanged'));
+    }
+    if (signal?.aborted) return { timedOut: false, aborted: true };
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) return { timedOut: true, aborted: false };
+    return await new Promise((resolve, reject) => {
+      const child = spawn(prepared?.executable ?? snapshot.executable, prepared?.args ?? snapshot.argv, {
+        cwd: prepared?.cwd ?? snapshot.cwd, env: prepared?.env ?? snapshot.env,
+        shell: false, stdio: ['ignore', 'pipe', 'pipe', ...(prepared?.extraFds ?? [])], detached: process.platform !== 'win32'
+      });
+      let output = '';
+      const capture = (text: string) => { output = (output + text).slice(-8_000); };
+      child.stdout?.setEncoding('utf8').on('data', capture);
+      child.stderr?.setEncoding('utf8').on('data', capture);
+      const cleanUp = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', stop);
+      };
+      const stop = () => {
+        terminateProcessTree(child);
+        cleanUp();
+        resolve({ timedOut: false, aborted: true });
+      };
+      const timer = setTimeout(() => {
+        terminateProcessTree(child);
+        cleanUp();
+        resolve({ timedOut: true, aborted: false });
+      }, remainingMs);
+      signal?.addEventListener('abort', stop, { once: true });
+      child.once('error', error => { cleanUp(); reject(error); });
+      child.once('close', code => {
+        cleanUp();
+        resolve({ exitCode: code ?? undefined, timedOut: false, aborted: false, output: redactSensitiveReviewText(output, 8_000) });
+      });
     });
-    let output = '';
-    const capture = (text: string) => { output = (output + text).slice(-8_000); };
-    child.stdout.setEncoding('utf8').on('data', capture);
-    child.stderr.setEncoding('utf8').on('data', capture);
-    const cleanUp = () => {
-      clearTimeout(timer);
-      signal?.removeEventListener('abort', stop);
-    };
-    const stop = () => {
-      terminateProcessTree(child);
-      cleanUp();
-      resolve({ timedOut: false, aborted: true });
-    };
-    const timer = setTimeout(() => {
-      terminateProcessTree(child);
-      cleanUp();
-      resolve({ timedOut: true, aborted: false });
-    }, timeoutMs);
-    signal?.addEventListener('abort', stop, { once: true });
-    child.once('error', error => { cleanUp(); reject(error); });
-    child.once('close', code => {
-      cleanUp();
-      resolve({ exitCode: code ?? undefined, timedOut: false, aborted: false, output: redactSensitiveReviewText(output, 8_000) });
-    });
-  });
+  } finally {
+    await prepared?.cleanup?.();
+  }
 }
 
 function localizeValidation(

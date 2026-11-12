@@ -136,7 +136,7 @@ export async function prepareLocalGitCommit(run: DraftRun, scope: CommandScope, 
   const index = await read(['ls-files', '--stage', '-z']);
   const treeHash = !command.all || stage ? hashTreeEntries(index, 'index') : undefined;
   return { outcome: 'ready', snapshot: { ...location, rootTaskId, previousHead, branchRef, files, messages: command.messages,
-    treeHash, scopeFingerprint: scope.fingerprint, indexHash: hashIndex(index) } };
+    treeHash, scopeFingerprint: scope.factsFingerprint, indexHash: hashIndex(index) } };
 }
 
 function getScopedGitLocation(scope: CommandScope): Pick<LocalGitCommitPlan, 'repositoryUri' | 'executable'> | undefined {
@@ -163,7 +163,7 @@ export async function assertLocalGitCommitSnapshot(run: DraftRun, snapshot: Loca
   const current = liveScope ?? await inspectDraftRunScope(run);
   const location = getScopedGitLocation(current);
   const mismatch = () => new Error('Git commit scope changed before launch. Nothing executed. / Git 提交范围在启动前已变化，尚未执行。');
-  if (signal?.aborted || !snapshot.scopeFingerprint || current.fingerprint !== snapshot.scopeFingerprint
+  if (signal?.aborted || !snapshot.scopeFingerprint || current.factsFingerprint !== snapshot.scopeFingerprint
     || !location || location.repositoryUri !== snapshot.repositoryUri || location.executable !== snapshot.executable) {
     throw mismatch();
   }

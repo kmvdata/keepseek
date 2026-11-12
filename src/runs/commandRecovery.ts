@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { DraftRun, DraftRunSpec } from '../shared/types';
+import type { ApprovalMode, DraftRun, DraftRunSpec } from '../shared/types';
 import type { DraftRunReplanResult } from '../approvals/approvalProcessing';
 import { analyzeCommandCapability } from '../approvals/authorization/commandCapability';
 import { analyzeCommand, type CommandSemantics } from '../approvals/authorization/commandSemantics';
@@ -146,7 +146,7 @@ export function observeCommandRecovery(observations: CommandRecoveryObservation[
 
 /** Static diagnostics are observations, not permission. Only a current never-dispatched
  * proposal is eligible; restored records without this evidence cannot restart work. */
-export function commandCapabilityReplan(run: DraftRun, rootTaskId: string): DraftRunReplanResult | undefined {
+export function commandCapabilityReplan(run: DraftRun, rootTaskId: string, mode?: ApprovalMode): DraftRunReplanResult | undefined {
   if (run.replacementDraftRunId || run.historyInvalidationId || run.historyOriginUnverified || run.startedAt || run.executionStarted === true
     || !['pending', 'needs_replan'].includes(run.status)
     || run.executionStarted !== false || run.executionPhase !== 'not_dispatched') return undefined;
@@ -154,7 +154,7 @@ export function commandCapabilityReplan(run: DraftRun, rootTaskId: string): Draf
     && run.replan.draftRunId === run.id && run.replan.specHash === run.specHash
     && run.replan.executionSegmentId === run.agentRunId) return run.replan;
   const historical = run.status === 'needs_replan' && run.capabilityDiagnostic?.blocking ? run.capabilityDiagnostic : undefined;
-  const capability = analyzeCommandCapability(run.spec);
+  const capability = analyzeCommandCapability(run.spec, undefined, mode);
   const current = capability.diagnostics.find(item => item.blocking);
   const diagnostic = historical ?? current;
   if (!diagnostic) return undefined;

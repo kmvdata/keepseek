@@ -848,7 +848,7 @@ test('Git draft cards bind diagnostics and expose only explicit current processi
     assert.ok(!tagVerified.some(node => node.type === 'button' || node.textContent === labels.draftRunCorrectionNextStep));
     ui.state.approvalProcessing = undefined;
     const waiting = render(status);
-    assert.ok(waiting.some(node => node.textContent === labels.draftRunTitleBlocked));
+    assert.ok(waiting.some(node => node.textContent === labels.draftRunTitleAwaitingSubmission));
     assert.ok(!waiting.some(node => node.type === 'button'));
     ui.state.approvalMode = 'ask';
     assert.equal(render(status).filter(node => node.dataset.draftRunAction === 'approveDraftRun').length, 2);
@@ -1539,10 +1539,10 @@ test('Approve for me shows precise, host-bound waiting and retry actions in both
     const rendered = ui.render();
     const labels = WEBVIEW_TRANSLATIONS[language];
     const nodes = elements(rendered.cards);
-    const approve = nodes.filter(node => node.type === 'button' && node.textContent === labels.approvalConfirmOnce);
+    const approve = nodes.filter(node => node.type === 'button' && node.textContent === labels.approvalAuthorizeForReview);
     const reject = nodes.filter(node => node.type === 'button' && node.textContent === labels.approvalCancelAction);
     const retry = nodes.filter(node => node.type === 'button' && node.textContent === labels.approvalRetryReview);
-    assert.equal(approve.length, 1); assert.equal(reject.length, 1); assert.equal(retry.length, 1);
+    assert.equal(approve.length, 0); assert.equal(reject.length, 0); assert.equal(retry.length, 1);
     const manual = elements(nodes.filter(node => node.className === 'draft-run-card manual-approval-card'));
     assert.ok(manual.some(node => node.textContent === labels.approvalWaitingUser));
     assert.ok(manual.some(node => node.className === 'approval-state-note' && node.textContent.includes('<script>')));
@@ -1554,7 +1554,7 @@ test('Approve for me shows precise, host-bound waiting and retry actions in both
     assert.ok(!nodes.some(node => node.textContent === labels.draftRunNotDispatchedBadge));
     assert.ok(!nodes.some(node => node.dataset.draftRunAction === 'approveDraftRun'));
     retry[0].click();
-    approve[0].click();
+    retry[0].click();
     assert.equal(ui.messages.length, 1);
     assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.at(-1))), {
       type: 'retryManualApproval', id: 'host-runtime-token', sessionId: 's', runtimeId: 'host-runtime'

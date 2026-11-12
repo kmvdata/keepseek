@@ -90,18 +90,35 @@
           "type": "array",
           "scope": "machine",
           "default": [],
-          "markdownDescription": "Preauthorize Git release in Approve for me for an exact real repository and resolved destination. Read grants accept exact refs or the heads/tags namespace. Push grants allow exact refs or a tag-name prefix ending in * and require matching read access for verification. The current task must also authorize the action. / 为帮我审批预授权真实仓库与解析后的确切目的地。查询可授权精确引用或分支、标签命名空间。推送可授权精确引用或以 * 结尾的标签名前缀，并需要核验所需的查询授权。本次任务仍须明确授权。",
+          "markdownDescription": "Preauthorize Git release in Approve for me for an exact real repository and resolved destination. Read grants accept exact refs or the heads/tags namespace. Push grants accept exact refs or a named branch/tag prefix ending in * and need read access for verification. A history rewrite grant must name the exact branch. The task and reviewer must also authorize each operation. / 为帮我审批预授权真实仓库与解析后的确切目的地。查询可授权精确引用或分支、标签命名空间。推送可授权精确引用或以 * 结尾的分支、标签名前缀，并需要查询权限以核验结果。改写历史须指定精确分支。本次任务和审批模型还须授权每个操作。",
           "items": {
             "type": "object",
             "additionalProperties": false,
             "required": ["repository", "destination", "read", "push"],
             "properties": {
               "repository": { "type": "string", "description": "Canonical absolute repository path / 仓库的真实绝对路径" },
-              "destination": { "type": "string", "description": "Exact resolved SSH URL or canonical bare repository path / 精确 SSH URL 或裸仓库的真实绝对路径" },
+              "destination": { "type": "string", "description": "Exact resolved HTTPS or SSH URL, or canonical bare repository path / 精确 HTTPS 或 SSH URL，或裸仓库的真实绝对路径" },
               "read": { "type": "array", "items": { "type": "string" }, "description": "Exact refs or refs/tags/* and refs/heads/* / 精确引用或标签、分支命名空间" },
-              "push": { "type": "array", "items": { "type": "string" }, "description": "Exact refs or tag-name prefix followed by * / 精确引用或以 * 结尾的标签名前缀" }
+              "push": { "type": "array", "items": { "type": "string" }, "description": "Exact refs or named branch/tag prefix followed by * / 精确引用或以 * 结尾的分支、标签名前缀" },
+              "rewrite": { "type": "array", "items": { "type": "string" }, "description": "Exact branches eligible for a model-approved explicit force-with-lease operation / 可由模型批准精确 force-with-lease 操作的分支全名" },
+              "credentialEnvironment": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]{0,127}$", "description": "Name of the host environment variable holding this repository's HTTPS token. Store the name here, without the token. / 持有此仓库 HTTPS 令牌的宿主环境变量名。此处填写变量名。" },
+              "credentialUsername": { "type": "string", "description": "Public HTTPS username for the configured token. Defaults to x-access-token. / 已配置令牌对应的公开 HTTPS 用户名，默认为 x-access-token。" }
             }
           }
+        },
+        "kmvdata.keepseek.projectExecution": {
+          "type": "string",
+          "scope": "machine",
+          "enum": ["isolated", "host"],
+          "default": "isolated",
+          "markdownDescription": "Execution environment for project commands and fixed validation in Approve for me. `isolated` uses a supported sandbox with project-local writes and restricted network access. `host` explicitly runs with the VS Code extension host account's permissions, including access outside the project. User settings only. / 帮我审批的项目命令与固定验证执行环境。`isolated` 使用支持的沙箱，写入限于工程与临时目录，网络受限。`host` 明确使用 VS Code 扩展宿主账号权限，可以访问工程外资源。仅使用用户设置。"
+        },
+        "kmvdata.keepseek.projectExecutionContainerImage": {
+          "type": "string",
+          "scope": "machine",
+          "default": "",
+          "pattern": "^(?:|sha256:[a-f0-9]{64})$",
+          "markdownDescription": "Immutable ID of a trusted, preinstalled Linux Docker toolchain image for isolated Windows execution, for example `sha256:…`. The image must include the tools the project needs. User settings only. / Windows 隔离执行使用的可信、已在本地安装的 Linux Docker 工具链镜像 ID，例如 `sha256:…`。镜像需包含工程所需工具，仅使用用户设置。"
         },
         "kmvdata.keepseek.autoApprovalReviewer": {
           "type": "object",

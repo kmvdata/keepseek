@@ -178,7 +178,7 @@ Diff 默认延迟生成，超阈值显示 hunk review。目录、二进制、越
 ```text
 keepseek_run_draft
   → immutable pending DraftRun
-  → 硬检查 + 审批记录
+  → 硬检查 + 核实执行环境 + 审批记录
   → ExecutionPermit(draftRunId, specHash, expiry, one-shot)
   → DraftRunExecutor
   → completed / failed / cancelled / timed_out / interrupted
@@ -187,10 +187,10 @@ keepseek_run_draft
 审核面完整展示 executable、argv、cwd、env、用途和风险。执行使用：
 
 ```ts
-spawn(executable, args, { shell: false })
+spawn(verifiedExecutable, verifiedArgs, { shell: false })
 ```
 
-需要 shell 语法时，shell 本身必须作为 executable，原始脚本作为可见 argv。拒绝不能改写命令；要修改只能新建 DraftRun。未受信任工作区、未授权外部 cwd、specHash 不匹配、过期/重复 permit 均硬拒绝。
+需要 shell 语法时，shell 本身必须作为 executable，原始脚本作为可见 argv。delegate 使用核实的项目隔离或受控 Git 发布计划，保留实际执行环境和参数。未受信任工作区、未授权外部 cwd、specHash 不匹配、过期或重复 permit 均硬拒绝。变更原提案需创建新 DraftRun。
 
 完成记录可克隆为新的 pending，但必须再次批准。重启时 `approved/running` 只能变为 interrupted，绝不自动重跑。
 
@@ -201,16 +201,16 @@ spawn(executable, args, { shell: false })
 | 模式 | 决策者 | 行为 |
 | --- | --- | --- |
 | `ask`（请求批准） | 用户 | 默认，逐项或批量批准，零审批模型请求 |
-| `delegate`（帮我审批） | 独立审批 reviewer，必要时用户 | v7 对宿主已核验的常规工程文件变更和脚本启动默认自动批准。每个受审操作进入一次逻辑审查。仍有执行资格且存在具体授权缺口时，宿主发出绑定当前 runtime 的精确单次请求 |
+| `delegate`（帮我审批） | 独立审批 reviewer | v9 对符合任务、执行权限已核实的常规工程操作默认批准。命令语义作为审查材料。用户可补充精确授权，模型核实后作出审批决定 |
 
-当前仅接受 ask/delegate；审批模型位于 `/` → 子代理模型 → 审批模型，配置仅取用户级 `kmvdata.keepseek.autoApprovalReviewer`，与普通子代理 default/角色设置独立。follow-main 跟随执行段的实际主模型。等待用户暂停有效计时，关闭 Webview 不取消等待；重启不恢复旧批准、队列或 permit。详细恢复与验收见 [帮我审批](keepseek-approve-for-me-verification.md)。
+审批模型位于 `/` → 子代理模型 → 审批模型，配置仅取用户级 `kmvdata.keepseek.autoApprovalReviewer`，与普通子代理 default/角色设置独立。follow-main 跟随执行段的实际主模型。用户级 `kmvdata.keepseek.projectExecution` 控制本地命令和固定验证环境。等待用户暂停有效计时，关闭 Webview 保留等待。重启后显式恢复会重新核验授权和审批。详细恢复与验收见 [帮我审批](keepseek-approve-for-me-verification.md)。
 
 共同规则：
 
 - 所有动作先过确定性硬检查，审批不能绕过工作区信任、URI 授权、基线、脏编辑器或 permit。
 - reviewer 是无工具、关闭 thinking 的独立审查，仅使用白名单事实和有界材料。一次逻辑审查共用一个截止时间，可重试故障和只因不熟悉工程逻辑而转人工的无效决定共用一次额外尝试。
 - actionHash 绑定完整 canonical payload；patch 即使只展示有界 hunks，也不能复用变更后的批准。
-- 批准记录与 session/run/target/kind/hash/policy/runtime 绑定；重启不恢复审批队列，不复用旧 reviewer 批准。
+- 批准记录与 session/run/target/kind/hash/policy/runtime 绑定。重启后由用户恢复未派发操作，宿主重新核验当前状态并申请新的审批决定。
 - 停止或切回 `ask` 会撤销队列和未执行授权。
 - 决定与真实结果以固定 user-tail 追加到下一条真实 user 消息，不能插入或改写旧历史。
 - 依赖本轮改动的脚本在 Apply 和 read-back 后才绑定实际入口并审查。局部修改或审批失败会阻止依赖项，可证明独立且有权限的步骤继续。连续拒绝达到熔断阈值时停止续跑。

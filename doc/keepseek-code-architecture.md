@@ -97,18 +97,18 @@ Webview 是字符串生成的页面，不是独立前端应用。`input/composer
 | [approvalMode.ts](../src/agent/approvalMode.ts) | ask/delegate 归一化、稳定 user-tail、易失性 `DelegatedApprovalQueue` |
 | [approvalReviewTypes.ts](../src/approvals/approvalReviewTypes.ts)、[approvalReviewHash.ts](../src/approvals/approvalReviewHash.ts)、[approvalReviewSurface.ts](../src/approvals/approvalReviewSurface.ts) | 精确 action、完整 canonical hash、有界 review 面 |
 | [authorization/](../src/approvals/authorization/index.ts) | 信任、外部精确范围、实际程序/环境身份、command effects、实时 preflight 和最终复核 |
-| [approvalPolicy.ts](../src/approvals/approvalPolicy.ts)、[approvalReviewer.ts](../src/approvals/approvalReviewer.ts)、[oneShotTextRequest.ts](../src/approvals/oneShotTextRequest.ts) | 独立无工具 reviewer、v8 决定、来源解析、占位认领与真实记录 |
+| [approvalPolicy.ts](../src/approvals/approvalPolicy.ts)、[approvalReviewer.ts](../src/approvals/approvalReviewer.ts)、[oneShotTextRequest.ts](../src/approvals/oneShotTextRequest.ts) | 独立无工具 reviewer、v9 决定、来源解析、占位认领与真实记录 |
 | [manualApproval.ts](../src/approvals/manualApproval.ts)、[approvalProcessing.ts](../src/approvals/approvalProcessing.ts) | runtime 绑定的单次人工决定与持久化等待摘要；`createApprovalProcessing()` / `isCompletedApprovalBatch()` 管批次初始化与幂等判定、依赖及有界补规划状态 |
 | [approvalReviewStore.ts](../src/approvals/approvalReviewStore.ts)、[approvalCircuitBreaker.ts](../src/approvals/approvalCircuitBreaker.ts) | append-only 审计、消费绑定、拒绝熔断 |
 | [draftEdit.ts](../src/edits/draftEdit.ts)、[textPatch.ts](../src/edits/textPatch.ts) | 版本化 DraftEdit 与 canonical byte hunks；URI/base/result hash/size/encoding/EOL 是 Apply 权威 |
 | [changeSetStore.ts](../src/edits/changeSetStore.ts)、[safeFileEditor.ts](../src/edits/safeFileEditor.ts) | ChangeSet 状态、preflight、prepared journal、base 复核、原子替换与 read-back；大内容由 artifact store 寻址 |
 | [draftRunProposal.ts](../src/runs/draftRunProposal.ts)、[draftRunStore.ts](../src/runs/draftRunStore.ts) | immutable executable/argv/cwd/env/specHash、pending/运行/终态与输出 |
-| [draftRunAuthorization.ts](../src/runs/draftRunAuthorization.ts)、[draftRunExecutor.ts](../src/runs/draftRunExecutor.ts) | draftRunId+specHash 绑定的短时单次 permit；`spawn(..., { shell:false })`、取消/超时 |
-| [gitReleaseBatch.ts](../src/runs/gitReleaseBatch.ts)、[gitReleaseAuthorization.ts](../src/runs/gitReleaseAuthorization.ts)、[localGitCommit.ts](../src/runs/localGitCommit.ts) | Git 本地提交/发布的精确任务意图、依赖批次、证据与范围；不成为另一条执行通道 |
+| [draftRunAuthorization.ts](../src/runs/draftRunAuthorization.ts)、[draftRunExecutor.ts](../src/runs/draftRunExecutor.ts)、[projectExecutionIsolation.ts](../src/runs/projectExecutionIsolation.ts) | 短时单次 permit、项目执行边界、字面启动计划与 `spawn(..., { shell:false })`、取消/超时 |
+| [gitReleaseBatch.ts](../src/runs/gitReleaseBatch.ts)、[gitReleaseAuthorization.ts](../src/runs/gitReleaseAuthorization.ts)、[localGitCommit.ts](../src/runs/localGitCommit.ts)、[gitTransportEnvironment.ts](../src/runs/gitTransportEnvironment.ts) | Git 本地提交与发布的任务意图、依赖、证据和范围。受控传输沿用 DraftRun 的审批、许可和派发记录。 |
 
-ask 由用户逐项或批量批准，零审批模型请求。delegate 的受审文件操作、DraftRun、固定验证和外部读取先过宿主安全检查，再由独立 reviewer 审查精确操作。可信项目内、范围和身份已核验的常规文件变更及脚本启动默认获得自动批准。依赖本轮文件变更的启动在 Apply 和落盘核验后才形成当前入口的审查快照。宿主仅为仍有执行资格且具有具体授权缺口的操作创建单次请求，绑定 session/root task/segment/target/hash/scope/runtime。审批记录、外部范围授权和执行许可分别核验。历史 `host_policy` 保留审计，适用的安全拒绝继续约束两种模式。
+ask 由用户逐项或批量批准，零审批模型请求。delegate 的受审文件操作、DraftRun、固定验证和外部读取先过宿主安全检查，再由独立 reviewer 审查精确操作。工程范围和实际启动身份已核实时，陌生命令参数只提供语义证据。依赖本轮文件变更的启动在 Apply 和落盘核验后才形成审查快照。精确用户授权、模型决定和执行许可分别核验。历史 `host_policy` 保留审计，适用的安全拒绝继续约束两种模式。
 
-所有路径保留信任、外部 URI/cwd、脏编辑器、hash/状态、取消等硬检查。进程使用扩展宿主账号权限，无操作系统沙箱。重启只恢复说明与可证明状态，不恢复队列、批准或 permit；关闭 Webview 保留人工等待。决定和真实结果只追加到下一条真实 user 的固定 tail。
+所有路径保留信任、外部 URI/cwd、脏编辑器、hash/状态、取消等硬检查。delegate 本地命令与固定验证默认使用平台隔离，用户可在机器级设置中显式选择宿主权限执行。受控 Git 传输绑定实际远端、refs 和源对象，隔离环境与发布计划均进入审批快照。重启恢复说明与可证明状态，重新核验后生成新的审批与执行许可。决定和真实结果只追加到下一条真实 user 的固定 tail。
 
 文件链：模型草案 → ChangeSet → 审批/Apply → SafeFileEditor → journal/hash/原子写/read-back → 真实结果。命令链：模型草案 → pending DraftRun → 审批 → 单次 permit → executor → 终态。Runner/Provider 不直接写工作区；shell 语法必须以 shell executable 与完整 argv 可见。
 

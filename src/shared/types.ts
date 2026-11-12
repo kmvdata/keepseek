@@ -683,6 +683,13 @@ export interface DraftRun extends DraftRunProposal {
   /** Host execution facts. Missing execution facts mean unknown. */
   executionStarted?: boolean;
   executionPhase?: 'not_dispatched' | 'spawn_failed' | 'exited' | 'result_unknown';
+  dispatch?: {
+    boundary: 'host' | 'seatbelt' | 'bubblewrap' | 'container' | 'git_transport' | 'restricted_python';
+    executable?: string;
+    /** Present when verified dispatch changes the immutable proposal's argv. */
+    args?: string[];
+    containerImage?: string;
+  };
   gitQueryResult?: import('../runs/gitQueryResult').GitQueryResult;
   /** Audit retained, but missing host origin cannot authorize execution or result delivery. */
   historyOriginUnverified?: boolean;

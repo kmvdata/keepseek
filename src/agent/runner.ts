@@ -2087,7 +2087,8 @@ export class AgentLoop {
             ? await preflightSafeValidation({
                 script: this.readSafeNpmScript(toolArgs, 'script'),
                 workspaceFolder: this.readOptionalString(toolArgs, 'workspaceFolder'),
-                language: request.language
+                language: request.language,
+                approvalMode: request.approvalMode
               })
             : undefined;
           if (planPhaseBlockReason) {
@@ -2114,6 +2115,7 @@ export class AgentLoop {
               error: validationPreflight.error
             });
           } else if (validationPreflight?.status === 'blocked') {
+            if (resumingApproval) throw new AgentInterruptedError('waiting_for_user', validationPreflight.error);
             rawToolResult = JSON.stringify({
               ok: false,
               errorType: validationPreflight.failureCode ?? 'validation_preflight_failed',
@@ -2160,7 +2162,7 @@ export class AgentLoop {
                 // An existing evidence reference is immutable and need not
                 // wait for the validation or external read under review.
                 for (const sibling of toolCalls.slice(toolCalls.indexOf(toolCall) + 1)) {
-                  if (sibling.function.name !== READ_EVIDENCE_TOOL_NAME) continue;
+                  if (sibling.function.name !== READ_EVIDENCE_TOOL_NAME || Object.hasOwn(pending!.results, sibling.id)) continue;
                   const reference = this.parseToolResultObject(sibling.function.arguments)?.evidenceRef;
                   const saved = typeof reference === 'string' && await evidenceStore.findByRef(reference, evidenceSessionId, checkpoint.taskId);
                   if (saved && saved.executionStatus === 'completed' && !saved.approvalResult) await executeToolCall(sibling);
@@ -3879,7 +3881,7 @@ ${launch.evidence.content}`;
       });
       verifyScope = async () => {
         const current = await preflightSafeValidation({
-          script, language, workspaceFolder: this.readOptionalString(input.args, 'workspaceFolder')
+          script, language, workspaceFolder: this.readOptionalString(input.args, 'workspaceFolder'), approvalMode: mode
         });
         return current.status === 'ready' && current.workspaceRootId === preflight.workspaceRootId && current.snapshot.fingerprint === snapshot;
       };
@@ -3908,6 +3910,7 @@ ${launch.evidence.content}`;
     };
     const pause = async (reason: string, reviewId?: string): Promise<never> => {
       await saveApproval('paused', reviewId);
+      await input.progressIndependentEvidence();
       throw new AgentInterruptedError('waiting_for_user', reason);
     };
     if (checkpoint.actionHash !== reviewRequest.actionHash || checkpoint.scopeFingerprint !== snapshot) {
@@ -3941,8 +3944,9 @@ ${launch.evidence.content}`;
       const disposition = approvalDisposition(prior.record);
       if (disposition === 'deny') return deny(formatSafetyDenial(prior.record, language), prior,
         prior.record.approvalSource === 'user_click' ? 'user_rejected' : undefined);
-      if (prior.circuitBreakReason || disposition === 'stop') {
-        if (['in_progress', 'insufficient_evidence', 'interrupted', 'scope_mismatch'].includes(prior.record.reviewState ?? '')) {
+      if (prior.circuitBreakReason || disposition === 'stop' && !(requiredUserScope && prior.record.decision === 'approve')) {
+        if (prior.record.decision === 'unavailable'
+          && !prior.circuitBreakReason && prior.record.reviewState !== 'budget_stopped') {
           return pause(prior.record.rationale, prior.record.approvalSource === 'auto_approval_review' ? prior.record.reviewId : undefined);
         }
         return deny(prior.record.rationale, prior, prior.record.policyRules[0]);
@@ -3953,7 +3957,7 @@ ${launch.evidence.content}`;
       if (needsUser) {
         const reason = (requiredUserScope ? (language === 'en' ? 'Authorize this exact URI and allow one read: '
           : '授权此精确 URI 并允许本次读取：') + requiredUserScope + ' · ' : '') + prior.record.rationale;
-        if (!reviewer.createUserApproval || !this.requestManualToolApproval) return pause(reason, prior.record.reviewId);
+        if (!reviewer.createUserAuthorization || !this.requestManualToolApproval) return pause(reason, prior.record.reviewId);
         if (!await verifyCurrent()) return pause(staleReason, prior.record.reviewId);
         await saveApproval('waiting', prior.record.reviewId);
         await input.progressIndependentEvidence();
@@ -3984,24 +3988,28 @@ ${launch.evidence.content}`;
           }
           return pause(reason);
         }
-        input.emitStatus({ base: 'executing', phase: 'executing_tool', toolName });
+        input.emitStatus({ base: 'thinking', phase: 'reviewing_tool_result', toolName, detail: scope });
         this.throwIfCostLimitReached(input.request);
         if (authorizeExternalRead && (!await authorizeExternalRead() || !await verifyCurrent())) return pause(staleReason);
-        outcome = await reviewer.createUserApproval(reviewRequest, link);
+        const { authorization: confirmed } = await reviewer.createUserAuthorization(reviewRequest, link);
+        reviewRequest = { ...reviewRequest, scopeFingerprint: snapshot, businessAuthorization: confirmed,
+          externalAuthorization: { required: false, targets: reviewRequest.externalAuthorization?.targets ?? [] } };
+        outcome = await reviewer.review(reviewRequest, modelContext, signal, undefined,
+          { retryOf: prior.record.reviewId, recovery: 'not_dispatched' });
       }
       if (approvalDisposition(outcome.record) !== 'execute') {
         if (outcome.record.decision === 'deny') return deny(formatSafetyDenial(outcome.record, language), outcome);
         return pause(outcome.record.rationale, outcome.record.reviewId);
       }
-      const verifyExecution = () => verifyCurrent(needsUser ? undefined : outcome.record);
+      const verifyExecution = () => verifyCurrent(outcome.record);
       const stale = () => needsUser ? pause(staleReason) : deny(staleReason, prior, 'approval_scope_changed');
       if (!await verifyExecution()) return stale();
-      await reviewer.consumeApproval(outcome.record, needsUser ? 'user_click' : 'auto_approval_review');
+      await reviewer.consumeApproval(outcome.record, 'auto_approval_review');
       if (!await verifyExecution()) return stale();
       return {
         decision: {
           allowed: true, toolName, riskLevel: scope === 'workspace_read' ? 'low' : 'medium', scope,
-          source: needsUser ? 'explicit_confirmation' : 'model_reviewer', requiresExplicitConfirmation: false,
+          source: 'model_reviewer', requiresExplicitConfirmation: false,
           reason: outcome.record.rationale, executionSnapshot: snapshot,
           approvalReview: toApprovalReviewDisplay(outcome.record),
           priorApprovalReview: prior !== outcome ? toApprovalReviewDisplay(prior.record) : undefined
@@ -4213,7 +4221,8 @@ ${launch.evidence.content}`;
             signal: options.signal,
             runDeadlineAt: options.runDeadlineAt,
             authorization: options.authorization,
-            expectedSnapshot: options.authorization.executionSnapshot
+            expectedSnapshot: options.authorization.executionSnapshot,
+            approvalMode: options.parentRequest?.approvalMode
           });
         case RUN_DRAFT_TOOL_NAME:
           return await this.createDraftRun(args, draftRuns, options.parentRequest?.approvalMode, language,
@@ -4363,7 +4372,7 @@ ${launch.evidence.content}`;
       timeoutMs: this.readOptionalNumber(args, 'timeoutMs'),
       env,
       ...normalizeDraftRunPlan(args)
-    });
+    }, approvalMode);
     if (!replayed) {
       if (blockedDraftId && draftRun.capabilityDiagnostic?.blocking) draftRun.id = blockedDraftId;
       if (commandRecoveryResponse?.deliveredDraftRunIds.length) draftRun.commandRecoveryResponse = commandRecoveryResponse;
@@ -4373,7 +4382,7 @@ ${launch.evidence.content}`;
       const rootTaskId = parentRequest?.approvalRootTaskId ?? commandRecovery?.taskId ?? 'current-tool-loop';
       const run = { ...draftRun, agentRunId: commandRecovery?.taskId ?? '', status: replayed ? 'needs_replan' : 'pending',
         executionStarted: false, executionPhase: 'not_dispatched' } as import('../shared/types').DraftRun;
-      const diagnosis = commandCapabilityReplan(run, rootTaskId)!;
+      const diagnosis = commandCapabilityReplan(run, rootTaskId, approvalMode)!;
       const ledgerUnverified = commandRecovery?.commandRecoveryObservationsInvalid === true;
       let repeated = false;
       if (commandRecovery && !ledgerUnverified) {

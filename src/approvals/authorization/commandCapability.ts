@@ -1,4 +1,4 @@
-import type { DraftRunSpec } from '../../shared/types';
+import type { ApprovalMode, DraftRunSpec } from '../../shared/types';
 import { analyzeCommand, type CommandSemantics } from './commandSemantics';
 
 /** Version of the persisted deterministic host diagnostic contract.
@@ -57,12 +57,13 @@ export function normalizeCommandCapabilityDiagnostic(value: unknown): CommandCap
 
 /** One static authority used by proposal, display and execution preflight.
  * It performs no filesystem/process access and cannot grant execution authority. */
-export function analyzeCommandCapability(spec: DraftRunSpec, semantics = analyzeCommand(spec)): CommandCapabilityAnalysis {
+export function analyzeCommandCapability(spec: DraftRunSpec, semantics = analyzeCommand(spec),
+  mode?: ApprovalMode): CommandCapabilityAnalysis {
   const diagnostics: CommandCapabilityDiagnostic[] = [];
   for (const reason of semantics.reasons) {
     if (!['unsupported_program', 'unsupported_option', 'missing_option_value', 'invalid_argv', 'git_commit_argv'].includes(reason.code)) continue;
     const invalid = ['missing_option_value', 'invalid_argv', 'git_commit_argv'].includes(reason.code);
-    const blocking = reason.code !== 'unsupported_program'
+    const blocking = mode !== 'delegate' && reason.code !== 'unsupported_program'
       && !(semantics.program === 'rg' && reason.detail === 'rg recursive search');
     diagnostics.push({
       code: `host_${reason.code}`,
@@ -75,13 +76,12 @@ export function analyzeCommandCapability(spec: DraftRunSpec, semantics = analyze
       capabilityVersion: COMMAND_CAPABILITY_VERSION, blocking
     });
   }
-  // Legacy exact semantic repairs use the same static delivery channel. The
-  // original config override is still subject to its normal policy refusal.
+  // Keep exact semantic repairs available for ask-mode correction and history.
   if (semantics.gitReplan && !diagnostics.some(item => item.blocking)) {
     diagnostics.push({ code: semantics.gitReplan.code, phase: 'capability', started: false,
       category: 'invalid_argv', reason: semantics.gitReplan.message,
       candidateArgs: semantics.gitReplan.candidateArgs?.slice(),
-      capabilityVersion: COMMAND_CAPABILITY_VERSION, blocking: true });
+      capabilityVersion: COMMAND_CAPABILITY_VERSION, blocking: mode !== 'delegate' });
   }
   const subcommand = semantics.arguments.find(item => item.role === 'subcommand');
   const equivalents = semantics.program === 'git' && subcommand?.value === 'log'
@@ -92,11 +92,12 @@ export function analyzeCommandCapability(spec: DraftRunSpec, semantics = analyze
     })) : [];
   const forms: Record<string, string[]> = {
     'git/log': [
-      'git log --oneline [--no-decorate|--decorate=no] [-n N] [(-S <value>|-S<value>) [--pickaxe-regex]|-G <value>|-G<value>] [revision|A..B] [-- paths...]',
+      'git log --oneline [--all] [--no-decorate|--decorate=no] [-n N] [(-S <value>|-S<value>) [--pickaxe-regex]|-G <value>|-G<value>] [revision|A..B] [-- paths...]',
       // Verified bounded alternative: inspect patches for the requested path.
       // It is a separate query, not an argv rewrite or an exact equivalent.
       'git --no-pager log -p --oneline -- <path>'
     ],
+    'git/ls-files': ['git ls-files [-s|--stage] [-- paths...]'],
     'git/tag': ['git tag --list [pattern]', 'git tag --list --sort=version:refname [pattern]'],
     'git/merge-base': ['git merge-base --is-ancestor commit commit'],
     'git/rev-parse': [

@@ -72,6 +72,60 @@ function captureDraftRunClick(host: Host) {
   };
 }
 
+test('the four original Git argv reach the independent reviewer and execute once', async t => {
+  try { execFileSync('git', ['--version'], { stdio: 'pipe' }); }
+  catch { t.skip('Git is unavailable'); return; }
+  await fixture('delegate', async f => {
+    const launches: string[][] = [];
+    const { runs } = installRealTaskExecutor(f, input => { launches.push(input.draftRun.spec.args); });
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: f.workspace, encoding: 'utf8', stdio: 'pipe' });
+    const file = 'game_pywin.log';
+    const argv = [
+      ['ls-files', '-s', '--', file, file + '.1', file + '.2', file + '.3'],
+      ['log', '--oneline', '--all', '--', file],
+      ['log', '--oneline', '--', file],
+      ['status', '--porcelain=v1']
+    ];
+    try {
+      git('init', '-q', '-b', 'main');
+      git('config', 'user.name', 'KeepSeek fixture');
+      git('config', 'user.email', 'fixture@example.invalid');
+      await writeFile(path.join(f.workspace, file + '.1'), 'clean tracked\n');
+      git('add', '--', file + '.1');
+      git('commit', '-qm', 'base fixture');
+      git('switch', '-qc', 'other');
+      await writeFile(path.join(f.workspace, file), 'other branch only\n');
+      git('add', '--', file);
+      git('commit', '-qm', 'other branch only');
+      git('switch', '-q', 'main');
+      f.session.projectScopeUri = vscode.Uri.file(f.workspace).toString();
+      f.session.messages[0].content = 'Check the Git index, all local refs, current branch history and working tree for the logs.';
+      f.response.draftEdits = [];
+      f.response.draftRuns = await Promise.all(argv.map(args => createDraftRunProposal({
+        executable: 'git', args, reason: 'Read the repository evidence'
+      }, 'delegate')));
+      await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+      f.host.queueResponseApprovals(f.session, f.message, f.response);
+      await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+      assert.deepEqual(launches, argv, JSON.stringify(f.session.approvalProcessing));
+      assert.equal(f.reviews(), 4);
+      assert.equal(f.manualRequests(), 0);
+      const [index, all, head, status] = f.response.draftRuns.map(proposal => runs.get(proposal.id)!);
+      assert.ok([index, all, head, status].every(run => run.status === 'done' && run.executionPhase === 'exited'));
+      assert.match(index.outputHead, /game_pywin\.log\.1/u);
+      assert.match(all.outputHead, /other branch only/u);
+      const dataOutput = (output: string) => output.split('\n')
+        .filter(line => !line.startsWith('git: warning: confstr() failed')).join('\n');
+      assert.equal(dataOutput(head.outputHead), '');
+      assert.equal(dataOutput(status.outputHead), '');
+      assert.ok([index, all, head, status].every(run => run.approvalReview?.approvalSource === 'auto_approval_review'));
+    } finally {
+      await runs.flush();
+      runs.dispose();
+    }
+  });
+});
+
 test('continuation carries safety counters without carrying prior tools or approvals; corrupt new limits fail closed', async () => {
   await fixture('delegate', async f => {
     f.cp.maxExecutionMs = 90_000; f.cp.maxCost = 2; f.cp.usedCostByCurrency = { USD: 0.3 };
@@ -315,7 +369,7 @@ test('delegate requires a prior exact execution grant and rejects forged manual 
     host.authorizedExternalReferenceUris.add(external.spec.cwdUri);
     if (granted) {
       const run = f.runs.get(external.id)!;
-      host.externalEffectGrants.grant(draftRunIdentity(run), await inspectDraftRunScope(run));
+      host.externalEffectGrants.grant(draftRunIdentity(run), await inspectDraftRunScope(run, false, undefined, true, undefined, 'delegate'));
     }
     Object.assign(f.host, { sessionReady: true, approvalDataReady: true, requestContextReady: true });
     f.host.queueResponseApprovals(f.session, f.message, f.response);
@@ -355,14 +409,14 @@ test('network commands require exact approval even with no external file URI', {
     if (scenario === 'granted') externalEffectGrants.grant(draftRunIdentity(run), decision.scope);
     f.host.queueResponseApprovals(f.session, f.message, f.response);
     await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
-    assert.equal(f.reviews(), 1);
+    assert.equal(f.reviews(), scenario === 'approve' ? 2 : 1);
     assert.equal(f.manualRequests(), scenario === 'granted' ? 0 : 1);
     assert.equal(f.executions(), scenario === 'reject' ? 0 : 1);
     if (scenario === 'reject') assert.equal(f.runs.get(run.id)?.executionStarted, false);
     else assert.equal(f.runs.get(run.id)?.status, 'done');
     const decisions = settledApprovalReviews(f.message).map(record => [record.approvalSource, record.decision]);
     assert.deepEqual(decisions, scenario === 'granted' ? [['auto_approval_review', 'approve']]
-      : [['auto_approval_review', 'approve'], ['user_click', scenario === 'approve' ? 'approve' : 'deny']]);
+      : [['auto_approval_review', 'needs_user'], scenario === 'approve' ? ['auto_approval_review', 'approve'] : ['user_click', 'deny']]);
   });
 });
 
@@ -682,6 +736,62 @@ test('reloaded pending delegate drafts remain inert even when sent a resume mess
   });
 });
 
+test('an exact submission recovers every unqueued current draft once, including prerequisite edits', async () => {
+  await fixture('delegate', async f => {
+    const entry = path.join(f.workspace, 'entry.cjs');
+    f.response.draftEdits.push(createFullTextDraftEdit({ id: 'entry-edit', uri: vscode.Uri.file(entry).toString(),
+      label: 'entry.cjs', action: 'create', content: 'console.log(1);\n', reason: 'Prepare the entry script' }));
+    const script = await createDraftRunProposal({ executable: process.execPath, args: ['entry.cjs'], reason: 'Run the new entry script' }, 'delegate');
+    f.response.draftRuns = [f.proposal, script];
+    f.onReview(async prompt => {
+      const { exactAction } = JSON.parse(prompt.split('\n')[2]);
+      if (exactAction.args?.includes('entry.cjs')) assert.equal(await readFile(entry, 'utf8'), 'console.log(1);\n');
+    });
+    await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+    const request = { type: 'resumeApprovalProcessing' as const, sessionId: f.session.id,
+      runId: f.cp.taskId, rootTaskId: f.message.userTask!.id, targetId: f.proposal.id };
+    assert.equal(f.runs.get(f.proposal.id)?.executionPhase, 'not_dispatched');
+    await f.host.handleMessage({ ...request, runId: 'obsolete-segment' });
+    assert.equal(f.queue.take(f.session.id), undefined);
+    await f.host.handleMessage(request);
+    await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+    assert.equal(f.runs.get(f.proposal.id)?.status, 'done');
+    assert.equal(f.runs.get(script.id)?.status, 'done');
+    assert.equal(await readFile(path.join(f.workspace, 'result.txt'), 'utf8'), 'result\n');
+    assert.equal(f.executions(), 2);
+    assert.equal(f.reviews(), 4);
+    assert.equal(f.continuations(), 1);
+    assert.equal(f.manualRequests(), 0);
+    await f.host.handleMessage(request);
+    assert.equal(f.queue.take(f.session.id), undefined);
+  });
+});
+
+test('retrying a recorded target keeps unqueued drafts recoverable in the current segment', async () => {
+  await fixture('delegate', async f => {
+    f.response.draftEdits = [];
+    const sibling = await createDraftRunProposal({ executable: 'node', args: ['--help'], reason: 'Inspect runtime usage' }, 'delegate');
+    f.response.draftRuns = [f.proposal, sibling];
+    await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+    const rootTaskId = f.message.userTask!.id;
+    f.session.approvalProcessing = { version: 2, runId: f.cp.taskId, rootTaskId, mode: 'delegate', status: 'paused',
+      targets: [{ id: f.proposal.id, kind: 'command', status: 'paused', canResume: true }], canResume: true,
+      updatedAt: new Date().toISOString() };
+    const request = { type: 'resumeApprovalProcessing' as const, sessionId: f.session.id, runId: f.cp.taskId, rootTaskId };
+    await f.host.handleMessage({ ...request, targetId: f.proposal.id });
+    await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+    assert.equal(f.runs.get(f.proposal.id)?.status, 'done');
+    assert.equal(f.runs.get(sibling.id)?.status, 'pending');
+    assert.equal(f.continuations(), 0);
+    await f.host.handleMessage({ ...request, targetId: sibling.id });
+    await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+    assert.equal(f.runs.get(sibling.id)?.status, 'done');
+    assert.equal(f.executions(), 2);
+    assert.equal(f.reviews(), 2);
+    assert.equal(f.continuations(), 1);
+  });
+});
+
 for (const mode of ['delegate'] as const) test(`local Git status, diff, add and commit run in sequence under ${mode}`, async () => {
   if (process.platform === 'win32') return;
   await fixture(mode, async f => {
@@ -843,7 +953,7 @@ test('Git approval rejects credential candidates and direct repository control f
   });
 });
 
-test('the logged Git argv receive independent repairs and finish a real same-task commit without a click', async () => {
+test('the exact pager query runs and the malformed commit is corrected within the same task without a click', async () => {
   if (process.platform === 'win32') return;
   await fixture('delegate', async f => {
     const git = (...args: string[]) => execFileSync('/usr/bin/git', args, {
@@ -867,14 +977,13 @@ test('the logged Git argv receive independent repairs and finish a real same-tas
     const approvals = (f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews;
     const runs = new DraftRunStore(vscode.Uri.file(path.join(f.root, 'replan-git-storage')) as never,
       executor, new DraftRunAuthorizationService(approvals));
-    const badStatus = ['-c', 'core.pager=cat', 'status', '--porcelain=v1'];
+    const status = ['-c', 'core.pager=cat', 'status', '--porcelain=v1'];
     const badCommit = ['commit', '-a', '-m', '中文标题', '-m', '正文第一段', '游离片段1', '游离片段2'];
     const title = 'chore(repo): 更新跟踪文件并加入新文件';
     const goodCommit = ['commit', '-a', '-m', title, '-m', '正文保留 Unicode、换行\n以及 $HOME 和 ;'];
     const stagedDiff = ['--no-pager', 'diff', '--cached', '--no-ext-diff', '--stat'];
-    const safeStatus = ['--no-pager', '--no-optional-locks', 'status', '--porcelain=v1'];
     const stage = ['add', '--all', '.'];
-    const script = [[badStatus, badCommit], [safeStatus, stagedDiff], [goodCommit], []];
+    const script = [[status, badCommit], [stagedDiff], [goodCommit], []];
     const previousFetch = globalThis.fetch;
     const dialog = vscode.window.showWarningMessage;
     const received: string[] = [];
@@ -916,7 +1025,7 @@ test('the logged Git argv receive independent repairs and finish a real same-tas
         turns++;
         const proposals = await Promise.all((parsed.message?.tool_calls ?? []).map(call => {
           assert.equal(call.function.name, 'keepseek_run_draft');
-          return createDraftRunProposal(JSON.parse(call.function.arguments));
+          return createDraftRunProposal(JSON.parse(call.function.arguments), 'delegate');
         }));
         if (!proposals.length) return;
         const response: AgentResponse = { ...f.response, draftEdits: [], draftRuns: proposals };
@@ -935,15 +1044,15 @@ test('the logged Git argv receive independent repairs and finish a real same-tas
       assert.equal(turns, 4, JSON.stringify(f.session.approvalProcessing));
       assert.equal(clicks, 0);
       assert.equal(f.reviews(), 4);
-      assert.deepEqual(spawned, [stage, safeStatus, stagedDiff, goodCommit]);
-      assert.match(received[1], /core\.pager/u);
+      assert.deepEqual(spawned, [stage, status, stagedDiff, goodCommit]);
       assert.match(received[1], /(?:pathspec|positional|position)/iu);
       assert.match(received[1], /"executed":false/u);
       assert.match(received[2], /tracked\.txt/u);
       assert.match(received[3], /"outcome":"verified"/u);
       const [staging, firstStatus, firstCommit] = runs.toWebviewState(f.session.id);
       assert.equal(staging.gitStageEvidence?.head, previousHead);
-      assert.equal(firstStatus.replan?.executed, false);
+      assert.equal(firstStatus.status, 'done');
+      assert.equal(firstStatus.replan, undefined);
       assert.equal(firstCommit.replan?.executed, false);
       assert.equal(firstCommit.dependency, undefined, 'each malformed argv has its own diagnosis, not a positional dependency');
       assert.equal(git('rev-parse', 'HEAD^').trim(), previousHead);
@@ -1165,7 +1274,7 @@ test('delegate creates a local tag and asks once for an ungranted push; rejectio
         { cwd: f.workspace, encoding: 'utf8' }).trim(), /^[a-f0-9]{40,64}$/u);
       assert.equal(execFileSync('git', ['--git-dir', remote, 'tag', '--list'], { encoding: 'utf8' }), approve ? 'test-task-approval\n' : '');
       assert.equal(f.manualRequests(), 1);
-      assert.equal(f.reviews(), 2);
+      assert.equal(f.reviews(), approve ? 3 : 2);
       assert.deepEqual(runs.toWebviewState(f.session.id).map(run => run.status).sort(), approve ? ['done', 'done'] : ['done', 'rejected']);
     } finally { await runs.flush(); runs.dispose(); }
   });
@@ -1231,7 +1340,7 @@ for (const scenario of ['release', 'extra-index', 'remote-conflict', 'missing-gr
         ? { globalValue: scenario.includes('missing-grant') ? [] : [
           { repository: workspace, destination, read: ['refs/tags/*', branch], push: [ref, branch] },
           ...(scenario === 'pushurl' ? [{ repository: workspace, destination: second, read: ['refs/tags/*'], push: [] }] : [])
-        ] } : undefined });
+        ] } : getConfiguration().inspect?.(key) });
       const store = (f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews;
       const spawn = new SpawnDraftRunExecutor();
       const launches: string[][] = [];
@@ -1274,7 +1383,7 @@ for (const scenario of ['release', 'extra-index', 'remote-conflict', 'missing-gr
           ? [queries[0], queries[1], add, queries[2], index]
           : [...queries, push, tag, commit, index, add];
         const proposals = (commands: string[][]) => Promise.all(commands.map(args =>
-          createDraftRunProposal({ executable: 'git', args, reason: 'Isolated release test' })));
+          createDraftRunProposal({ executable: 'git', args, reason: 'Isolated release test' }, 'delegate')));
         if (scenario === 'query-replan') {
           let repaired = false;
           const continueTask = (f.host as unknown as { sendPrompt(): Promise<void> }).sendPrompt.bind(f.host);
@@ -1485,7 +1594,7 @@ async function createFixture(root: string, mode: 'ask' | 'delegate') {
       assert.equal(input.model.id, 'main');
       const lines = input.userPrompt.split('\n');
       assert.equal(lines[1], '<FACTS>');
-      const { exactAction, externalAuthorization } = JSON.parse(lines[2]);
+      const { exactAction, externalAuthorization, businessAuthorization } = JSON.parse(lines[2]);
       assert.ok(exactAction, 'review sees the exact operation');
       assert.equal(lines[4], '<UNTRUSTED_EVIDENCE>');
       assert.ok(JSON.parse(lines[5]).originalGoalSummary, 'review uses task-scoped public evidence');
@@ -1493,8 +1602,10 @@ async function createFixture(root: string, mode: 'ask' | 'delegate') {
       const affectedTargets = exactAction.targetUri ? [exactAction.sourceUri, exactAction.targetUri]
         : [exactAction.uri ?? exactAction.scope?.projectEntryUri ?? exactAction.cwdUri ?? exactAction.launch?.cwdUri];
       if (externalAuthorization?.required) affectedTargets.push(...externalAuthorization.targets);
-      return JSON.stringify({ decision, risk, reason: decision === 'deny' ? 'Not allowed.' : 'Requested operation.',
-        policyRules: policyRules ?? [decision === 'needs_user' ? 'exact_user_authorization_required' : 'direct_user_goal'],
+      if (businessAuthorization) affectedTargets.push(...businessAuthorization.targets);
+      const currentDecision = businessAuthorization && decision === 'needs_user' ? 'approve' : decision;
+      return JSON.stringify({ decision: currentDecision, risk, reason: currentDecision === 'deny' ? 'Not allowed.' : 'Requested operation.',
+        policyRules: policyRules ?? [currentDecision === 'needs_user' ? 'exact_user_authorization_required' : 'direct_user_goal'],
         saferAlternative: alternative, affectedTargets: [...new Set(affectedTargets)] });
     } });
   const executor = { execute: async () => { executeCount++; now += 3000; return { started: true, phase: 'exited', exitCode: 0, signal: undefined, timedOut: false, cancelled: false }; }, cancel: () => false, showTerminal: () => false, dispose: () => {} } satisfies DraftRunExecutorAdapter;
@@ -1608,10 +1719,15 @@ test('needs_user creates one host-bound request; forged/repeated messages cannot
     assert.equal(f.session.pendingApproval?.status, 'approved');
     const records = settledApprovalReviews(f.message);
     assert.deepEqual(records.map(record => [record.approvalSource, record.decision]), [
-      ['auto_approval_review', 'needs_user'], ['user_click', 'approve']
+      ['auto_approval_review', 'needs_user'], ['auto_approval_review', 'approve']
     ]);
-    assert.equal(records[1].priorReviewId, records[0].reviewId);
-    assert.equal(records[1].userRequestId, pending.id);
+    const proof = records[1].businessAuthorization;
+    const store = (f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews;
+    const receipt = proof?.kind === 'confirmed_action' && store.get(proof.receiptId);
+    assert.ok(receipt);
+    assert.equal(receipt.priorReviewId, records[0].reviewId);
+    assert.equal(receipt.userRequestId, pending.id);
+    assert.equal(receipt.consumedAt, undefined);
     assert.ok(records[1].consumedAt);
     const raw = JSON.stringify(f.session);
     const restored = new ChatSessionStore(f.storage, 'en', f.scope); await restored.initialize();
@@ -1629,15 +1745,15 @@ for (const risk of ['high', 'critical'] as const) test(`a valid ${risk} approve 
     await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
     f.host.queueResponseApprovals(f.session, f.message, f.response);
     await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
-    assert.equal(f.manualRequests(), 1);
+    assert.equal(f.manualRequests(), risk === 'high' ? 1 : 0);
     assert.equal(f.reviews(), 1);
     const record = settledApprovalReviews(f.message).at(-1);
-    assert.equal(record?.decision, 'needs_user');
+    assert.equal(record?.decision, risk === 'high' ? 'needs_user' : 'deny');
     assert.equal(record?.risk, risk);
     assert.equal(record?.policyVersion, APPROVAL_POLICY_VERSION);
     assert.ok(record);
     const store = (f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews;
-    assert.ok(store.get(record.reviewId)?.policyRules.includes('user_confirmable_risk'));
+    if (risk === 'high') assert.ok(store.get(record.reviewId)?.policyRules.includes('user_confirmable_risk'));
     await assert.rejects(readFile(path.join(f.workspace, 'result.txt')), { code: 'ENOENT' });
   });
 });
@@ -2136,6 +2252,7 @@ for (const scenario of ['valid', 'syntax_error', 'changed', 'denied', 'needs_use
       }, new DraftRunAuthorizationService(host.approvalReviews));
       const requests: Array<{ system: string; user: string; model: string }> = [];
       let fixed = false;
+      let reviewerRestored = false;
       if (scenario === 'budget') {
         f.cp.budgetLimits = { maxModelRequests: 1, maxToolRounds: 20, maxToolCalls: 20, maxContinuations: 4,
           maxContextEpochRollovers: 2, maxUpstreamTokens: 2_000, maxTreeUpstreamTokens: 4_000,
@@ -2151,9 +2268,9 @@ for (const scenario of ['valid', 'syntax_error', 'changed', 'denied', 'needs_use
           if (scenario === 'cancelled') f.host.abortPrompt();
           if (scenario === 'configuration_changed') fixed = true;
           if (scenario === 'mode_changed') await (f.host as unknown as { sessionStore: ChatSessionStore }).sessionStore.setApprovalMode('ask');
-          if (scenario === 'unavailable') throw new OneShotTextRequestError('unavailable', 'reviewer offline', true);
+          if (scenario === 'unavailable' && !reviewerRestored) throw new OneShotTextRequestError('unavailable', 'reviewer offline', true);
           const { exactAction } = JSON.parse(input.userPrompt.split('\n')[2]);
-          return JSON.stringify({ decision: scenario === 'denied' ? 'deny' : scenario === 'needs_user' ? 'needs_user' : 'approve', risk: 'medium',
+          return JSON.stringify({ decision: scenario === 'denied' ? 'deny' : scenario === 'needs_user' && !reviewerRestored ? 'needs_user' : 'approve', risk: 'medium',
             reason: 'Only the identified source snapshot reaches the fixed parser.', policyRules: ['bounded_input'],
             saferAlternative: '', affectedTargets: [exactAction.restricted.targetUri] });
         }
@@ -2223,9 +2340,26 @@ for (const scenario of ['valid', 'syntax_error', 'changed', 'denied', 'needs_use
         const restarted = new DraftRunStore(storageUri);
         try {
           await restarted.initialize();
-          assert.notEqual(restarted.get(actual.id)?.status, 'pending');
+          if (scenario === 'unavailable' || scenario === 'needs_user') {
+            assert.equal(restarted.get(actual.id)?.status, 'pending');
+            assert.equal(restarted.get(actual.id)?.executionPhase, 'not_dispatched');
+            assert.equal(restarted.get(actual.id)?.approvalHold?.status, 'paused');
+          } else assert.notEqual(restarted.get(actual.id)?.status, 'pending');
           assert.equal(restarted.get(original.id)?.replacementDraftRunId, actual.id);
         } finally { restarted.dispose(); }
+        if (scenario === 'unavailable' || scenario === 'needs_user') {
+          assert.equal(f.session.approvalProcessing?.targets[0].status,
+            scenario === 'unavailable' ? 'review_unavailable' : 'insufficient_launch_evidence');
+          reviewerRestored = true;
+          await f.host.handleMessage({ type: 'resumeApprovalProcessing', sessionId: f.session.id, runId: f.cp.taskId,
+            rootTaskId: f.message.userTask!.id, targetId: original.id });
+          await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+          assert.equal(requests.length, scenario === 'unavailable' ? 3 : 2);
+          assert.deepEqual(started, [actual.id]);
+          assert.equal(runs.get(actual.id)?.status, 'done');
+          assert.equal(runs.get(actual.id)?.approvalReview?.decision, 'approve');
+          assert.equal(f.manualRequests(), 0);
+        }
       } finally {
         vscode.window.showWarningMessage = dialogs;
         await runs.flush(); runs.dispose();
@@ -2539,15 +2673,20 @@ for (const scenario of ['reject', 'stop', 'mode', 'new_task', 'session', 'trust'
 }
 
 for (const failure of ['timeout', 'invalid_json', 'configuration'] as const) {
-  test(`automatic review ${failure} retains a precise manual fallback`, { timeout: 15_000 }, async () => {
+  test(`automatic review ${failure} pauses without execution and requires a fresh model decision`, { timeout: 15_000 }, async () => {
     await fixture('delegate', async f => {
       const reviews = (f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews;
       let attempts = 0;
+      let available = false;
       const reviewer = new ApprovalReviewerService({ globalStorageUri: vscode.Uri.file(path.join(f.root, 'storage')) as never,
         workspaceKey: f.scope.key, sourceStore: new ModelSourceStore(vscode.Uri.file(path.join(f.root, 'storage')) as never), store: reviews,
-        getAutoSetting: () => failure === 'configuration' ? { mode: 'fixed', sourceId: 'missing', modelId: 'missing' } : { mode: 'follow-main' },
-        requestText: async () => {
+        getAutoSetting: () => failure === 'configuration' && !available
+          ? { mode: 'fixed', sourceId: 'missing', modelId: 'missing' } : { mode: 'follow-main' },
+        requestText: async input => {
           attempts++;
+          if (available) return JSON.stringify({ decision: 'approve', risk: 'low', reason: 'Exact edit verified.',
+            policyRules: ['direct_user_goal'], saferAlternative: '',
+            affectedTargets: [JSON.parse(input.userPrompt.split('\n')[2]).exactAction.uri] });
           if (failure === 'invalid_json') return '{not-json}';
           throw new OneShotTextRequestError('timeout', 'review request timeout', true);
         } });
@@ -2558,7 +2697,7 @@ for (const failure of ['timeout', 'invalid_json', 'configuration'] as const) {
       f.host.queueResponseApprovals(f.session, f.message, f.response);
       await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
       assert.equal(attempts, failure === 'configuration' ? 0 : 2);
-      assert.equal(f.manualRequests(), 1);
+      assert.equal(f.manualRequests(), 0);
       const records = settledApprovalReviews(f.message);
       assert.equal(records.length, 1);
       assert.equal(records[0].decision, 'unavailable');
@@ -2567,10 +2706,13 @@ for (const failure of ['timeout', 'invalid_json', 'configuration'] as const) {
       assert.equal(records[0].consumedAt, undefined);
       await assert.rejects(readFile(path.join(f.workspace, 'result.txt')), { code: 'ENOENT' });
       assert.equal(f.continuations(), 0);
-      await f.resolveManual(f.session.pendingApproval!.id, true);
+      available = true;
+      await f.host.handleMessage({ type: 'resumeApprovalProcessing', sessionId: f.session.id, runId: f.cp.taskId,
+        rootTaskId: f.message.userTask!.id, targetId: 'edit' });
+      await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
       assert.equal(await readFile(path.join(f.workspace, 'result.txt'), 'utf8'), 'result\n');
       assert.equal(f.continuations(), 1);
-      assert.equal(attempts, failure === 'configuration' ? 0 : 2);
+      assert.equal(attempts, failure === 'configuration' ? 1 : 3);
       assert.deepEqual(settledApprovalReviews(f.message).map(record => record.decision), ['unavailable', 'approve']);
     });
   });
@@ -2594,15 +2736,16 @@ for (const recovery of ['retry', 'restart'] as const) test(`an unusable review r
     await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
     f.host.queueResponseApprovals(f.session, f.message, f.response);
     await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
-    const old = f.session.pendingApproval!;
-    assert.equal(old.status, 'waiting');
+    const old = originalStore.getLatestForTarget('edit')!;
+    assert.equal(old.reviewState, 'invalid_response');
+    assert.equal(f.session.pendingApproval, undefined);
     await assert.rejects(readFile(path.join(f.workspace, 'result.txt')), { code: 'ENOENT' });
     if (recovery === 'retry') {
-      await f.host.handleMessage({ type: 'retryManualApproval', id: old.id, sessionId: f.session.id, runtimeId: old.runtimeId });
+      await f.host.handleMessage({ type: 'resumeApprovalProcessing', sessionId: f.session.id, runId: f.cp.taskId,
+        rootTaskId: f.message.userTask!.id, targetId: 'edit' });
       await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
-      assert.equal(f.session.pendingApproval?.resolutionReason, 'retry_requested');
       assert.equal(f.session.approvalProcessing?.status, 'completed');
-      assert.ok(originalStore.get(old.priorReviewId!)?.supersededByReviewId);
+      assert.ok(originalStore.get(old.reviewId)?.supersededByReviewId);
     } else {
       const sessions = new ChatSessionStore(f.storage, 'en', f.scope); await sessions.initialize();
       const restored = sessions.getActiveSession();
@@ -2616,25 +2759,24 @@ for (const recovery of ['retry', 'restart'] as const) test(`an unusable review r
         delegatedApprovals: queue, approvalReviews: store, approvalReviewer: reviewerFor(store), batchManualApprovals: new Map(),
         postState: () => {}, executeDelegatedApprovals: prototype.executeDelegatedApprovals });
       try {
-        assert.equal(restored.pendingApproval?.status, 'interrupted');
-        await host.handleMessage({ type: 'resolveValidationApproval', id: old.id, approve: true });
+        assert.equal(restored.approvalProcessing?.status, 'paused');
+        await host.handleMessage({ type: 'resolveValidationApproval', id: old.reviewId, approve: true });
         assert.equal(queue.take(restored.id), undefined);
         await host.handleMessage({ type: 'resumeApprovalProcessing', sessionId: restored.id, runId: f.cp.taskId,
           rootTaskId: f.message.userTask!.id, targetId: 'edit' });
         await host.executeDelegatedApprovals(queue.take(restored.id)!);
         const fresh = restored.pendingApproval!;
         assert.equal(fresh.status, 'waiting');
-        assert.notEqual(fresh.id, old.id);
-        assert.notEqual(fresh.runtimeId, old.runtimeId);
-        assert.ok(store.get(old.priorReviewId!)?.supersededByReviewId);
-        await host.handleMessage({ type: 'resolveValidationApproval', id: old.id, approve: true });
+        assert.notEqual(fresh.id, old.reviewId);
+        assert.ok(store.get(old.reviewId)?.supersededByReviewId);
+        await host.handleMessage({ type: 'resolveValidationApproval', id: old.reviewId, approve: true });
         assert.equal(queue.take(restored.id), undefined);
         await host.handleMessage({ type: 'resolveValidationApproval', id: fresh.id, approve: true });
         await host.executeDelegatedApprovals(queue.take(restored.id)!);
         assert.equal(restored.approvalProcessing?.status, 'completed');
       } finally { await edits.flush(); diff.dispose(); }
     }
-    assert.equal(attempts, 3);
+    assert.equal(attempts, recovery === 'restart' ? 4 : 3);
     assert.equal(await readFile(path.join(f.workspace, 'result.txt'), 'utf8'), 'result\n');
   });
 });
@@ -2652,7 +2794,7 @@ test('a manual approval audit write fault pauses the unstarted command and prese
     await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
     const manual = f.session.pendingApproval!;
     const reviewer = (f.host as unknown as { approvalReviewer: ApprovalReviewerService }).approvalReviewer;
-    const auditWrite = t.mock.method(reviewer, 'createUserApproval', async () => { throw new ApprovalAuditError('Fixture audit write failed.'); });
+    const auditWrite = t.mock.method(reviewer, 'createUserAuthorization', async () => { throw new ApprovalAuditError('Fixture audit write failed.'); });
     await f.resolveManual(manual.id, true);
     assert.equal(f.executions(), 0);
     assert.equal(f.session.approvalProcessing?.status, 'paused');
@@ -2694,7 +2836,7 @@ test('an invalid response is isolated while a disjoint sibling still obtains its
     f.host.queueResponseApprovals(f.session, f.message, f.response);
     await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
     assert.deepEqual(requests, [failedUri, failedUri, siblingUri]);
-    assert.equal(f.manualRequests(), 1);
+    assert.equal(f.manualRequests(), 0);
     const records = settledApprovalReviews(f.message);
     assert.deepEqual(records.map(record => record.decision), ['unavailable', 'approve']);
     assert.equal(await readFile(siblingFile, 'utf8'), 'sibling\n');
@@ -2702,7 +2844,7 @@ test('an invalid response is isolated while a disjoint sibling still obtains its
   });
 });
 
-test('Python probe with unusable review keeps its bound test pending while an independent test runs', async t => {
+test('Python probe with unusable review pauses only dependent work and resumes with a fresh model decision', async t => {
   try { execFileSync('python3', ['--version'], { stdio: 'pipe' }); }
   catch { t.skip('Python 3 is unavailable'); return; }
   const wallClock = Date.now;
@@ -2741,6 +2883,7 @@ test('Python probe with unusable review keeps its bound test pending while an in
       const independent = await createDraftRunProposal({ executable: process.execPath, args: ['independent.cjs'], reason: 'Run the disjoint unit test' });
       f.response.draftRuns = [probe, dependent, independent];
       const attempts: string[] = [];
+      let available = false;
       const store = (f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews;
       const reviewer = new ApprovalReviewerService({ globalStorageUri: reviewStorage, workspaceKey: f.scope.key,
         sourceStore: new ModelSourceStore(reviewStorage), store, requestText: async input => {
@@ -2749,8 +2892,9 @@ test('Python probe with unusable review keeps its bound test pending while an in
           if (args.includes(inline)) {
             assert.equal(await readFile(path.join(f.workspace, 'result.txt'), 'utf8'), 'result\n');
             attempts.push(input.userPrompt);
-            return JSON.stringify({ decision: 'approve', risk: 42, reason: 'Fixture supplies a numeric risk.',
-              policyRules: ['direct_user_goal'], saferAlternative: '', affectedTargets: [exactAction.cwdUri] });
+            return JSON.stringify({ decision: 'approve', risk: available ? 'low' : 42,
+              reason: 'Fixture verifies the Python probe.', policyRules: ['direct_user_goal'], saferAlternative: '',
+              affectedTargets: [exactAction.cwdUri] });
           }
           return JSON.stringify({ decision: 'approve', risk: 'low', reason: 'Exact requested fixture.',
             policyRules: ['direct_user_goal'], saferAlternative: '', affectedTargets: [exactAction.uri ?? exactAction.scope?.projectEntryUri ?? exactAction.cwdUri] });
@@ -2760,19 +2904,18 @@ test('Python probe with unusable review keeps its bound test pending while an in
       f.host.queueResponseApprovals(f.session, f.message, f.response);
       await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
       assert.deepEqual(f.session.approvalProcessing?.targets.map(target => target.status),
-        ['executed', 'manual_required', 'dependency_blocked', 'executed'], JSON.stringify(f.session.approvalProcessing));
+        ['executed', 'review_unavailable', 'dependency_blocked', 'executed'], JSON.stringify(f.session.approvalProcessing));
       assert.deepEqual(launches, [independent.id]);
       assert.equal(attempts.length, 2);
       assert.match(attempts[1], /risk/u);
-      assert.equal(f.manualRequests(), 1);
+      assert.equal(f.manualRequests(), 0);
       assert.equal(runs.get(probe.id)?.executionPhase, 'not_dispatched');
       assert.equal(runs.get(probe.id)?.outputBytes, 0);
       assert.equal(runs.get(dependent.id)?.dependency?.targetId, probe.id);
       assert.equal(runs.get(dependent.id)?.executionStarted, false);
-      const pending = f.session.pendingApproval!;
       const restoredAudit = new ApprovalReviewStore(reviewStorage);
       await restoredAudit.initialize();
-      const invalid = restoredAudit.get(pending.priorReviewId!);
+      const invalid = restoredAudit.getLatestForTarget(probe.id);
       assert.equal(invalid?.decision, 'unavailable');
       assert.equal(invalid?.reviewState, 'invalid_response');
       assert.equal(invalid?.targetId, probe.id);
@@ -2786,10 +2929,12 @@ test('Python probe with unusable review keeps its bound test pending while an in
         assert.equal(restoredRuns.get(independent.id)?.executionPhase, 'exited');
       } finally { restoredRuns.dispose(); }
       idleMs = 3_600_783;
-      await f.resolveManual(pending.id, true);
-      await f.resolveManual(pending.id, true);
+      available = true;
+      await f.host.handleMessage({ type: 'resumeApprovalProcessing', sessionId: f.session.id, runId: f.cp.taskId,
+        rootTaskId: f.message.userTask!.id, targetId: probe.id });
+      await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
       assert.deepEqual(launches, [independent.id, probe.id, dependent.id]);
-      assert.equal(attempts.length, 2, 'the reviewer is unnecessary for manual approval');
+      assert.equal(attempts.length, 3);
       assert.equal(f.continuations(), 1);
       assert.match(runs.get(probe.id)?.outputHead ?? '', /3 result/u);
       assert.match(runs.get(dependent.id)?.outputHead ?? '', /dependent-ok/u);
@@ -2804,7 +2949,7 @@ test('Python probe with unusable review keeps its bound test pending while an in
   });
 });
 
-test('a segment-wide reviewer outage uses one transport sequence and preserves separate manual requests', async () => {
+test('a segment-wide reviewer outage uses one transport sequence and preserves separate recoverable holds', async () => {
   await fixture('delegate', async f => {
     const reviews = (f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews;
     const storage = vscode.Uri.file(path.join(f.root, 'storage')) as never;
@@ -2824,8 +2969,8 @@ test('a segment-wide reviewer outage uses one transport sequence and preserves s
     f.host.queueResponseApprovals(f.session, f.message, f.response);
     await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
     assert.deepEqual(attempts, [f.response.draftEdits[0].uri, f.response.draftEdits[0].uri]);
-    assert.equal(f.manualRequests(), 2);
-    assert.ok(f.session.approvalProcessing?.targets.every(target => target.status === 'manual_required'));
+    assert.equal(f.manualRequests(), 0);
+    assert.ok(f.session.approvalProcessing?.targets.every(target => target.status === 'review_unavailable'));
     const records = settledApprovalReviews(f.message);
     assert.ok(records.length >= 1);
     assert.ok(records.every(record => record.reviewState === 'service_unavailable' && !record.consumedAt));
@@ -2962,7 +3107,7 @@ test('a non-Git capability gap returns a structured diagnostic and fresh approva
 });
 
 
-test('a first preflight observed by the real Runner survives checkpoint handoff to delegate', async () => {
+test('the real Runner persists an unknown option and hands the unchanged command to the independent reviewer', async () => {
   await fixture('delegate', async f => {
     const request: AgentRequest = { ...f.cp.request, approvalRootTaskId: f.message.userTask!.id,
       sourceConfig: { sourceId: 'main', provider: 'openai-compatible', baseUrl: 'https://fixture.invalid/v1', apiKey: 'fixture', supportsBilling: false } };
@@ -2970,7 +3115,10 @@ test('a first preflight observed by the real Runner survives checkpoint handoff 
     let requests = 0;
     globalThis.fetch = (async (_url, init) => {
       const first = ++requests === 1;
-      if (!first) assert.match(String(init?.body), /host_unsupported_option/u);
+      if (!first) {
+        assert.doesNotMatch(String(init?.body), /host_unsupported_option/u);
+        assert.match(String(init?.body), /--unknown-fixture/u);
+      }
       const delta = first ? { tool_calls: [{ index: 0, id: 'first-preflight', type: 'function', function: {
         name: RUN_DRAFT_TOOL_NAME, arguments: JSON.stringify({ executable: 'git', args: ['rev-parse', '--unknown-fixture', 'HEAD'], reason: 'Resolve HEAD' })
       } }] } : { content: 'The check has not run yet.' };
@@ -2986,118 +3134,12 @@ test('a first preflight observed by the real Runner survives checkpoint handoff 
       f.host.queueResponseApprovals(f.session, f.message, response);
       await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
       assert.equal(requests, 2);
-      assert.equal(f.executions(), 0);
-      assert.equal(f.runs.get(draft.id)?.executionStarted, false);
-      assert.equal(f.runs.get(draft.id)?.capabilityDiagnostic?.token, '--unknown-fixture');
+      assert.equal(f.executions(), 1);
+      assert.equal(f.reviews(), 1);
+      assert.equal(f.runs.get(draft.id)?.executionStarted, true);
+      assert.equal(f.runs.get(draft.id)?.capabilityDiagnostic, undefined);
+      assert.deepEqual(f.runs.get(draft.id)?.spec.args, ['rev-parse', '--unknown-fixture', 'HEAD']);
       assert.equal(f.continuations(), 1, JSON.stringify(f.session.approvalProcessing));
-    } finally { globalThis.fetch = originalFetch; }
-  });
-});
-
-test('an accepted diagnostic can stop only a new repeated command, while an independent query still runs', async t => {
-  await fixture('delegate', async f => {
-    await writeFile(path.join(f.workspace, 'input.txt'), 'independent\n');
-    const reviews = (f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews;
-    const spawn = new SpawnDraftRunExecutor();
-    const launched: string[][] = [];
-    const storageUri = vscode.Uri.file(path.join(f.root, 'repetition-store')) as never;
-    const runs = new DraftRunStore(storageUri, {
-      execute: input => { launched.push(input.draftRun.spec.args); return spawn.execute(input); },
-      cancel: id => spawn.cancel(id), showTerminal: id => spawn.showTerminal(id), dispose: () => spawn.dispose()
-    }, new DraftRunAuthorizationService(reviews));
-    Object.assign(f.host, { draftRuns: runs, hasActiveBackgroundRun: () => false });
-    const originalFetch = globalThis.fetch;
-    const originalUser = JSON.stringify(f.session.messages[0]);
-    const root = f.message.userTask!.id;
-    const requests: string[] = [];
-    const makeCall = (index: number, id: string, executable: string, args: string[], reason: string) =>
-      ({ index, id, type: 'function', function: { name: RUN_DRAFT_TOOL_NAME, arguments: JSON.stringify({ executable, args, reason }) } });
-    const request: AgentRequest = { ...f.cp.request, approvalRootTaskId: root,
-      sourceConfig: { sourceId: 'main', provider: 'openai-compatible', baseUrl: 'https://fixture.invalid/v1', apiKey: 'fixture', supportsBilling: false } };
-    const runner = () => new AgentRunner(undefined, undefined, undefined, undefined, undefined, undefined, storageUri);
-    let continuations = 0;
-    let repeated: AgentResponse | undefined;
-    globalThis.fetch = (async (_url, init) => {
-      requests.push(String(init?.body));
-      const turn = requests.length;
-      if (turn === 2 || turn === 4) assert.match(requests.at(-1)!, /host_unsupported_option/u);
-      if (turn === 3) assert.match(requests.at(-1)!, /keepseek-operation-results/u);
-      assert.ok(turn <= 4);
-      const tool_calls = turn === 1 ? [makeCall(0, 'original', 'head', ['--unknown-fixture=first'], 'Read requested input')]
-        : turn === 3 ? [makeCall(0, 'repeated', 'head', ['--unknown-fixture=another', 'input.txt'], 'A different reason'),
-          makeCall(1, 'independent', 'cat', ['input.txt'], 'Read the independent fixture')] : undefined;
-      const delta = tool_calls ? { tool_calls } : { content: 'Prepared the proposed checks.' };
-      return new Response(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: tool_calls ? 'tool_calls' : 'stop' }] })}\n\ndata: [DONE]\n\n`,
-        { headers: { 'Content-Type': 'text/event-stream' } });
-    }) as typeof fetch;
-    Object.assign(f.host, { sendPrompt: async (prompt: string, _source: string, _model: string, _settings: unknown,
-      options: { commandRecoveryContinuation?: AgentRequest['commandRecoveryContinuation'] }) => {
-      assert.equal(++continuations, 1);
-      const assistant: ChatMessage = { id: 'actual-runner-continuation', role: 'assistant', content: '', createdAt: f.message.createdAt,
-        userTask: { ...f.message.userTask!, reason: 'approval' } };
-      const next: AgentRequest = { ...request, prompt, assistantMessageId: assistant.id,
-        commandRecoveryContinuation: options.commandRecoveryContinuation };
-      const checkpoint = createRunCheckpoint(next, 0, 'same root correction', f.scope.folderUris);
-      inheritTaskBudget(checkpoint, f.session.userTaskBudgets![root]);
-      next.checkpoint = checkpoint;
-      f.session.messages.push(assistant);
-      repeated = await runner().run(next, { onCheckpoint: cp => f.host.saveAgentCheckpoint(f.session, assistant, cp) });
-      f.host.queueResponseApprovals(f.session, assistant, repeated);
-      return repeated;
-    } });
-    try {
-      const first = await runner().run(request, { onCheckpoint: cp => f.host.saveAgentCheckpoint(f.session, f.message, cp) });
-      f.host.queueResponseApprovals(f.session, f.message, first);
-      await f.host.maybeAutoContinueDraftRun();
-      assert.equal(continuations, 1);
-      assert.equal(requests.length, 4);
-      assert.deepEqual(launched, [['input.txt']]);
-      const [blocked, independent] = repeated?.draftRuns ?? [];
-      assert.ok(blocked && independent);
-      assert.equal(runs.get(first.draftRuns![0].id)?.commandRecoveryOutcome, undefined);
-      assert.deepEqual(runs.get(blocked.id)?.commandRecoveryOutcome, { kind: 'repeated', priorDraftRunId: first.draftRuns![0].id });
-      assert.equal(runs.get(blocked.id)?.executionStarted, false);
-      assert.equal(runs.get(independent.id)?.outputHead, 'independent\n');
-      assert.equal(f.session.approvalProcessing?.status, 'stopped');
-      assert.deepEqual(f.session.approvalProcessing?.targets.map(target => target.status), ['needs_replan', 'executed']);
-      assert.equal(f.session.approvalProcessing?.reason, localize('en', 'draftRunCorrectionStopped'));
-      assert.equal(f.session.userTaskBudgets?.[root].runBudget?.modelRequests, 4);
-      assert.equal(JSON.stringify(f.session.messages[0]), originalUser);
-      assert.equal(f.reviews(), 1); assert.equal(f.manualRequests(), 0);
-      t.diagnostic('Controlled model requests 4, host correction continuations 1, real independent process starts 1, blocked starts 0');
-    } finally { globalThis.fetch = originalFetch; await runs.flush(); runs.dispose(); }
-  });
-});
-
-test('a confirmed repetition in one segment does not reopen through the original draft in its final response', async () => {
-  await fixture('delegate', async f => {
-    const request: AgentRequest = { ...f.cp.request, approvalRootTaskId: f.message.userTask!.id,
-      sourceConfig: { sourceId: 'main', provider: 'openai-compatible', baseUrl: 'https://fixture.invalid/v1', apiKey: 'fixture', supportsBilling: false } };
-    const originalFetch = globalThis.fetch;
-    let requests = 0;
-    globalThis.fetch = (async (_url, init) => {
-      const turn = ++requests;
-      if (turn > 1) assert.match(String(init?.body), /host_unsupported_option/u);
-      const delta = turn < 3 ? { tool_calls: [{ index: 0, id: `preflight-${turn}`, type: 'function', function: {
-        name: RUN_DRAFT_TOOL_NAME, arguments: JSON.stringify({ executable: 'git', args: ['rev-parse', `--unknown-fixture=${turn}`, 'HEAD'], reason: 'Resolve HEAD' })
-      } }] } : { content: 'The check could not run.' };
-      return new Response(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: turn < 3 ? 'tool_calls' : 'stop' }] })}\n\ndata: [DONE]\n\n`,
-        { headers: { 'Content-Type': 'text/event-stream' } });
-    }) as typeof fetch;
-    try {
-      const runner = new AgentRunner(undefined, undefined, undefined, undefined, undefined, undefined,
-        vscode.Uri.file(path.join(f.root, 'same-segment-runner')) as never);
-      const response = await runner.run(request, { onCheckpoint: cp => f.host.saveAgentCheckpoint(f.session, f.message, cp) });
-      const [first, repeat] = response.draftRuns ?? [];
-      assert.ok(first && repeat);
-      f.host.queueResponseApprovals(f.session, f.message, response);
-      await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
-      assert.equal(requests, 3);
-      assert.equal(f.continuations(), 0);
-      assert.equal(f.executions(), 0);
-      assert.equal(f.runs.get(first.id)?.commandRecoveryOutcome, undefined);
-      assert.deepEqual(f.runs.get(repeat.id)?.commandRecoveryOutcome, { kind: 'repeated', priorDraftRunId: first.id });
-      assert.equal(f.session.approvalProcessing?.status, 'stopped');
     } finally { globalThis.fetch = originalFetch; }
   });
 });

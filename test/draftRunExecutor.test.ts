@@ -1,6 +1,6 @@
 import './registerVscodeStub';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { test } from 'node:test';
@@ -8,6 +8,7 @@ import * as vscode from 'vscode';
 import { analyzeDraftRunEffects } from '../src/approvals/authorization';
 import { DraftRunAuthorizationService } from '../src/runs/draftRunAuthorization';
 import { SpawnDraftRunExecutor } from '../src/runs/draftRunExecutor';
+import * as isolation from '../src/runs/projectExecutionIsolation';
 import { hashDraftRunSpec } from '../src/runs/draftRunProposal';
 import type { DraftRun, DraftRunSpec } from '../src/shared/types';
 import { APPROVAL_POLICY_VERSION, type ApprovalRecordMatch } from '../src/approvals/approvalReviewTypes';
@@ -19,6 +20,10 @@ test('delegated execution requires its matching approval record and remains sing
   const executor = new SpawnDraftRunExecutor();
   t.after(async () => { executor.dispose(); await rm(storage, { recursive: true, force: true }); });
   const draftRun = createDraftRun(['-e', 'process.stdout.write("delegated")']);
+  const workspace = path.join(storage, 'project');
+  await mkdir(workspace);
+  draftRun.spec.cwdUri = vscode.Uri.file(workspace).toString();
+  draftRun.specHash = hashDraftRunSpec(draftRun.spec);
   const approvalStore = new ApprovalReviewStore(vscode.Uri.file(storage) as never);
   await approvalStore.initialize();
   const authorization = new DraftRunAuthorizationService(approvalStore);
@@ -39,7 +44,10 @@ test('delegated execution requires its matching approval record and remains sing
   await assert.rejects(authorization.createDelegatedPermit(draftRun, () => true, match), /matching approval/u);
   await assert.rejects(executor.execute({ draftRun, permit, onOutput: () => {} }), /approval record/u);
   draftRun.authorizationSource = 'delegated_approver';
-  const result = await executor.execute({ draftRun, permit, onOutput: () => {} });
+  const cwd = vscode.Uri.parse(draftRun.spec.cwdUri).fsPath;
+  const projectExecution = await isolation.inspectProjectExecution(cwd, cwd, draftRun.spec.executable);
+  const result = await executor.execute({ draftRun, permit,
+    verifiedLaunch: { cwd, executable: draftRun.spec.executable, projectExecution }, onOutput: () => {} });
   assert.equal(result.exitCode, 0);
   await assert.rejects(executor.execute({ draftRun, permit, onOutput: () => {} }), /already consumed/u);
 });
@@ -73,6 +81,30 @@ test('SpawnDraftRunExecutor passes a literal argv with shell disabled and consum
     executor.execute({ draftRun, permit, onOutput: () => undefined }),
     /permit was already consumed/u
   );
+});
+
+test('cancellation during the final asynchronous launch check prevents dispatch', async t => {
+  clearCreatedTerminals();
+  const executor = new SpawnDraftRunExecutor();
+  t.after(() => executor.dispose());
+  const draftRun = createDraftRun(['-e', 'process.stdout.write("must not start")']);
+  const permit = new DraftRunAuthorizationService().createUserClickPermit(draftRun);
+  let entered!: () => void;
+  let release!: () => void;
+  const checking = new Promise<void>(resolve => { entered = resolve; });
+  const pendingCheck = new Promise<void>(resolve => { release = resolve; });
+  const output: string[] = [];
+  const executing = executor.execute({ draftRun, permit, onOutput: chunk => output.push(chunk.text),
+    assertBeforeLaunch: () => { entered(); return pendingCheck; } });
+  await checking;
+  try { assert.equal(executor.cancel(draftRun.id), true); }
+  finally { release(); }
+  const result = await executing;
+  assert.equal(result.cancelled, true);
+  assert.equal(result.started, false);
+  assert.equal(result.phase, 'not_dispatched');
+  assert.deepEqual(output, []);
+  assert.equal(createdTerminals.length, 0);
 });
 
 test('SpawnDraftRunExecutor reuses one hidden terminal for consecutive runs in the same session', async () => {
@@ -168,6 +200,44 @@ test('SpawnDraftRunExecutor distinguishes a failed launch from an executed comma
     assert.equal(exited.phase, 'exited');
     assert.equal(exited.exitCode, 3);
   } finally { executor.dispose(); }
+});
+
+test('an isolated launcher failure cannot masquerade as a negative Git predicate', async t => {
+  const executor = new SpawnDraftRunExecutor();
+  t.after(() => executor.dispose());
+  const command = ['merge-base', '--is-ancestor', 'HEAD', 'HEAD'];
+  const rejected = createDraftRun(command);
+  const cwd = vscode.Uri.parse(rejected.spec.cwdUri).fsPath;
+  const projectExecution = {
+    kind: 'bubblewrap' as const, root: cwd, cwd, executable: process.execPath, fingerprint: 'fixture',
+    wrapper: process.execPath, executableRealPath: process.execPath, toolRoots: []
+  };
+  const simulatedLauncher = t.mock.method(isolation, 'prepareProjectExecution', async () => ({
+    executable: process.execPath, args: ['-e', 'console.error("bwrap: error creating the namespace"); process.exitCode = 1;'],
+    cwd, env: {}
+  }));
+  const executePredicate = async (run: DraftRun) => {
+    run.spec.executable = 'git';
+    run.specHash = hashDraftRunSpec(run.spec);
+    return await executor.execute({ draftRun: run, permit: new DraftRunAuthorizationService().createUserClickPermit(run),
+      verifiedLaunch: { cwd, executable: process.execPath, projectExecution }, onOutput: () => {} });
+  };
+  const failure = await executePredicate(rejected);
+  assert.equal(failure.phase, 'result_unknown');
+  assert.equal(failure.started, undefined);
+  assert.equal(failure.exitCode, 1);
+  assert.match(failure.error ?? '', /isolation launcher/u);
+  assert.equal(failure.queryResult, undefined);
+
+  simulatedLauncher.mock.mockImplementation(async () => ({
+    executable: process.execPath, args: ['-e', 'process.exitCode = 1;'], cwd, env: {}
+  }));
+  const ordinary = createDraftRun(command);
+  ordinary.id = 'executor-ordinary-predicate';
+  const negative = await executePredicate(ordinary);
+  assert.equal(negative.phase, 'exited');
+  assert.equal(negative.started, true);
+  assert.equal(negative.queryResult?.predicate, false);
 });
 
 test('SpawnDraftRunExecutor settles when a detached descendant keeps inherited output open', {

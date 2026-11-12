@@ -305,6 +305,13 @@ export class ChangeSetStore {
     );
   }
 
+  public getUnreviewedPendingEditIds(sessionId: string, segmentId: string): string[] {
+    return [...this.changeSets.values()]
+      .filter(set => set.sessionId === sessionId && set.runId === segmentId && hasActiveHistory(set))
+      .flatMap(set => set.files.filter(file => file.status === 'pending' && !file.checkpointId
+        && !file.approvalReview && !file.approvalSource && !this.activeEditOperations.has(file.id)).map(file => file.id));
+  }
+
   public async loadSession(sessionId: string): Promise<void> {
     if (!sessionId || await new SessionDeletionAuthority(this.globalStorageUri).isSessionIdDeleted(sessionId) || this.loadedSessionIds.has(sessionId)) return;
     const entries = this.storageIndex.entries.filter((entry) => entry.sessionId === sessionId);

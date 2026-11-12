@@ -7,6 +7,7 @@ import { inspectDraftRunScope, type CommandScope } from '../approvals/authorizat
 import { checkDraftRunApprovalIdentity } from '../approvals/authorization/executionBoundary';
 import type { DraftRun } from '../shared/types';
 import type { GitRemoteLaunch } from './gitReleaseAuthorization';
+import { prepareGitTransportEnvironment } from './gitTransportEnvironment';
 import { gitReleaseIntent, gitTaskText, isGitInstructionQuotedOrExplanatory, taskNamesGitRef, type GitReleaseIntent } from './gitTaskIntent';
 
 const git = promisify(execFile);
@@ -158,7 +159,7 @@ export async function prepareGitRelease(input: {
   const { run, scope, intent, remote, prior, needsCommit, signal } = input;
   const semantics = analyzeCommand(run.spec);
   const tag = semantics.gitTagCreate;
-  const command = semantics.gitRemote;
+  const command = remote?.gitRemote ?? semantics.gitRemote;
   if (!tag && !command) return undefined;
   const repositoryUri = scope.paths.find(target => target.role === 'repository' && !target.external)?.uri;
   if (!repositoryUri || !scope.executable) throw new Error('Git repository is unverified. / Git 仓库尚未核验。');
@@ -183,7 +184,8 @@ export async function prepareGitRelease(input: {
   };
 
   if (tag) {
-    if (!intent.tag || !taskNamesGitRef(intent, tag.ref)) {
+    const name = tag.ref.slice('refs/tags/'.length);
+    if (!intent.tag || !(intent.localTags.size ? intent.localTags.has(name) : taskNamesGitRef(intent, tag.ref))) {
       throw new Error('The current task does not authorize this exact tag. / 当前任务未授权创建此确切标签。');
     }
     assertCommit();
@@ -233,8 +235,11 @@ export async function prepareGitRelease(input: {
   }
   const expected = await Promise.all(command.refs.map(async ref => {
     const current = await localRef(ref);
-    if (!current || (commitHead && (current.peeled ?? current.object) !== commitHead)
-      || (intent.tag && ref.startsWith('refs/tags/') && !prior.some(candidate => candidate.gitReleaseEvidence?.kind === 'tag'
+    const isTaskTag = ref.startsWith('refs/tags/') && intent.tag
+      && (intent.localTags.size ? intent.localTags.has(ref.slice('refs/tags/'.length)) : taskNamesGitRef(intent, ref));
+    if (!current || !remote.sourceRefs.some(source => source.ref === ref && source.object === current.object)
+      || (commitHead && (isTaskTag || ref === commit?.branchRef) && (current.peeled ?? current.object) !== commitHead)
+      || (isTaskTag && !prior.some(candidate => candidate.gitReleaseEvidence?.kind === 'tag'
         && candidate.gitReleaseEvidence.repositoryUri === repositoryUri
         && (!candidate.gitReleaseEvidence.repositoryIdentity || candidate.gitReleaseEvidence.repositoryIdentity === scope.gitRepositoryIdentity)
         && sameRefs(candidate.gitReleaseEvidence.refs, [current])))) {
@@ -255,12 +260,23 @@ export async function prepareGitRelease(input: {
       throw new Error('Remote verification requires an authorized destination. / 远端核验需要已授权的目的地。');
     } };
   }
-  const readRemote = async () => parseGitRefOutput(await readGit(remote.executable, remote.cwd, remote.env,
-    ['ls-remote', '--', remote.destination, ...command.refs.flatMap(ref => ref.startsWith('refs/tags/') ? [ref, ref + '^{}'] : [ref])], signal), command.refs);
+  const readRemote = async () => {
+    const args = ['ls-remote', '--', remote.destination, ...command.refs.flatMap(ref => ref.startsWith('refs/tags/') ? [ref, ref + '^{}'] : [ref])];
+    const transport = await prepareGitTransportEnvironment({ env: remote.env, args,
+      gitRemote: { kind: 'query', remote: command.remote, refs: command.refs } });
+    try {
+      return parseGitRefOutput(await readGit(remote.executable, transport.cwd, transport.env, args, signal), command.refs);
+    } finally {
+      await transport.dispose();
+    }
+  };
   const initial = await readRemote();
   const evidence = (executed: boolean): GitReleaseEvidence =>
     ({ kind: 'push', repositoryUri, destinationHash, refsRequested: command.refs, refs: expected, executed });
   const completed = sameRefs(initial, expected) ? evidence(false) : undefined;
+  if (!completed && command.lease && initial.find(ref => ref.ref === command.lease?.ref)?.object !== command.lease.expected) {
+    throw new Error('The remote ref differs from the requested lease. / 远端引用与请求的预期提交不一致。');
+  }
   if (!completed && initial.some(remoteRef => remoteRef.ref.startsWith('refs/tags/')
     && !expected.some(local => local.ref === remoteRef.ref && local.object === remoteRef.object))) {
     throw new Error('The remote tag already points to a different object. / 远端标签已指向另一个对象。');
@@ -272,7 +288,7 @@ export async function prepareGitRelease(input: {
       && attempt.refs.some(ref => command.refs.includes(ref));
     const previous = analyzeCommand(candidate.spec).gitRemote;
     return candidate.spec.cwdUri === run.spec.cwdUri && previous?.kind === 'push'
-      && previous.refs.some(ref => command.refs.includes(ref));
+      && (previous.currentBranch || previous.shortRef || previous.refs.some(ref => command.refs.includes(ref)));
   })) {
     throw new Error('A prior push has an unresolved result for this reference. / 该引用的先前推送结果尚未核实。');
   }

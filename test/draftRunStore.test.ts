@@ -9,7 +9,8 @@ import { analyzeDraftRunEffects, inspectDraftRunScope } from '../src/approvals/a
 import type {
   DraftRunExecutionOutcome,
   DraftRunExecutorAdapter,
-  DraftRunOutputChunk
+  DraftRunOutputChunk,
+  VerifiedDraftRunLaunch
 } from '../src/runs/draftRunExecutor';
 import { createDraftRunProposal, hashDraftRunSpec } from '../src/runs/draftRunProposal';
 import { DraftRunStore } from '../src/runs/draftRunStore';
@@ -20,7 +21,7 @@ import { APPROVAL_POLICY_VERSION, type ApprovalRecordMatch } from '../src/approv
 import type { DraftRun, DraftRunProposal, DraftRunSpec, ExecutionPermit } from '../src/shared/types';
 
 test('delegated DraftRun records its approval source and consumes a single immutable proposal', async () => {
-  await withDraftRunFixture(async ({ workspaceRoot, store, executor, approvalReviews }) => {
+  await withDraftRunFixture(async ({ root, workspaceRoot, store, executor, approvalReviews }) => {
     const proposal = createProposal(workspaceRoot);
     store.addProposals({ proposals: [proposal], agentRunId: 'r', sessionId: 's' });
     const approvalRecord = await addReviewerApproval(approvalReviews, proposal, 's', 'r');
@@ -29,6 +30,18 @@ test('delegated DraftRun records its approval source and consumes a single immut
     assert.equal(executor.executeCount, 1);
     assert.equal(executor.lastPermit?.source, 'delegated_approver');
     assert.equal(store.get(proposal.id)?.authorizationSource, 'delegated_approver');
+    const executable = executor.lastLaunch?.executable;
+    assert.ok(executable && path.isAbsolute(executable));
+    await store.flush();
+    const reopened = new DraftRunStore(vscode.Uri.file(path.join(root, 'storage')) as never, executor);
+    try {
+      await reopened.initialize();
+      const run = reopened.get(proposal.id);
+      assert.equal(run?.dispatch?.boundary, 'host');
+      assert.equal(run?.dispatch?.executable, executable);
+      assert.deepEqual(run?.dispatch?.args ?? run?.spec.args, proposal.spec.args);
+      assert.equal(executor.executeCount, 1);
+    } finally { reopened.dispose(); }
   });
 });
 
@@ -697,6 +710,7 @@ class FakeDraftRunExecutor implements DraftRunExecutorAdapter {
   public holdUntilCancelled = false;
   public lastPermit: ExecutionPermit | undefined;
   public lastDraftRun: DraftRun | undefined;
+  public lastLaunch: VerifiedDraftRunLaunch | undefined;
   private startedResolver: (() => void) | undefined;
   private cancelResolver: ((outcome: DraftRunExecutionOutcome) => void) | undefined;
   public started: Promise<void> = new Promise((resolve) => {
@@ -713,11 +727,13 @@ class FakeDraftRunExecutor implements DraftRunExecutorAdapter {
   public async execute(input: {
     draftRun: DraftRun;
     permit: ExecutionPermit;
+    verifiedLaunch?: VerifiedDraftRunLaunch;
     onOutput: (chunk: DraftRunOutputChunk) => void;
   }): Promise<DraftRunExecutionOutcome> {
     this.executeCount += 1;
     this.lastPermit = input.permit;
     this.lastDraftRun = input.draftRun;
+    this.lastLaunch = input.verifiedLaunch;
     for (const chunk of this.output) {
       input.onOutput(chunk);
     }
@@ -789,7 +805,7 @@ async function addReviewerApproval(
     actionHash: proposal.specHash,
     policyVersion: APPROVAL_POLICY_VERSION,
     approvalMode: 'delegate',
-    scopeFingerprint: (await inspectDraftRunScope(proposal)).fingerprint,
+    scopeFingerprint: (await inspectDraftRunScope(proposal, false, undefined, false, undefined, 'delegate')).fingerprint,
     approvalSource: 'auto_approval_review',
     reviewerConfigFingerprint: 'a'.repeat(64),
     reviewerSourceId: 'test-source',

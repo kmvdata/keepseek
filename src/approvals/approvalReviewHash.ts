@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { DraftEdit, DraftRun } from '../shared/types';
-import type { BoundedReviewText } from './approvalReviewTypes';
+import type { ApprovalReviewExactAction, BoundedReviewText } from './approvalReviewTypes';
 import { canonicalPatchPayload } from '../edits/textPatch';
 import { getDraftEditBase, getDraftEditResult } from '../edits/draftEdit';
 
@@ -12,6 +12,13 @@ export function hashApprovalValue(value: unknown): string {
 
 export function hashApprovalText(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+export function hashExternalFileReviewAction(
+  { uri, access, readLimits }: Omit<Extract<ApprovalReviewExactAction, { kind: 'external_file_access' }>, 'kind'>,
+  fingerprint: string | undefined
+): string {
+  return hashApprovalValue({ uri, access, fingerprint, readLimits });
 }
 
 export function hashDraftEditAction(edit: DraftEdit): string {

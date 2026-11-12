@@ -291,8 +291,10 @@ export const workspace = {
       get<T>(_key: string, fallback: T): T {
         return fallback;
       },
-      inspect() {
-        return undefined;
+      inspect(key: string) {
+        // Tests using this synthetic host explicitly opt into process execution
+        // without a nested OS sandbox. Isolation has separate boundary tests.
+        return key === 'projectExecution' ? { globalValue: 'host' } : undefined;
       },
       async update(): Promise<void> {
         return undefined;

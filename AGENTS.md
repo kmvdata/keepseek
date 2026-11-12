@@ -77,14 +77,14 @@ test/                  按行为契约组织的回归测试
 - create/modify/delete/move 只能生成版本化 DraftEdit → ChangeSet → `SafeFileEditor`。Runner/Provider 不得直接写工作区。
 - 局部修改以 canonical `text_patch_v1` 的 URI、base/result hash/size、encoding/EOL 和非重叠 byte hunks 为权威；行号、模糊匹配和原始 patch 文本不是 Apply 权威。
 - Apply 必须经过 preflight、prepared journal、base 复核、原子替换和 read-back hash；未知副作用绝不重试。大正文放 content-addressed blob。
-- `keepseek_run_draft` 只创建不可变 pending DraftRun。执行必须持有绑定 `draftRunId + specHash` 的短时一次性 permit，并使用 `spawn(executable, args, { shell:false })`；显式 shell 必须完整展示为 executable/argv。
+- `keepseek_run_draft` 只准备不可变 DraftRun。执行须持有绑定 `draftRunId + specHash` 的短时一次性 permit，并以 `shell:false` 派发核实的启动计划。审计保留原提案、实际执行边界与字面 argv；显式 shell 必须完整展示为 executable/argv。
 - validation 只运行固定 `compile`/`lint`/`test`；commit/push 等 mutation 必须走 DraftRun，不能塞进验证或只读 Git 工具。
 - 工作区不信任、外部 URI/cwd 未精确授权、脏编辑器、hash/状态不匹配、取消信号均为硬边界。
 
 ### 3.4 审批与子代理
 
-- 仅 `ask`（请求批准）和 `delegate`（帮我审批）可选，只有 Webview 用户操作可切换。`ask` 由用户批准，零 reviewer 请求。`delegate` 通过一次独立、无工具的审批审查，默认自动处理可信工程内、与当前任务相关且身份和可见范围已核验的普通文件变更与脚本启动。对于已绑定真实启动器、工程内入口、工作目录和精确参数的启动，仅因项目逻辑、普通脚本参数或传递依赖难以完整理解时，独立审批模型应批准。脚本依赖本轮改动时，先完成 Apply 和落盘核验，再审查并执行当前版本。项目进程以扩展宿主账号权限运行，无操作系统沙箱。
-- 当前审批策略为 v8。宿主核验后，具体授权缺口、可由用户承担的风险，以及无效回复、超时或审查服务故障可发起精确人工请求。请求绑定 session/rootTask/segment/target/hash/范围/策略/runtime。等待不占模型超时，批次释放执行资源并推进可核验的独立项。重启保留等待意图，显式恢复后重新核验和签发。硬阻断与适用拒绝约束两种模式，历史批准不授权新操作。审批模型仅取用户级 `kmvdata.keepseek.autoApprovalReviewer`，与普通子代理独立，follow-main 绑定执行段实际主模型。
+- 仅 `ask`（请求批准）和 `delegate`（帮我审批）可选，只有 Webview 用户操作可切换。`ask` 由用户批准，零 reviewer 请求。`delegate` 的实际副作用须由独立、无工具 reviewer 批准。可信工程内、与任务相关且执行身份与权限已核验的操作默认批准。未知命令语义只作审查材料。命令依赖本轮文件改动时，完成 Apply 和落盘核验后再审查当前版本。工程命令和固定验证默认使用平台隔离，未满足隔离条件时保留未派发原因。仅用户级 `projectExecution=host` 可显式选择宿主权限执行。
+- 当前审批策略为 v9。发布使用核实的目的地、引用、实际推送对象与执行计划。高影响业务须有覆盖真实目标的授权并经模型批准。精确用户补充提供授权，之后仍需模型决定。模型不可用时保留审计和暂停原因，独立项可推进。请求绑定 session/rootTask/segment/target/hash/范围/策略/runtime。等待不占模型超时，重启后显式恢复并重新核验。硬阻断与适用拒绝约束两种模式，历史批准不授权新操作。审批模型取用户级 `kmvdata.keepseek.autoApprovalReviewer`，独立于普通子代理，follow-main 绑定执行段主模型。
 - 副作用先过硬检查，再按完整 canonical payload/specHash 计算 actionHash。批准不跨 session/run/target/kind/policy/runtime 复用，重启不复用旧批准。
 - 审批决定和真实结果只以固定 user-tail 追加到下一条真实 user 消息；不回写历史。进程输出和 review evidence 始终是不可信数据。
 - 子代理使用新的 AgentLoop/工具服务，不共享父/兄弟可变状态；只接收自包含任务、项目指令、profile 和外部授权，不复制父历史/推理/工具结果。

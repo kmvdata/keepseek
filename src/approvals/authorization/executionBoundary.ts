@@ -1,7 +1,7 @@
 import { analyzeCommandCapability, type CommandCapabilityDiagnostic } from './commandCapability';
 import { realpath } from 'node:fs/promises';
 import * as vscode from 'vscode';
-import type { DraftRun, DraftRunSpec } from '../../shared/types';
+import type { ApprovalMode, DraftRun, DraftRunSpec } from '../../shared/types';
 import { hashDraftRunSpec } from '../../runs/draftRunProposal';
 import { getFileReferenceAuthorizationKey } from '../../context/references/fileReference';
 import { findCanonicalWorkspaceFolder } from './pathScope';
@@ -28,16 +28,18 @@ export function assertValidGitCommitArguments(spec: DraftRunSpec): void {
 }
 
 export function getDraftRunLaunchRefusal(scope: CommandScope): string | undefined {
-  const diagnostic = scope.diagnostics.find(item => ['script_entry_unverified', 'interpreter_identity', 'launch_scope_unverified',
-    'foreign_path', 'path_resolution'].includes(item.code));
-  return diagnostic?.message ?? (!scope.boundLauncher
+  const diagnostic = scope.diagnostics.find(item => ['script_entry_unverified', 'launch_scope_unverified',
+    'foreign_path', 'path_resolution'].includes(item.code)
+    || item.code === 'interpreter_identity' && (!scope.projectExecution || scope.projectExecution.kind === 'host'));
+  return diagnostic?.message ?? scope.projectExecutionUnavailable ?? (!scope.boundLauncher
     ? 'The exact launch cannot be verified. / 无法核实实际启动配置。' : undefined);
 }
 
 export async function validateDraftRunBeforeApproval(
   draftRun: DraftRun,
   authorizedExternalReferenceUris: ReadonlySet<string>,
-  scope?: CommandScope
+  scope?: CommandScope,
+  mode?: ApprovalMode
 ): Promise<void> {
   checkDraftRunApprovalBoundary(draftRun, authorizedExternalReferenceUris);
   if (!scope) {
@@ -55,8 +57,12 @@ export async function validateDraftRunBeforeApproval(
     const launchFailure = getDraftRunLaunchRefusal(scope);
     if (launchFailure) throw new Error(launchFailure);
   }
+  if (mode === 'delegate' && !draftRun.spec.restricted && !scope?.semantics?.gitRemote && !scope?.projectExecution) {
+    throw new Error(scope?.projectExecutionUnavailable
+      ?? 'The project execution boundary is missing. / 缺少工程执行边界。');
+  }
   checkDraftRunApprovalBoundary(draftRun, authorizedExternalReferenceUris);
-  const diagnosis = analyzeCommandCapability(draftRun.spec, scope?.semantics).diagnostics.find(item => item.blocking);
+  const diagnosis = analyzeCommandCapability(draftRun.spec, scope?.semantics, mode).diagnostics.find(item => item.blocking);
   if (diagnosis) throw new CommandCapabilityError(diagnosis);
 }
 

@@ -55,8 +55,7 @@ export function orderGitReleaseBatch(ids: readonly string[], get: (id: string) =
 }
 
 export function missingGitTaskOutcome(goal: string, getRuns: () => DraftRun[], rootTaskId: string,
-  verifiedThisBatch: readonly GitReleaseEvidence[] = []): 'commit' | 'tag' | 'push' | undefined {
-  const intent = gitReleaseIntent(goal);
+  verifiedThisBatch: readonly GitReleaseEvidence[] = [], intent = gitReleaseIntent(goal)): 'commit' | 'tag' | 'push' | undefined {
   const needsCommit = isExplicitLocalCommitGoal(goal);
   if (!needsCommit && !intent.tag && !intent.push) return undefined;
   const runs = getRuns();
@@ -75,8 +74,17 @@ export function missingGitTaskOutcome(goal: string, getRuns: () => DraftRun[], r
   }
   if (intent.push) {
     const pushed = evidence.filter(item => item.kind === 'push').flatMap(item => item.refs);
-    if (!pushed.length || (intent.tags.size && !pushed.some(ref => taskNamesGitRef(intent, ref.ref)))
-      || (intent.branch && !pushed.some(ref => ref.ref.startsWith('refs/heads/')))) return 'push';
+    const exact = intent.pushTargets;
+    if (!pushed.length) return 'push';
+    if (exact) {
+      const refs = new Set(pushed.map(ref => ref.ref));
+      if ([...exact.tags].some(name => !refs.has('refs/tags/' + name))
+        || [...exact.branches].some(name => !refs.has('refs/heads/' + name))
+        || [...exact.shortRefs].some(name => !refs.has('refs/heads/' + name) && !refs.has('refs/tags/' + name))
+        || exact.currentBranch && (commit?.branchRef ? !refs.has(commit.branchRef)
+          : !pushed.some(ref => ref.ref.startsWith('refs/heads/')))) return 'push';
+    } else if (intent.tags.size && !pushed.some(ref => taskNamesGitRef(intent, ref.ref))
+      || intent.branch && !pushed.some(ref => ref.ref.startsWith('refs/heads/'))) return 'push';
   }
   return undefined;
 }

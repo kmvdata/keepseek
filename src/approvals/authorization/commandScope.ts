@@ -5,8 +5,10 @@ import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import * as vscode from 'vscode';
-import type { DraftRun } from '../../shared/types';
+import type { ApprovalMode, DraftRun } from '../../shared/types';
 import { createControlledEnvironment } from '../../runs/executionEnvironment';
+import { getProjectExecutionMode, inspectProjectExecution, isProjectExecutionEnvNameSupported,
+  type ProjectExecutionBoundary } from '../../runs/projectExecutionIsolation';
 import { findSensitiveEvidence } from '../approvalPolicy';
 import { assertOperationPath, isGitProjectSkillPath, isProtectedOperationPath } from './protectedTargets';
 import type { GitRemoteScope } from './gitRemoteScope';
@@ -36,7 +38,11 @@ export interface CommandScope {
   boundLauncher?: string;
   environment: NodeJS.ProcessEnv;
   environmentNames?: string[];
-  /** The interpreter, on-disk entry and explicit argv paths were verified. The script runs with host privileges. */
+  projectExecution?: ProjectExecutionBoundary;
+  projectExecutionUnavailable?: string;
+  /** The launcher and visible scope are bound to an active, user-selected execution profile. */
+  verifiedProjectCommand?: boolean;
+  /** The interpreter, on-disk entry and explicit argv paths were verified. */
   trustedProjectScript?: boolean;
   projectScriptLaunchPath?: string;
   projectScriptEntryUri?: string;
@@ -46,6 +52,8 @@ export interface CommandScope {
   uncertain: boolean;
   reasons: string[];
   diagnostics: AuthorizationReason[];
+  /** Repository/operand evidence can be checked without reselecting a runner. */
+  factsFingerprint: string;
   /** In-memory binding for exact grants; includes live resolution, never raw env values. */
   fingerprint: string;
 }
@@ -55,8 +63,12 @@ export type CommandRemoteInspection = boolean | 'metadata';
 
 export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectRemote: CommandRemoteInspection = false,
   tagSnapshot?: { ref: string; signal: AbortSignal }, allowUnresolvedLauncher = false, selectedProjectUri?: string,
-  allowMissingCwd = false): Promise<CommandScope> {
+  inspection: boolean | ApprovalMode = false): Promise<CommandScope> {
+  const allowMissingCwd = inspection === true;
+  const delegate = inspection === 'delegate';
   const parsed = analyzeCommand(run.spec);
+  const usesProjectExecution = delegate && !parsed.gitRemote && !run.spec.restricted;
+  const isolated = usesProjectExecution && getProjectExecutionMode() !== 'host';
   const diagnostics = [...parsed.reasons];
   const roots = await Promise.all((vscode.workspace.workspaceFolders ?? []).filter(f => f.uri.scheme === 'file')
     .map(f => canonicalPath(f.uri.fsPath)));
@@ -109,7 +121,7 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectR
     } else assertOperationPath(resolved, write);
     assertCommandTarget(resolved, write);
     const uri = vscode.Uri.file(resolved).toString();
-    const outside = projectLaunch && selectedProjectRoot ? !isPathInside(selectedProjectRoot, resolved)
+    const outside = (projectLaunch || delegate) && selectedProjectRoot ? !isPathInside(selectedProjectRoot, resolved)
       : !roots.some(root => isPathInside(root, resolved));
     if ((write || ['script', 'executable', 'launcher_config', 'package_manifest', 'lifecycle_script'].includes(role))
       && vscode.workspace.textDocuments?.some(document => document.isDirty && document.uri.scheme === 'file'
@@ -146,12 +158,19 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectR
     || parsed.effects.some(effect => ['credential_access', 'privilege_escalation'].includes(effect))
     || (parsed.program === 'git' && parsed.arguments.some(argument => argument.role === 'subcommand' && argument.value === 'config')
       && run.spec.args.some(argument => ['--system', '--global'].includes(argument)))
-    || run.spec.env.some(({ name }) => /^(?:LD_|DYLD_|NODE_OPTIONS$|BASH_ENV$|ENV$)|(?:^|_)(?:TOKEN|SECRET|PASSWORD|KEY|CREDENTIALS?)(?:_|$)/iu.test(name))) {
+    || run.spec.env.some(({ name }) => /^(?:LD_|DYLD_|NODE_OPTIONS$|BASH_ENV$|ENV$)|(?:^|_)(?:TOKEN|SECRET|PASSWORD|KEY|CREDENTIALS?)(?:_|$)/iu.test(name)
+      || delegate && /^(?:GIT_|BASH_FUNC_|(?:PATH|PATHEXT|HOME|USERPROFILE|TMP|TEMP|TMPDIR|SYSTEMROOT|COMSPEC|WINDIR|NODE_PATH|PYTHONHOME|PYTHONPATH|RUBYOPT|PERL5OPT)$)/iu.test(name))) {
     throw new Error('Credential access, privilege escalation or unsafe execution environment. Nothing executed. / 操作涉及凭据、提权或高风险执行环境，尚未执行。');
   }
-  const visibleTargets = inspectVisibleCommandTargets(parsed);
+  const collectNetworkTarget = (value: string) => {
+    if (!parsed.effects.includes('network')) parsed.effects.push('network');
+    const targets = parsed.networkTargets ??= [];
+    if (!targets.includes(value)) targets.push(value);
+  };
+  const visibleTargets = inspectVisibleCommandTargets(parsed, collectNetworkTarget, isolated);
   const projectOperandPath = (value: string) => /^file:/iu.test(value) ? fileURLToPath(value)
     : /^~[\\/]/u.test(value) ? joinUnresolvedPath(homedir(), value.slice(2)) : value;
+  const genericOperands = parsed.reasons.some(item => item.code === 'unsupported_program');
   await check(cwdUri.fsPath, 'cwd');
   const gitCommand = parsed.program === 'git' ? parsed.arguments.find(argument => argument.role === 'subcommand') : undefined;
   for (const operand of parsed.arguments) {
@@ -169,7 +188,8 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectR
       continue;
     }
     const base = joinUnresolvedPath(cwd, ...operand.cwdChanges.filter(Boolean));
-    const value = projectLaunch && operand.role !== 'script' ? projectOperandPath(operand.value) : operand.value;
+    const value = projectLaunch && operand.role !== 'script' || genericOperands && /^file:\/\//iu.test(operand.value)
+      ? projectOperandPath(operand.value) : operand.value;
     await check(joinUnresolvedPath(base, value), operand.role, gitCommand?.value === 'add' && operand.role === 'read_path');
   }
   for (const target of visibleTargets) {
@@ -182,6 +202,11 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectR
   }
   const env = createControlledEnvironment(run.spec.env);
   const executable = await resolveExecutable(run.spec.executable, cwd, env);
+  // The pinned Linux image owns PATH on Windows. A bare command may be
+  // present there even when the Windows host only has a .cmd shim or no tool.
+  const containerCommand = isolated && process.platform === 'win32' && !executable
+    && /^[A-Za-z0-9][A-Za-z0-9_.+-]*$/u.test(run.spec.executable) ? run.spec.executable : undefined;
+  const requestedLauncher = executable?.launchPath ?? containerCommand;
   if (executable && vscode.workspace.textDocuments?.some(document => document.isDirty && document.uri.scheme === 'file'
     && [executable.path, executable.launchPath].includes(path.resolve(document.uri.fsPath)))) {
     throw new Error('The launcher has unsaved changes. Nothing executed. / 启动程序有未保存的修改，尚未执行。');
@@ -212,10 +237,7 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectR
         throw new Error('Package lifecycle contains sensitive material. / 软件包生命周期包含敏感信息。');
       }
       const targets = inspectVisibleCommandTargets({ program: 'sh', effects: ['arbitrary_code'], reasons: [],
-        arguments: [{ index: 0, value: definition, role: 'inline_code', cwdChanges: [] }] }, value => {
-          if (!parsed.effects.includes('network')) parsed.effects.push('network');
-          (parsed.networkTargets ??= []).push(value);
-        });
+        arguments: [{ index: 0, value: definition, role: 'inline_code', cwdChanges: [] }] }, collectNetworkTarget, isolated);
       for (const target of targets) await check(joinUnresolvedPath(cwd, target.value), target.write ? 'write_path' : 'read_path');
       const literal = parseLiteralLifecycleArgv(definition);
       if (literal) {
@@ -235,7 +257,7 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectR
             if (item.role === 'script') await check(joinUnresolvedPath(cwd, item.value), 'lifecycle_script');
             else if (['read_path', 'write_path'].includes(item.role)) await check(joinUnresolvedPath(cwd, projectOperandPath(item.value)), item.role);
           }
-          for (const item of inspectVisibleCommandTargets(lifecycle)) {
+          for (const item of inspectVisibleCommandTargets(lifecycle, undefined, isolated)) {
             await check(joinUnresolvedPath(cwd, item.value), item.write ? 'write_path' : 'read_path');
           }
         }
@@ -284,12 +306,14 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectR
   let gitRepositoryIdentity: string | undefined;
   let gitTagSnapshot: GitTagSnapshot | undefined;
   const gitRuntime = diagnostics.findIndex(item => item.code === 'git_runtime');
-  const boundedGitOptions = gitCommand && ['status', 'diff', 'log', 'show'].includes(gitCommand.value);
+  const boundedGitOptions = gitCommand && (delegate || ['status', 'diff', 'log', 'show'].includes(gitCommand.value));
+  const exactStatusPager = delegate && parsed.gitReplan?.code === 'git_status_pager_override';
   if (executable && installed && gitCommand && gitRuntime >= 0
     && diagnostics.every(item => ['git_runtime', 'git_commit_argv', 'git_ref_mutation', 'missing_option_value'].includes(item.code)
-      || (boundedGitOptions && item.code === 'unsupported_option'))
+      || (boundedGitOptions && item.code === 'unsupported_option') || (exactStatusPager && item.code === 'git_configuration'))
     && !external.size && (!parsed.gitRemote || inspectRemote)) {
-    const git = await inspectLocalGitScope({ executable: executable.path, cwd, roots, cwdChanges: gitCommand.cwdChanges,
+    const git = await inspectLocalGitScope({ executable: executable.path, cwd,
+      roots: delegate && selectedProjectRoot ? [selectedProjectRoot] : roots, cwdChanges: gitCommand.cwdChanges,
       subcommand: gitCommand.value, env, commitAll: parsed.gitCommit?.all,
       refMutation: parsed.gitRefMutation, remote: parsed.gitRemote, remoteMetadataOnly: inspectRemote === 'metadata',
       tagSnapshotRef: tagSnapshot?.ref.startsWith('refs/tags/') && isGitReleaseRef(tagSnapshot.ref) ? tagSnapshot.ref : undefined,
@@ -297,6 +321,8 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectR
       noOptionalLocks: parsed.arguments.some(argument => argument.index < gitCommand.index && argument.value === '--no-optional-locks'),
       noIndexRefresh: gitCommand.value === 'diff' && parsed.arguments.some(argument => argument.role === 'option'
         && argument.index > gitCommand.index && ['--cached', '--staged'].includes(argument.value)),
+      includeLinkedWorktreeRefs: gitCommand.value === 'log' && parsed.arguments.some(argument => argument.role === 'option'
+        && argument.index > gitCommand.index && argument.value === '--all'),
       addPathspecs: parsed.arguments.filter(argument => argument.role === 'read_path' && argument.index > gitCommand.index).map(argument => argument.value),
       addTracksOnly: parsed.arguments.some(argument => argument.role === 'option' && argument.index > gitCommand.index
         && ['-u', '--update'].includes(argument.value)),
@@ -336,6 +362,32 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectR
     throw new Error('Project skill paths require a verified local Git repository. Nothing executed. / 项目技能路径需通过本地 Git 仓库核验，原命令未启动。');
   }
   const externalUris = [...external].sort();
+  let projectExecution: ProjectExecutionBoundary | undefined;
+  let projectExecutionUnavailable: string | undefined;
+  if (usesProjectExecution && requestedLauncher) {
+    const projectCwd = selectedProjectRoot && isPathInside(selectedProjectRoot, cwd);
+    const executionRoot = projectCwd ? selectedProjectRoot : isolated ? undefined : cwd;
+    const unsupportedEnv = isolated && run.spec.env.find(entry => !isProjectExecutionEnvNameSupported(entry.name));
+    if (!executionRoot || isolated && externalUris.length) {
+      projectExecutionUnavailable = 'The current execution profile cannot cover the command\'s project paths. / 当前执行环境无法覆盖命令的工程路径。';
+    } else if (unsupportedEnv) {
+      projectExecutionUnavailable = `This isolation profile cannot pass the requested environment variable: ${unsupportedEnv.name}. / 当前隔离环境无法传递所请求的环境变量：${unsupportedEnv.name}。`;
+    } else {
+      const mightWrite = parsed.effects.some(effect => !['workspace_read', 'long_running'].includes(effect))
+        || diagnostics.some(item => ['unsupported_program', 'unsupported_option', 'unsupported_pathspec', 'git_configuration', 'external_helper'].includes(item.code));
+      if (mightWrite && vscode.workspace.textDocuments?.some(document => document.isDirty && document.uri.scheme === 'file'
+        && isPathInside(executionRoot, document.uri.fsPath))) {
+        throw new Error('Save the project\'s dirty editors before running a command with possible writes. / 命令可能写入文件，请先保存当前工程中的未保存编辑器。');
+      }
+      try { projectExecution = await inspectProjectExecution(executionRoot, cwd, requestedLauncher); }
+      catch (error) {
+        projectExecutionUnavailable = error instanceof Error ? error.message
+          : 'Project execution boundary could not be verified. / 无法核实工程执行边界。';
+      }
+    }
+  }
+  const verifiedProjectCommand = Boolean(projectExecution && selectedProjectRoot && !externalUris.length);
+  const boundLauncher = executable?.launchPath ?? (projectExecution?.kind === 'container' ? projectExecution.executable : undefined);
   const trustedProjectScript = Boolean(interpreterVerified && localScript && !externalUris.length
     && !parsed.networkTargets?.length && !parsed.effects.includes('network')
     && diagnostics.every(item => item.code === 'script_execution' || item.code === 'environment_override'
@@ -347,19 +399,23 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectR
   if (!executable && process.platform !== 'win32' && !allowUnresolvedLauncher) {
     throw new Error('Executable cannot be resolved. Nothing executed. / 无法解析实际程序，尚未执行。');
   }
-  const fingerprint = createHash('sha256').update(JSON.stringify({
+  const factsFingerprint = createHash('sha256').update(JSON.stringify({
     version: 2, executable, env, roots, selectedProjectRoot, venv: venv?.fingerprint, packageRuntime: packageLaunch?.runtime, custom,
     paths, pathIdentities, gitFingerprint, gitCwd, externalUris, diagnostics, trustedProjectScript,
     argv: projectLaunch ? run.spec.args : undefined, networkTargets: parsed.networkTargets
   })).digest('hex');
+  const fingerprint = projectExecution || projectExecutionUnavailable
+    ? createHash('sha256').update(JSON.stringify([factsFingerprint, projectExecution?.fingerprint, projectExecutionUnavailable])).digest('hex')
+    : factsFingerprint;
   return { semantics: parsed, selectedProjectRoot, externalUris, paths, cwd: paths[0]?.uri ?? run.spec.cwdUri,
     gitCwd, gitBranchRef, gitRemote, gitRepositoryIdentity, gitTagSnapshot,
-    executable: executable?.path, verifiedLauncher: installed || venv || packageLaunch || custom ? executable?.launchPath : undefined,
-    boundLauncher: executable?.launchPath, environment: env, environmentNames: Object.keys(env).sort(),
+    executable: executable?.path ?? boundLauncher, verifiedLauncher: installed || venv || packageLaunch || custom ? executable?.launchPath : undefined,
+    boundLauncher, environment: env, environmentNames: Object.keys(env).sort(),
+    projectExecution, projectExecutionUnavailable, verifiedProjectCommand,
     trustedProjectScript, projectScriptLaunchPath, projectScriptEntryUri: scriptEntry ? vscode.Uri.file(scriptEntry).toString() : undefined,
     projectScriptEntryIdentity, projectScriptEntryStat,
     uncertain: diagnostics.length > 0, diagnostics,
-    reasons: diagnostics.map(reason => reason.message), fingerprint };
+    reasons: diagnostics.map(reason => reason.message), factsFingerprint, fingerprint };
 }
 export function hasExactCommandScope(scope: CommandScope, cwdUri: string, authorizedUris: ReadonlySet<string>): boolean {
   return scope.externalUris.every(uri => authorizedUris.has(uri)

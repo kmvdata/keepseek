@@ -6,11 +6,16 @@ import { hasAssociatedRecordOwner, assertManagedStoragePath, readAssociatedJson,
 import type { HistoryTruncationScope } from '../sessions/historyTruncation';
 import {
   APPROVAL_POLICY_VERSION,
+  AUTHORIZED_BUSINESS_EFFECT_RULE,
+  MANUAL_FALLBACK_STATES,
+  MAX_APPROVAL_TARGETS,
   VERIFIED_PROJECT_OPERATION_RULE,
   approvalDisposition,
   normalizeApprovalAttemptFailures,
+  normalizeApprovalExecutionIsolation,
   normalizeApprovalReviewAttempts,
   normalizeApprovalReviewState,
+  normalizeBusinessAuthorization,
   type ApprovalRecordMatch,
   type ApprovalReviewDisplay,
   type ApprovalReviewRecord,
@@ -70,6 +75,10 @@ export class ApprovalReviewStore {
   public async add(input: ReviewRecordInput): Promise<ApprovalReviewRecord> {
     if (input.policyVersion !== APPROVAL_POLICY_VERSION || input.approvalSource === 'host_policy'
       || (input.approvalSource === 'local_policy' && input.decision === 'approve')
+      || (input.approvalSource === 'user_click' && input.decision === 'approve')
+      || (input.decision === 'approve' && input.risk === 'critical')
+      || (input.approvalSource === 'auto_approval_review' && input.decision === 'approve' && input.risk === 'high'
+        && !hasAuthorizedHighRiskApproval(input))
       || (input.projectApproval && !hasVerifiedProjectApproval(input))) {
       throw new Error('Historical or non-authorizing approval source cannot issue a current approval record.');
     }
@@ -88,7 +97,7 @@ export class ApprovalReviewStore {
       if (record.approvalSource === 'user_click' && record.priorReviewId) {
         const prior = records.get(record.priorReviewId);
         if (!prior || !this.isCurrentReviewerSnapshot(prior, record) || prior.reviewerConfigFingerprint !== record.reviewerConfigFingerprint
-          || (record.decision === 'approve' && findSafetyDenial(records, record))) {
+          || (record.decision !== 'deny' && (approvalDisposition(prior) !== 'request_user' || findSafetyDenial(records, record)))) {
           throw new ApprovalRecordConflictError('The exact user approval review is no longer active.');
         }
       }
@@ -128,7 +137,8 @@ export class ApprovalReviewStore {
           || this.activeReviewIds.has(duplicate.reviewId)
           || (decided && (decided.decision === 'deny' || !provenNotDispatched))
           || (duplicate.runtimeId === this.runtimeId && !['request_user', 'execute'].includes(approvalDisposition(duplicate))
-            && !['in_progress', 'interrupted', 'cancelled', 'scope_mismatch', 'insufficient_evidence'].includes(duplicate.reviewState ?? ''))) {
+            && !['in_progress', 'interrupted', 'cancelled', 'scope_mismatch', 'insufficient_evidence',
+              ...MANUAL_FALLBACK_STATES].includes(duplicate.reviewState ?? ''))) {
           throw new ApprovalRecordConflictError('The exact approval review cannot be retried from this state.');
         }
         records.set(retryOf, { ...duplicate, supersededByReviewId: record.reviewId });
@@ -246,22 +256,18 @@ export class ApprovalReviewStore {
     let consumed: ApprovalReviewRecord | undefined;
     await this.persist(records => {
       const record = records.get(input.reviewId);
-      const priorReview = record?.priorReviewId ? records.get(record.priorReviewId) : undefined;
       if (!record || !this.liveRecordIds.has(record.reviewId) || this.consumptionClaims.has(record.reviewId)
       || record.historyInvalidatedBy || record.runtimeId !== this.runtimeId || record.consumedAt
       || record.sessionId !== input.sessionId || record.rootTaskId !== input.rootTaskId || record.agentRunId !== input.agentRunId
       || record.targetId !== input.targetId || record.actionKind !== input.actionKind
       || record.actionHash !== input.actionHash || input.policyVersion !== APPROVAL_POLICY_VERSION
       || record.policyVersion !== input.policyVersion
-      || (input.expectedSource !== 'auto_approval_review' && input.expectedSource !== 'user_click')
+      || input.expectedSource !== 'auto_approval_review'
       || record.approvalSource !== input.expectedSource || approvalDisposition(record) !== 'execute'
       || input.approvalMode !== 'delegate' || record.approvalMode !== input.approvalMode
       || !record.scopeFingerprint || record.scopeFingerprint !== input.scopeFingerprint
       || !input.reviewerConfigFingerprint || record.reviewerConfigFingerprint !== input.reviewerConfigFingerprint
-      || (input.expectedSource === 'user_click' && (!priorReview || !record.userRequestId
-        || !this.isCurrentReviewerSnapshot(priorReview, record)))
-      || (input.expectedSource === 'auto_approval_review'
-        && (!record.reviewerModelId || !record.reviewerSourceId || !['low', 'medium'].includes(record.risk)))
+      || !record.reviewerModelId || !record.reviewerSourceId
       || findSafetyDenial(records, record)) {
         throw new ApprovalRecordConflictError('No current matching approval record exists for this exact operation.');
       }
@@ -277,7 +283,13 @@ export class ApprovalReviewStore {
     return structuredClone(consumed);
   }
 
-  public async flush(): Promise<void> { await this.persistenceQueue; }
+  public async flush(): Promise<void> {
+    try { await this.persistenceQueue; }
+    catch (error) {
+      // An exact-request conflict rejects that caller before any write.
+      if (!(error instanceof ApprovalRecordConflictError)) throw error;
+    }
+  }
 
   public decisionHistory(sessionId: string, rootTaskId: string, beforeReviewId?: string): Array<'approve' | 'deny'> {
     const history: Array<'approve' | 'deny'> = [];
@@ -398,6 +410,8 @@ function toDisplay(record: ApprovalReviewRecord): ApprovalReviewDisplay {
     approvalSource: record.approvalSource,
     projectApproval: hasVerifiedProjectApproval(record) ? true : undefined,
     osIsolation: record.osIsolation,
+    businessAuthorization: normalizeBusinessAuthorization(record.businessAuthorization),
+    authorizationPending: record.authorizationPending === true ? true : undefined,
     reviewerSourceId: record.reviewerSourceId,
     reviewerModelId: record.reviewerModelId,
     reviewerProvider: record.reviewerProvider,
@@ -440,9 +454,11 @@ function normalizeRecord(value: unknown): ApprovalReviewRecord | undefined {
     attemptFailures: normalizeApprovalAttemptFailures(record.attemptFailures),
     historyInvalidatedBy: typeof record.historyInvalidatedBy === 'string' && record.historyInvalidatedBy.length > 0
       ? record.historyInvalidatedBy.slice(0, 300) : undefined,
-    osIsolation: record.osIsolation === 'none' ? record.osIsolation : undefined,
+    osIsolation: normalizeApprovalExecutionIsolation(record.osIsolation),
+    businessAuthorization: normalizeBusinessAuthorization(record.businessAuthorization),
+    authorizationPending: record.authorizationPending === true ? true : undefined,
     affectedTargets: Array.isArray(record.affectedTargets)
-      ? record.affectedTargets.filter(target => typeof target === 'string').slice(0, 12).map(target => target.slice(0, 300)) : undefined,
+      ? record.affectedTargets.filter(target => typeof target === 'string').slice(0, MAX_APPROVAL_TARGETS).map(target => target.slice(0, 300)) : undefined,
     reviewerConfigFingerprint: typeof record.reviewerConfigFingerprint === 'string' && /^[a-f0-9]{64}$/u.test(record.reviewerConfigFingerprint)
       ? record.reviewerConfigFingerprint : undefined,
     originalActionHash: typeof record.originalActionHash === 'string' && /^[a-f0-9]{64}$/u.test(record.originalActionHash)
@@ -454,5 +470,10 @@ function hasVerifiedProjectApproval(record: ReviewRecordInput): boolean {
   return record.projectApproval === true && record.policyVersion >= 7 && record.policyVersion <= APPROVAL_POLICY_VERSION
     && record.approvalSource === 'auto_approval_review' && record.decision === 'approve'
     && !record.reviewState && record.policyRules.includes(VERIFIED_PROJECT_OPERATION_RULE)
-    && ['low', 'medium'].includes(record.risk);
+    && (['low', 'medium'].includes(record.risk) || hasAuthorizedHighRiskApproval(record));
+}
+
+function hasAuthorizedHighRiskApproval(record: ReviewRecordInput): boolean {
+  return record.policyVersion === APPROVAL_POLICY_VERSION && record.risk === 'high' && Boolean(record.scopeFingerprint)
+    && record.policyRules.includes(AUTHORIZED_BUSINESS_EFFECT_RULE) && !!normalizeBusinessAuthorization(record.businessAuthorization);
 }

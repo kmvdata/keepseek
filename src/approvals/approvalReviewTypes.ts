@@ -1,13 +1,47 @@
 import type { DraftEditAction, DraftRunEffectAssessment, SafeNpmScript } from '../shared/types';
+import { isGitReleaseRef } from './authorization/commandSemantics';
 
-export const APPROVAL_POLICY_VERSION = 8;
+export const APPROVAL_POLICY_VERSION = 9;
 
 export const EXACT_USER_AUTHORIZATION_RULE = 'exact_user_authorization_required';
 export const PROJECT_BEHAVIOR_UNKNOWN_RULE = 'project_behavior_unknown';
 export const VERIFIED_PROJECT_OPERATION_RULE = 'verified_project_operation';
 export const USER_CONFIRMABLE_RISK_RULE = 'user_confirmable_risk';
+export const AUTHORIZED_BUSINESS_EFFECT_RULE = 'authorized_business_effect';
+export const MAX_APPROVAL_TARGETS = 32;
 
-export type VerifiedProjectOperation = 'file_change' | 'script_launch' | 'fixed_validation';
+export type VerifiedProjectOperation = 'file_change' | 'script_launch' | 'project_process' | 'fixed_validation';
+export type ApprovalExecutionIsolation = 'none' | 'seatbelt' | 'bubblewrap' | 'container';
+export interface ApprovalContainerRuntime { image: string; command: string }
+
+export type ApprovalBusinessAuthorization =
+  | { kind: 'git_push'; authority: 'task' | 'project'; targets: string[]; refs: string[]; sourceCommit?: string }
+  | { kind: 'confirmed_action'; authority: 'user_confirmation'; targets: string[]; receiptId: string };
+
+export function normalizeApprovalExecutionIsolation(value: unknown): ApprovalExecutionIsolation | undefined {
+  return (['none', 'seatbelt', 'bubblewrap', 'container'] as const).find(kind => kind === value);
+}
+
+export function normalizeBusinessAuthorization(value: unknown): ApprovalBusinessAuthorization | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const candidate = value as Partial<ApprovalBusinessAuthorization>;
+  const { kind, authority, targets } = candidate;
+  if (!Array.isArray(targets) || !targets.length || targets.length > MAX_APPROVAL_TARGETS
+    || !targets.every(target => typeof target === 'string' && target.trim().length > 0 && target.length <= 300 && !target.includes('\0'))
+    || new Set(targets).size !== targets.length) return undefined;
+  if (kind === 'confirmed_action') {
+    return authority === 'user_confirmation' && typeof candidate.receiptId === 'string'
+      && /^[a-f0-9-]{36}$/u.test(candidate.receiptId) ? { kind, authority, targets: [...targets], receiptId: candidate.receiptId } : undefined;
+  }
+  if (kind !== 'git_push' || (authority !== 'task' && authority !== 'project')) return undefined;
+  const { refs, sourceCommit } = candidate;
+  if (!Array.isArray(refs) || !refs.length || refs.length + 1 !== targets.length || new Set(refs).size !== refs.length
+    || !refs.every(ref => typeof ref === 'string' && isGitReleaseRef(ref) && targets.includes(ref))
+    || (sourceCommit !== undefined && (typeof sourceCommit !== 'string' || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(sourceCommit)))) {
+    return undefined;
+  }
+  return { kind, authority, targets: [...targets], refs: [...refs], sourceCommit };
+}
 
 export type ApprovalActionKind =
   | 'external_file_access'
@@ -81,7 +115,8 @@ export type ApprovalReviewExactAction =
       kind: 'validation_run';
       script: SafeNpmScript;
       workspaceRootId: string;
-      launch?: { cwdUri: string; executable: string; argv: string[]; envNames: string[]; scripts: BoundedReviewText };
+      launch?: { cwdUri: string; executable: string; argv: string[]; envNames: string[]; scripts: BoundedReviewText;
+        osIsolation?: ApprovalExecutionIsolation; containerRuntime?: ApprovalContainerRuntime };
     }
   | {
       kind: 'draft_edit_apply' | 'draft_delete_apply';
@@ -109,7 +144,11 @@ export type ApprovalReviewExactAction =
         launcherTrust?: 'verified_runtime' | 'identity_only';
         projectEntryUri?: string;
         networkTargets?: string[];
-        osIsolation?: 'none'; paths: Array<{ uri: string; role: string; external: boolean }> };
+        executionArgv?: string[];
+        sourceRefs?: Array<{ ref: string; object: string }>;
+        transport?: { destination: string; protocol: string };
+        osIsolation?: ApprovalExecutionIsolation; projectRootUri?: string; containerRuntime?: ApprovalContainerRuntime;
+        paths: Array<{ uri: string; role: string; external: boolean }> };
       restricted?: {
         kind: 'python_ast_v1';
         original: { id: string; specHash: string; executable: string; argv: string[]; cwdUri: string; executed: false };
@@ -138,9 +177,13 @@ export interface ApprovalReviewRequest {
   scopeFingerprint?: string;
   approvalMode?: 'delegate';
   externalAuthorization?: { required: boolean; targets: string[] };
+  /** Positive authority supplied by the host for this exact bound action. */
+  businessAuthorization?: ApprovalBusinessAuthorization;
   /** Host-verified scope, never a model claim or a grant. Runtime only. */
   verifiedProjectOperation?: VerifiedProjectOperation;
   originalGoalSummary: string;
+  /** Recent genuine user instructions for this task, in chronological order. */
+  taskConstraints?: string[];
   evidenceIncomplete?: boolean;
   visibleSessionEvidence: string[];
   workspaceTrusted: boolean;
@@ -175,7 +218,9 @@ export interface ApprovalReviewRecord {
   approvalMode?: 'delegate';
   approvalSource: ApprovalReviewSource;
   projectApproval?: true;
-  osIsolation?: 'none';
+  osIsolation?: ApprovalExecutionIsolation;
+  businessAuthorization?: ApprovalBusinessAuthorization;
+  authorizationPending?: true;
   reviewerConfigFingerprint?: string;
   originalActionHash?: string;
   reviewerSourceId: string;
@@ -211,17 +256,23 @@ export interface ApprovalReviewOutcome {
   circuitBreakReason?: 'consecutive_denials' | 'recent_denials';
 }
 
+export interface ApprovalUserAuthorizationReceipt {
+  record: ApprovalReviewRecord;
+  authorization: Extract<ApprovalBusinessAuthorization, { kind: 'confirmed_action' }>;
+}
+
 /** Shared by draft processing and in-loop tools; text never determines routing. */
 export function approvalDisposition(record: ApprovalReviewRecord): 'execute' | 'request_user' | 'deny' | 'stop' {
   if (record.decision === 'deny') return 'deny';
   if (record.policyVersion !== APPROVAL_POLICY_VERSION || record.supersededByReviewId
-    || record.approvalSource === 'host_policy' || record.approvalSource === 'local_policy') return 'stop';
-  if (record.reviewState) return record.decision === 'unavailable' && record.approvalSource === 'auto_approval_review'
-    && MANUAL_FALLBACK_STATES.includes(record.reviewState) ? 'request_user' : 'stop';
-  if (record.decision === 'approve' && (record.approvalSource === 'user_click' || ['low', 'medium'].includes(record.risk))) return 'execute';
-  if (record.decision === 'needs_user' && record.approvalSource === 'auto_approval_review'
-    && (record.policyRules.includes(EXACT_USER_AUTHORIZATION_RULE)
-      || (record.policyRules.includes(USER_CONFIRMABLE_RISK_RULE) && ['high', 'critical'].includes(record.risk)))) return 'request_user';
+    || record.approvalSource !== 'auto_approval_review' || record.reviewState || record.risk === 'critical') return 'stop';
+  if (record.decision === 'approve') {
+    if (record.authorizationPending) return 'request_user';
+    if (record.risk === 'low' || record.risk === 'medium' || (record.risk === 'high' && record.scopeFingerprint
+      && record.policyRules.includes(AUTHORIZED_BUSINESS_EFFECT_RULE) && normalizeBusinessAuthorization(record.businessAuthorization))) return 'execute';
+  }
+  if (record.decision === 'needs_user' && (record.authorizationPending && record.policyRules.includes(EXACT_USER_AUTHORIZATION_RULE)
+    || (record.risk === 'high' && record.policyRules.includes(USER_CONFIRMABLE_RISK_RULE)))) return 'request_user';
   return 'stop';
 }
 

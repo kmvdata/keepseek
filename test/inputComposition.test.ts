@@ -50,12 +50,12 @@ test('exact approval presents combined scope, preserves focus, and posts one res
   const transcript = view.element('transcript');
   const approveButton = () => transcript.querySelector('button[data-manual-approval-action="approve"]');
   assert.equal(view.state.startup.interactiveReady, true);
-  assert.equal(approveButton()?.textContent, 'Authorize and run once');
+  assert.equal(approveButton()?.textContent, 'Authorize and review again');
   assert.equal(transcript.querySelector('.approval-exact-scope li')?.textContent, manual.authorizationTargets[0]);
   assert.match(transcript.querySelector('.approval-exact-payload')?.textContent ?? '', /"access": "read"/u);
   approveButton()?.focus();
   view.receive({ type: 'statePatch', sessionId: 'A', revision: 3, state: { language: 'zh-CN' } });
-  assert.equal(approveButton()?.textContent, '授权并仅执行一次');
+  assert.equal(approveButton()?.textContent, '授权并重新审查');
   assert.equal(view.document.activeElement, approveButton());
   const originalButton = approveButton()!;
   originalButton.click();
@@ -85,9 +85,35 @@ test('approval mode help describes automatic project work and host process permi
     const labels = WEBVIEW_TRANSLATIONS[language];
     assert.equal(view.element('commandApprovalModeDescription').textContent, labels.approvalDelegateDescription);
     const switchButton = view.element('commandApprovalModeSwitch');
-    assert.match(switchButton.title, language === 'en' ? /no OS sandbox/u : /无操作系统沙箱/u);
+    assert.match(switchButton.title, language === 'en' ? /isolation by default/u : /默认在隔离环境/u);
     assert.equal(switchButton.getAttribute('aria-description'), switchButton.title);
   }
+});
+
+test('unqueued command and edit cards submit the current segment for review with its exact identity', () => {
+  const view = readyView();
+  const recovery = { sessionId: 'A', runId: 'segment', rootTaskId: 'root', canResume: true,
+    unqueuedDraftIds: ['command'], unqueuedEditIds: ['edit'] };
+  view.receive({ type: 'state', revision: 2, state: { approvalMode: 'delegate', approvalRecovery: recovery,
+    draftRuns: [{ id: 'command', sessionId: 'A', status: 'pending', executionStarted: false,
+      executionPhase: 'not_dispatched', spec: { executable: 'node', args: ['--version'] } }],
+    changeSets: [{ id: 'change-set', sessionId: 'A', status: 'pending',
+      files: [{ id: 'edit', action: 'create', status: 'pending', label: 'entry.cjs' }] }] } });
+  const cards = view.element('unlinkedChangeSetList');
+  const button = (id: string) => cards.querySelector(`button[data-approval-resume-target-id="${id}"]`);
+  assert.match(cards.textContent, /Command draft · Not dispatched/u);
+  for (const id of ['command', 'edit']) assert.equal(button(id)?.textContent, 'Submit pending drafts for review (2)');
+  view.receive({ type: 'statePatch', sessionId: 'A', revision: 3, state: { language: 'zh-CN' } });
+  assert.equal(button('edit')?.textContent, '提交本段待审草稿（2 项）');
+  const submit = button('edit')!;
+  submit.click();
+  submit.click();
+  const messages = view.posted.filter(message => message.type === 'resumeApprovalProcessing');
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].sessionId, 'A');
+  assert.equal(messages[0].runId, 'segment');
+  assert.equal(messages[0].rootTaskId, 'root');
+  assert.equal(messages[0].targetId, 'edit');
 });
 
 for (const platform of ['Win32', 'Linux x86_64', 'MacIntel']) {

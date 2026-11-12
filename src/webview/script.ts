@@ -653,7 +653,7 @@ ${conversationsStateFragment.source}
       reading_semantic_context: ['agentStatusReadingSemanticContext'],
       reading_git_state: ['agentStatusReadingGitState'],
       awaiting_authorization: ['agentStatusAwaitingAuthorization'],
-      awaiting_manual_approval: ['approvalConfirmOnce'],
+      awaiting_manual_approval: ['approvalWaitingUser'],
       generating_repair: ['agentStatusGeneratingRepair'],
       waiting_for_apply: ['agentStatusWaitingForApply'],
       running_validation: ['agentStatusRunningValidation'],
@@ -1603,6 +1603,7 @@ ${conversationsMenuDismissFragment.source}
       var sameTarget = function(button) {
         if (button.disabled) return false;
         if (focusedAction.manualApprovalId) return button.dataset.manualApprovalId === focusedAction.manualApprovalId;
+        if (focusedAction.approvalResumeTargetId) return button.dataset.approvalResumeTargetId === focusedAction.approvalResumeTargetId;
         // Batch controls must never fall back to a member card or a later approval.
         if (focusedAction.operationId) return button.dataset.operationId === focusedAction.operationId;
         if (focusedAction.batchSnapshotId) return button.dataset.batchSnapshotId === focusedAction.batchSnapshotId;
@@ -3147,7 +3148,7 @@ ${conversationsSessionListFragment.source}
       } else if (statusValue === 'pending' && (needsAuthorization || !externalAuthorized)) {
         displayStatus = 'needs_authorization';
       } else if (statusValue === 'pending' && state.approvalMode === 'delegate' && !state.isBusy) {
-        displayStatus = 'blocked';
+        displayStatus = target ? 'blocked' : 'awaiting_submission';
       } else if (statusValue === 'pending' && state.approvalMode !== 'ask'
         && !['manual_required', 'denied', 'review_unavailable', 'needs_authorization'].includes(target?.status)) {
         displayStatus = 'preparing';
@@ -3242,11 +3243,15 @@ ${conversationsSessionListFragment.source}
           ? t('draftRunCorrectionCandidate', { command: formatShellCommand(spec.executable, candidateArgs, spec.env) })
           : t('draftRunCorrectionNextStep'), true);
       }
-      if ((target?.status === 'needs_replan' || displayStatus === 'superseded') && targetReason && targetReason !== diagnostic
+      var canResumeReplacement = displayStatus === 'superseded' && canResumeApproval(target);
+      if ((target?.status === 'needs_replan' || displayStatus === 'superseded' && !canResumeReplacement)
+        && targetReason && targetReason !== diagnostic
         && (!recoveryLabel || targetReason !== t('approvalReplanHistoricalStop'))) {
         appendApprovalStateNote(header, targetReason);
       }
-      if (!dependency && displayStatus !== 'superseded' && target?.status !== 'dependency_blocked') {
+      if (canResumeReplacement) {
+        appendAutomaticApprovalState(header, actions, draftRun.id, draftRun.approvalReview, draftRun.approvalHold);
+      } else if (!dependency && displayStatus !== 'superseded' && target?.status !== 'dependency_blocked') {
         appendDraftRunActions(actions, draftRun, header, target, approvalBlocked, externalAuthorized, needsAuthorization);
       }
       var processing = state.approvalProcessing;
@@ -3256,11 +3261,23 @@ ${conversationsSessionListFragment.source}
         appendApprovalStateNote(header, t('approvalInterrupted'));
         appendApprovalResumeAction(actions, 'approvalResumeProcessing', draftRun.id);
       }
-      if (actions.childElementCount) header.append(actions);
+      if (actions.children.length) header.append(actions);
 
       var fields = document.createElement('div');
       fields.className = 'draft-run-fields';
       appendDraftRunField(fields, t('draftRunCommand'), formatShellCommand(spec.executable, spec.args, spec.env), true);
+      var dispatch = draftRun.dispatch;
+      if (dispatch) {
+        var boundaryKey = 'draftRunBoundary_' + dispatch.boundary;
+        if (t(boundaryKey) !== boundaryKey) appendDraftRunField(fields, t('draftRunExecutionBoundary'), t(boundaryKey), false);
+        if (dispatch.containerImage) appendDraftRunField(fields, t('draftRunContainerImage'), dispatch.containerImage, true);
+        var launchArgs = dispatch.args || spec.args;
+        if (dispatch.executable && Array.isArray(launchArgs)
+          && (dispatch.boundary === 'git_transport' || dispatch.executable !== spec.executable)) {
+          var launchKey = dispatch.boundary === 'git_transport' ? 'draftRunTransportCommand' : 'draftRunVerifiedCommand';
+          appendDraftRunField(fields, t(launchKey), formatShellCommand(dispatch.executable, launchArgs, []), true);
+        }
+      }
       var cwdDisplay = String(spec.cwdLabel || '');
       var cwdUri = String(spec.cwdUri || '');
       appendDraftRunField(fields, t('draftRunCwd'), cwdUri && cwdUri !== cwdDisplay
@@ -3442,6 +3459,7 @@ ${conversationsSessionListFragment.source}
       var recovery = state.approvalRecovery;
       var button = document.createElement('button');
       button.type = 'button';
+      button.dataset.approvalResumeTargetId = targetId;
       button.textContent = t(label);
       button.title = t('approvalResumeHint');
       button.disabled = !state.startup?.sideEffectsReady;
@@ -3459,10 +3477,10 @@ ${conversationsSessionListFragment.source}
       var processing = state.approvalProcessing;
       var target = getApprovalTarget(id);
       var denied = target && target.status === 'denied' || review && review.decision === 'deny';
-      var active = processing && ['processing', 'replanning'].includes(processing.status);
+      var active = target && ['processing', 'replanning'].includes(processing?.status);
       var recoverable = canResumeApproval(target);
       var waitingLabel = getApprovalWaitingLabel(target, hold);
-      var fallback = processing?.status === 'replanning' ? 'approvalReplanningNow' : active ? 'approvalProcessingNow'
+      var fallback = active ? processing.status === 'replanning' ? 'approvalReplanningNow' : 'approvalProcessingNow'
         : recoverable ? 'approvalInterrupted'
         : state.approvalMode === 'delegate' && !state.isBusy ? (target ? 'approvalAutoStopped' : 'approvalAutoInactive') : 'approvalAutoWaiting';
       if (target?.dependency) appendApprovalStateNote(notices, formatApprovalDependency(target.dependency));
@@ -3479,7 +3497,26 @@ ${conversationsSessionListFragment.source}
       if (recoverable && !denied && !getManualApprovalRows().some(function(manual) {
         return manual.targetId === id && ['waiting', 'interrupted', 'paused'].includes(manual.status);
       })) {
-        appendApprovalResumeAction(actions, waitingLabel ? 'approvalRecheckPaused' : 'approvalResumeProcessing', id);
+        appendApprovalResumeAction(actions, target?.status === 'review_unavailable' ? 'approvalRetryReview'
+          : waitingLabel ? 'approvalRecheckPaused' : 'approvalResumeProcessing', id);
+      }
+      var recovery = state.approvalRecovery;
+      if (!target && recovery?.canResume === true && recovery.sessionId === state.activeSessionId
+        && (recovery.unqueuedDraftIds?.includes(id) || recovery.unqueuedEditIds?.includes(id))) {
+        var resume = document.createElement('button');
+        resume.type = 'button';
+        resume.dataset.approvalResumeTargetId = id;
+        resume.textContent = t('approvalSubmitForReview', {
+          count: (recovery.unqueuedDraftIds?.length || 0) + (recovery.unqueuedEditIds?.length || 0)
+        });
+        resume.disabled = !state.startup?.sideEffectsReady;
+        resume.addEventListener('click', function() {
+          if (resume.disabled || recovery !== state.approvalRecovery) return;
+          resume.disabled = true;
+          vscode.postMessage({ type: 'resumeApprovalProcessing', sessionId: recovery.sessionId,
+            runId: recovery.runId, rootTaskId: recovery.rootTaskId, targetId: id });
+        });
+        actions.append(resume);
       }
     }
 
@@ -3570,6 +3607,7 @@ ${conversationsSessionListFragment.source}
         case 'result_unknown': return t('draftRunTitleResultUnknown');
         case 'superseded': return t('draftRunTitleSuperseded');
         case 'blocked': return t('draftRunTitleBlocked');
+        case 'awaiting_submission': return t('draftRunTitleAwaitingSubmission');
         case 'no_changes': return t('draftRunTitleNoChanges');
         case 'approved':
         case 'running': return t('draftRunTitleRunning');
@@ -3652,6 +3690,7 @@ ${conversationsSessionListFragment.source}
         case 'dependency_blocked': return t('draftRunStatusDependencyBlocked');
         case 'waiting_prerequisite':
         case 'waiting_approval': return t('draftRunStatusNotExecuted');
+        case 'awaiting_submission':
         case 'not_dispatched': return t('draftRunStatusNotExecuted');
         case 'spawn_failed': return t('draftRunStatusSpawnFailed');
         case 'result_unknown': return t('draftRunStatusResultUnknown');
@@ -4057,8 +4096,8 @@ ${conversationsSessionListFragment.source}
       if (recoverable && manual.canResume === true && manual.targetId) {
         appendApprovalResumeAction(actions, 'approvalRecheckPaused', manual.targetId);
       }
-      if (waiting && manual.canDecide === true) {
-        appendManualApprovalButton(actions, manual, 'approve', authorizationTargets.length ? 'approvalAuthorizeAndApproveOnce' : 'approvalConfirmOnce');
+      if (waiting && manual.canDecide === true && manual.canRetry !== true) {
+        appendManualApprovalButton(actions, manual, 'approve', 'approvalAuthorizeForReview');
         appendManualApprovalButton(actions, manual, 'reject', 'approvalCancelAction');
       }
       if (waiting && manual.canRetry === true) appendManualApprovalButton(actions, manual, 'retry', 'approvalRetryReview');

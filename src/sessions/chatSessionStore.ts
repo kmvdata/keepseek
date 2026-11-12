@@ -1,7 +1,8 @@
 import { normalizeProviderReplay } from './providerReplayNormalization';
 import { normalizePendingHistoryTruncation } from './historyTruncation';
 import { normalizeManualApproval, normalizeManualApprovals } from '../approvals/manualApproval';
-import { normalizeApprovalAttemptFailures, normalizeApprovalReviewAttempts, normalizeApprovalReviewState } from '../approvals/approvalReviewTypes';
+import { APPROVAL_POLICY_VERSION, MAX_APPROVAL_TARGETS, normalizeApprovalAttemptFailures, normalizeApprovalExecutionIsolation,
+  normalizeApprovalReviewAttempts, normalizeApprovalReviewState, normalizeBusinessAuthorization } from '../approvals/approvalReviewTypes';
 import { normalizeUserTaskBudgets } from './userTaskBudget';
 import { normalizeApprovalProcessing } from '../approvals/approvalProcessing';
 import { normalizeUserTask } from './userTask';
@@ -1504,12 +1505,15 @@ function normalizeRunDetails(value: unknown, restoring = false): ChatMessage['ru
           actionKind: review.actionKind as import('../approvals/approvalReviewTypes').ApprovalActionKind,
           policyVersion: normalizeNonNegativeInteger(review.policyVersion),
           approvalMode: (review.approvalMode === 'delegate' ? review.approvalMode : undefined) as import('../approvals/approvalReviewTypes').ApprovalReviewDisplay['approvalMode'],
-          osIsolation: review.osIsolation === 'none' ? 'none' as const : undefined,
+          osIsolation: normalizeApprovalExecutionIsolation(review.osIsolation),
+          businessAuthorization: normalizeBusinessAuthorization(review.businessAuthorization),
+          authorizationPending: review.authorizationPending === true ? true as const : undefined,
           projectApproval: review.projectApproval === true && typeof review.policyVersion === 'number'
             && Number.isInteger(review.policyVersion) && review.policyVersion >= 7
             && review.approvalSource === 'auto_approval_review' && review.decision === 'approve' && review.reviewState === undefined
             && typeof review.reviewerModelId === 'string' && review.reviewerModelId.length > 0
-            && (review.risk === 'low' || review.risk === 'medium') ? true as const : undefined,
+            && (review.risk === 'low' || review.risk === 'medium' || review.risk === 'high'
+              && review.policyVersion === APPROVAL_POLICY_VERSION && normalizeBusinessAuthorization(review.businessAuthorization)) ? true as const : undefined,
           approvalSource: review.approvalSource as import('../approvals/approvalReviewTypes').ApprovalReviewSource,
           reviewerSourceId: typeof review.reviewerSourceId === 'string' ? review.reviewerSourceId : '',
           reviewerModelId: typeof review.reviewerModelId === 'string' ? review.reviewerModelId : '',
@@ -1522,7 +1526,7 @@ function normalizeRunDetails(value: unknown, restoring = false): ChatMessage['ru
           risk: (review.risk === 'low' || review.risk === 'medium' || review.risk === 'critical' ? review.risk : 'high') as import('../approvals/approvalReviewTypes').ApprovalReviewRisk,
           rationale: typeof review.rationale === 'string' ? review.rationale.slice(0, 800) : '',
           affectedTargets: Array.isArray(review.affectedTargets)
-            ? review.affectedTargets.filter((target): target is string => typeof target === 'string').slice(0, 12).map(target => target.slice(0, 300)) : undefined,
+            ? review.affectedTargets.filter((target): target is string => typeof target === 'string').slice(0, MAX_APPROVAL_TARGETS).map(target => target.slice(0, 300)) : undefined,
           saferAlternative: typeof review.saferAlternative === 'string' ? review.saferAlternative.slice(0, 1200) : undefined,
           createdAt: normalizeSessionTimestamp(review.createdAt, new Date().toISOString()),
           priorReviewId: typeof review.priorReviewId === 'string' ? review.priorReviewId : undefined,

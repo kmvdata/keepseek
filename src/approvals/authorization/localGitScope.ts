@@ -8,7 +8,7 @@ import { canonicalPath, isPathInside, joinUnresolvedPath } from './pathScope';
 import { isGitProjectSkillPath, isProtectedOperationPath } from './protectedTargets';
 import { redactSensitiveReviewText } from '../approvalPolicy';
 
-import type { GitRemoteCommand } from './commandSemantics';
+import { isGitRemoteAlias, type GitRemoteCommand } from './commandSemantics';
 import { inspectGitRemoteScope, type GitRemoteScope } from './gitRemoteScope';
 
 const readGit = promisify(execFile);
@@ -46,6 +46,7 @@ export async function inspectLocalGitScope(input: {
   env: NodeJS.ProcessEnv;
   noOptionalLocks?: boolean;
   noIndexRefresh?: boolean;
+  includeLinkedWorktreeRefs?: boolean;
   commitAll?: boolean;
   addPathspecs?: readonly string[];
   addTracksOnly?: boolean;
@@ -54,6 +55,7 @@ export async function inspectLocalGitScope(input: {
   ambiguousRevisionOperands?: readonly string[];
   remote?: GitRemoteCommand;
   remoteMetadataOnly?: boolean;
+  remoteTargetOnly?: boolean;
   refMutation?: { name: string; action: 'create' | 'delete' | 'force' };
   tagSnapshotRef?: string;
   signal?: AbortSignal;
@@ -86,6 +88,14 @@ export async function inspectLocalGitScope(input: {
       const target = pointer && await realpath(path.resolve(repository, pointer)).catch(() => undefined);
       return { reason: 'Git uses redirected metadata or a linked worktree. / Git 使用重定向元数据或链接工作树。',
         externalPath: target && !isPathInside(root, target) ? target : undefined };
+    }
+
+    if (input.includeLinkedWorktreeRefs) {
+      const worktrees = path.join(metadata, 'worktrees');
+      const linked = await inspectEntry(worktrees);
+      if (linked && (!linked.isDirectory() || (await readdir(worktrees)).length)) {
+        return { reason: 'Git --all can include linked worktree refs. / Git --all 可能纳入链接工作树的引用。' };
+      }
     }
 
     const entries = await Promise.all(metadataEntries.map(name => inspectEntry(path.join(metadata, name))));
@@ -256,21 +266,6 @@ export async function inspectLocalGitScope(input: {
       }
       referenceIdentity = entryIdentity(await inspectEntry(target));
     }
-    let pushRefSnapshot: string | undefined;
-    if (input.remote?.kind === 'push') {
-      for (const ref of input.remote.refs) {
-        const target = path.join(metadata, ref);
-        const loose = await inspectEntry(target);
-        const tracking = ref.startsWith('refs/heads/') ? path.join('refs', 'remotes', input.remote.remote, ref.slice('refs/heads/'.length)) : undefined;
-        if (await hasSymlinkBelow(metadata, target)
-          || (tracking && (await hasSymlinkBelow(metadata, path.join(metadata, tracking))
-            || await hasSymlinkBelow(metadata, path.join(metadata, 'logs', tracking)))) || (loose && (!loose.isFile() || loose.size > 4096
-          || !objectId.test((await readFile(target, 'utf8')).trim())))) {
-          return { reason: 'A local push ref uses unverified reference storage. / 待推送本地引用的存储无法核实。', hardBlocked: true };
-        }
-      }
-      pushRefSnapshot = await readSnapshot(['for-each-ref', '--format=%(refname)%00%(objectname)', '--', ...input.remote.refs]);
-    }
     const operationMarkers = committing
       ? await Promise.all(inProgressEntries.map(async name => entryIdentity(await inspectEntry(path.join(metadata, name)))))
       : [];
@@ -306,11 +301,24 @@ export async function inspectLocalGitScope(input: {
     let remote: GitRemoteScope | undefined;
     if (input.remote && !executableHook) {
       try { remote = await inspectGitRemoteScope({ command: input.remote, executable: input.executable, cwd, env: input.env,
-        config: configEntries, metadataOnly: input.remoteMetadataOnly }); }
+        config: configEntries, metadataOnly: input.remoteMetadataOnly, targetOnly: input.remoteTargetOnly }); }
       catch (error) {
         // execFile errors can embed configuration values. Only return our own diagnostics.
         return { reason: error instanceof Error && !('code' in error) ? error.message
           : 'Git could not resolve the configured destination. / Git 无法解析配置的目的地。', hardBlocked: true };
+      }
+    }
+    const push = remote?.command.kind === 'push' ? remote.command : undefined;
+    for (const ref of push?.refs ?? []) {
+      const target = path.join(metadata, ref);
+      const loose = await inspectEntry(target);
+      const tracking = push && isGitRemoteAlias(push.remote) && ref.startsWith('refs/heads/')
+        ? path.join('refs', 'remotes', push.remote, ref.slice('refs/heads/'.length)) : undefined;
+      if (await hasSymlinkBelow(metadata, target)
+        || (tracking && (await hasSymlinkBelow(metadata, path.join(metadata, tracking))
+          || await hasSymlinkBelow(metadata, path.join(metadata, 'logs', tracking)))) || (loose && (!loose.isFile() || loose.size > 4096
+        || !objectId.test((await readFile(target, 'utf8')).trim())))) {
+        return { reason: 'A local push ref uses unverified reference storage. / 待推送本地引用的存储无法核实。', hardBlocked: true };
       }
     }
     const directory = await stat(metadata);
@@ -328,7 +336,7 @@ export async function inspectLocalGitScope(input: {
     const fingerprint = createHash('sha256').update(JSON.stringify([
       repository, metadata, directory.dev, directory.ino, headText, headRefIdentity,
       entryIdentity(entries[1]), entryIdentity(entries[8]), stdout, hooksPath, hookIdentities,
-      operationMarkers, mutationStatus, workingTree, referenceIdentity, pushRefSnapshot, localRefs, remote
+      operationMarkers, mutationStatus, workingTree, referenceIdentity, localRefs, remote
     ])).digest('hex');
     if (scopeReason) return { reason: scopeReason, binding: fingerprint };
     if (executableHook) return {

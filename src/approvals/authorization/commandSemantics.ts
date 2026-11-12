@@ -57,7 +57,17 @@ export function isLocalGitRevisionRange(value: string): boolean {
 
 export type GitRemoteCommand =
   | { kind: 'query'; remote: string; namespace?: 'tags' | 'heads'; refs: string[] }
-  | { kind: 'push'; remote: string; refs: string[] };
+  | { kind: 'push'; remote: string; refs: string[]; currentBranch?: true; shortRef?: string; atomic?: true;
+      lease?: { ref: string; expected: string } };
+
+export function isGitRemoteAlias(value: string): boolean {
+  return /^[\w][\w.-]*$/u.test(value);
+}
+
+function isExplicitGitTransport(value: string): boolean {
+  return /^(?:https:\/\/|ssh:\/\/|[\w.-]+@[\w.-]+:|\/(?!\/)|[a-z]:[\\/])/iu.test(value)
+    && value.length <= 4096 && !/[\p{Cc}]/u.test(value);
+}
 
 export function isGitReleaseRef(ref: string): boolean {
   return /^refs\/(?:heads|tags)\/[\w][\w./-]*$/u.test(ref) && !ref.includes('..')
@@ -115,25 +125,41 @@ function parseGitRemote(subcommand: string, operands: string[]): GitRemoteComman
   const args = operands.slice();
   let namespace: 'tags' | 'heads' | undefined;
   let atomic = false;
+  let lease: { ref: string; expected: string } | undefined;
   if (subcommand === 'ls-remote') {
     if (args[0] === '--tags' || args[0] === '--heads') namespace = args.shift() === '--tags' ? 'tags' : 'heads';
   } else if (subcommand === 'push') {
-    if (args[0] === '--atomic') { atomic = true; args.shift(); }
+    while (args[0] && args[0] !== '--' && args[0].startsWith('-')) {
+      const option = args.shift()!;
+      if (option === '--atomic' && !atomic) { atomic = true; continue; }
+      const match = /^--force-with-lease=(refs\/heads\/[^:]+):([a-f0-9]{40}|[a-f0-9]{64})$/u.exec(option);
+      if (!match || lease || !isGitReleaseRef(match[1])) return undefined;
+      lease = { ref: match[1], expected: match[2] };
+    }
+    if (!args.length && !lease) return { kind: 'push', remote: '', refs: [], currentBranch: true, ...(atomic && { atomic: true }) };
   } else return undefined;
   if (args[0] === '--') args.shift();
   const remote = args.shift();
-  if (!remote || !/^[\w][\w.-]*$/u.test(remote)) return undefined;
+  if (!remote || !isGitRemoteAlias(remote) && !isExplicitGitTransport(remote)) return undefined;
   if (subcommand === 'ls-remote') {
     if ((!namespace && !args.length) || !args.every(ref => isGitReleaseRef(ref)
       && (!namespace || ref.startsWith('refs/' + namespace + '/')))) return undefined;
     return { kind: 'query', remote, namespace, refs: args };
   }
+  if (!args.length && !lease) return { kind: 'push', remote, refs: [], currentBranch: true, ...(atomic && { atomic: true }) };
   const refs = args.map(value => {
     const [source, target = source, ...extra] = value.split(':');
     return !extra.length && source === target && isGitReleaseRef(source) ? source : '';
   });
+  if (!lease && args.length === 1 && !refs[0]) {
+    const [source, target = source, ...extra] = args[0].split(':');
+    if (!extra.length && source === target && !source.startsWith('refs/') && isGitReleaseRef('refs/heads/' + source)) {
+      return { kind: 'push', remote, refs: [], shortRef: source, ...(atomic && { atomic: true }) };
+    }
+  }
   return refs.length > 0 && (refs.length === 1 || atomic) && refs.every(Boolean) && new Set(refs).size === refs.length
-    ? { kind: 'push', remote, refs } : undefined;
+    && (!lease || refs.length === 1 && refs[0] === lease.ref)
+    ? { kind: 'push', remote, refs, ...(atomic && { atomic: true }), ...(lease && { lease }) } : undefined;
 }
 
 export interface GitCommandReplan {
@@ -193,6 +219,8 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
     effects.add('arbitrary_code');
     reason('external_helper', value, 'This option can invoke an external program.', '该选项可能调用外部程序。');
   };
+  const isOutputArgument = (index: number) => /^--(?:output|out|dest|destination|target-dir|write-to)=/u.test(args[index])
+    || /^--(?:output|out|dest|destination|target-dir|write-to)$/u.test(args[index - 1] ?? '');
   const scriptArg = (index: number) => {
     const raw = args[index];
     const operand = raw.replace(/^--[\w-]+=/u, '')
@@ -205,9 +233,7 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
     // flags or expanding argv. Visible URLs and tilde paths are separate.
     const pathOperand = !operand.startsWith('-') && !isExplicitUri(operand) && !/^~[\\/]/u.test(operand)
       && (/[\\/]/u.test(operand) || operand.startsWith('.') || /\.[\p{L}\p{N}]{1,12}$/u.test(operand));
-    const output = /^--(?:output|out|dest|destination|target-dir|write-to)=/u.test(raw)
-      || /^--(?:output|out|dest|destination|target-dir|write-to)$/u.test(args[index - 1] ?? '');
-    arg(index, output && (pathOperand || /^file:|^~[\\/]/iu.test(operand)) ? 'write_path'
+    arg(index, isOutputArgument(index) && (pathOperand || /^file:|^~[\\/]/iu.test(operand)) ? 'write_path'
       : pathOperand ? 'read_path' : 'text', operand);
   };
 
@@ -235,6 +261,10 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
         if (token === '-c' || token === '--config-env') i = valueAfter(i, 'option_value');
         else arg(i, 'option_value');
         reason('git_configuration', token, 'Git configuration is overridden.', 'Git 配置被覆盖。');
+      } else if (token.startsWith('--exec-path=')) {
+        arg(i, 'read_path', token.slice('--exec-path='.length));
+        unsupported(token, i, '--exec-path');
+        helper('--exec-path');
       } else {
         arg(i, 'option'); unsupported(token, i);
         if (['-p', '--paginate'].includes(token) || token.startsWith('--exec-path')) helper(token);
@@ -273,8 +303,9 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
     const staging = subcommand === 'add';
     const committing = subcommand === 'commit';
     const status = subcommand === 'status';
+    const listFiles = subcommand === 'ls-files';
     const localQuery = ['merge-base', 'rev-parse', 'rev-list'].includes(subcommand);
-    if (!viewing && !staging && !committing && !status && !listingTags && !boundedRef && !result.gitRemote && !localQuery) unsupported(subcommand ?? 'missing Git subcommand', subcommand ? subcommandIndex : undefined);
+    if (!viewing && !staging && !committing && !status && !listFiles && !listingTags && !boundedRef && !result.gitRemote && !localQuery) unsupported(subcommand ?? 'missing Git subcommand', subcommand ? subcommandIndex : undefined);
     let query: GitLocalQuery | undefined;
     if (subcommand === 'rev-parse') {
       const verify = operands[0] === '--verify';
@@ -378,9 +409,11 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
             arg(i, 'option');
           }
         }
-      } else if (staging || status) {
-        if (!paths && (staging ? ['-A', '--all', '-u', '--update', '--ignore-removal', '--no-all', '-v', '--verbose'].includes(token)
-            : /^(?:-s|-b|-sb|-bs|-z|--short|--branch|--porcelain(?:=v[12])?|--long|--no-renames|--untracked-files(?:=(?:no|normal|all))?|-u(?:no|normal|all)?)$/u.test(token))) {
+      } else if (staging || status || listFiles) {
+        const knownOption = staging ? ['-A', '--all', '-u', '--update', '--ignore-removal', '--no-all', '-v', '--verbose'].includes(token)
+          : listFiles ? ['-s', '--stage', '-z', '--error-unmatch'].includes(token)
+            : /^(?:-s|-b|-sb|-bs|-z|--short|--branch|--porcelain(?:=v[12])?|--long|--no-renames|--untracked-files(?:=(?:no|normal|all))?|-u(?:no|normal|all)?)$/u.test(token);
+        if (!paths && knownOption) {
           arg(i, 'option');
         } else if (paths || !token.startsWith('-')) {
           arg(i, 'read_path');
@@ -421,7 +454,7 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
             result.reasons.at(-1)!.invalidArgvKind = 'option_value';
           }
         }
-      } else if (subcommand === 'log' && token === '--pickaxe-regex') {
+      } else if (subcommand === 'log' && ['--pickaxe-regex', '--all'].includes(token)) {
         arg(i, 'option');
       } else if (['-n', '--max-count', '-U', '--unified'].includes(token)) {
         i = valueAfter(i, 'option_value');
@@ -445,7 +478,7 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
         // A bare diff operand may be a revision or a file. Git can
         // implicitly use --no-index when an operand is outside the worktree.
         const obviousRevision = isLocalGitRevisionRange(token) || isLocalGitRevision(token)
-          && (subcommand === 'log' && !token.includes('/') || /^(?:HEAD|[a-f0-9]{4,64}|refs\/)/u.test(token) || /\^\{(?:tree|commit|tag|object)\}$/u.test(token));
+          && (subcommand === 'log' || /^(?:HEAD|[a-f0-9]{4,64}|refs\/)/u.test(token) || /\^\{(?:tree|commit|tag|object)\}$/u.test(token));
         arg(i, noIndex || !obviousRevision ? 'read_path' : 'revision');
       }
     }
@@ -480,8 +513,8 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
         kind: 'log', revisions: result.arguments.filter(item => item.role === 'revision').map(item => item.value)
       };
     }
-    // This exact display-only override has an equivalent for captured stdout.
-    // Keep the original config override outside the automatic approval grammar.
+    // Keep the equivalent for ask-mode corrections and historical diagnostics.
+    // Delegate can review the exact display-only override after repository checks.
     if (args.length === 4 && args[0] === '-c' && args[1] === 'core.pager=cat'
       && args[2] === 'status' && args[3] === '--porcelain=v1' && spec.env.length === 0) {
       result.gitReplan = {
@@ -600,8 +633,19 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
       // This fallback only identifies explicit path-shaped operands. It never
       // claims unknown arguments/effects are fully covered.
       const operand = value.replace(/^--[\w-]+=/u, '').replace(/^-[Cof](?=\/|\.\.?[\\/]|[A-Za-z]:[\\/])/u, '');
-      arg(i, /^(?:https?|ssh|git):\/\//u.test(operand) ? 'text'
-        : /[/\\]/u.test(operand) || !value.startsWith('-') ? (writers.includes(program) ? 'write_path' : 'read_path') : 'option', operand);
+      const remoteTarget = isExternalNetworkTarget(operand);
+      if (remoteTarget || /^(?:https?|ssh|git):\/\//u.test(operand)) {
+        if (remoteTarget) {
+          effects.add('network');
+          (result.networkTargets ??= []).push(operand);
+        }
+        arg(i, 'text', operand);
+      } else {
+        const output = isOutputArgument(i) || program === 'curl'
+          && (args[i - 1] === '-o' || /^-o(?:\/|\.\.?[\\/]|[A-Za-z]:[\\/])/u.test(value));
+        arg(i, output ? 'write_path' : /[/\\]/u.test(operand) || !value.startsWith('-')
+          ? (writers.includes(program) ? 'write_path' : 'read_path') : 'option', operand);
+      }
     });
     if (!result.projectExecutable) reason('unsupported_program', program, 'No bounded argument grammar is available for this program.', '该程序没有受支持的有限参数规则。');
   }

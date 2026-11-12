@@ -1,4 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { realpathSync } from 'node:fs';
+import * as path from 'node:path';
 import type { GitRemoteCommand } from '../approvals/authorization/commandSemantics';
 import { parseGitRefOutput, gitTransportError } from './gitReleaseEvidence';
 import { createControlledEnvironment } from './executionEnvironment';
@@ -8,6 +10,8 @@ import * as vscode from 'vscode';
 import type { DraftRun, ExecutionPermit } from '../shared/types';
 import { analyzeCommand } from '../approvals/authorization/commandSemantics';
 import { interpretGitQueryResult, type GitQueryResult } from './gitQueryResult';
+import { prepareProjectExecution, type PreparedProjectExecution, type ProjectExecutionBoundary } from './projectExecutionIsolation';
+import { prepareGitTransportEnvironment } from './gitTransportEnvironment';
 
 const RESTRICTED_OUTPUT_LIMIT_BYTES = 8_192;
 const EXIT_STREAM_CLOSE_GRACE_MS = 1_500;
@@ -36,6 +40,11 @@ export interface VerifiedDraftRunLaunch {
   cwd: string;
   env?: NodeJS.ProcessEnv;
   gitRemote?: GitRemoteCommand;
+  /** Only a verified Git transport may supply its independently bound argv. */
+  args?: readonly string[];
+  gitObjectDirectory?: string;
+  gitObjectIdentity?: string;
+  projectExecution?: ProjectExecutionBoundary;
   /** Remote transport approval binds the repository, endpoint and refs. */
   fingerprint?: string;
 }
@@ -47,6 +56,7 @@ export interface DraftRunExecutorAdapter {
     verifiedLaunch?: VerifiedDraftRunLaunch;
     restrictedLaunch?: RestrictedPythonSyntaxLaunch;
     signal?: AbortSignal;
+    assertBeforeLaunch?: () => void | Promise<void>;
     onOutput: (chunk: DraftRunOutputChunk) => void;
   }): Promise<DraftRunExecutionOutcome>;
   cancel(draftRunId: string): boolean;
@@ -73,6 +83,7 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
   private readonly sessionTerminals = new Map<string, SessionTerminal>();
   private readonly runTerminalSessions = new Map<string, string>();
   private readonly consumedPermitNonces = new Map<string, number>();
+  private preparing?: { id: string; controller: AbortController };
 
   public async execute(input: {
     draftRun: DraftRun;
@@ -80,6 +91,7 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
     verifiedLaunch?: VerifiedDraftRunLaunch;
     restrictedLaunch?: RestrictedPythonSyntaxLaunch;
     signal?: AbortSignal;
+    assertBeforeLaunch?: () => void | Promise<void>;
     onOutput: (chunk: DraftRunOutputChunk) => void;
   }): Promise<DraftRunExecutionOutcome> {
     validatePermit(input.draftRun, input.permit);
@@ -99,11 +111,54 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
       throw new Error('DraftRun execution permit was already consumed.');
     }
     this.consumedPermitNonces.set(input.permit.nonce, input.permit.expiresAt);
-    if (this.running.size > 0 || this.running.has(input.draftRun.id)) {
+    if (this.running.size > 0 || this.preparing) {
       throw new Error('Another DraftRun is already running.');
     }
     if (input.signal?.aborted) {
       return { started: false, phase: 'not_dispatched', timedOut: false, cancelled: true };
+    }
+
+    const boundary = input.verifiedLaunch?.projectExecution;
+    if (!boundary && !restricted && !gitRemote && input.permit.source === 'delegated_approver') {
+      return { started: false, phase: 'not_dispatched', timedOut: false, cancelled: false,
+        error: 'The approved execution boundary is missing. / 缺少已审批的执行边界。' };
+    }
+    const preparation = new AbortController();
+    const abortPreparation = () => preparation.abort();
+    input.signal?.addEventListener('abort', abortPreparation, { once: true });
+    this.preparing = { id: input.draftRun.id, controller: preparation };
+    let launch: PreparedProjectExecution = {
+      executable: restricted?.executable ?? input.verifiedLaunch?.executable ?? input.draftRun.spec.executable,
+      args: gitRemote ? input.verifiedLaunch?.args ?? input.draftRun.spec.args : input.draftRun.spec.args,
+      cwd: restricted?.cwd ?? input.verifiedLaunch?.cwd ?? vscode.Uri.parse(input.draftRun.spec.cwdUri).fsPath,
+      env: restricted ? {} : input.verifiedLaunch?.env ?? createControlledEnvironment(input.draftRun.spec.env)
+    };
+    try {
+      if (input.signal?.aborted) abortPreparation();
+      if (gitRemote) {
+        const verified = input.verifiedLaunch;
+        if (!verified?.args || !verified.env) throw new Error('The exact Git transport plan is missing. / 缺少精确的 Git 传输计划。');
+        const transport = await prepareGitTransportEnvironment({ gitRemote, args: verified.args, env: verified.env,
+          gitObjectDirectory: verified.gitObjectDirectory, gitObjectIdentity: verified.gitObjectIdentity });
+        launch = { ...launch, cwd: transport.cwd, env: transport.env, cleanup: transport.dispose };
+      } else if (boundary && !restricted) {
+        launch = await prepareProjectExecution(boundary, launch.executable, launch.args, launch.env, preparation.signal,
+          input.draftRun.spec.timeoutMs);
+      }
+      preparation.signal.throwIfAborted();
+      const beforeLaunch = input.assertBeforeLaunch?.();
+      if (beforeLaunch) await beforeLaunch;
+      preparation.signal.throwIfAborted();
+      validatePermit(input.draftRun, input.permit);
+    } catch (error) {
+      let reason = error instanceof Error ? error.message : String(error);
+      try { await launch.cleanup?.(); }
+      catch (cleanupError) { reason = cleanupError instanceof Error ? cleanupError.message : String(cleanupError); }
+      return { started: false, phase: 'not_dispatched', timedOut: false, cancelled: preparation.signal.aborted,
+        error: preparation.signal.aborted ? undefined : reason };
+    } finally {
+      input.signal?.removeEventListener('abort', abortPreparation);
+      this.preparing = undefined;
     }
 
     const { pty, terminal } = this.getOrCreateSessionTerminal(input.draftRun.sessionId);
@@ -111,14 +166,23 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
     this.runTerminalSessions.set(input.draftRun.id, input.draftRun.sessionId);
     pty.write(formatTerminalHeader(input.draftRun));
 
-    const child = spawn(restricted?.executable ?? input.verifiedLaunch?.executable ?? input.draftRun.spec.executable, input.draftRun.spec.args, {
-      cwd: restricted?.cwd ?? input.verifiedLaunch?.cwd ?? vscode.Uri.parse(input.draftRun.spec.cwdUri).fsPath,
-      env: restricted ? {} : input.verifiedLaunch?.env ?? createControlledEnvironment(input.draftRun.spec.env),
-      shell: false,
-      windowsHide: true,
-      detached: process.platform !== 'win32',
-      stdio: [restricted ? 'pipe' : 'ignore', 'pipe', 'pipe']
-    });
+    let child: ChildProcess;
+    try {
+      child = spawn(launch.executable, launch.args, {
+        cwd: launch.cwd,
+        env: launch.env,
+        shell: false,
+        windowsHide: true,
+        detached: process.platform !== 'win32',
+        stdio: [restricted ? 'pipe' : 'ignore', 'pipe', 'pipe', ...(launch.extraFds ?? [])]
+      });
+    } catch (error) {
+      let reason = error instanceof Error ? error.message : String(error);
+      try { await launch.cleanup?.(); }
+      catch (cleanupError) { reason = cleanupError instanceof Error ? cleanupError.message : String(cleanupError); }
+      pty.finishRun();
+      return { started: false, phase: 'spawn_failed', timedOut: false, cancelled: false, error: reason };
+    }
     const running: RunningProcess = {
       child,
       terminal,
@@ -143,6 +207,7 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
       let queryStdout = '';
       let queryStderr = '';
       let queryOutputTruncated = false;
+      let isolationStderr = '';
       const stdoutDecoder = new StringDecoder('utf8');
       const stderrDecoder = new StringDecoder('utf8');
       const emit = (stream: DraftRunOutputChunk['stream'], text: string) => {
@@ -180,6 +245,9 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
           return;
         }
         const text = decoder.write(chunk);
+        if (stream === 'stderr' && boundary && boundary.kind !== 'host' && isolationStderr.length < 4_096) {
+          isolationStderr = (isolationStderr + text).slice(0, 4_096);
+        }
         if (gitLocalQuery) {
           // Query facts must be interpreted from complete bounded stdout, never
           // from the store's display head/tail or from a model's claim.
@@ -202,6 +270,10 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
         if (exitCloseTimer) clearTimeout(exitCloseTimer);
         if (terminationSettleTimer) clearTimeout(terminationSettleTimer);
         input.signal?.removeEventListener('abort', abortExecution);
+        const possibleStartupFailure = started && isolationMayHaveFailedBeforeDispatch(boundary, outcome, isolationStderr);
+        if (possibleStartupFailure && !outcome.cancelled && !outcome.timedOut) {
+          outcome.error ??= 'The isolation launcher reported an error before command dispatch could be verified. / 隔离启动器报告错误，无法核实命令是否已派发。';
+        }
         if (gitRemote) {
           if (outcome.exitCode === 0 && !outcome.error && gitRemote.kind === 'query') {
             try {
@@ -231,12 +303,17 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
               `Git query ${outcome.queryResult.errorCode}. / Git 查询失败：${outcome.queryResult.errorCode}。`;
           }
         }
-        this.running.delete(input.draftRun.id);
-        pty.write(`\r\n[KeepSeek DraftRun ${formatOutcomeLabel(outcome)}]\r\n`);
-        pty.finishRun();
-        resolve({ ...outcome, started: started ? true : spawnFailed ? false : undefined,
-          phase: spawnFailed ? 'spawn_failed' : outcome.exitCode !== undefined || outcome.signal
-            ? 'exited' : 'result_unknown' });
+        const complete = (cleanupError?: unknown) => {
+          if (cleanupError) outcome.error = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+          this.running.delete(input.draftRun.id);
+          pty.write(`\r\n[KeepSeek DraftRun ${formatOutcomeLabel(outcome)}]\r\n`);
+          pty.finishRun();
+          resolve({ ...outcome, started: started && !possibleStartupFailure ? true : spawnFailed ? false : undefined,
+            phase: cleanupError || possibleStartupFailure ? 'result_unknown' : spawnFailed ? 'spawn_failed' : outcome.exitCode !== undefined || outcome.signal
+              ? 'exited' : 'result_unknown' });
+        };
+        if (launch.cleanup) void launch.cleanup().then(() => complete(), complete);
+        else complete();
       };
       const currentOutcome = (error?: string): DraftRunExecutionOutcome => ({
         exitCode,
@@ -251,6 +328,7 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
       };
       const terminateAndBoundSettlement = () => {
         terminateProcessTree(child);
+        if (boundary?.kind === 'container') void launch.cleanup?.().catch(() => undefined);
         if (terminationSettleTimer) {
           return;
         }
@@ -318,6 +396,10 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
   }
 
   public cancel(draftRunId: string): boolean {
+    if (this.preparing?.id === draftRunId && !this.preparing.controller.signal.aborted) {
+      this.preparing.controller.abort();
+      return true;
+    }
     const running = this.running.get(draftRunId);
     if (!running || running.cancelRequested) {
       return false;
@@ -342,9 +424,11 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
   }
 
   public dispose(): void {
+    this.preparing?.controller.abort();
     for (const running of this.running.values()) {
       running.cancelRequested = true;
-      terminateProcessTree(running.child);
+      if (running.terminateAndSettle) running.terminateAndSettle();
+      else terminateProcessTree(running.child);
     }
     for (const shared of this.sessionTerminals.values()) {
       shared.terminal.dispose();
@@ -376,6 +460,18 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
     const created = { terminal, pty };
     this.sessionTerminals.set(sessionId, created);
     return created;
+  }
+}
+
+function isolationMayHaveFailedBeforeDispatch(boundary: ProjectExecutionBoundary | undefined,
+  outcome: DraftRunExecutionOutcome, stderr: string): boolean {
+  if (!boundary || boundary.kind === 'host' || outcome.exitCode === 0) return false;
+  if (outcome.exitCode === undefined) return true;
+  switch (boundary.kind) {
+    case 'seatbelt': return /^sandbox-exec:/mu.test(stderr);
+    case 'bubblewrap': return /^bwrap:/mu.test(stderr);
+    case 'container': return [125, 126, 127].includes(outcome.exitCode)
+      || /^(?:Error response from daemon:|Error: failed to start containers:|timeout: failed to run command|\/usr\/bin\/env:)/mu.test(stderr);
   }
 }
 
@@ -452,13 +548,33 @@ export function terminateProcessTree(child: ChildProcess): void {
   if (!child.pid || child.killed) {
     return;
   }
+  const stopChild = () => {
+    try { child.kill('SIGTERM'); }
+    catch { /* Process already exited or is no longer owned. */ }
+  };
   try {
     if (process.platform === 'win32') {
-      const killer = spawn('taskkill.exe', ['/pid', String(child.pid), '/t', '/f'], {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
+      if (!systemRoot || !/^[A-Za-z]:[\\/]/u.test(systemRoot)) {
+        stopChild();
+        return;
+      }
+      const system32 = realpathSync.native(path.win32.join(systemRoot, 'System32'));
+      const taskkill = realpathSync.native(path.win32.join(system32, 'taskkill.exe'));
+      if (path.win32.dirname(taskkill).toLowerCase() !== system32.toLowerCase()) {
+        stopChild();
+        return;
+      }
+      const killer = spawn(taskkill, ['/pid', String(child.pid), '/t', '/f'], {
+        cwd: system32,
+        env: { SystemRoot: systemRoot, WINDIR: systemRoot },
         shell: false,
         windowsHide: true,
         stdio: 'ignore'
       });
+      killer.once('error', stopChild);
+      killer.once('exit', code => { if (code !== 0) stopChild(); });
       killer.unref();
     } else {
       process.kill(-child.pid, 'SIGTERM');
@@ -471,7 +587,7 @@ export function terminateProcessTree(child: ChildProcess): void {
       }, 1_500).unref();
     }
   } catch {
-    child.kill('SIGTERM');
+    stopChild();
   }
 }
 

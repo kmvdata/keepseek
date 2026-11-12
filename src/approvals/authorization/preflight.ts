@@ -22,7 +22,7 @@ export function draftRunIdentity(run: DraftRun): OperationIdentity {
 export async function inspectAutomaticRunAuthorization(run: DraftRun, grants: ExactOperationGrants, mode?: ApprovalMode,
   remoteScope: CommandRemoteInspection = false, selectedProjectUri?: string) {
   checkDraftRunApprovalIdentity(run);
-  const scope = await inspectDraftRunScope(run, remoteScope, undefined, mode === 'delegate', selectedProjectUri);
+  const scope = await inspectDraftRunScope(run, remoteScope, undefined, mode === 'delegate', selectedProjectUri, mode);
   return evaluateAutomaticRunAuthorization(run, grants, mode, remoteScope, scope);
 }
 
@@ -78,23 +78,36 @@ function inspectDelegatedRunEligibility(run: DraftRun, scope: CommandScope, sema
   const git = semantics.program === 'git' && semantics.arguments.find(argument => argument.role === 'subcommand');
   if (git && ['push', 'ls-remote'].includes(git.value) && !semantics.gitRemote) {
     return { code: 'hard_blocked',
-      reason: 'Automatic Git release requires a bounded ref query or an explicit, non-forced push. / 自动 Git 发布要求范围明确的引用查询，或显式且非强制的引用推送。' };
+      reason: 'Controlled Git transport needs one verified destination and bounded refs. For a rewrite, provide a single explicit --force-with-lease=<ref>:<expected>. / 受控 Git 传输需要唯一可核验的目的地和明确的引用范围。改写时请为单个分支提供 --force-with-lease=<ref>:<expected>。' };
   }
   const packageGlobal = !semantics.projectPackageScript && !semantics.projectScript && /^(?:npm|pnpm|yarn|bun)$/u.test(semantics.program)
     && run.spec.args.some(arg => /^(?:-[a-z]*g[a-z]*|--global|--location=global)(?:=|$)/u.test(arg) || arg === 'global');
-  const pagerCorrection = semantics.gitReplan?.code === 'git_status_pager_override';
-  const gitUnbounded = git && !pagerCorrection && (scope.diagnostics.some(item =>
-    ['git_configuration', 'external_helper', 'unsupported_pathspec'].includes(item.code)
-    || (item.code === 'unsupported_option' && !/^(?:--graph|--all|--first-parent|--no-merges|--merges)$/u.test(item.detail)))
-    || (semantics.effects.includes('git_mutation') && !semantics.gitReplan
-      && scope.diagnostics.some(item => item.code !== 'git_ref_mutation')));
-  if (packageGlobal || gitUnbounded) return { code: 'hard_blocked',
-    reason: reason || 'The command would use an unverified repository, configuration or system target. / 命令涉及未经核实的仓库、配置或系统目标。' };
-  const gitUnverified = git && (!scope.verifiedLauncher || !scope.gitCwd) && !pagerCorrection;
-  const hasIncompleteLaunch = scope.diagnostics.some(item => item.code === 'missing_option_value' && !semantics.gitReplan)
-    || run.spec.env.some(({ name }) => !/^(?:LANG|LC_ALL|LC_CTYPE|TERM|COLORTERM|CI|NO_COLOR|NODE_ENV|PYTHONDONTWRITEBYTECODE)$/u.test(name));
-  if (gitUnverified || hasIncompleteLaunch) return { code: 'insufficient_launch_evidence',
-    reason: reason || 'The exact launch cannot be verified. / 无法核实实际启动配置。' };
+  if (packageGlobal) return { code: 'hard_blocked',
+    reason: 'A global package installation is outside the project. / 全局软件包安装超出当前工程范围。' };
+  if (semantics.gitRemote) {
+    if (!scope.verifiedLauncher || !scope.gitCwd || !scope.gitRemote || scope.uncertain) return { code: 'insufficient_launch_evidence',
+      reason: reason || 'The exact Git transport could not be verified. / 无法核实 Git 实际传输范围。' };
+    return undefined;
+  }
+  if (!run.spec.restricted && !scope.projectExecution) return { code: 'insufficient_launch_evidence',
+    reason: scope.projectExecutionUnavailable ?? 'The project execution boundary is missing. / 缺少工程执行边界。' };
+  if (scope.projectExecution?.kind === 'host' && git) {
+    const exactStatusPager = semantics.gitReplan?.code === 'git_status_pager_override';
+    if (scope.diagnostics.some(item => ['external_helper', 'unsupported_pathspec'].includes(item.code)
+      || item.code === 'git_configuration' && !exactStatusPager)) {
+      return { code: 'hard_blocked', reason: reason
+        || 'This Git command needs an isolated execution profile. / 此 Git 命令需要隔离执行环境。' };
+    }
+    const readsRepository = semantics.gitLocalQuery || ['show', 'diff', 'log', 'status', 'ls-files'].includes(git.value);
+    const noIndex = git.value === 'diff' && semantics.arguments.some(item => item.role === 'option' && item.value === '--no-index');
+    if (readsRepository && !noIndex && !scope.gitCwd) return { code: 'insufficient_launch_evidence', reason: reason
+      || 'The exact Git repository could not be verified. / 无法核实 Git 仓库。' };
+  }
+  if (scope.projectExecution && scope.projectExecution.kind !== 'host'
+    && (needsExactNetworkGrant(run, semantics, false) || semantics.effects.includes('package_install') && semantics.networkTargets?.length)) {
+    return { code: 'insufficient_launch_evidence',
+      reason: 'This project command has no network access in its execution profile. Use a verified remote operation for publishing. / 当前执行环境中的工程命令没有网络权限。发布操作请使用可核实的远端操作。' };
+  }
   return undefined;
 }
 

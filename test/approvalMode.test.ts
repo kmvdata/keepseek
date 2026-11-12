@@ -41,8 +41,8 @@ test('draft receipt and host authorization text describe the actual mode without
     assert.match(scope, /file:\/\/\/outside\/result.txt/u);
     assert.notEqual(localize(lang, 'approvalReviewerUnavailable'), 'approvalReviewerUnavailable');
     const delegate = WEBVIEW_TRANSLATIONS[lang].approvalDelegateDescription;
-    assert.match(delegate, lang === 'en' ? /project edits and run scripts after review/u : /项目.*经审查后自动执行/u);
-    assert.match(WEBVIEW_TRANSLATIONS[lang].approvalDelegateProcessHelp, lang === 'en' ? /no OS sandbox/u : /无操作系统沙箱/u);
+    assert.match(delegate, lang === 'en' ? /Independent review of project operations/u : /独立模型审批工程操作/u);
+    assert.match(WEBVIEW_TRANSLATIONS[lang].approvalDelegateProcessHelp, lang === 'en' ? /isolation by default/u : /默认在隔离环境/u);
     assert.ok(delegate.length <= WEBVIEW_TRANSLATIONS[lang].approvalAskDescription.length * 1.2);
   }
 });
@@ -676,6 +676,7 @@ function workflowFixture(options: {
   workspacePath?: string;
   runStore?: DraftRunStore;
 } = {}) {
+  let workspacePath = options.workspacePath ?? os.tmpdir();
   const queue = new DelegatedApprovalQueue();
   const userTask = { version: 1, id: 'r', originMessageId: 'u', reason: 'user' };
   const session = { id: 's', approvalMode: options.mode ?? 'delegate', approvalProcessing: undefined as ChatSession['approvalProcessing'], messages: [{
@@ -726,13 +727,13 @@ function workflowFixture(options: {
         baseBytes: Buffer.from('preserve these bytes\n'), reason: `delete ${id}`
       })
     : createFullTextDraftEdit({
-        id, uri: vscode.Uri.file(path.join(os.tmpdir(), id)).toString(), label: id, action: 'create',
+        id, uri: vscode.Uri.file(path.join(workspacePath, id)).toString(), label: id, action: 'create',
         content: `content:${id}\n`, reason: `create ${id}`
       });
   const draftRun = (id: string) => {
     const spec = {
       executable: 'node', args: ['--version'], reason: `run ${id}`, externalCwd: false,
-      cwdUri: vscode.Uri.file(os.tmpdir()).toString(), cwdLabel: os.tmpdir(), env: [], timeoutMs: 20_000
+      cwdUri: vscode.Uri.file(workspacePath).toString(), cwdLabel: workspacePath, env: [], timeoutMs: 20_000
     };
     return {
     id, sessionId: 's', agentRunId: 'r', messageId: 'a', status: 'pending', executionStarted: false, executionPhase: 'not_dispatched', specHash: hashDraftRunSpec(spec), spec,
@@ -806,9 +807,10 @@ function workflowFixture(options: {
     resumeApprovalProcessing(): Promise<void>; sendPrompt(prompt: string): Promise<unknown>;
     markAskDraftRunCorrections(chat: typeof session, segmentId: string, rootTaskId: string, ids: string[]): Promise<void> };
   fixture.run = async () => {
+    if (!options.workspacePath) workspacePath = await mkdtemp(path.join(os.tmpdir(), 'keepseek-approval-workflow-'));
     vscode.workspace.isTrusted = true;
     const priorFolders = vscode.workspace.workspaceFolders;
-    vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file(options.workspacePath ?? os.tmpdir()), name: 'test' }];
+    vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file(workspacePath), name: 'test' }];
     queue.enqueue({
       sessionId: 's',
       runId: 'r',
@@ -824,7 +826,10 @@ function workflowFixture(options: {
       }] : undefined
     });
     try { await provider.executeDelegatedApprovals(queue.take('s')!); }
-    finally { vscode.workspace.workspaceFolders = priorFolders; }
+    finally {
+      vscode.workspace.workspaceFolders = priorFolders;
+      if (!options.workspacePath) await rm(workspacePath, { recursive: true, force: true });
+    }
   };
   return Object.assign(fixture, { provider });
 }
