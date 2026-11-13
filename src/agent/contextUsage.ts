@@ -319,6 +319,10 @@ export function calibrateContextUsageEstimate(
   });
 }
 
+/**
+ * 会话“已用”口径：只统计当前会进入下一次请求的上下文（上下文前缀、未摘要历史、待发送输入
+ * 与本轮工具调用/结果/推理），不含窗口外的输出与安全预留。
+ */
 export function toSessionContextUsageEstimate(usage: ContextUsageEstimate): ContextUsageEstimate {
   const breakdown = normalizeBreakdown({
     ...usage.breakdown,
@@ -335,46 +339,33 @@ export function toSessionContextUsageEstimate(usage: ContextUsageEstimate): Cont
   });
 }
 
-export function finalizeSessionContextUsageEstimate(usage: ContextUsageEstimate): ContextUsageEstimate {
-  const breakdown = normalizeBreakdown({
-    ...usage.breakdown,
-    historyTokensEstimate: usage.breakdown.historyTokensEstimate + usage.breakdown.inputTokensEstimate,
-    inputTokensEstimate: 0
-  });
+/**
+ * 显示口径不变量：上下文压缩会在阈值（软阈值约 80%）处把已摘要历史移出请求投影，
+ * 因此“已用”必须跟随压缩后的真实投影，而不是会话累积量。
+ *
+ * 输入若已是“下一次请求”口径（`toSessionContextUsageEstimate` 的结果），原样返回；
+ * 请求口径（含输出/安全预留、system 与工具 schema、未定稿的 `inputTokensEstimate`）
+ * 则先折算成同一口径。旧版按 `pickLarger` 取历史最大值，压缩后仍停留在 100%，已移除。
+ */
+export function toDisplayedSessionContextUsageEstimate(usage: ContextUsageEstimate): ContextUsageEstimate {
+  const inProjection: Array<keyof ContextUsageBreakdown> = [
+    'systemTokensEstimate',
+    'inputTokensEstimate',
+    'toolSchemaTokensEstimate'
+  ];
+  const reserves: Array<keyof ContextUsageBreakdown> = [
+    'outputReserveTokensEstimate',
+    'safetyReserveTokensEstimate'
+  ];
+  const breakdown = normalizeBreakdown(usage.breakdown);
+  if (inProjection.some((key) => breakdown[key] > 0) || reserves.some((key) => breakdown[key] > 0)) {
+    return toSessionContextUsageEstimate(usage);
+  }
   return normalizeContextUsageEstimate({
     maxTokensEstimate: usage.maxTokensEstimate,
     usedTokensEstimate: sumSessionBreakdownTokens(breakdown),
     breakdown
   });
-}
-
-export function addInputTokensToContextUsage(
-  usage: ContextUsageEstimate,
-  inputTokensEstimate: number
-): ContextUsageEstimate {
-  const inputTokens = normalizeTokenEstimate(inputTokensEstimate);
-  const breakdown = normalizeBreakdown({
-    ...usage.breakdown,
-    inputTokensEstimate: inputTokens
-  });
-  return normalizeContextUsageEstimate({
-    maxTokensEstimate: usage.maxTokensEstimate,
-    usedTokensEstimate: usage.usedTokensEstimate + inputTokens,
-    breakdown
-  });
-}
-
-export function pickLargerContextUsageEstimate(
-  left: ContextUsageEstimate | undefined,
-  right: ContextUsageEstimate | undefined
-): ContextUsageEstimate | undefined {
-  if (!left) {
-    return right;
-  }
-  if (!right) {
-    return left;
-  }
-  return left.usedTokensEstimate >= right.usedTokensEstimate ? left : right;
 }
 
 export function normalizeContextUsageEstimateValue(value: unknown): ContextUsageEstimate | undefined {

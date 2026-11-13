@@ -6,7 +6,9 @@ import {
   createContextUsageEstimate,
   createContextUsageEstimateFromMessages,
   createDisplayedSessionContextUsageEstimate,
-  createUnsentSessionContextUsageEstimate
+  createUnsentSessionContextUsageEstimate,
+  toDisplayedSessionContextUsageEstimate,
+  toSessionContextUsageEstimate
 } from '../src/agent/contextUsage';
 import { buildCurrentRunContext } from '../src/agent/currentRunContext';
 import { hashContent } from '../src/agent/projectInstructions';
@@ -14,7 +16,7 @@ import { buildInitialAgentMessages, formatCurrentRunContextForAgent } from '../s
 import { getSupportedDeepSeekV4Models } from '../src/shared/modelProfiles';
 import { hasSessionProviderRequest } from '../src/provider/modelSelection';
 import { createEmptySession } from '../src/sessions/chatSessionStore';
-import type { ActivatedSkill, ChatMessage, ChatSession, ProjectInstructionContext } from '../src/shared/types';
+import type { ActivatedSkill, ChatMessage, ChatSession, ContextUsageEstimate, ProjectInstructionContext } from '../src/shared/types';
 
 test('deduplicates exact normalized URIs before consuming context budget', () => {
   const result = deduplicateContextSources([
@@ -273,6 +275,64 @@ test('an interacted session still counts its dynamic context prefix', () => {
   assert.equal(displayed, projected);
   assert.ok(displayed.breakdown.contextFileTokensEstimate > 0);
   assert.ok(displayed.usedTokensEstimate > 0);
+});
+
+test('displayed context usage follows the compressed projection instead of the pre-compression peak', () => {
+  const maxTokens = 100_000;
+  const estimate = (historyTokensEstimate: number) => toDisplayedSessionContextUsageEstimate({
+    usedTokensEstimate: historyTokensEstimate,
+    maxTokensEstimate: maxTokens,
+    remainingTokensEstimate: Math.max(0, maxTokens - historyTokensEstimate),
+    usedPercent: historyTokensEstimate / maxTokens * 100,
+    remainingPercent: Math.max(0, 100 - historyTokensEstimate / maxTokens * 100),
+    breakdown: {
+      systemTokensEstimate: 0,
+      contextFileTokensEstimate: 0,
+      historyTokensEstimate,
+      inputTokensEstimate: 0,
+      toolSchemaTokensEstimate: 0,
+      toolCallTokensEstimate: 0,
+      toolResultTokensEstimate: 0,
+      reasoningTokensEstimate: 0,
+      outputReserveTokensEstimate: 0,
+      safetyReserveTokensEstimate: 0
+    }
+  });
+  // 压缩前：累计历史把会话推到 100%。
+  const preCompressionPeak = estimate(maxTokens);
+  assert.equal(preCompressionPeak.usedPercent, 100);
+
+  // 压缩后：摘要把已摘要历史移出请求投影，下一次请求只保留约 30%。
+  const afterCompression = estimate(30_000);
+  assert.equal(afterCompression.usedPercent, 30);
+  assert.equal(afterCompression.usedTokensEstimate, 30_000);
+
+  // 根因：此前 Provider 按 pickLarger 保留历史最大值，压缩后仍显示 100%。
+  // 现在显示值只由最近一次观测（跟随压缩后的投影）决定。
+  const displayed = toDisplayedSessionContextUsageEstimate(afterCompression);
+  assert.equal(displayed.usedPercent, 30);
+  assert.ok(displayed.usedTokensEstimate < preCompressionPeak.usedTokensEstimate);
+});
+
+test('request-scope estimates are converted to the displayed session scope', () => {
+  const model = getSupportedDeepSeekV4Models()[0];
+  const requestUsage = createContextUsageEstimate({
+    model,
+    agentSettings: { thinkingEnabled: false, reasoningEffort: 'high', compressionThreshold: 'balanced' },
+    contextFiles: [],
+    messages: [],
+    language: 'en',
+    prompt: 'input'.repeat(100),
+    outputReserveTokens: 512,
+    safetyReserveTokens: 64
+  });
+  assert.ok(requestUsage.breakdown.outputReserveTokensEstimate > 0);
+
+  const displayed = toDisplayedSessionContextUsageEstimate(requestUsage);
+  assert.equal(displayed.breakdown.outputReserveTokensEstimate, 0);
+  assert.equal(displayed.breakdown.safetyReserveTokensEstimate, 0);
+  assert.equal(displayed.usedTokensEstimate, toSessionContextUsageEstimate(requestUsage).usedTokensEstimate);
+  assert.ok(displayed.usedTokensEstimate < requestUsage.usedTokensEstimate);
 });
 
 function userMessage(): ChatMessage {

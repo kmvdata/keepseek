@@ -88,8 +88,7 @@ import { normalizeProviderReplay } from '../sessions/providerReplayNormalization
 import {
   createDisplayedSessionContextUsageEstimate,
   createUnsentSessionContextUsageEstimate,
-  finalizeSessionContextUsageEstimate,
-  pickLargerContextUsageEstimate,
+  toDisplayedSessionContextUsageEstimate,
   toSessionContextUsageEstimate
 } from '../agent/contextUsage';
 import { ChangeSetStore, type PendingDeleteTarget } from '../edits/changeSetStore';
@@ -2612,15 +2611,17 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     return selected === confirmAction;
   }
 
+  /**
+   * “已用”跟随压缩后的下一次请求投影。压缩会在阈值处移出已摘要历史，因此这里只记录
+   * 最近一次观测、不再取历史最大值（取最大值会让百分比在压缩后仍停在 100%）。
+   * 上下文前缀或压缩状态变化时，缓存仍然直接作废（见各项 `contextUsage = undefined`）。
+   */
   private updateActiveSessionContextUsage(usage: ContextUsageEstimate | undefined): void {
     if (!usage) {
       return;
     }
     const activeSession = this.sessionStore.getActiveSession();
-    activeSession.contextUsage = pickLargerContextUsageEstimate(
-      activeSession.contextUsage,
-      finalizeSessionContextUsageEstimate(usage)
-    );
+    activeSession.contextUsage = toDisplayedSessionContextUsageEstimate(usage);
   }
 
   private applyUsageEvent(
@@ -7887,15 +7888,16 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       baseUrl: selectedModelSource?.baseUrl
       }));
     const storedContextUsage = activeSession.contextUsage?.maxTokensEstimate === computedContextUsage.maxTokensEstimate
-      ? activeSession.contextUsage
+      ? toDisplayedSessionContextUsageEstimate(activeSession.contextUsage)
       : undefined;
     const liveContextUsage = this.liveContextUsage?.maxTokensEstimate === computedContextUsage.maxTokensEstimate
-      ? this.liveContextUsage
+      ? toDisplayedSessionContextUsageEstimate(this.liveContextUsage)
       : undefined;
-    const selectedContextUsage = pickLargerContextUsageEstimate(
-      pickLargerContextUsageEstimate(storedContextUsage, computedContextUsage),
-      this.isBusy ? liveContextUsage : undefined
-    ) ?? computedContextUsage;
+    // 压缩后的投影可能小于历史值：以最近一次观测为准，只有缺失时才回落到现算投影。
+    // 仍在使用更大的值，等于把压缩前的量重新当成“已用”。
+    const selectedContextUsage = (this.isBusy ? liveContextUsage : undefined)
+      ?? storedContextUsage
+      ?? computedContextUsage;
     // 只有真实发送给 provider 的字节才算“已用”：未交互会话显示归零估算。
     const contextUsage = this.contextUsageForSessionDisplay(activeSession, selectedContextUsage);
     const contextCompression = getAgentRuntimeProfile(selectedModel, this.agentSettings).contextCompression;
