@@ -629,6 +629,8 @@ export interface DraftRunProposal {
   spec: DraftRunSpec;
   specHash: string;
   effectAssessment: DraftRunEffectAssessment;
+  /** Host-internal: a never-started replacement this proposal swaps in. Not a tool argument. */
+  pendingReplacement?: import('../runs/draftRunPendingReplacement').DraftRunPendingReplacement;
 }
 
 export interface ExecutionPermit {
@@ -705,6 +707,8 @@ export interface DraftRun extends DraftRunProposal {
   /** Explicit reproposal of a historical approval failure. Never confers authority. */
   reproposedFromDraftRunId?: string;
   replacementDraftRunId?: string;
+  /** A never-started replacement already swapped in for this pending proposal. */
+  pendingReplacement?: import('../runs/draftRunPendingReplacement').DraftRunPendingReplacement;
   /** Host-verified explanation for a terminal, never-dispatched command. */
   commandRecoveryOutcome?: { kind: 'repeated'; priorDraftRunId: string } | { kind: 'git_tag_verified'; ref: string; commit: string };
   replan?: import('../approvals/approvalProcessing').DraftRunReplanResult;

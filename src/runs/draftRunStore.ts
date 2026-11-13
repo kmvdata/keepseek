@@ -170,14 +170,28 @@ export class DraftRunStore {
         this.knownDraftRunIds.add(draftRun.id);
       }
       for (const draftRun of this.draftRuns.values()) {
-        const replacement = draftRun.replacementDraftRunId && this.draftRuns.get(draftRun.replacementDraftRunId);
-        // Older builds could link two blocked proposals. Keep the new proposal's
-        // source pointer for audit, but leave the original eligible for correction.
-        if (replacement && replacement.sessionId === draftRun.sessionId && replacement.spec.replacesDraftRun?.draftRunId === draftRun.id
-          && replacement.spec.replacesDraftRun.specHash === draftRun.specHash && replacement.status === 'needs_replan'
-          && replacement.executionStarted === false && replacement.executionPhase === 'not_dispatched'
-          && (replacement.capabilityDiagnostic?.blocking || replacement.replan)) {
+        const linkedId = draftRun.replacementDraftRunId;
+        if (!linkedId) continue;
+        const replacement = this.draftRuns.get(linkedId);
+        const linkMatches = replacement !== undefined && replacement.sessionId === draftRun.sessionId
+          && replacement.spec.replacesDraftRun?.draftRunId === draftRun.id
+          && replacement.spec.replacesDraftRun.specHash === draftRun.specHash;
+        // A missing, mis-linked or never-dispatched unsuccessful replacement can never
+        // take over the original. Keeping that pointer would freeze the original behind a
+        // supersede note that no approval can resolve; the replacement keeps its own
+        // spec.replacesDraftRun pointer as audit evidence.
+        const abandoned = replacement !== undefined && hasNeverDispatched(replacement)
+          && ['failed', 'rejected', 'cancelled', 'no_changes', 'needs_replan'].includes(replacement.status);
+        if (!linkMatches || abandoned) {
           draftRun.replacementDraftRunId = undefined;
+          repairedInterruptedRun = true;
+          continue;
+        }
+        // A superseded original must never stay directly dispatchable. Only
+        // needs_replan carries that meaning for the Webview and the batch checks.
+        if (draftRun.status === 'pending' && hasNeverDispatched(draftRun)) {
+          draftRun.status = 'needs_replan';
+          draftRun.finishedAt ??= draftRun.updatedAt;
           repairedInterruptedRun = true;
         }
       }
@@ -238,18 +252,23 @@ export class DraftRunStore {
           }
         }
         const original = this.draftRuns.get(replacement.draftRunId);
-        const valid = original && !isHistoryInactive(original) && original.sessionId === draftRun.sessionId
-          && (original.agentRunId === draftRun.agentRunId || input.rootTaskRunIds?.has(original.id))
-          && original.specHash === replacement.specHash && hashDraftRunSpec(original.spec) === original.specHash
-          && draftRun.id !== original.id && hashDraftRunSpec(draftRun.spec) === draftRun.specHash
-          && original.executionStarted === false && original.executionPhase === 'not_dispatched' && !original.startedAt
-          && original.status === 'needs_replan' && !original.replacementDraftRunId
-          && JSON.stringify(original.spec.prerequisites ?? []) === JSON.stringify(draftRun.spec.prerequisites ?? []);
-        if (valid && draftRun.status === 'pending') {
-          original.replacementDraftRunId = draftRun.id; original.updatedAt = now; this.emitState(original);
-        }
-        else if (!valid && draftRun.status === 'pending') {
-          draftRun.status = 'failed'; draftRun.error = 'Replacement identity or prerequisites changed. / 替代来源身份或前置条件已变化。';
+        const invalid = replacementInvalidReason(draftRun, replacement, original,
+          { rootTaskRunIds: input.rootTaskRunIds, approvalInFlight: this.approving.has(replacement.draftRunId) });
+        if (draftRun.status === 'pending') {
+          if (!invalid && original) {
+            // The replacement takes over the original proposal. A never-dispatched
+            // original must stop being directly executable, and only needs_replan
+            // renders as superseded in the Webview and in approval batch handling.
+            original.status = 'needs_replan';
+            original.replacementDraftRunId = draftRun.id;
+            original.approvalHold = undefined;
+            original.finishedAt ??= now;
+            original.updatedAt = now;
+            this.emitState(original);
+          } else {
+            draftRun.status = 'failed';
+            draftRun.error = replacementInvalidMessage(invalid ?? 'missing');
+          }
         }
       }
       this.draftRuns.set(draftRun.id, draftRun);
@@ -1376,6 +1395,56 @@ function normalizeDraftRunDispatch(value: unknown): DraftRun['dispatch'] {
       ? args.map(arg => redactSensitiveReviewText(arg, 4096)) : undefined,
     containerImage: boundary === 'container' && typeof containerImage === 'string' && /^sha256:[a-f0-9]{64}$/u.test(containerImage)
       ? containerImage : undefined };
+}
+
+type DraftRunReplacementInvalidReason = 'missing' | 'history' | 'session' | 'task' | 'identity' | 'spec_drift'
+  | 'execution_boundary' | 'not_replaceable_pending' | 'not_replaceable' | 'already_replaced' | 'prerequisites';
+
+const REPLACEMENT_ERROR = 'Replacement identity or prerequisites changed. / 替代来源身份或前置条件已变化。';
+const REPLACEMENT_PREREQUISITES_ERROR =
+  'Replacement prerequisites differ from the original. Resend the identical prerequisites list. / 替换草稿的前置条件与原草稿不一致，请原样复用同一份前置列表。';
+const REPLACEMENT_PENDING_ERROR =
+  'The original DraftRun is still pending (never blocked); only a blocked (needs_replan) DraftRun can be replaced. / 原草稿仍为待执行状态（未被阻塞），只有被阻塞的草稿才能被替换。';
+
+/** Named, ordered checks behind one replacement refusal. Every branch is an existing
+ * boundary of the former conjunction, so the model-facing diagnostic becomes
+ * actionable without weakening any check. A pending original is replaceable; it is
+ * only refused while this host is already reviewing or holding it, so a proposal is
+ * never retargeted under an in-flight approval decision. */
+function replacementInvalidReason(
+  draftRun: DraftRun,
+  replacement: NonNullable<DraftRun['spec']['replacesDraftRun']>,
+  original: DraftRun | undefined,
+  options: { rootTaskRunIds?: ReadonlySet<string>; approvalInFlight: boolean }
+): DraftRunReplacementInvalidReason | undefined {
+  if (!original) return 'missing';
+  if (isHistoryInactive(original)) return 'history';
+  if (original.sessionId !== draftRun.sessionId) return 'session';
+  if (original.agentRunId !== draftRun.agentRunId && !options.rootTaskRunIds?.has(original.id)) return 'task';
+  if (original.specHash !== replacement.specHash) return 'identity';
+  if (hashDraftRunSpec(original.spec) !== original.specHash) return 'spec_drift';
+  if (draftRun.id === original.id) return 'identity';
+  if (hashDraftRunSpec(draftRun.spec) !== draftRun.specHash) return 'spec_drift';
+  if (original.executionStarted !== false || original.executionPhase !== 'not_dispatched' || original.startedAt) {
+    return 'execution_boundary';
+  }
+  if (original.status === 'pending') {
+    if (options.approvalInFlight || original.approvalHold) return 'not_replaceable_pending';
+  } else if (original.status !== 'needs_replan') {
+    return 'not_replaceable';
+  }
+  if (original.replacementDraftRunId) return 'already_replaced';
+  if (JSON.stringify(original.spec.prerequisites ?? []) !== JSON.stringify(draftRun.spec.prerequisites ?? [])) {
+    return 'prerequisites';
+  }
+  return undefined;
+}
+
+/** Bilingual, single-line diagnostics consumed by the model. */
+function replacementInvalidMessage(reason: DraftRunReplacementInvalidReason): string {
+  if (reason === 'prerequisites') return REPLACEMENT_PREREQUISITES_ERROR;
+  if (reason === 'not_replaceable_pending') return REPLACEMENT_PENDING_ERROR;
+  return REPLACEMENT_ERROR;
 }
 
 function hasNeverDispatched(run: Partial<DraftRun>): boolean {

@@ -838,18 +838,24 @@ function createProposal(workspaceRoot: string, options: {
   cwd?: string;
   externalCwd?: boolean;
   specHash?: string;
+  args?: string[];
+  reason?: string;
+  prerequisites?: DraftRunSpec['prerequisites'];
+  replacesDraftRun?: DraftRunSpec['replacesDraftRun'];
 } = {}): DraftRunProposal {
   const cwd = options.cwd ?? workspaceRoot;
   const spec: DraftRunSpec = {
     executable: 'printf',
-    args: ['%s', 'hello; still-one-argument'],
-    reason: 'Verify DraftRun lifecycle.',
+    args: options.args ?? ['%s', 'hello; still-one-argument'],
+    reason: options.reason ?? 'Verify DraftRun lifecycle.',
     workspaceFolder: options.externalCwd ? undefined : 'workspace',
     cwdUri: vscode.Uri.file(cwd).toString(),
     cwdLabel: options.externalCwd ? cwd : '.',
     externalCwd: options.externalCwd === true,
     timeoutMs: 120_000,
-    env: [{ name: 'KEEPSEEK_DRAFT_RUN_TEST', value: 'literal value' }]
+    env: [{ name: 'KEEPSEEK_DRAFT_RUN_TEST', value: 'literal value' }],
+    ...(options.prerequisites ? { prerequisites: options.prerequisites } : {}),
+    ...(options.replacesDraftRun ? { replacesDraftRun: options.replacesDraftRun } : {})
   };
   return {
     id: options.id ?? 'proposal',
@@ -923,5 +929,127 @@ test('an adapter throw after dispatch and missing legacy execution facts never b
     assert.equal(restored.cloneAsPending(proposal.id), undefined);
     assert.equal(await restored.approveAndRun(proposal.id, new Set()), undefined);
     restored.dispose();
+  });
+});
+
+test('a pending never-dispatched original is superseded by an executable replacement reusing the same unmet prerequisite', async () => {
+  await withDraftRunFixture(async ({ root, workspaceRoot, store, executor }) => {
+    const [staged] = store.addProposals({ proposals: [createProposal(workspaceRoot, { id: 'release-prerequisite' })],
+      sessionId: 's', agentRunId: 'r' });
+    // The prerequisite is pending as well: an unmet prerequisite is a launch-time
+    // check, never a proposal-time gate.
+    assert.equal(staged.status, 'pending');
+    const prerequisites: DraftRunSpec['prerequisites'] = [
+      { draftRunId: staged.id, specHash: staged.specHash, condition: 'completed' }
+    ];
+    const [original] = store.addProposals({ proposals: [createProposal(workspaceRoot, {
+      id: 'release-original', args: ['%s', 'chore: bump version to 0.2.4'],
+      reason: 'Commit the release bump', prerequisites
+    })], sessionId: 's', agentRunId: 'r' });
+    assert.equal(original.status, 'pending');
+    assert.equal(original.replacementDraftRunId, undefined);
+
+    const [fresh] = store.addProposals({ proposals: [createProposal(workspaceRoot, {
+      id: 'release-replacement',
+      args: ['%s', 'chore(release): bump version to 0.2.4\n\nA body paragraph with details.\n\nAnother paragraph.'],
+      reason: 'Commit the release bump',
+      prerequisites,
+      replacesDraftRun: { draftRunId: original.id, specHash: original.specHash }
+    })], sessionId: 's', agentRunId: 'r' });
+    assert.equal(fresh.status, 'pending');
+    assert.equal(fresh.error, undefined);
+    assert.deepEqual(fresh.spec.prerequisites, prerequisites);
+
+    const superseded = store.get(original.id);
+    assert.equal(superseded?.status, 'needs_replan');
+    assert.equal(superseded?.replacementDraftRunId, fresh.id);
+    assert.ok(superseded?.finishedAt);
+    assert.equal(superseded?.executionStarted, false);
+    assert.equal(superseded?.executionPhase, 'not_dispatched');
+    assert.equal(superseded?.authorizationSource, undefined);
+    assert.equal(executor.executeCount, 0);
+
+    // A superseded original needs a fresh replacement instead of being dispatchable.
+    assert.equal(await store.approveAndRun(original.id, new Set()), undefined);
+    await assert.rejects(store.preflightApproval(original.id, new Set()));
+    assert.equal(executor.executeCount, 0);
+
+    await store.flush();
+    const restored = new DraftRunStore(vscode.Uri.file(path.join(root, 'storage')) as never, executor);
+    try {
+      await restored.initialize();
+      assert.equal(restored.get(original.id)?.status, 'needs_replan');
+      assert.equal(restored.get(original.id)?.replacementDraftRunId, fresh.id);
+      assert.equal(restored.get(fresh.id)?.status, 'pending');
+      assert.equal(executor.executeCount, 0);
+    } finally { restored.dispose(); }
+  });
+});
+
+test('a replacement with different prerequisites is refused with the prerequisites diagnostic', async () => {
+  await withDraftRunFixture(async ({ workspaceRoot, store, executor }) => {
+    const [staged] = store.addProposals({ proposals: [createProposal(workspaceRoot, { id: 'prereq-target' })],
+      sessionId: 's', agentRunId: 'r' });
+    const [original] = store.addProposals({ proposals: [createProposal(workspaceRoot, {
+      id: 'prereq-original', prerequisites: [{ draftRunId: staged.id, specHash: staged.specHash, condition: 'completed' }]
+    })], sessionId: 's', agentRunId: 'r' });
+    assert.equal(original.status, 'pending');
+
+    const [refused] = store.addProposals({ proposals: [createProposal(workspaceRoot, {
+      id: 'prereq-replacement', args: ['%s', 'changed argv'],
+      replacesDraftRun: { draftRunId: original.id, specHash: original.specHash }
+    })], sessionId: 's', agentRunId: 'r' });
+    assert.equal(refused.status, 'failed');
+    assert.equal(refused.error,
+      'Replacement prerequisites differ from the original. Resend the identical prerequisites list. / 替换草稿的前置条件与原草稿不一致，请原样复用同一份前置列表。');
+    // A refused replacement changes nothing about the original.
+    assert.equal(store.get(original.id)?.status, 'pending');
+    assert.equal(store.get(original.id)?.replacementDraftRunId, undefined);
+    assert.equal(executor.executeCount, 0);
+  });
+});
+
+test('a restart releases an abandoned replacement link and retires a pending original that still links a live replacement', async () => {
+  await withDraftRunFixture(async ({ root, workspaceRoot, store, executor }) => {
+    const [superseded] = store.addProposals({ proposals: [createProposal(workspaceRoot, { id: 'linked-original' })],
+      sessionId: 's', agentRunId: 'r' });
+    const [replacement] = store.addProposals({ proposals: [createProposal(workspaceRoot, {
+      id: 'linked-replacement', args: ['%s', 'next argv'],
+      replacesDraftRun: { draftRunId: superseded.id, specHash: superseded.specHash }
+    })], sessionId: 's', agentRunId: 'r' });
+    assert.equal(store.get(superseded.id)?.replacementDraftRunId, replacement.id);
+    await store.flush();
+
+    const file = path.join(root, 'storage', 'draft-runs.json');
+    const abandoned = JSON.parse(await readFile(file, 'utf8'));
+    for (const run of abandoned.draftRuns) {
+      // An interrupted replacement that never dispatched can never take over.
+      if (run.id === replacement.id) { run.status = 'failed'; run.error = 'Interrupted before dispatch.'; }
+    }
+    await writeFile(file, JSON.stringify(abandoned));
+    const released = new DraftRunStore(vscode.Uri.file(path.join(root, 'storage')) as never, executor);
+    try {
+      await released.initialize();
+      assert.equal(released.get(superseded.id)?.status, 'needs_replan');
+      assert.equal(released.get(superseded.id)?.replacementDraftRunId, undefined);
+    } finally { released.dispose(); }
+
+    const live = JSON.parse(await readFile(file, 'utf8'));
+    for (const run of live.draftRuns) {
+      // Older builds could persist a pending original that already points at a live
+      // replacement. Restart must retire it instead of leaving it dispatchable.
+      if (run.id === replacement.id) { run.status = 'pending'; run.error = undefined; }
+      if (run.id === superseded.id) { run.status = 'pending'; run.replacementDraftRunId = replacement.id; }
+    }
+    await writeFile(file, JSON.stringify(live));
+    const retired = new DraftRunStore(vscode.Uri.file(path.join(root, 'storage')) as never, executor);
+    try {
+      await retired.initialize();
+      assert.equal(retired.get(superseded.id)?.status, 'needs_replan');
+      assert.equal(retired.get(superseded.id)?.replacementDraftRunId, replacement.id);
+      assert.equal(retired.get(replacement.id)?.status, 'pending');
+      assert.equal(await retired.approveAndRun(superseded.id, new Set()), undefined);
+      assert.equal(executor.executeCount, 0);
+    } finally { retired.dispose(); }
   });
 });
