@@ -33,6 +33,10 @@ import {
   type ExecutionMode
 } from '../shared/types';
 import { normalizeExecutionMode, normalizePlanWorkflowRecords } from '../agent/executionMode';
+import type { ProjectQueueService } from './queue/queueService';
+import { moveToIndex, promoteToFront } from './queue/projectQueue';
+import { buildQueueView, type QueueView } from './queue/queueView';
+import type { ProjectSessionQueue, SessionExecutionMode } from './queue/types';
 import {
   CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION,
   CURRENT_PROVIDER_TOOL_SCHEMA_VERSION
@@ -303,7 +307,9 @@ export class ChatSessionStore {
   public constructor(
     private readonly sessionStorage: ChatSessionStorageAdapter,
     private language: KeepseekLanguage = getConfiguredKeepseekLanguage(),
-    private workspaceScope: WorkspaceSessionScope = getCurrentWorkspaceSessionScope()
+    private workspaceScope: WorkspaceSessionScope = getCurrentWorkspaceSessionScope(),
+    /** Project queue authority for ordering and derived normal/plan mode. */
+    private readonly projectQueue?: ProjectQueueService
   ) {}
 
   public async initialize(options: { fresh?: boolean } = {}): Promise<void> {
@@ -322,8 +328,22 @@ export class ChatSessionStore {
     return this.approvalModeValue;
   }
 
+  /**
+   * Runtime authority for the active session's mode.
+   *
+   * P2: the project queue is authoritative once it is loaded. The stored
+   * per-session field remains as a fallback only for projects whose queue has not
+   * loaded yet (for example before the first save), so behaviour never silently
+   * flips to plan just because the queue file is missing.
+   */
   public get executionMode(): ExecutionMode {
-    return normalizeExecutionMode(this.getActiveSession().executionMode);
+    const session = this.getActiveSession();
+    return this.resolveExecutionMode(session);
+  }
+
+  /** Queue-derived mode for one session; falls back to its stored field. */
+  private resolveExecutionMode(session: ChatSession): ExecutionMode {
+    return this.getDerivedExecutionMode(session.id) ?? normalizeExecutionMode(session.executionMode);
   }
 
   public get messages(): ChatMessage[] {
@@ -363,6 +383,9 @@ export class ChatSessionStore {
     this.setActiveSessionId(session.id);
     onSaving?.(session.id);
     await this.persist();
+    // A blank session is a transient composer: it is neither persisted nor queued,
+    // so it never occupies a queue position or takes the head. It joins the queue
+    // only once it receives its first user message (see ensureProjectQueue).
     return session;
   }
 
@@ -380,11 +403,30 @@ export class ChatSessionStore {
     return true;
   }
 
+  /**
+   * Switch the active session's mode.
+   *
+   * The queue is authoritative (P2): asking for 
+ormal promotes this session to
+   * the head, and asking for plan demotes it behind the next session. A session
+   * can therefore never be 
+ormal while another session is ahead of it in the
+   * queue, which is the single-normal invariant.
+   */
   public async setExecutionMode(executionMode: ExecutionMode): Promise<boolean> {
     const session = this.getActiveSession();
     const normalized = normalizeExecutionMode(executionMode);
-    if (normalizeExecutionMode(session.executionMode) === normalized) return false;
-    session.executionMode = normalized;
+    if (this.resolveExecutionMode(session) === normalized) return false;
+    const queue = this.getProjectQueue();
+    if (queue && this.projectQueue) {
+      const seeds = this.queueSeeds();
+      const updated = normalized === 'normal'
+        ? await this.promoteSessionInQueue(session.id)
+        : await this.demoteSessionInQueue(session.id, seeds);
+      if (!updated) return false;
+    }
+    // Keep the stored field as a diagnostic mirror of the resolved mode.
+    session.executionMode = this.resolveExecutionMode(session);
     session.updatedAt = new Date().toISOString();
     await this.persist();
     return true;
@@ -567,6 +609,9 @@ export class ChatSessionStore {
     // otherwise that adapter write could recreate the deleted session.
     await this.persistenceDrain?.catch(() => {});
     await this.sessionStorage.deleteWorkspaceSessions(this.workspaceScope.key, Array.from(ids));
+    for (const id of deletedSummaryIds) {
+      await this.projectQueue?.remove(this.workspaceScope.key, id, this.queueSeeds());
+    }
     await this.persist();
     return {
       deletedCount,
@@ -700,6 +745,12 @@ export class ChatSessionStore {
     });
     this.startPersistenceDrain();
     await completed;
+    // Keep the queue aligned after every save: a session that just received its
+    // first user message joins the queue (at the tail), and a blank composer is
+    // dropped from it. A queue failure must never fail the session save.
+    if (this.projectQueue) {
+      try { await this.syncProjectQueue(); } catch { /* ordering stays advisory until the next save */ }
+    }
   }
 
   public async getRecoveryCheckpoint(messageId: string): Promise<import('../agent/runCheckpoint').RunCheckpoint | undefined> {
@@ -853,6 +904,105 @@ export class ChatSessionStore {
     }
   }
 
+  /** Sessions currently known for this project, in creation-agnostic shape. */
+  private queueSeeds(): Array<{ id: string; createdAt: string }> {
+    const seeds = new Map<string, { id: string; createdAt: string }>();
+    for (const session of this.sessions) {
+      // A blank session is a transient composer, never a queue member: it must
+      // not occupy a position, hold the head, or leak into history.
+      if (this.isInCurrentWorkspace(session) && session.messages.length > 0) {
+        seeds.set(session.id, { id: session.id, createdAt: session.createdAt });
+      }
+    }
+    for (const summary of this.sessionSummaries.values()) {
+      if (summary.workspaceKey === this.workspaceScope.key && !seeds.has(summary.id)) {
+        seeds.set(summary.id, { id: summary.id, createdAt: summary.createdAt });
+      }
+    }
+    return [...seeds.values()];
+  }
+
+  /** Load (or rebuild) the project queue and align it with stored sessions. */
+  /** Align the queue with the sessions that have content; blank sessions are excluded. */
+  private async syncProjectQueue(now = new Date().toISOString()): Promise<ProjectSessionQueue | undefined> {
+    if (!this.projectQueue) return undefined;
+    const seeds = this.queueSeeds();
+    await this.projectQueue.ensureLoaded(this.workspaceScope.key, seeds);
+    return this.projectQueue.sync(this.workspaceScope.key, seeds, now);
+  }
+
+  public async ensureProjectQueue(): Promise<ProjectSessionQueue | undefined> {
+    if (!this.projectQueue) return undefined;
+    await this.projectQueue.ensureLoaded(this.workspaceScope.key, this.queueSeeds());
+    return this.projectQueue.sync(this.workspaceScope.key, this.queueSeeds());
+  }
+
+  public getProjectQueue(): ProjectSessionQueue | undefined {
+    return this.projectQueue?.peek(this.workspaceScope.key);
+  }
+
+  /**
+   * Derived mode from the project queue (P1: presentation only).
+   *
+   * Returns undefined when no queue is loaded, so callers fall back to the
+   * stored per-session field instead of inventing a mode.
+   */
+  public getDerivedExecutionMode(sessionId: string): SessionExecutionMode | undefined {
+    return this.projectQueue?.getDerivedMode(this.workspaceScope.key, sessionId);
+  }
+
+  /**
+   * Read-only queue projection for the webview (P1: display only).
+   *
+   * Titles come from the summary index; a session without a title yet falls
+   * back to its id inside uildQueueView.
+   */
+  public getProjectQueueView(): QueueView | undefined {
+    const queue = this.getProjectQueue();
+    if (!queue) return undefined;
+    const titles = new Map<string, string>();
+    for (const summary of this.sessionSummaries.values()) {
+      if (summary.workspaceKey === this.workspaceScope.key) titles.set(summary.id, summary.title);
+    }
+    return buildQueueView({ queue, titles });
+  }
+  public async moveSessionInQueue(sessionId: string, targetIndex: number): Promise<ProjectSessionQueue | undefined> {
+    if (!this.projectQueue) return undefined;
+    return this.projectQueue.mutate(
+      this.workspaceScope.key,
+      this.queueSeeds(),
+      (queue) => moveToIndex(queue, sessionId, targetIndex),
+      new Date().toISOString()
+    );
+  }
+
+  /**
+   * Move a session to the tail so the next queued session becomes the head.
+   * Used when the user switches a normal session back to plan.
+   */
+  public async demoteSessionInQueue(
+    sessionId: string,
+    seeds: Array<{ id: string; createdAt: string }> = this.queueSeeds()
+  ): Promise<ProjectSessionQueue | undefined> {
+    if (!this.projectQueue) return undefined;
+    return this.projectQueue.mutate(
+      this.workspaceScope.key,
+      seeds,
+      (queue) => moveToIndex(queue, sessionId, queue.entries.length - 1),
+      new Date().toISOString()
+    );
+  }
+
+  public async promoteSessionInQueue(sessionId: string): Promise<ProjectSessionQueue | undefined> {
+    if (!this.projectQueue) return undefined;
+    return this.projectQueue.mutate(
+      this.workspaceScope.key,
+      this.queueSeeds(),
+      (queue) => promoteToFront(queue, sessionId),
+      new Date().toISOString()
+    );
+  }
+
   public getSessionSummaries(): ChatSessionSummary[] {
     for (const session of this.getCurrentWorkspaceSessions()) {
       if (session.messages.length) this.sessionSummaries.set(session.id, toSessionSummary(session, this.language));
@@ -926,6 +1076,11 @@ export class ChatSessionStore {
     this.approvalModeValue = normalizeStoredApprovalMode(stored.approvalMode ?? storedActiveSession?.approvalMode);
     this.ensureActiveSession();
     this.compact();
+    // Align the project queue with what is actually on disk. A queue failure must
+    // never block session loading; the derived mode simply stays unavailable.
+    if (this.projectQueue) {
+      try { await this.ensureProjectQueue(); } catch { /* ordering stays advisory until the next save */ }
+    }
   }
 
   private ensureActiveSession(): ChatSession {
@@ -933,7 +1088,10 @@ export class ChatSessionStore {
     const existing = currentSessions.find((session) => session.id === this.activeSessionIdValue);
     if (existing) {
       existing.approvalMode = this.approvalModeValue;
-      existing.executionMode = normalizeExecutionMode(existing.executionMode);
+      // Mirror the queue-derived mode onto the session field. Readers such as the
+      // Runner and the webview projection consume this field, so it must never
+      // disagree with the queue authority.
+      existing.executionMode = this.resolveExecutionMode(existing);
       this.setActiveSessionId(existing.id);
       return existing;
     }
@@ -944,6 +1102,7 @@ export class ChatSessionStore {
       this.sessions.unshift(fallback);
     }
     fallback.approvalMode = this.approvalModeValue;
+    fallback.executionMode = this.resolveExecutionMode(fallback);
     this.setActiveSessionId(fallback.id);
     return fallback;
   }

@@ -952,13 +952,17 @@ test('an in-flight automatic title does not block or get cancelled by session na
   assert.equal(posts.at(-1)?.state?.isBusy, false);
 });
 
-test('session navigation retains the main-run busy guard', async t => {
-  const { host, store, first, second } = await fixture(t);
+test('a running task does not block opening or switching sessions', async t => {
+  const { host, store, second } = await fixture(t);
   host.isBusy = true;
-  await host.handleMessage({ type: 'newSession' });
-  await host.handleMessage({ type: 'selectSession', sessionId: second.id });
-  assert.equal(store.activeSessionId, first.id);
-  host.isBusy = false;
+  try {
+    // Navigation stays available while a task runs; the run is pinned to the session
+    // captured at admission, so the switch must not cancel it or redirect its output.
+    await host.handleMessage({ type: 'selectSession', sessionId: second.id });
+    assert.equal(store.activeSessionId, second.id, 'switching sessions is allowed during a run');
+  } finally {
+    host.isBusy = false;
+  }
 });
 
 test('early navigation state cannot schedule a continuation before recovery and request context are ready', async t => {

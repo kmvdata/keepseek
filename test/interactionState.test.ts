@@ -33,7 +33,7 @@ test('navigation owns its reservation before I/O but does not offer task cancell
   const loading = coordinator.snapshot(ready({ cancellable: true }));
   assert.equal(loading.phase, 'loading_session');
   assert.equal(loading.canSubmit, false);
-  assert.equal(loading.canNavigate, false);
+  assert.equal(loading.canNavigate, false, 'a navigation in progress blocks another navigation');
   assert.equal(loading.canEdit, true);
   assert.equal(loading.canCancel, false);
   assert.equal(loading.cancelOperationId, undefined);
@@ -105,12 +105,14 @@ test('cancel requires a current actual owner; readiness and context failures are
   const run = deriveInteractionState(ready({ mainRunning: true, cancellable: true, cancelOperationId: 'run-current' }));
   assert.equal(run.canCancel, true);
   assert.equal(run.cancelOperationId, 'run-current');
-  assert.equal(run.canNavigate, false);
+  // A running task no longer blocks navigation: the user must be able to open another
+  // session while it runs, and the run stays pinned to its own session.
+  assert.equal(run.canNavigate, true);
   const context = deriveInteractionState(ready({ contextRefreshing: true }));
   assert.equal(context.phase, 'preparing_context');
   assert.equal(context.canEdit, true);
   assert.equal(context.canSubmit, false);
-  assert.equal(context.canNavigate, false);
+  assert.equal(context.canNavigate, true, 'context preparation does not own navigation');
   const failed = deriveInteractionState(ready({ failure: 'Unable to save; retry required' }));
   assert.equal(failed.phase, 'failed');
   assert.equal(failed.canSubmit, false);

@@ -3,6 +3,7 @@ import * as vscode from 'vscode';
 import { KeepseekChatViewProvider } from './provider/KeepseekChatViewProvider';
 import { GlobalSessionStorage } from './sessions/globalSessionStorage';
 import { ChatSessionStore, getCurrentWorkspaceSessionScope } from './sessions/chatSessionStore';
+import { ProjectQueueService } from './sessions/queue/queueService';
 import { getConfiguredKeepseekLanguage } from './shared/i18n';
 import type { KeepseekExtensionInfo } from './shared/types';
 import { StartupPerformanceTrace } from './shared/startupPerformance';
@@ -19,7 +20,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const storageUri = getNativeStorageUri();
   const globalSessionStorage = new GlobalSessionStorage(storageUri, startupTrace);
   const workspaceScope = getCurrentWorkspaceSessionScope();
-  const sessionStore = new ChatSessionStore(globalSessionStorage, getConfiguredKeepseekLanguage(), workspaceScope);
+  const projectQueue = new ProjectQueueService((workspaceKey) => globalSessionStorage.getProjectQueueUri(workspaceKey));
+  const sessionStore = new ChatSessionStore(globalSessionStorage, getConfiguredKeepseekLanguage(), workspaceScope, projectQueue);
   let startSessionInitialization: (() => void) | undefined;
   const sessionInitialization = new Promise<void>((resolve, reject) => {
     startSessionInitialization = () => {

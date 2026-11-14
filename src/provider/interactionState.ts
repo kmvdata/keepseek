@@ -81,6 +81,8 @@ export interface InteractionFacts {
   starting?: boolean;
   contextRefreshing?: boolean;
   actionRunning?: boolean;
+  /** Action kinds that mutate the viewed session (not a running command). */
+  navigationBlockingAction?: boolean;
   /** Only the existing exclusive background task policy belongs here. */
   backgroundRunning?: boolean;
   cancellable?: boolean;
@@ -133,6 +135,8 @@ interface OwnedOperation {
 export class InteractionCoordinator {
   private generation = 0;
   private active?: OwnedOperation;
+  /** A navigation that runs alongside a task owner; never owns submit/cancel. */
+  private navigation?: OwnedOperation;
   private readonly now: () => number;
   private readonly id: () => string;
   private readonly onDiagnostic?: (event: InteractionDiagnostic) => void;
@@ -150,27 +154,40 @@ export class InteractionCoordinator {
   public get current(): InteractionOperation | undefined { return this.active?.token; }
 
   /** Wait for the owner observed now, never an unrelated later generation. */
-  public whenSettled(): Promise<void> { return this.active?.settled ?? Promise.resolve(); }
+  public whenSettled(): Promise<void> { return this.active?.settled ?? this.navigation?.settled ?? Promise.resolve(); }
 
   public begin(kind: InteractionOperationKind, sessionId: string, phase: InteractionPhase): InteractionOperation | undefined {
-    if (this.active) return undefined;
+    // A navigation may coexist with a running task: the run keeps its own owner and
+    // is pinned to the session captured at admission, so opening or switching a
+    // session must not require the run to finish first.
+    if (this.active && !(kind === 'navigation' && this.active.token.kind !== 'navigation')) return undefined;
     const token: InteractionOperation = Object.freeze({ operationId: this.id(), sessionId,
       generation: ++this.generation, kind, phase });
     let resolveSettled!: () => void;
     const settled = new Promise<void>(resolve => { resolveSettled = resolve; });
-    this.active = { token, sessionId, phase, startedAt: this.now(), settled, resolveSettled };
+    const next: OwnedOperation = { token, sessionId, phase, startedAt: this.now(), settled, resolveSettled };
+    if (kind === 'navigation' && this.active) { this.navigation = next; return (this.navigation.token); }
+    this.active = next;
     this.diagnose('begin', this.active);
     return token;
   }
 
+  /** The operation this token refers to, whether it owns the task slot or navigation. */
+  private owned(token: InteractionOperation | undefined): OwnedOperation | undefined {
+    if (!token) return undefined;
+    if (this.active?.token === token) return this.active;
+    if (this.navigation?.token === token) return this.navigation;
+    return undefined;
+  }
+
   public owns(token: InteractionOperation | undefined): boolean {
-    return token !== undefined && this.active?.token === token;
+    return this.owned(token) !== undefined;
   }
 
   /** Only the current owner can advance a phase or commit a navigation target. */
   public update(token: InteractionOperation, phase: InteractionPhase, sessionId?: string): boolean {
-    if (!this.owns(token)) { this.stale(token); return false; }
-    const active = this.active!;
+    const active = this.owned(token);
+    if (!active) { this.stale(token); return false; }
     if (active.phase === phase && (sessionId === undefined || sessionId === active.sessionId)) return true;
     active.phase = phase;
     if (sessionId !== undefined) active.sessionId = sessionId;
@@ -179,19 +196,22 @@ export class InteractionCoordinator {
   }
 
   public finish(token: InteractionOperation): boolean {
-    if (!this.owns(token)) { this.stale(token); return false; }
-    const active = this.active!;
-    this.active = undefined;
+    const active = this.owned(token);
+    if (!active) { this.stale(token); return false; }
+    if (this.active?.token === token) this.active = undefined;
+    else if (this.navigation?.token === token) this.navigation = undefined;
     active.resolveSettled();
     this.diagnose('finish', active);
     return true;
   }
 
   public snapshot(facts: InteractionFacts): InteractionSnapshot {
-    return deriveInteractionState(facts, this.active ? {
-      operationId: this.active.token.operationId,
-      sessionId: this.active.sessionId,
-      phase: this.active.phase
+    const shown = this.active ?? this.navigation;
+    return deriveInteractionState(facts, shown ? {
+      kind: shown.token.kind,
+      operationId: shown.token.operationId,
+      sessionId: shown.sessionId,
+      phase: shown.phase
     } : undefined);
   }
 
@@ -213,6 +233,7 @@ export class InteractionCoordinator {
 
 /** The only UI capability derivation; it does not grant execution authority. */
 export function deriveInteractionState(facts: InteractionFacts, operation?: {
+  kind?: InteractionOperationKind;
   operationId: string;
   sessionId: string;
   phase: InteractionPhase;
@@ -220,6 +241,12 @@ export function deriveInteractionState(facts: InteractionFacts, operation?: {
   const owned = operation?.sessionId === facts.sessionId ? operation : undefined;
   const pending = Boolean(operation || facts.mainRunning || facts.starting || facts.contextRefreshing
     || facts.actionRunning || facts.backgroundRunning);
+  // A plain command/DraftRun keeps running in its own session and must not freeze
+  // navigation; only actions that mutate the viewed session block it.
+  // in-flight task reservation are deliberately excluded.
+  // Blocks that also stop navigation. A main model run, a running command and an
+  const navBlocking = Boolean(facts.backgroundRunning || facts.navigationBlockingAction
+    || (operation?.kind === 'navigation') || (!facts.sessionReady && operation));
   const ready = facts.sessionReady && facts.requestContextReady && facts.approvalDataReady
     && facts.modelReady !== false && facts.contextReady !== false && facts.sessionRecoveryReady !== false;
   let phase: InteractionPhase = owned?.phase ?? 'idle';
@@ -252,7 +279,11 @@ export function deriveInteractionState(facts: InteractionFacts, operation?: {
     canEdit: true,
     canSubmit: ready && !pending && !facts.failure,
     canChangeContext: ready && !pending && !facts.failure,
-    canNavigate: facts.sessionReady && !pending,
+    // Navigation must stay available while a task is running: the user needs to open
+    // another session and come back. The run itself is pinned to the session captured
+    // at admission, so switching sessions cannot redirect its results or cancel it.
+    // Background work and a still-loading session remain hard barriers.
+    canNavigate: facts.sessionReady && !navBlocking,
     canCancel,
     ...(canCancel ? { cancelOperationId } : {}),
     ...(waitingReason ? { waitingReason } : {}),

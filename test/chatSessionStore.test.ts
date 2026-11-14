@@ -12,6 +12,7 @@ import {
   type StoredWorkspaceSessionState,
   type WorkspaceSessionScope
 } from '../src/sessions/chatSessionStore';
+import { ProjectQueueService } from '../src/sessions/queue/queueService';
 import {
   CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION,
   CURRENT_PROVIDER_TOOL_SCHEMA_VERSION
@@ -269,33 +270,49 @@ test('approval mode persists for the project and is inherited by every new or se
   assert.equal(restarted.getActiveSession().approvalMode, 'delegate');
 });
 
-test('execution mode defaults to normal and is restored independently for each session', async () => {
+test('the project queue decides normal/plan instead of a per-session flag', async () => {
   const workspaceScope: WorkspaceSessionScope = {
     key: 'workspace:execution-mode',
     name: 'Execution Workspace',
     folderUris: []
   };
-  const normal = createSession('normal-session', [createMessage(0)], workspaceScope);
-  const planned = createSession('plan-session', [createMessage(1)], workspaceScope);
-  planned.executionMode = 'plan';
+  const first = createSession('first-session', [createMessage(0)], workspaceScope);
+  const second = createSession('second-session', [createMessage(1)], workspaceScope);
+  // Both sessions are stored with the default 'normal' flag; only the queue decides.
   const storage = new MemorySessionStorage({
-    activeSessionId: normal.id,
-    sessions: [normal, planned]
+    activeSessionId: first.id,
+    sessions: [first, second]
   });
   const store = new ChatSessionStore(storage, 'en', workspaceScope);
-
   await store.initialize();
-  assert.equal(store.executionMode, 'normal');
-  assert.equal((await store.createNewSession('en')).executionMode, 'normal');
-  assert.equal((await store.selectSession(planned.id))?.executionMode, 'plan');
-  assert.equal(await store.setExecutionMode('normal'), true);
-  assert.equal((await store.selectSession(normal.id))?.executionMode, 'normal');
-  assert.equal(await store.setExecutionMode('plan'), true);
 
-  const restarted = new ChatSessionStore(storage, 'en', workspaceScope);
-  await restarted.initialize();
-  assert.equal(restarted.executionMode, 'plan');
-  assert.equal((await restarted.selectSession(planned.id))?.executionMode, 'normal');
+  // Without a loaded queue the stored flag is the compatibility fallback.
+  assert.equal(store.executionMode, 'normal');
+
+  // Attach the queue authority and align it with the stored sessions.
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'keepseek-mode-authority-'));
+  try {
+    const queueUri = path.join(dir, 'queue.json');
+    const queueService = new ProjectQueueService((_workspaceKey) =>
+      vscode.Uri.file(queueUri) as unknown as ReturnType<ConstructorParameters<typeof ProjectQueueService>[0]>);
+    const queued = new ChatSessionStore(storage, 'en', workspaceScope, queueService);
+    await queued.initialize();
+
+    // Creation order decides the head: the earlier session is the only normal one.
+    assert.equal((await queued.selectSession(first.id))?.executionMode, 'normal');
+    assert.equal((await queued.selectSession(second.id))?.executionMode, 'plan');
+
+    // Executing in the second session takes the write position.
+    assert.equal(await queued.setExecutionMode('normal'), true);
+    assert.equal(queued.executionMode, 'normal');
+    assert.equal((await queued.selectSession(first.id))?.executionMode, 'plan');
+
+    // Handing it back demotes the second session behind the other one.
+    assert.equal((await queued.selectSession(second.id))?.executionMode, 'normal');
+    assert.equal(await queued.setExecutionMode('plan'), true);
+    assert.equal((await queued.selectSession(first.id))?.executionMode, 'normal');
+    assert.equal((await queued.selectSession(second.id))?.executionMode, 'plan');
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
 test('legacy workspace approval mode migrates from its active session', async () => {

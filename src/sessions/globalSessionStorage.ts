@@ -898,6 +898,11 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     return vscode.Uri.joinPath(this.getWorkspaceDirectoryUri(hash), 'sessions');
   }
 
+  /** Location of the per-project session queue, next to this workspace's index. */
+  public getProjectQueueUri(workspaceKey: string): vscode.Uri {
+    return vscode.Uri.joinPath(this.getWorkspaceDirectoryUri(getWorkspaceHash(workspaceKey)), 'queue.json');
+  }
+
   private getSessionUri(workspaceHash: string, sessionId: string): vscode.Uri {
     return vscode.Uri.joinPath(this.getSessionsDirectoryUri(workspaceHash), `${getSessionHash(sessionId)}.json`);
   }

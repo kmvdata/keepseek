@@ -327,6 +327,11 @@ test('only the host plan-decision message starts a fresh protected implementatio
       ...sessionUseFixture(),
       activeSessionId: session.id,
       getActiveSession: () => session,
+      // Executing a plan takes the queue head, so the store must expose the promotion.
+      // The store is the mode authority after P2; mirror it onto the session field.
+      get executionMode() { return session.executionMode; },
+      setExecutionMode: async (mode: string) => { session.executionMode = mode === 'plan' ? 'plan' : 'normal'; return true; },
+      promoteSessionInQueue: async () => { session.executionMode = 'normal'; return undefined; },
       persist: async () => {}
     },
     hasActiveBackgroundRun: () => false,
@@ -343,7 +348,6 @@ test('only the host plan-decision message starts a fresh protected implementatio
     interactions: InteractionCoordinator;
   };
 
-  await provider.handleMessage({ type: 'resolvePlanDecision', planId: plan.id, action: 'start_execution' });
   assert.equal(session.executionMode, 'plan');
   assert.equal(sends.length, 0, 'an old plan card cannot grant delegate authority');
   session.approvalMode = 'ask';

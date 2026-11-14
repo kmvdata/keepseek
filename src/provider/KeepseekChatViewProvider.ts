@@ -8,6 +8,7 @@ import type { SessionHistoryCleanupService, HistoryCleanupTarget, HistoryCleanup
 import { classifyHistoryCleanupError, localizeHistoryCleanupIssue, HistoryCleanupFailure,
   type HistoryCleanupIssue, type HistoryCleanupPhase } from '../sessions/historyCleanupErrors';
 import { InteractionCoordinator, deriveSessionTitleCapability, deriveHistoryCleanupCapability, type InteractionOperation, type InteractionPhase } from './interactionState';
+import { SessionRunRegistry } from './sessionRunRegistry';
 import { SessionTitleCoordinator, type SessionTitleRequest, type SessionTitleRegenerationOutcome } from '../sessions/sessionTitleCoordinator';
 import { hasConsumedTitleRound, buildSessionTitleRegenerationMaterial, getSessionTitleRegenerationTaskId } from '../sessions/sessionTitle';
 import { captureSessionTitleSubmission, checkSessionTitleSubmission, type SessionTitleSubmission } from './sessionTitleCompletion';
@@ -357,7 +358,46 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private readonly backgroundRunModelSelections = new Map<string, { sourceId: string; modelId: string }>();
   private agentSettings = getConfiguredAgentSettings();
   private language = getConfiguredKeepseekLanguage();
-  private isBusy = false;
+  // `isBusy` stays a plain field so callers and tests can set it directly.
+  // Parallel execution uses the per-session registry for every real decision;
+  // the field is only kept in sync for legacy read paths and diagnostics.
+  /** Explicit override used by tests and one-shot diagnostic paths. */
+  private isBusyOverride: boolean | undefined;
+  private isBusyField = false;
+
+  private get isBusy(): boolean {
+    const viewed = this.sessionStore?.activeSessionId;
+    // Real runs always win: a session registered in the run registry is busy.
+    if (viewed && this.sessionRuns?.isRunning(viewed)) return true;
+    // Otherwise a direct assignment (tests, one-shot overrides) is honoured,
+    // because accessor properties cannot be replaced through Object.assign.
+    if (this.isBusyOverride !== undefined) return this.isBusyOverride;
+    return this.isBusyField;
+  }
+
+  private set isBusy(value: boolean) {
+    this.isBusyOverride = value;
+    this.isBusyField = value;
+    const viewed = this.sessionStore?.activeSessionId;
+    if (!viewed) return;
+    if (value) {
+      if (this.sessionRuns && !this.sessionRuns.isRunning(viewed)) this.sessionRuns.tryStart(viewed);
+    } else {
+      this.sessionRuns?.forceRelease(viewed);
+    }
+  }
+
+  /** True when the VIEWED session owns the running command. */
+  private commandRunBelongsToViewed(): boolean {
+    const viewed = this.sessionStore?.activeSessionId;
+    return Boolean(viewed) && this.activeDraftRunSessionId === viewed;
+  }
+
+  /** Per-session busy test that never consults the viewed session. */
+  private isBusyFor(sessionId: string): boolean {
+    return Boolean(this.sessionRuns?.isRunning(sessionId));
+  }
+
   private interactionCoordinator?: InteractionCoordinator;
   /** Host mutual-exclusion guard; UI capabilities come from interactionState. */
   private get isStartingRun(): boolean { return Boolean(this.interactionCoordinator?.current); }
@@ -371,6 +411,16 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private activeSessionEntryRevision = 0;
   private submissionResults?: Map<string, { type: 'submissionResult'; requestId: string; sessionId: string; status: 'accepted' | 'rejected' | 'failed'; reason?: string }>;
 
+  /**
+   * True when the session being viewed has a run in flight.
+   *
+   * With parallel runs this must consult the registry: several sessions may run
+   * at once, so a single global flag can no longer describe the viewed session.
+   */
+  private runBelongsToViewed(sessionId = this.sessionStore.activeSessionId): boolean {
+    return Boolean(sessionId) && Boolean(this.sessionRuns?.isRunning(sessionId));
+  }
+
   private interactionSnapshot(revision: number) {
     const sessionId = this.sessionReady ? this.sessionStore.activeSessionId : '';
     return this.interactions.snapshot({ sessionId, revision, sessionReady: this.sessionReady,
@@ -378,10 +428,15 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       modelReady: this.commandSettingsReadiness?.mainModel === 'ready',
       contextReady: this.runContextReadiness === 'ready' || this.runContextReadiness === 'deferred',
       sessionRecoveryReady: this.sessionRecoveryReady,
-      mainRunning: this.isBusy, contextRefreshing: this.runContextRefreshInFlight,
+      // A run in another session is not this session's run: keep this composer idle.
+      mainRunning: this.runBelongsToViewed(sessionId) && this.isBusy, contextRefreshing: this.runContextRefreshInFlight,
       actionRunning: Boolean(this.activeDraftRunId || this.activeChangeActions?.size || this.delegatedApprovalInFlight
         || this.reservingManualDecision || this.reservingApprovalResume || this.draftRunBatches?.locked || this.delegatedApprovals?.hasPending(sessionId)),
       backgroundRunning: this.hasActiveBackgroundRun(),
+      // A running command (activeDraftRunId) does not block navigation: it executes in
+      // its own session. Actions that mutate the viewed session still do.
+      navigationBlockingAction: Boolean(this.activeChangeActions?.size || this.delegatedApprovalInFlight
+        || this.reservingManualDecision || this.reservingApprovalResume || this.draftRunBatches?.locked || this.delegatedApprovals?.hasPending(sessionId)),
       cancellable: Boolean(this.currentRunAbortController && !this.currentRunAbortController.signal.aborted
         || this.changeActionAbortController && !this.changeActionAbortController.signal.aborted || this.activeDraftRunId),
       cancelOperationId: this.interactionCoordinator?.current?.operationId,
@@ -403,8 +458,28 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
   private historyTruncationRecovery?: Promise<void>;
   private activeRunSettled?: Promise<void>;
+  /** Abort controllers per running session; parallel sessions never share one. */
+  private readonly runAbortControllers = new Map<string, AbortController>();
+  /**
+   * Controller of the viewed session. Kept as a plain field so host-only fixtures
+   * and legacy readers can assign or inspect it directly; real runs use the
+   * per-session map through abortControllerFor/setAbortController.
+   */
   private currentRunAbortController: AbortController | undefined;
+
+  private abortControllerFor(sessionId: string): AbortController | undefined {
+    return this.runAbortControllers.get(sessionId) ?? this.currentRunAbortController;
+  }
+
+  private setAbortController(sessionId: string, controller: AbortController | undefined): void {
+    if (controller) this.runAbortControllers.set(sessionId, controller);
+    else this.runAbortControllers.delete(sessionId);
+    this.currentRunAbortController = controller;
+  }
+  private readonly sessionRuns = new SessionRunRegistry();
   private activeDraftRunId: string | undefined;
+  /** Session that owns the command (DraftRun) currently executing. */
+  private activeDraftRunSessionId: string | undefined;
   private readonly delegatedApprovals = new DelegatedApprovalQueue();
   private authorizedExternalExecutionUris = new Set<string>();
   private externalEffectGrants = new ExactOperationGrants();
@@ -862,6 +937,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private balanceRefreshPromise: Promise<void> | undefined;
   /** 来源隔离的全局余额 store：同一来源跨 workspace/window 共享快照与限流。 */
   private readonly balanceStore: GlobalBalanceStore;
+  /**
+   * Session that owns the currently running task. Run state (activity, busy, live
+   * usage) is global in this build, so every projection must be scoped to this id;
+   * otherwise a freshly opened session would show another session's progress.
+   */
+  private runningSessionId: string | undefined;
   private agentActivitySequence = 0;
   private agentActivity: AgentActivityState = {
     base: 'idle',
@@ -1578,6 +1659,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleMessageImpl(message: WebviewMessage, webviewId: string): Promise<void> {
+    console.log("HMI type=", message.type, "isBusy=", this.isBusy, "approvalReady=", this.approvalDataReady, "ctxReady=", this.requestContextReady);
     if (message.type === 'sendPrompt' || message.type === 'editUserPrompt') {
       await this.handleSubmission(message);
       return;
@@ -1656,7 +1738,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         if (this.isBusy || this.isStartingRun || this.activeDraftRunId || this.hasActiveBackgroundRun()) return;
         {
           const session = this.sessionStore.getActiveSession();
-          if (normalizeExecutionMode(session.executionMode) === message.mode) return;
+          // The project queue is the authority (P2): the store derives the mode and
+          // moves the session in the queue instead of writing a per-session flag.
+          if (this.sessionStore.executionMode === message.mode) return;
           const originalExecutionMode = session.executionMode;
           const originalUpdatedAt = session.updatedAt;
           const originalPlanStates = (session.planWorkflows ?? []).map((record) => ({
@@ -1665,8 +1749,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
             decidedAt: record.decidedAt
           }));
           if (message.mode === 'normal') exitPendingPlan(session);
-          session.executionMode = message.mode;
-          session.updatedAt = new Date().toISOString();
+          await this.sessionStore.setExecutionMode(message.mode);
           try {
             await this.sessionStore.persist();
           } catch (error) {
@@ -2094,6 +2177,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
             return;
           }
           this.activeDraftRunId = draftRun.id;
+      this.activeDraftRunSessionId = draftRun.sessionId;
           this.setAgentActivity({
             base: 'executing',
             phase: 'running_draft_run',
@@ -3031,7 +3115,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   private async createNewSessionForNavigation(): Promise<ChatSession | undefined> {
     if (this.sessionReady && !this.interactionSnapshot(this.stateRevision).canNavigate) return;
-    if (this.isBusy || this.isStartingRun || this.runContextRefreshInFlight || this.activeDraftRunId || this.activeChangeActions.size || this.hasActiveBackgroundRun()) {
+    // Navigation stays available while a main run is in flight; the run is bound to
+    // the session captured at admission. Background work, context refresh and
+    // in-progress change actions remain hard barriers.
+    if (this.runContextRefreshInFlight || this.activeDraftRunId || this.activeChangeActions.size || this.hasActiveBackgroundRun()) {
       return;
     }
     const operation = this.interactions.begin('navigation', this.sessionStore.activeSessionId, 'loading_session');
@@ -3039,7 +3126,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.postState({ immediate: true });
     try {
       await this.ensureSessionNavigationReady();
-      if (this.isBusy || this.hasActiveBackgroundRun()) return;
+      if (this.hasActiveBackgroundRun()) return;
       // Check after initialization, before clearing references or publishing a
       // navigation: an unused session remains the same composer and context.
       if (!this.sessionStore.hasUserMessages) return this.sessionStore.getActiveSession();
@@ -3085,7 +3172,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   private async selectSession(sessionId: string): Promise<void> {
     if (this.sessionReady && !this.interactionSnapshot(this.stateRevision).canNavigate) return;
-    if (this.isBusy || this.isStartingRun || this.runContextRefreshInFlight || this.activeDraftRunId || this.activeChangeActions.size || this.hasActiveBackgroundRun()) {
+    // Navigation stays available while a main run is in flight; the run is bound to
+    // the session captured at admission. Background work, context refresh and
+    // in-progress change actions remain hard barriers.
+    if (this.runContextRefreshInFlight || this.activeDraftRunId || this.activeChangeActions.size || this.hasActiveBackgroundRun()) {
       return;
     }
     const operation = this.interactions.begin('navigation', this.sessionStore.activeSessionId, 'loading_session');
@@ -3093,7 +3183,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.postState({ immediate: true });
     try {
       await this.ensureSessionNavigationReady();
-      if (this.isBusy || this.hasActiveBackgroundRun()) return;
+      if (this.hasActiveBackgroundRun()) return;
       const wasActiveSession = sessionId === this.sessionStore.activeSessionId;
       const selection = await this.sessionStore.selectSessionBounded(sessionId, {
         timeoutMs: this.historySessionLoadTimeoutMs,
@@ -5061,6 +5151,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
       if (this.activeDraftRunId === id) {
         this.activeDraftRunId = undefined;
+      this.activeDraftRunSessionId = undefined;
       }
       this.interactions.finish(operation);
       this.setAgentActivity({
@@ -5130,6 +5221,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         },
         onCurrent: (run) => {
           this.activeDraftRunId = run?.id;
+      this.activeDraftRunSessionId = run?.sessionId;
           if (run) this.setAgentActivity({ base: 'executing', phase: 'running_draft_run', detail: run.spec.reason });
         }
       });
@@ -5144,6 +5236,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           this.interactionFailure = { sessionId: this.sessionStore.activeSessionId, message: this.t('runStorageFailed') + ': ' + getErrorMessage(error) };
         }
         this.activeDraftRunId = undefined;
+      this.activeDraftRunSessionId = undefined;
         this.setAgentActivity({ base: 'idle', phase: 'idle' }, { post: false });
       }
       if (operation) this.interactions.finish(operation);
@@ -5930,7 +6023,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       let usage: TurnUsageStats | undefined;
       this.approvalMainContexts.set(`${session.id}:${message.id}`, { model: { ...(cp.outputFailure ? currentModel : checkpointForResume.request.model) },
         sourceConfig: { sourceId: source.sourceId, provider: source.provider, apiKey: source.apiKey, baseUrl: source.baseUrl, supportsBilling: source.supportsBilling } });
-      this.isBusy = true;
+    this.sessionRuns.tryStart(session.id);
       this.setInteractionPhase('running', operation);
       const response = await this.agentRunner.run({
         ...checkpointForResume.request, model: { ...(cp.outputFailure ? currentModel : checkpointForResume.request.model) }, checkpoint: checkpointForResume,
@@ -6021,7 +6114,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       if (refreshTimer) clearTimeout(refreshTimer);
       delete message.isStreaming;
       if (this.currentRunAbortController === controller) this.currentRunAbortController = undefined;
-      this.isBusy = false; this.liveTurnUsage = undefined; this.liveContextUsage = undefined;
+    this.sessionRuns.forceRelease(session.id); this.liveTurnUsage = undefined; this.liveContextUsage = undefined;
+    this.setAbortController(session.id, undefined);
       this.interactions.update(operation, this.modelSelectionTransactions?.getSnapshot?.()?.pending ? 'preparing_context' : 'saving');
       this.postState({ immediate: true });
       try {
@@ -6048,6 +6142,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handlePlanDecision(planId: string, action: PlanDecisionAction): Promise<void> {
+    console.log("HPD isBusy=", this.isBusy, "override=", this.isBusyOverride, "field=", this.isBusyField, "startingRun=", this.isStartingRun, "draft=", this.activeDraftRunId, "bg=", this.hasActiveBackgroundRun(), "action=", action);
     if (this.isBusy || this.isStartingRun || this.activeDraftRunId || this.hasActiveBackgroundRun()) {
       vscode.window.showInformationMessage(this.t('planDecisionBusy'));
       return;
@@ -6080,6 +6175,17 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         vscode.window.showWarningMessage(this.t('planDecisionInvalid'));
         this.postState();
         return;
+      }
+      // Executing a plan means taking the write position (P2): promote this
+      // session to the queue head so it derives `normal`. The previous head keeps
+      // its own plan and simply becomes `plan`.
+      if (resolution.startExecution) {
+        try { await this.sessionStore.promoteSessionInQueue(session.id); }
+        catch (error) {
+          vscode.window.showErrorMessage(this.t('runStorageFailed') + ': ' + getErrorMessage(error));
+          this.postState();
+          return;
+        }
       }
       try {
         await this.sessionStore.persist();
@@ -6241,7 +6347,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       work?.finish();
       if (this.activeTaskScope === work) this.activeTaskScope = undefined;
       continuationSignal?.removeEventListener('abort', abortContinuation);
-      this.isBusy = false;
+    this.sessionRuns.forceRelease(taskSessionForSave.id);
       // The model is finished; the reservation remains through durability.
       if (this.interactions.owns(operation)) this.interactions.update(operation, 'saving');
       if (this.currentRunAbortController === preparationController) this.currentRunAbortController = undefined;
@@ -6357,7 +6463,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
   ): Promise<AgentResponse | undefined> {
     const trimmedPrompt = prompt.trim();
-    if (!trimmedPrompt || this.isBusy || this.activeDraftRunId) {
+    const admissionSessionId = this.sessionStore?.activeSessionId || '';
+    // Parallel runs are allowed across sessions; only a second run of the SAME
+    // session is refused. The registry claim below is the atomic admission point.
+    if (!trimmedPrompt || !admissionSessionId || this.isBusyFor(admissionSessionId) || this.activeDraftRunSessionId === admissionSessionId) {
       return;
     }
     const backgroundRun = this.backgroundRunCoordinator.getActiveRun();
@@ -6431,8 +6540,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
     this.modelSelectionTransactions.beginRun({ sourceId: model.sourceId, modelId: model.id });
 
-    const abortController = this.currentRunAbortController ?? new AbortController();
-    this.currentRunAbortController = abortController;
+    // Bind the controller to the session admitted for this run, not to whatever
+    // session happens to be viewed now: navigation is allowed during a run.
+    const abortController = this.abortControllerFor(admissionSessionId) ?? new AbortController();
+    this.setAbortController(admissionSessionId, abortController);
     this.liveContextUsage = undefined;
     this.liveTurnUsage = undefined;
     this.setAgentActivity({
@@ -6760,7 +6871,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         await executeHistoryTruncation(activeSession, truncation, this.historyTruncationHooks(activeSession));
         this.authorizedExternalReferenceUris.clear();
         for (const uri of authorizedExternalReferenceUris) this.authorizedExternalReferenceUris.add(uri);
-      } else this.messages.push(userMessage);
+      } else activeSession.messages.push(userMessage);
       if (draftRunTail && !truncation) {
         this.draftRuns.bindResultsToMessage(draftRunTail.draftRunIds, userMessage.id);
       }
@@ -6844,7 +6955,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         runCheckpoint: noProgressRecovery ? snapshotCheckpoint(noProgressRecovery) : undefined,
         isStreaming: true
       };
-      this.messages.push(assistantMessage);
+      // Append to the session captured at admission, never to whatever session
+      // happens to be active now: navigation is allowed while a run is in flight.
+      activeSession.messages.push(assistantMessage);
       streamPublisher = this.createRunStreamPublisher(activeSession.id, assistantMessage);
       this.setAgentActivity({
         base: 'thinking',
@@ -6903,7 +7016,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
       this.approvalMainContexts.set(`${activeSession.id}:${assistantMessage.id}`, { model: { ...model }, sourceConfig: { ...sourceConfig } });
       while (this.approvalMainContexts.size > 100) this.approvalMainContexts.delete(this.approvalMainContexts.keys().next().value!);
-      this.isBusy = true;
+    this.sessionRuns.tryStart(activeSession.id);
       this.setInteractionPhase('running', options?.interactionOperation);
       const response = await this.agentRunner.run(agentRequest, {
         onTaskBudgetReady: authority => titleBudgetChannel?.setAuthority(authority),
@@ -7163,9 +7276,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
               ? 'Agent run stopped by the user.'
               : 'Agent 运行已由用户停止。';
           } else if (!hasPartialOutput) {
-            const assistantIndex = this.messages.findIndex((message) => message.id === assistantMessageId);
+            const assistantIndex = failedSession.messages.findIndex((message) => message.id === assistantMessageId);
             if (assistantIndex >= 0) {
-              this.messages.splice(assistantIndex, 1);
+              failedSession.messages.splice(assistantIndex, 1);
             }
             assistantMessage = undefined;
           }
@@ -7217,7 +7330,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.liveContextUsage = undefined;
       this.liveTurnUsage = undefined;
       this.sessionStore.getActiveSession().updatedAt = new Date().toISOString();
-      this.isBusy = false;
+      // Release the run registered for the session admitted by this call.
+      this.sessionRuns.forceRelease(admissionSessionId);
+      this.setAbortController(admissionSessionId, undefined);
       this.setInteractionPhase(this.modelSelectionTransactions?.getSnapshot?.()?.pending ? 'preparing_context' : 'saving', options?.interactionOperation);
       await this.applyPendingModelSelectionAfterRun();
       this.setInteractionPhase('saving', options?.interactionOperation);
@@ -7600,7 +7715,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         activeSessionId: this.sessionStore.activeSessionId,
         interaction: this.interactionSnapshot(revision),
         titleRegenerationCapability: this.sessionTitleCapability(),
-        isBusy: this.isBusy && !this.activeDraftRunId,
+        isBusy: this.runBelongsToViewed() && this.isBusy && !this.activeDraftRunId,
         startup: this.getStartupState(),
         backgroundAvailableScripts: this.backgroundAvailableScripts
       }
@@ -7635,7 +7750,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         activeSessionId: activeSession?.id ?? '',
         interaction: this.interactionSnapshot(revision),
         titleRegenerationCapability: this.sessionTitleCapability(),
-        isBusy: this.isBusy && !this.activeDraftRunId,
+        isBusy: this.runBelongsToViewed() && this.isBusy && !this.activeDraftRunId,
         sessionSummaries: hasSession ? this.sessionStore.getSessionSummaries() : [],
         messages,
         hasOlderMessages: Boolean(activeSession && activeSession.messages.length > messages.length),
@@ -7940,6 +8055,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         activeSessionId: this.sessionStore.activeSessionId,
         workspaceFolders: (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath || folder.uri.toString()),
         sessionSummaries: this.sessionStore.getSessionSummaries(),
+        projectQueue: this.sessionStore.getProjectQueueView(),
         contextFiles: contextFiles.map(({ content: _content, ...file }) => file),
         skills: this.skillStore.getStateView(activeSession),
         subagents: this.subagentProgress.filter((item) => item.parentSessionId === activeSession.id)
@@ -8019,8 +8135,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         authorizedExternalExecutionUris: [...this.authorizedExternalExecutionUris],
         interaction: this.interactionSnapshot(revision),
         titleRegenerationCapability: this.sessionTitleCapability(),
-        isBusy: this.isBusy && !this.activeDraftRunId,
-        agentActivity: this.agentActivity,
+        isBusy: this.runBelongsToViewed() && this.isBusy && !this.activeDraftRunId,
+        agentActivity: this.runBelongsToViewed() ? this.agentActivity : { base: 'idle', phase: 'idle', updatedAt: this.agentActivity.updatedAt, sequence: this.agentActivity.sequence },
         maxFileBytes: getConfiguredMaxFileBytes(),
         historyRetentionDays: getConfiguredHistoryRetentionDays(),
         debugMode: getConfiguredDebugMode(),
@@ -9798,6 +9914,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           }
           if (commit?.outcome === 'ready' || release?.pushAttempt) await this.draftRuns.flush();
           this.activeDraftRunId = actual.id;
+      this.activeDraftRunSessionId = actual.sessionId;
           this.setAgentActivity({ base: 'executing', phase: 'running_draft_run', detail: actual.spec.executable });
           const result = await this.draftRuns.approveAndRun(actual.id, actual.spec.restricted ? new Set() : authorization.scopeUris, {
             delegatedApproval: () => isAuthorized() && (review.source !== 'auto_approval_review' || config === this.approvalReviewerSettingKey()),
@@ -9816,6 +9933,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
             this.attachApprovalReviewToRunDetails(consumedReview);
           }
           this.activeDraftRunId = undefined;
+      this.activeDraftRunSessionId = undefined;
           if (result?.status === 'pending' && result.approvalHold?.status === 'paused') {
             const cancelled = controller.signal.aborted && controller.signal.reason?.code === 'user_cancelled';
             report(id, cancelled ? 'cancelled' : 'paused', result.approvalHold.reason,
@@ -10134,6 +10252,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         this.interactions.finish(operation);
         this.delegatedApprovalInFlight = false;
         this.activeDraftRunId = undefined;
+      this.activeDraftRunSessionId = undefined;
         if (this.currentRunAbortController === controller) this.currentRunAbortController = undefined;
       }
       if (processing.status === 'waiting_user' || processing.status === 'paused') {
