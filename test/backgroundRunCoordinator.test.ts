@@ -10,13 +10,13 @@ describe('BackgroundRunCoordinator', () => {
       sessionId: 'session-1',
       workspaceKey: 'workspace-1',
       goal: { kind: 'repair_until_validation_passes', script: 'test', description: 'Repair until test passes.' },
-      limits: { maxRounds: 1, maxDurationMs: 60_000, maxToolCalls: 3 }
+      limits: { maxRounds: 1, maxToolCalls: 3 }
     });
     assert.throws(() => coordinator.start({
       sessionId: 'session-1',
       workspaceKey: 'workspace-1',
       goal: { kind: 'repair_until_validation_passes', script: 'test', description: 'Second task.' },
-      limits: { maxRounds: 1, maxDurationMs: 60_000, maxToolCalls: 3 }
+      limits: { maxRounds: 1, maxToolCalls: 3 }
     }), /Only one/iu);
 
     coordinator.beginRound();
@@ -33,7 +33,7 @@ describe('BackgroundRunCoordinator', () => {
       sessionId: 'session-1',
       workspaceKey: 'workspace-1',
       goal: { kind: 'repair_until_validation_passes', script: 'compile', description: 'Repair compile.' },
-      limits: { maxRounds: 5, maxDurationMs: 60_000, maxToolCalls: 2 }
+      limits: { maxRounds: 5, maxToolCalls: 2 }
     });
     coordinator.beginRound();
     coordinator.recordRun(createRunDetails(2));

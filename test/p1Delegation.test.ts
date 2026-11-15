@@ -214,7 +214,7 @@ test('real KeepSeek runtime and durable store verify a returned child before par
   }) as typeof fetch;
   try {
     const request = createRequest();
-    const response = await new AgentLoop(undefined, undefined, undefined, undefined, undefined, undefined, undefined, runtime).run(request);
+    const response = await new AgentLoop(undefined, undefined, undefined, undefined, undefined, undefined, runtime).run(request);
     assert.equal(calls, 6);
     assert.equal(response.taskPlan.status, 'completed');
     assert.equal(response.taskPlan.delegation?.results[0]?.acceptance, 'adopt');
@@ -300,7 +300,7 @@ async function runModelSequence(deltas: object[], adapter?: SubagentToolAdapter,
   }) as typeof fetch;
   const request = createRequest();
   if (explicit) request.explicitSubagentSelection = { kind: 'single', profile: 'research' };
-  try { return { response: await new AgentLoop(workspaceTools, undefined, undefined, undefined, undefined, undefined, undefined, adapter).run(request), bodies }; }
+  try { return { response: await new AgentLoop(workspaceTools, undefined, undefined, undefined, undefined, undefined, adapter).run(request), bodies }; }
   finally { globalThis.fetch = originalFetch; }
 }
 function createRequest(): AgentRequest {

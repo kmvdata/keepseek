@@ -23,7 +23,7 @@ import { ResponsesStreamParser } from '../src/agent/providers/responsesStreamPar
 import { AnthropicStreamParser } from '../src/agent/providers/anthropicStreamParser';
 import { OpenAICompatibleClient } from '../src/agent/providers/openAiCompatibleClient';
 import { getAgentRuntimeProfile } from '../src/shared/modelProfiles';
-import { getConfiguredAgentMaxCost, getConfiguredAgentMaxExecutionMs, getConfiguredBackgroundMaxDurationMs } from '../src/shared/config';
+import { getConfiguredAgentMaxCost, getConfiguredAgentMaxExecutionMs } from '../src/shared/config';
 import { WorkspaceToolService } from '../src/agent/tools/workspaceTools';
 import type { AgentRequest } from '../src/shared/types';
 
@@ -36,8 +36,7 @@ describe('long-running Agent execution and safe recovery', () => {
     assert.equal(JSON.parse(JSON.stringify({ duration: normalizeDuration(undefined) })).duration, 0);
     assert.equal(getConfiguredAgentMaxExecutionMs(), 0);
     assert.equal(getConfiguredAgentMaxCost(), 0);
-    assert.equal(getConfiguredBackgroundMaxDurationMs(), 0);
-    assert.equal('maxRunMs' in getAgentRuntimeProfile({ id: 'generic', label: 'generic', provider: 'openai-compatible' },
+      assert.equal('maxRunMs' in getAgentRuntimeProfile({ id: 'generic', label: 'generic', provider: 'openai-compatible' },
       { thinkingEnabled: true, reasoningEffort: 'high' }), false);
   });
 
@@ -80,13 +79,13 @@ describe('long-running Agent execution and safe recovery', () => {
 
   it('does not spend background budget while awaiting Apply or authorization', () => {
     const coordinator = new BackgroundRunCoordinator();
-    coordinator.start({ sessionId: 's', workspaceKey: 'w', goal: { kind: 'repair_until_validation_passes', script: 'test', description: 'test' }, limits: { maxRounds: 3, maxDurationMs: 0, maxToolCalls: 30 } });
+    coordinator.start({ sessionId: 's', workspaceKey: 'w', goal: { kind: 'repair_until_validation_passes', script: 'test', description: 'test' }, limits: { maxRounds: 3, maxToolCalls: 30 } });
     coordinator.recordExecutionTime(7_200_000);
     coordinator.waitForApply('apply');
     assert.equal(coordinator.getRemainingExecutionLimits().maxRunMs, 0);
     assert.equal(coordinator.getLimitStopReason(), undefined);
     coordinator.stop('stop');
-    coordinator.start({ sessionId: 's', workspaceKey: 'w', goal: { kind: 'repair_until_validation_passes', script: 'test', description: 'test' }, limits: { maxRounds: 3, maxDurationMs: 2000, maxToolCalls: 30 } });
+    coordinator.start({ sessionId: 's', workspaceKey: 'w', goal: { kind: 'repair_until_validation_passes', script: 'test', description: 'test' }, limits: { maxRounds: 3, maxToolCalls: 30 } });
     coordinator.recordExecutionTime(500);
     coordinator.waitForAuthorization('approve');
     assert.equal(coordinator.getRemainingExecutionLimits().maxRunMs, 1500);

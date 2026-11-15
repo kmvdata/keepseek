@@ -842,7 +842,7 @@ test('restart after a new epoch seed is persisted sends its exact bytes without 
     return modelResponse('openai-compatible');
   }) as typeof fetch;
   try {
-    const response = await new AgentRunner(undefined, undefined, undefined, undefined, undefined, undefined, uri).run(input, {
+    const response = await new AgentRunner(undefined, undefined, undefined, undefined, undefined, uri).run(input, {
       onCheckpoint: async (cp) => { finalCheckpoint = checkpointCopy(cp); }
     });
     assert.equal(response.message, 'Done.');
@@ -907,7 +907,7 @@ test('a new real user turn reopens no-progress work across all lanes without res
     }) as typeof fetch;
     try {
       const input = request(provider);
-      const runner = () => new AgentRunner(workspace, undefined, undefined, undefined, undefined, undefined, vscode.Uri.file(root) as never);
+      const runner = () => new AgentRunner(workspace, undefined, undefined, undefined, undefined, vscode.Uri.file(root) as never);
       await assert.rejects(() => runner().run(input, { onCheckpoint: async next => { cp = checkpointCopy(next); } }),
         (error: unknown) => error instanceof AgentInterruptedError && error.reason === 'no_progress_loop');
       assert.equal(reads, 3);
@@ -1085,7 +1085,7 @@ test('crash recovery distinguishes pending, replayable, completed and uncertain 
       workspace.readWorkspaceFile = async () => { reads += 1; return JSON.stringify({ ok: true, path: 'recovery.ts', content: LARGE_ASCII }); };
       const bodies: string[] = [];
       globalThis.fetch = (async (_url, init) => { bodies.push(String(init?.body)); return modelResponse('openai-compatible'); }) as typeof fetch;
-      const response = await new AgentRunner(workspace, undefined, undefined, undefined, undefined, undefined, uri).run(input);
+      const response = await new AgentRunner(workspace, undefined, undefined, undefined, undefined, uri).run(input);
       assert.equal(response.message, 'Done.', scenario.name);
       assert.equal(reads, scenario.expectedReads, scenario.name);
       assert.equal(bodies.length, 1, scenario.name);
@@ -1107,7 +1107,7 @@ test('crash recovery distinguishes pending, replayable, completed and uncertain 
     assert.equal(recoveryBlocker(checkpoint), undefined,
       'the UI lets the runner reconcile evidence before deciding that a side effect is uncertain');
     await assert.rejects(
-      () => new AgentRunner(undefined, undefined, undefined, undefined, undefined, undefined, uri).run(input),
+      () => new AgentRunner(undefined, undefined, undefined, undefined, undefined, uri).run(input),
       (error: unknown) => error instanceof AgentInterruptedError && error.reason === 'uncertain_tool_result'
     );
     assert.equal((await new ToolEvidenceStore(uri).findByRef(evidence.evidenceRef, input.sessionId, checkpoint.taskId))?.executionStatus, 'uncertain');
@@ -1240,7 +1240,7 @@ test('capacity-pressure replay crosses two necessary epochs with mixed audit and
           paused = true; pause.abort();
         }
       };
-      const runner = () => new AgentRunner(workspace, undefined, undefined, undefined, undefined, undefined, uri);
+      const runner = () => new AgentRunner(workspace, undefined, undefined, undefined, undefined, uri);
       await assert.rejects(() => runner().run({ ...input, signal: pause.signal }, { onCheckpoint: save }));
       const taskId = checkpoint.taskId, usedMs = checkpoint.usedMs;
       const response = await runner().run({ ...input, checkpoint: checkpointCopy(checkpoint) }, { onCheckpoint: save });
@@ -1303,7 +1303,7 @@ test('offline 120-round replay across three protocols delivers pages and resumes
         checkpoint = snapshotCheckpoint(cp);
         if (!stopped && cp.state?.turn === 20 && !cp.state.pending) { stopped = true; controller.abort(); }
       };
-      const runner = () => new AgentRunner(workspace, undefined, undefined, undefined, undefined, undefined, uri);
+      const runner = () => new AgentRunner(workspace, undefined, undefined, undefined, undefined, uri);
       await assert.rejects(() => runner().run({ ...input, signal: controller.signal }, { onCheckpoint: save }));
       const taskId = checkpoint.taskId, spent = checkpoint.usedMs, calls = reads;
       assert.equal(calls, 10);

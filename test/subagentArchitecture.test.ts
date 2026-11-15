@@ -230,7 +230,7 @@ test('main AgentRunner routes delegation through the isolated adapter and reject
     content: JSON.stringify({ ok: true, subagentId: 'sa_child' }),
     draftEdits: [childEdit]
   });
-  const runner = new AgentRunner(undefined, undefined, undefined, undefined, undefined, undefined, undefined, adapter);
+  const runner = new AgentRunner(undefined, undefined, undefined, undefined, undefined, undefined, adapter);
   const invoke = runner as unknown as {
     handleToolCall(
       call: { id: string; type: 'function'; function: { name: string; arguments: string } },

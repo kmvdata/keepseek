@@ -79,7 +79,7 @@ test('canonical page bytes reach actual mocked Chat/Responses/Anthropic/DSML req
       const adapter: SubagentToolAdapter = { delegateTask: async () => { throw new Error('Unexpected delegate'); },
         delegateParallel: async () => { throw new Error('Unexpected parallel'); }, readResult: async () => { reads++; return { content: raw }; } };
       const provider = format === 'responses' ? 'openai-responses' : format === 'anthropic' ? 'anthropic-compatible' : 'openai-compatible';
-      const result = await new AgentRunner(undefined, undefined, undefined, undefined, undefined, undefined, undefined, adapter).run(request(provider));
+      const result = await new AgentRunner(undefined, undefined, undefined, undefined, undefined, undefined, adapter).run(request(provider));
       assert.equal(reads, 1, format); assert.equal(bodies.length, 2, format);
       const visibleStrings = strings(bodies[1]);
       const serialized = visibleStrings.find(value => value.includes('"returnedBytes"') && value.includes('sa_result'));

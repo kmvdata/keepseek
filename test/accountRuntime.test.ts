@@ -256,7 +256,6 @@ test('main runtime resolves credentials from the model source bound to the selec
       undefined,
       undefined,
       undefined,
-      undefined,
       globalStorageUri
     ) as unknown as RuntimeConfigInvoker;
 

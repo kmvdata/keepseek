@@ -21,10 +21,8 @@ import {
 import { WorkspaceToolService } from '../src/agent/tools/workspaceTools';
 import { SafeFileEditor } from '../src/edits/safeFileEditor';
 import { ValidationToolService, type ValidationToolAdapter } from '../src/agent/tools/validationTools';
-import type { ToolAuthorizationAdapter } from '../src/agent/tools/toolAuthorization';
 import type {
   AgentRequest,
-  RunAuthorizationPolicy,
   SafeNpmScript,
   ToolAuthorizationDecision
 } from '../src/shared/types';
@@ -718,7 +716,7 @@ for (const setting of ['approval model', 'execution environment']) {
     });
     const request = { ...createRequest('Run the fixed test script.'), approvalMode: 'delegate' as const,
       sessionId: 'validation-configuration-change' };
-    const runner = new AgentRunner(undefined, undefined, new ValidationToolService(), undefined, undefined, undefined,
+    const runner = new AgentRunner(undefined, undefined, new ValidationToolService(), undefined, undefined,
       undefined, undefined, reviewer, async () => assert.fail('Stale review cannot request a click'));
     const response = await withResponses([
       toolResponse([toolCall('changed-configuration', RUN_VALIDATION_TOOL_NAME, { script: 'test' })])

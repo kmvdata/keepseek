@@ -11,7 +11,7 @@ import {
   getConfiguredAgentMaxToolCalls,
   getConfiguredAgentMaxToolIterations,
   getConfiguredAgentMaxTreeUpstreamTokens,
-  getConfiguredBalanceEndpointUrl,
+  getBalanceEndpointUrl,
   getConfiguredDraftRunMaxTranscriptBytes,
   getConfiguredDraftRunTimeoutMs,
   getConfiguredModelUsagePricing,
@@ -86,32 +86,32 @@ test('timeout changes save presets globally and reject arbitrary or malformed me
 
 test('official DeepSeek baseUrl without version prefix maps to /user/balance', () => {
   assert.equal(
-    getConfiguredBalanceEndpointUrl('https://api.deepseek.com'),
+    getBalanceEndpointUrl('https://api.deepseek.com'),
     'https://api.deepseek.com/user/balance'
   );
 });
 
 test('official DeepSeek baseUrl with /v1 prefix still maps to /user/balance without /v1', () => {
   assert.equal(
-    getConfiguredBalanceEndpointUrl('https://api.deepseek.com/v1'),
+    getBalanceEndpointUrl('https://api.deepseek.com/v1'),
     'https://api.deepseek.com/user/balance'
   );
 });
 
 test('official DeepSeek baseUrl with chat completions path maps to /user/balance', () => {
   assert.equal(
-    getConfiguredBalanceEndpointUrl('https://api.deepseek.com/v1/chat/completions'),
+    getBalanceEndpointUrl('https://api.deepseek.com/v1/chat/completions'),
     'https://api.deepseek.com/user/balance'
   );
 });
 
 test('non-official proxy baseUrl keeps its path prefix', () => {
   assert.equal(
-    getConfiguredBalanceEndpointUrl('https://proxy.example.com/v1'),
+    getBalanceEndpointUrl('https://proxy.example.com/v1'),
     'https://proxy.example.com/v1/user/balance'
   );
   assert.equal(
-    getConfiguredBalanceEndpointUrl('https://proxy.example.com'),
+    getBalanceEndpointUrl('https://proxy.example.com'),
     'https://proxy.example.com/user/balance'
   );
 });

@@ -61,7 +61,7 @@ test('static unknown and incomplete argv reach the current tool loop, durable ev
         return streaming(lane);
       }) as typeof fetch;
       try {
-        const result = await new AgentRunner(undefined, undefined, undefined, undefined, undefined, undefined,
+        const result = await new AgentRunner(undefined, undefined, undefined, undefined, undefined,
           storage as unknown as import('vscode').Uri).run(input, { onCheckpoint: async next => { checkpoints.push(checkpointCopy(next)); } });
         assert.match(result.message, /Prepared/u);
         assert.equal(bodies.length, 3);
@@ -117,7 +117,7 @@ test('new segments inherit budgets, and same-root repetition needs a concrete di
       })) : streaming('chat');
     }) as typeof fetch;
     try {
-      await new AgentRunner(undefined, undefined, undefined, undefined, undefined, undefined,
+      await new AgentRunner(undefined, undefined, undefined, undefined, undefined,
         storage as unknown as import('vscode').Uri).run(input, { onCheckpoint: async next => { first = checkpointCopy(next); } });
       assert.equal(first.commandRecoveryObservations?.length, 1);
       first.usedMs = Math.max(first.usedMs, 321);
@@ -157,7 +157,7 @@ test('new segments inherit budgets, and same-root repetition needs a concrete di
         assert.equal((diagnostics[1].recovery as { allowed: boolean }).allowed, false);
         return streaming('chat');
       }) as typeof fetch;
-      const response = await new AgentRunner(undefined, undefined, undefined, undefined, undefined, undefined,
+      const response = await new AgentRunner(undefined, undefined, undefined, undefined, undefined,
         storage as unknown as import('vscode').Uri).run({ ...input, checkpoint: restored },
         { onCheckpoint: async next => { latest = checkpointCopy(next); } });
       assert.equal(dispatches, 3);
@@ -207,7 +207,7 @@ test('same-response sibling gaps deduplicate one root cause without capping dist
       return streaming('chat');
     }) as typeof fetch;
     try {
-      const result = await new AgentRunner(undefined, undefined, undefined, undefined, undefined, undefined,
+      const result = await new AgentRunner(undefined, undefined, undefined, undefined, undefined,
         storage as unknown as import('vscode').Uri).run(request('chat', 'sibling-gaps'),
         { onCheckpoint: async next => { checkpoint = checkpointCopy(next); } });
       assert.equal(dispatches, 2, 'the model gets one opportunity to react after the sibling batch');
@@ -283,7 +283,7 @@ test('a compact preflight envelope delivers ordinary diagnostics but a reference
       return streaming('chat');
     }) as typeof fetch;
     try {
-      await new AgentRunner(undefined, undefined, undefined, undefined, undefined, undefined,
+      await new AgentRunner(undefined, undefined, undefined, undefined, undefined,
         storage as unknown as import('vscode').Uri).run(input, { onCheckpoint: async next => { final = checkpointCopy(next); } });
       const [ordinary, original, beforeRead, afterRead] = final.commandRecoveryObservations!;
       assert.ok(ordinary.deliveredResponseId);
@@ -322,7 +322,7 @@ test('checkpoint re-entry and a physical reconnect preserve one accepted correct
       return streaming('chat');
     }) as typeof fetch;
     try {
-      const runner = () => new AgentRunner(undefined, undefined, undefined, undefined, undefined, undefined,
+      const runner = () => new AgentRunner(undefined, undefined, undefined, undefined, undefined,
         storage as unknown as import('vscode').Uri);
       await assert.rejects(runner().run({ ...input, signal: controller.signal }, {
         onCheckpoint: async next => {
@@ -377,7 +377,7 @@ test('a blocked emulated proposal keeps its audit identity across interruption b
       return streaming('chat');
     }) as typeof fetch;
     try {
-      const runner = () => new AgentRunner(undefined, undefined, undefined, undefined, undefined, undefined,
+      const runner = () => new AgentRunner(undefined, undefined, undefined, undefined, undefined,
         storage as unknown as import('vscode').Uri);
       await assert.rejects(runner().run({ ...input, signal: controller.signal }, {
         onCheckpoint: async next => {

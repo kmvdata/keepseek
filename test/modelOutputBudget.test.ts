@@ -381,7 +381,7 @@ test('configuration changes affect the next model round while a network retry ke
     return reply('qwencloud', bodies.length === 2 ? 'tool' : 'stop');
   }) as typeof fetch;
   try {
-    await new AgentRunner(workspace, undefined, undefined, undefined, undefined, undefined, storageUri).run(input);
+    await new AgentRunner(workspace, undefined, undefined, undefined, undefined, storageUri).run(input);
     assert.equal(bodies[0], bodies[1]);
     assert.deepEqual(bodies.map((body) => JSON.parse(body).max_tokens), [8192, 8192, 32768]);
   } finally { globalThis.fetch = original; await rm(directory, { recursive: true, force: true }); }

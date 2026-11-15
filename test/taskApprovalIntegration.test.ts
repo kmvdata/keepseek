@@ -2583,7 +2583,7 @@ test('delegate drains background approval while no Webview is attached and advan
     const running = background.start({
       sessionId: f.session.id, workspaceKey: f.scope.key,
       goal: { kind: 'repair_until_validation_passes', script: 'test', description: 'Run tests' },
-      limits: { maxDurationMs: 60_000, maxRounds: 3, maxToolCalls: 20 }
+      limits: { maxRounds: 3, maxToolCalls: 20 }
     });
     background.beginRound();
     background.waitForAuthorization('Processing automatically.');

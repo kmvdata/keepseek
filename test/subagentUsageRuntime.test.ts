@@ -280,7 +280,7 @@ async function runParent(callbacks: Parameters<AgentRunner['run']>[1], options: 
         candidates: ['single', 'parallel'].map(id => ({ id, goal: `Inspect the ${id} surface`, scope: [`src/${id}`], inputs: [],
           dependsOn: [], capabilities: ['read'], acceptance: ['Return bounded evidence.'] })), results: [], events: [] } };
     request.checkpoint = checkpoint;
-    const response = await new AgentRunner(undefined, undefined, undefined, undefined, undefined, undefined, undefined, adapter).run(request, callbacks);
+    const response = await new AgentRunner(undefined, undefined, undefined, undefined, undefined, undefined, adapter).run(request, callbacks);
     return { response, bodies };
   } finally { globalThis.fetch = originalFetch; }
 }
