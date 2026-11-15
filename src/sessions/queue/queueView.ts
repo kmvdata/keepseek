@@ -86,7 +86,3 @@ function resolveTitle(titles: QueueViewInput['titles'], sessionId: string): stri
   return typeof value === 'string' && value ? value : sessionId;
 }
 
-/** Stable identity for change detection without diffing whole entries. */
-export function queueViewSignature(view: QueueView): string {
-  return view.entries.map((entry) => `${entry.sessionId}:${entry.position}:${entry.mode}:${entry.holdingLease ? 1 : 0}`).join('|');
-}

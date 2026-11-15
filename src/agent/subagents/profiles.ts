@@ -123,22 +123,6 @@ export function resolveSubagentProfile(input: {
   };
 }
 
-export function getSubagentProfileCatalog(skills?: readonly ActivatedSkill[]): Array<Pick<SubagentProfile, 'id' | 'label' | 'description' | 'lane'>> {
-  const profiles = BUILTIN_PROFILES.map(({ id, label, description, lane }) => ({ id, label, description, lane }));
-  for (const skill of skills ?? []) {
-    if (skill.runAs !== 'subagent' || !skill.subagentProfile) {
-      continue;
-    }
-    profiles.push({
-      id: skill.subagentProfile.id,
-      label: skill.name,
-      description: skill.description ?? '',
-      lane: inferCustomLane(skill.subagentProfile.tools ?? READ_TOOLS)
-    });
-  }
-  return profiles;
-}
-
 export function getBuiltInReadToolNames(): string[] {
   return [...READ_TOOLS];
 }

@@ -868,7 +868,6 @@ export class SubagentRuntime implements SubagentToolAdapter {
         undefined,
         undefined,
         undefined,
-        undefined,
         this.options.globalStorageUri,
         this
       );
@@ -1365,7 +1364,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
     const repairPrompt = getSubagentFormatRepairPrompt(input.input.profile.lane, input.diagnostics, input.taskHash);
     try {
       const runner = new AgentLoop(
-        undefined, this.options.traceLogService, undefined, undefined, undefined,
+        undefined, this.options.traceLogService, undefined, undefined,
         undefined, this.options.globalStorageUri, undefined
       );
       const repaired = await runner.run({

@@ -128,7 +128,6 @@ export class BackgroundRunCoordinator {
 
   public getRemainingExecutionLimits(): AgentExecutionLimits {
     const run = this.requireRun();
-    const elapsedMs = run.progress.usedMs ?? 0;
     const remainingToolCalls = Math.max(0, run.limits.maxToolCalls - run.progress.toolCalls);
     return {
       toolsEnabled: remainingToolCalls > 0,

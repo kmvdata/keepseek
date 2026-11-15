@@ -261,21 +261,6 @@ export function createProtectedContextMeta(reason: string): ChatMessageContextMe
   };
 }
 
-export function estimateHistoryProjectionTokens(
-  projection: HistoryProjectionResult,
-  requestProtocolVersion = CURRENT_AGENT_PROTOCOL_VERSION
-): number {
-  const summaryTokens = projection.syntheticSystemMessages.reduce(
-    (total, content) => total + estimateTokenCount(`system\n${content}`),
-    0
-  );
-  const historyTokens = projection.history.reduce(
-    (total, message) => total + estimateProjectedChatMessageTokens(message, requestProtocolVersion),
-    0
-  );
-  return summaryTokens + historyTokens;
-}
-
 function selectProtectedMessageIds(
   history: ChatMessage[],
   contextCompression: ContextCompressionState | undefined

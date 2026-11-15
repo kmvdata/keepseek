@@ -7,7 +7,6 @@ import { effectiveMode, headSessionId, positionOf } from './projectQueue';
  */
 export type WriteCapability = 'edit' | 'command' | 'validation' | 'git_mutation';
 
-export const WRITE_CAPABILITIES: readonly WriteCapability[] = ['edit', 'command', 'validation', 'git_mutation'];
 
 export interface WriteLeaseFacts {
   /** Session currently holding the project write lease, if any. */
@@ -112,8 +111,3 @@ export function describeWriteBlock(permission: WritePermission, language: 'zh-CN
   }
 }
 
-/** True when this session is a handoff candidate for `target`. */
-export function isHandoffBlocker(queue: ProjectSessionQueue, holderSessionId: string | undefined, targetSessionId: string): boolean {
-  if (!holderSessionId || holderSessionId === targetSessionId) return false;
-  return positionOf(queue, holderSessionId) >= 0;
-}

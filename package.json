@@ -318,10 +318,6 @@
           "enumItemLabels": ["5 分钟 / 5 minutes", "15 分钟 / 15 minutes", "1 小时 / 1 hour", "2 小时 / 2 hours", "8 小时 / 8 hours", "24 小时 / 24 hours"],
           "markdownDescription": "Timeout in seconds for each model request, including response headers and streaming. Shared by all accounts and models, including summaries and approval reviewers. Changes apply to new requests. Task execution limits and cancellation still apply. / 每次模型请求的超时时间（秒），包含等待响应头和流式响应。所有账号、模型、摘要及审批模型共用，修改后对新请求生效；任务执行时限及取消仍然有效。"
         },
-        "kmvdata.keepseek.background.maxDurationMs": {
-          "type": "number", "default": 0, "minimum": 0, "scope": "window",
-          "markdownDescription": "Legacy explicit background execution budget. Combined with agent.maxExecutionMs using the smaller positive value; 0 unlimited. / 兼容旧版显式后台时间预算。"
-        },
         "kmvdata.keepseek.draftRun.timeoutMs": {
           "type": "number",
           "default": 120000,
@@ -372,16 +368,6 @@
           "type": "number",
           "default": 10
         },
-        "kmvdata.keepseek.authorizationPolicy": {
-          "type": "string",
-          "default": "auto",
-          "enum": [
-            "auto",
-            "always",
-            "never"
-          ],
-          "description": "Tool execution authorization policy"
-        },
         "kmvdata.keepseek.skills.contextBudgetChars": {
           "type": "number",
           "default": 72000,
@@ -397,26 +383,6 @@
           "maximum": 8,
           "scope": "window",
           "markdownDescription": "Maximum number of Skills eligible under policy.allow_implicit_invocation that deterministic request matching may activate per Agent run."
-        },
-        "kmvdata.keepseek.contextCompression": {
-          "type": "boolean",
-          "default": true,
-          "description": "Enable context compression for long sessions"
-        },
-        "kmvdata.keepseek.maxTurns": {
-          "type": "number",
-          "default": 75,
-          "description": "Max turns before compression"
-        },
-        "kmvdata.keepseek.thinking": {
-          "type": "boolean",
-          "default": false,
-          "description": "Show model reasoning content in chat UI"
-        },
-        "kmvdata.keepseek.enableCache": {
-          "type": "boolean",
-          "default": true,
-          "description": "Enable API caching for reduced latency and cost"
         }
       }
     },

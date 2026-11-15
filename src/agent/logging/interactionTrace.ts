@@ -282,10 +282,6 @@ export class InteractionTraceCleanup {
   }
 }
 
-export async function deleteSessionInteractionTraces(root: vscode.Uri, sessionId: string): Promise<{ unverifiedSources: number }> {
-  return new InteractionTraceCleanup(root).cleanup(sessionId);
-}
-
 class JsonlInteractionTrace implements AgentInteractionTrace {
   public readonly enabled = true;
   public readonly level: InteractionTraceLevel;

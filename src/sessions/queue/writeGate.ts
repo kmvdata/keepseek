@@ -39,10 +39,6 @@ export function installWriteGateAuthority(next: WriteGateAuthority | undefined):
   authority = next;
 }
 
-export function getWriteGateAuthority(): WriteGateAuthority | undefined {
-  return authority;
-}
-
 /**
  * Ask the installed authority.
  *

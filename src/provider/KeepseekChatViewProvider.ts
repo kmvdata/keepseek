@@ -286,6 +286,9 @@ interface SessionTitleCandidate {
   setting?: SubagentModelSetting;
 }
 
+/** Minimum interval between balance refreshes for one source. */
+const BALANCE_REFRESH_INTERVAL_MS = 60_000;
+
 export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = CHAT_VIEW_TYPE;
 
@@ -5015,7 +5018,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     // 每个来源独立共享限流时间戳；同来源跨窗口仍只发一份请求节奏。
     if (!(await this.balanceStore.claimRefresh(
       now,
-      getConfiguredBalanceRefreshIntervalMs(),
+      BALANCE_REFRESH_INTERVAL_MS,
       options.force,
       scope
     ))) {

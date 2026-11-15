@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import type {
   DeleteDraftEditV1,
   DraftEdit,
@@ -74,10 +73,6 @@ export function createDeleteDraftEdit(input: {
     base: { sha256: hashBytes(input.baseBytes), sizeBytes: input.baseBytes.byteLength },
     encoding: inspectTextEncoding(input.baseBytes)
   };
-}
-
-export function hashTextUtf8(value: string): string {
-  return createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
 function safeEncoding(bytes: Uint8Array): TextFileEncoding {

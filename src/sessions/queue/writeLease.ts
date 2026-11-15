@@ -155,17 +155,6 @@ export function release(
   };
 }
 
-/** A queued session is no longer desired (deleted or cancelled). */
-export function cancelHandoffRequest(lease: LeaseSnapshot, sessionId?: string): LeaseOutcome {
-  if (lease.state !== 'handoff_requested') return { lease, applied: false, reason: 'not_handing_off' };
-  if (sessionId && lease.pendingHandoffToSessionId !== sessionId) {
-    return { lease, applied: false, reason: 'no_pending_handoff' };
-  }
-  const rest: LeaseSnapshot = { ...lease, state: 'held' };
-  delete rest.pendingHandoffToSessionId;
-  return { lease: { ...rest, state: 'held' }, applied: true };
-}
-
 /**
  * Emergency recovery only: the holder stopped responding. This is the single
  * non-explicit path that transfers the lease, so it must be audited.
@@ -198,10 +187,6 @@ export interface SerializedLease {
   pendingHandoffToSessionId?: string;
   acquiredAt?: string;
   epoch: number;
-}
-
-export function toSerializableLease(lease: LeaseSnapshot): SerializedLease {
-  return { version: 1, ...lease };
 }
 
 export function normalizeLease(value: unknown, workspaceKey: string): LeaseSnapshot {

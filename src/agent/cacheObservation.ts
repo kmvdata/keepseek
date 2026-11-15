@@ -283,12 +283,6 @@ export function finalizeCacheObservationWithUsage(
   };
 }
 
-export function toCacheObservationReference(value: ProviderCacheObservation): ProviderCacheObservation {
-  // The persisted observation is already content-free and is sufficient for a
-  // future prefix proof by hashing the first N bytes of the new projection.
-  return structuredClone(value);
-}
-
 function projectNativeRequest(body: ProviderRequestBody, contextInstructions?: string): ProjectionBytes {
   let systemItems: unknown[] = [];
   let historyItems: unknown[] = [];

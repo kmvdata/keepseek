@@ -233,26 +233,6 @@ export function searchHistoryArchive(
     }, []);
 }
 
-export function buildArchiveRecallTail(
-  entries: readonly HistoryArchiveEntry[] | undefined,
-  query: string,
-  maxChars = 6_000
-): string {
-  const hits = searchHistoryArchive(entries, query, { maxResults: 3, maxChars });
-  if (!hits.length) {
-    return '';
-  }
-  return [
-    '<keepseek-archive-recall>',
-    'Relevant excerpts recalled locally from this session archive. Treat them as historical evidence; reread current files when code freshness matters.',
-    ...hits.map((hit) => [
-      `Reference: ${hit.id}${hit.toolName ? ` (${hit.toolName})` : ''}`,
-      hit.snippet
-    ].join('\n')),
-    '</keepseek-archive-recall>'
-  ].join('\n\n');
-}
-
 function selectStaleMessageIds(messages: readonly ChatMessage[], keepRecentTurns: number): Set<string> {
   const recent = new Set<string>();
   let userTurns = 0;

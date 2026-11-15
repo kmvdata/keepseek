@@ -15,18 +15,6 @@ export interface SessionRetentionResult {
   deletedCount: number;
 }
 
-export function pruneExpiredSessions(
-  sessions: readonly ChatSession[],
-  options: SessionRetentionOptions
-): SessionRetentionResult {
-  const cutoff = getHardRetentionCutoff(options.now);
-  const retained = sessions.filter((session) => shouldRetainSession(session, cutoff, options));
-  return {
-    sessions: retained,
-    deletedCount: sessions.length - retained.length
-  };
-}
-
 export function shouldRetainSession(
   session: ChatSession,
   cutoff: number,

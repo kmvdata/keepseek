@@ -9,10 +9,7 @@ import {
   UsageCostRates
 } from './types';
 import { SESSION_HARD_RETENTION_DAYS } from '../sessions/sessionRetention';
-import {
-  getEffectiveContextWindowTokens,
-  getSupportedDeepSeekV4Models
-} from './modelProfiles';
+import { getSupportedDeepSeekV4Models } from './modelProfiles';
 import { isOfficialDeepSeekSource } from '../accounts/sourceCapabilities';
 import { resolveProjectModel } from '../accounts/modelCatalog';
 import {

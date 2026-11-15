@@ -1,3 +1,4 @@
+import type { KeepseekLanguage } from '../../shared/i18n';
 import type { AuthorizedToolScope, ToolAuthorizationDecision, ToolRiskLevel } from '../../shared/types';
 import {
   APPLY_PATCH_TOOL_NAME,
