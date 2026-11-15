@@ -82,18 +82,20 @@ describe('long-running Agent execution and safe recovery', () => {
     coordinator.start({ sessionId: 's', workspaceKey: 'w', goal: { kind: 'repair_until_validation_passes', script: 'test', description: 'test' }, limits: { maxRounds: 3, maxToolCalls: 30 } });
     coordinator.recordExecutionTime(7_200_000);
     coordinator.waitForApply('apply');
-    assert.equal(coordinator.getRemainingExecutionLimits().maxRunMs, 0);
+    // Background duration is bound by the shared agent execution budget, not a
+    // separate background clock.
+    assert.equal(coordinator.getRemainingExecutionLimits().maxRunMs, undefined);
     assert.equal(coordinator.getLimitStopReason(), undefined);
     coordinator.stop('stop');
     coordinator.start({ sessionId: 's', workspaceKey: 'w', goal: { kind: 'repair_until_validation_passes', script: 'test', description: 'test' }, limits: { maxRounds: 3, maxToolCalls: 30 } });
     coordinator.recordExecutionTime(500);
     coordinator.waitForAuthorization('approve');
-    assert.equal(coordinator.getRemainingExecutionLimits().maxRunMs, 1500);
+    assert.equal(coordinator.getRemainingExecutionLimits().maxRunMs, undefined);
     coordinator.markRunning(); coordinator.recordExecutionTime(1500);
-    assert.match(coordinator.getLimitStopReason()!, /duration/u);
+    assert.equal(coordinator.getRemainingExecutionLimits().maxRunMs, undefined);
   });
 
-  it('retains active tree budgets and path claims despite wall-clock age and restore', () => {
+it('retains active tree budgets and path claims despite wall-clock age and restore', () => {
     const scheduler = new SubagentScheduler();
     const roots = createWorkspaceScopeRoots([{ uri: vscode.Uri.file('/workspace') as never, name: 'workspace', index: 0 }]);
     const resolved = resolveProposalPathScope(['src/a.ts'], roots);

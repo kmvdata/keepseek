@@ -228,7 +228,7 @@ test('stored approval modes accept only current choices and fail closed on missi
 
 test('approval model shares inline subagent selection, keyboard navigation and focus without sharing configuration', () => {
   const script = getInputScript();
-  const bindings = script.slice(script.indexOf('commandSubagentModelList.addEventListener'), script.indexOf('if (commandModelCancelPending) {'));
+  const bindings = script.slice(script.indexOf('if (commandSubagentModelList) {'), script.indexOf('if (commandModelCancelPending) {'));
   for (const language of ['zh-CN', 'en'] as const) {
     const labels = WEBVIEW_TRANSLATIONS[language];
     const list = new ApprovalMenuElement();

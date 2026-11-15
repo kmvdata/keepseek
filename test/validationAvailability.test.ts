@@ -47,7 +47,7 @@ describe('background validation availability', () => {
     const result = JSON.parse(await new ValidationToolService().runSafeNpmScript({
       script: 'test', language: 'en', approvalMode: 'delegate', expectedSnapshot: 'host-claimed-snapshot',
       authorization: { allowed: true, toolName: RUN_VALIDATION_TOOL_NAME, riskLevel: 'medium', scope: 'validation_test',
-        source: 'configuration', requiresExplicitConfirmation: false }
+        source: 'user_denied', requiresExplicitConfirmation: false }
     }));
     assert.equal(result.errorType, 'authorization_denied');
     await assert.rejects(fs.stat(path.join(root, 'ran')), { code: 'ENOENT' });

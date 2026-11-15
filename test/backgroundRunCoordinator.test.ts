@@ -43,8 +43,7 @@ describe('BackgroundRunCoordinator', () => {
       toolsEnabled: false,
       maxToolIterations: undefined,
       maxToolCalls: undefined,
-      maxRunMs: 60_000,
-      timeLimitSource: 'background.maxDurationMs + agent.maxExecutionMs (remaining active time)',
+      timeLimitSource: 'agent.maxExecutionMs (remaining active time)',
       maxRepairIterations: 5
     });
     assert.equal(coordinator.beginRound().status, 'failed');
