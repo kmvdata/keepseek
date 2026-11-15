@@ -49,7 +49,6 @@ export const modelSelectorBindingsFragment: WebviewFragment = {
           commandModelListOpen = !commandModelListOpen;
           if (commandModelListOpen) {
             commandSubagentModelListOpen = false;
-            commandApprovalModeListOpen = false;
             commandSkillListOpen = false;
           }
           renderCommandMenu();
@@ -91,7 +90,6 @@ export const modelSelectorBindingsFragment: WebviewFragment = {
           if (commandSubagentModelListOpen) {
             commandSubagentModelProfile = '';
             commandModelListOpen = false;
-            commandApprovalModeListOpen = false;
             commandSkillListOpen = false;
           } else {
             commandSubagentModelProfile = '';
@@ -100,7 +98,8 @@ export const modelSelectorBindingsFragment: WebviewFragment = {
         });
       }
 
-      if (commandApprovalModeSwitch) {
+      if (commandSubagentModelSwitch) {
+
 `.slice(1)
 };
 

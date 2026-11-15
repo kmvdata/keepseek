@@ -40,7 +40,6 @@ export const commandSkillsBindingsFragment: WebviewFragment = {
           if (commandSkillListOpen) {
             commandModelListOpen = false;
             commandSubagentModelListOpen = false;
-            commandApprovalModeListOpen = false;
             vscode.postMessage({ type: 'requestSkills' });
           }
           renderCommandMenu();

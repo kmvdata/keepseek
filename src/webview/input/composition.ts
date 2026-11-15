@@ -9,7 +9,6 @@ import * as referenceCodec from './references/codec';
 import * as skillsScript from './skills/script';
 import * as commandMenuScript from './commandMenu/script';
 import * as commandModels from './commandMenu/models';
-import * as commandApproval from './commandMenu/approval';
 import * as commandAgentSettings from './commandMenu/agentSettings';
 import * as commandSkills from './commandMenu/skills';
 import * as executionMode from './executionMode';
@@ -55,7 +54,6 @@ export const INPUT_SCRIPT_FRAGMENTS = [
   commandMenuScript.commandMenuDeclarationFragment,
   executionMode.executionModeDeclarationFragment,
   commandModels.modelSelectorsDeclarationFragment,
-  commandApproval.approvalDeclarationFragment,
   commandModels.modelStatusDeclarationFragment,
   commandAgentSettings.agentSettingsDeclarationFragment,
   commandSkills.commandSkillsDeclarationFragment,
@@ -65,7 +63,6 @@ export const INPUT_SCRIPT_FRAGMENTS = [
   commandMenuScript.commandMenuStateFragment,
   executionMode.executionModeStateFragment,
   commandModels.modelControlsStateFragment,
-  commandApproval.approvalStateFragment,
   commandSkills.commandSkillsStateFragment,
   referenceMenu.referenceMenuStateFragment,
   commandAgentSettings.agentSettingsStateFragment,
@@ -77,7 +74,6 @@ export const INPUT_SCRIPT_FRAGMENTS = [
   referenceMenu.referenceMenuButtonBindingsFragment,
   commandMenuScript.commandMenuTriggerBindingsFragment,
   commandModels.modelSelectorBindingsFragment,
-  commandApproval.approvalBindingsFragment,
   commandModels.subagentAndPendingBindingsFragment,
   executionMode.executionModeBindingsFragment,
   commandAgentSettings.compressionBindingsFragment,
@@ -99,7 +95,6 @@ export const INPUT_SCRIPT_FRAGMENTS = [
   usageFormatters.usageFormattersFragment,
   commandMenuScript.commandMenuRenderFragment,
   commandModels.modelControlsRenderFragment,
-  commandApproval.approvalRenderFragment,
   commandModels.modelControlsLockingFragment,
   commandAgentSettings.agentSettingsRenderFragment,
   commandSkills.commandSkillsImplementationFragment,

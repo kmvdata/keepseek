@@ -20,7 +20,6 @@ import { WorkspaceToolService } from '../src/agent/tools/workspaceTools';
 import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
 import { getInputScript } from '../src/webview/input/script';
 import { getInputTemplate } from '../src/webview/input/template';
-import { approvalRenderFragment } from '../src/webview/input/commandMenu/approval';
 import { modelControlsLockingFragment, modelControlsRenderFragment, modelControlsHelpersFragment } from '../src/webview/input/commandMenu/models';
 import { commandMenuImplementationFragment } from '../src/webview/input/commandMenu/script';
 import { getScript } from '../src/webview/script';
@@ -253,51 +252,6 @@ test('approval mode uses the model selector interaction directly below the subag
   assert.doesNotMatch(inputScript, /setComposerStatus\(t\('approvalMode'\)/u);
   assert.match(getScript(), /approvalMode: 'ask'/u);
   assert.doesNotMatch(JSON.stringify(getAgentTools({ requestProtocolVersion: 7 })), /setApprovalMode/u);
-});
-
-test('approval submenu renders exactly two modes and keeps reviewer configuration separate', () => {
-  const script = getInputScript();
-  const bindings = script.slice(script.indexOf('if (commandApprovalModeSwitch) {'), script.indexOf('if (commandSubagentModelList) {'));
-  for (const language of ['zh-CN', 'en'] as const) {
-    const labels = WEBVIEW_TRANSLATIONS[language];
-    const modeList = new ApprovalMenuElement();
-    const posted: unknown[] = [];
-    const state = {
-      approvalMode: 'ask', isBusy: false, manualToolApproval: false,
-      commandSettingsReadiness: { approvalMode: 'ready' },
-      approvalReviewerSetting: { mode: 'follow-main', label: '', error: '', sourceId: '', modelId: '' }
-    };
-    const context = {
-      state, Element: ApprovalMenuElement, document: { createElement: () => new ApprovalMenuElement() },
-      commandApprovalModeSwitch: new ApprovalMenuElement(), commandApprovalModeValue: new ApprovalMenuElement(),
-      commandApprovalModeDescription: new ApprovalMenuElement(), commandApprovalModeList: modeList,
-      commandApprovalModeListOpen: true,
-      renderCommandMenu: () => {}, t: (key: string) => labels[key],
-      vscode: { postMessage: (message: unknown) => posted.push(JSON.parse(JSON.stringify(message))) }
-    };
-    const render = new Script(approvalRenderFragment.source + modelControlsLockingFragment.source + bindings
-      + '\nrenderCommandApprovalMode;').runInNewContext(context) as () => void;
-    for (const mode of ['ask', 'delegate']) {
-      state.approvalMode = mode;
-      render();
-      assert.equal(modeList.children.length, 2);
-      assert.deepEqual(modeList.children.map(item => item.dataset.approvalMode), ['ask', 'delegate']);
-      assert.deepEqual(modeList.children.map(item => item.attributes.role), ['menuitemradio', 'menuitemradio']);
-      assert.equal(modeList.children.find(item => item.attributes['aria-checked'] === 'true')?.dataset.approvalMode, mode);
-      const option = modeList.children[mode === 'ask' ? 1 : 0];
-      modeList.dispatchClick(option.children[1].children[0]);
-      assert.deepEqual(posted.pop(), { type: 'setApprovalMode', mode: option.dataset.approvalMode });
-      assert.equal(context.commandApprovalModeListOpen, false);
-    }
-    for (const patch of [{ commandSettingsReadiness: { approvalMode: 'loading' } }, { commandSettingsReadiness: { approvalMode: 'error' } }]) {
-      Object.assign(state, { isBusy: false, manualToolApproval: false, commandSettingsReadiness: { approvalMode: 'ready' } }, patch);
-      render();
-      assert.ok(modeList.children.every(option => option.disabled));
-      modeList.dispatchClick(modeList.children[0]);
-      assert.equal(posted.length, 0);
-      assert.equal(modeList.children.length, 2, 'rerendering must not add a third entry');
-    }
-  }
 });
 
 test('approval model shares inline subagent selection, keyboard navigation and focus without sharing configuration', () => {
