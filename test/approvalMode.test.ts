@@ -15,7 +15,6 @@ import { createFullTextDraftEdit, createDeleteDraftEdit } from '../src/edits/dra
 import { DraftRunStore } from '../src/runs/draftRunStore';
 import { ExactOperationGrants } from '../src/approvals/authorization';
 import { buildInitialAgentMessages, getAgentSystemPrompt, getAgentTools, RUN_VALIDATION_TOOL_NAME } from '../src/agent/protocol';
-import { ToolAuthorizationService } from '../src/agent/tools/toolAuthorization';
 import { WorkspaceToolService } from '../src/agent/tools/workspaceTools';
 import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
 import { getInputScript } from '../src/webview/input/script';
@@ -227,36 +226,9 @@ test('stored approval modes accept only current choices and fail closed on missi
   });
 });
 
-test('approval mode uses the model selector interaction directly below the subagent model', () => {
-  const template = getInputTemplate();
-  const modelSection = template.indexOf('<section class="command-section" aria-label="Model">');
-  const subagentList = template.indexOf('id="commandSubagentModelList"', modelSection);
-  const approvalSwitch = template.indexOf('id="commandApprovalModeSwitch"', subagentList);
-  const approvalList = template.indexOf('id="commandApprovalModeList"', approvalSwitch);
-  const compressionThreshold = template.indexOf('data-i18n="compressionThreshold"', approvalList);
-
-  assert.ok(modelSection >= 0);
-  assert.ok(subagentList < approvalSwitch);
-  assert.ok(approvalSwitch < approvalList);
-  assert.ok(approvalList < compressionThreshold);
-  assert.doesNotMatch(template, /id="commandApprovalModelButton"/u, 'reviewer is rendered inside the subagent list');
-  const inputScript = getInputScript();
-  const optionList = inputScript.indexOf("{ mode: 'ask'");
-  assert.ok(optionList >= 0);
-  assert.doesNotMatch(inputScript, /mode: 'model_review'/u);
-  assert.ok(optionList < inputScript.indexOf("{ mode: 'delegate'", optionList));
-  assert.equal((template.match(/id="commandApprovalModeSwitch"/gu) ?? []).length, 1);
-  assert.match(inputScript, /commandApprovalModeListOpen/u);
-  assert.match(inputScript, /openCommandApprovalModeListAndFocus/u);
-  assert.match(inputScript, /postMessage\(\{ type: 'setApprovalMode'/u);
-  assert.doesNotMatch(inputScript, /setComposerStatus\(t\('approvalMode'\)/u);
-  assert.match(getScript(), /approvalMode: 'ask'/u);
-  assert.doesNotMatch(JSON.stringify(getAgentTools({ requestProtocolVersion: 7 })), /setApprovalMode/u);
-});
-
 test('approval model shares inline subagent selection, keyboard navigation and focus without sharing configuration', () => {
   const script = getInputScript();
-  const bindings = script.slice(script.indexOf('if (commandSubagentModelList) {'), script.indexOf('if (commandModelCancelPending) {'));
+  const bindings = script.slice(script.indexOf('commandSubagentModelList.addEventListener'), script.indexOf('if (commandModelCancelPending) {'));
   for (const language of ['zh-CN', 'en'] as const) {
     const labels = WEBVIEW_TRANSLATIONS[language];
     const list = new ApprovalMenuElement();
@@ -373,37 +345,6 @@ class ApprovalMenuElement {
     return this.matches(selector) ? this : this.parent?.closest(selector) ?? null;
   }
 }
-
-test('generic delegate authorization cannot bypass exact validation review; unknown tools remain denied', async () => {
-  vscode.workspace.isTrusted = true;
-  const service = new ToolAuthorizationService();
-  const policy = { ...service.createRunPolicy('r'), approvalMode: 'delegate' as const, mediumRiskPolicy: 'ask' as const };
-  const decision = await service.authorize({ policy, toolName: RUN_VALIDATION_TOOL_NAME, args: { script: 'test' }, language: 'en' });
-  assert.equal(decision.allowed, false);
-  assert.equal(decision.failureCode, 'approval_review_required');
-  assert.equal(decision.requiresExplicitConfirmation, false);
-  const unknown = await service.authorize({ policy, toolName: 'unknown', args: {}, language: 'en' });
-  assert.equal(unknown.allowed, false);
-});
-
-test('ask mode requests approval for each validation even with prior grants and always configuration', async () => {
-  const window = vscode.window as unknown as { showInformationMessage?: (...args: unknown[]) => Promise<string> };
-  const original = window.showInformationMessage;
-  let prompts = 0;
-  window.showInformationMessage = async () => { prompts++; return 'Allow once'; };
-  try {
-    const service = new ToolAuthorizationService();
-    const policy = { ...service.createRunPolicy('r'), approvalMode: 'ask' as const, mediumRiskPolicy: 'always' as const };
-    for (let i = 0; i < 2; i++) {
-      const decision = await service.authorize({ policy, toolName: RUN_VALIDATION_TOOL_NAME, args: { script: 'compile' }, language: 'en' });
-      assert.equal(decision.source, 'explicit_confirmation');
-    }
-    assert.equal(prompts, 2);
-  } finally {
-    if (original) window.showInformationMessage = original;
-    else delete window.showInformationMessage;
-  }
-});
 
 test('an external target requires an exact URI authorization even in a trusted workspace', () => {
   const folders = vscode.workspace.workspaceFolders;

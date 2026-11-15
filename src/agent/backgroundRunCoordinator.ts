@@ -129,14 +129,12 @@ export class BackgroundRunCoordinator {
   public getRemainingExecutionLimits(): AgentExecutionLimits {
     const run = this.requireRun();
     const elapsedMs = run.progress.usedMs ?? 0;
-    const remainingDurationMs = run.limits.maxDurationMs > 0 ? Math.max(1, run.limits.maxDurationMs - elapsedMs) : 0;
     const remainingToolCalls = Math.max(0, run.limits.maxToolCalls - run.progress.toolCalls);
     return {
       toolsEnabled: remainingToolCalls > 0,
       maxToolIterations: remainingToolCalls > 0 ? remainingToolCalls : undefined,
       maxToolCalls: remainingToolCalls > 0 ? remainingToolCalls : undefined,
-      maxRunMs: remainingDurationMs,
-      timeLimitSource: 'background.maxDurationMs + agent.maxExecutionMs (remaining active time)',
+      timeLimitSource: 'agent.maxExecutionMs (remaining active time)',
       maxRepairIterations: run.limits.maxRounds
     };
   }
@@ -144,7 +142,6 @@ export class BackgroundRunCoordinator {
   public getLimitStopReason(run = this.activeRun): string | undefined {
     if (!run) return 'Background task is unavailable.';
     if (run.progress.round >= run.limits.maxRounds) return `Maximum background rounds reached (${run.limits.maxRounds}).`;
-    if (run.limits.maxDurationMs > 0 && (run.progress.usedMs ?? 0) >= run.limits.maxDurationMs) return `Maximum background duration reached (${run.limits.maxDurationMs} ms).`;
     if (run.progress.toolCalls >= run.limits.maxToolCalls) return `Maximum background tool calls reached (${run.limits.maxToolCalls}).`;
     return undefined;
   }
@@ -191,7 +188,6 @@ export class BackgroundRunCoordinator {
 function normalizeLimits(limits: BackgroundRunLimits): BackgroundRunLimits {
   return {
     maxRounds: clamp(limits.maxRounds, 1, 10),
-    maxDurationMs: normalizeDuration(limits.maxDurationMs),
     maxToolCalls: clamp(limits.maxToolCalls, 1, 256)
   };
 }

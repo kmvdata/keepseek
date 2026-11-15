@@ -1474,8 +1474,6 @@ export interface RunDetailsHistorySummaryProvenance {
   createdAt: string;
 }
 
-export type ValidationAuthorizationPolicy = 'never' | 'ask' | 'always';
-
 export type ToolRiskLevel = 'low' | 'medium' | 'high';
 
 export type AuthorizedToolScope =
@@ -1494,21 +1492,13 @@ export type AuthorizedToolScope =
   | 'git_commit'
   | 'git_push';
 
-export interface RunAuthorizationPolicy {
-  approvalMode?: ApprovalMode;
-  runId: string;
-  mediumRiskPolicy: ValidationAuthorizationPolicy;
-  authorizedScopes: AuthorizedToolScope[];
-  deniedScopes: AuthorizedToolScope[];
-}
-
 export interface ToolAuthorizationDecision {
   failureCode?: string;
   allowed: boolean;
   toolName: string;
   riskLevel: ToolRiskLevel;
   scope: AuthorizedToolScope;
-  source: 'low_risk' | 'run_policy' | 'configuration' | 'explicit_confirmation' | 'model_reviewer' | 'delegated_approver' | 'user_denied';
+  source: 'low_risk' | 'model_reviewer' | 'delegated_approver' | 'user_denied';
   requiresExplicitConfirmation: boolean;
   reason?: string;
   approvalReview?: import('../approvals/approvalReviewTypes').ApprovalReviewDisplay;
@@ -1863,7 +1853,6 @@ export interface BackgroundRunGoal {
 
 export interface BackgroundRunLimits {
   maxRounds: number;
-  maxDurationMs: number;
   /** Cumulative hard limit across every AgentRunner invocation in the background task. */
   maxToolCalls: number;
 }

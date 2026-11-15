@@ -1,6 +1,6 @@
 import type { ModelSourceProvider } from '../accounts/types';
 import type { ModelSourceBalanceState } from '../shared/types';
-import { getConfiguredBalanceEndpointUrl } from '../shared/config';
+import { getBalanceEndpointUrl } from '../shared/config';
 import {
   isOfficialDeepSeekSource,
   isOfficialKimiSource
@@ -22,7 +22,7 @@ export async function fetchModelSourceBalance(
   if (isOfficialDeepSeekSource(input)) {
     return fetchDeepSeekBalance({
       apiKey: input.apiKey,
-      endpointUrl: getConfiguredBalanceEndpointUrl(input.baseUrl),
+      endpointUrl: getBalanceEndpointUrl(input.baseUrl),
       signal: input.signal
     });
   }

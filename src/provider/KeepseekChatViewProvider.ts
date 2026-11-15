@@ -144,8 +144,6 @@ import {
   DEFAULT_DEEPSEEK_BASE_URL,
   DEFAULT_HISTORY_RETENTION_DAYS,
   getConfiguredAgentSettings,
-  getConfiguredBalanceRefreshIntervalMs,
-  getConfiguredBackgroundMaxDurationMs,
   getConfiguredBackgroundMaxRounds,
   getConfiguredBackgroundMaxToolCalls,
   getConfiguredDebugMode,
@@ -1117,7 +1115,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.agentRunner = new AgentRunner(
       undefined,
       this.traceLogService,
-      undefined,
       undefined,
       undefined,
       undefined,
@@ -5640,7 +5637,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         },
         limits: {
           maxRounds,
-          maxDurationMs: getConfiguredBackgroundMaxDurationMs(),
           maxToolCalls: getConfiguredBackgroundMaxToolCalls()
         }
       });
@@ -8149,7 +8145,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         backgroundAvailableScripts: this.backgroundAvailableScripts,
         backgroundDefaults: {
           maxRounds: getConfiguredBackgroundMaxRounds(),
-          maxDurationMs: getConfiguredBackgroundMaxDurationMs(),
           maxToolCalls: getConfiguredBackgroundMaxToolCalls()
         },
         contextUsage,

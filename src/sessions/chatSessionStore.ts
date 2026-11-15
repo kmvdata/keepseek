@@ -1889,11 +1889,8 @@ function normalizeRunDetailsTaskPlan(value: unknown): NonNullable<ChatMessage['r
 
 function normalizeAuthorizationSource(value: unknown): NonNullable<ChatMessage['runDetails']>['authorizations'][number]['source'] {
   return value === 'low_risk'
-    || value === 'run_policy'
-    || value === 'configuration'
     || value === 'model_reviewer'
     || value === 'delegated_approver'
-    || value === 'explicit_confirmation'
     || value === 'user_denied'
     ? value
     : 'user_denied';

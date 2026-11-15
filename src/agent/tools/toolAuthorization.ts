@@ -1,12 +1,4 @@
-import * as vscode from 'vscode';
-import { getConfiguredValidationAuthorizationPolicy } from '../../shared/config';
-import type { KeepseekLanguage } from '../../shared/i18n';
-import type {
-  AuthorizedToolScope,
-  RunAuthorizationPolicy,
-  ToolAuthorizationDecision,
-  ToolRiskLevel
-} from '../../shared/types';
+import type { AuthorizedToolScope, ToolAuthorizationDecision, ToolRiskLevel } from '../../shared/types';
 import {
   APPLY_PATCH_TOOL_NAME,
   CREATE_DRAFT_EDIT_TOOL_NAME,
@@ -41,16 +33,6 @@ import {
 export interface ToolAuthorizationMetadata {
   riskLevel: ToolRiskLevel;
   scope: AuthorizedToolScope;
-}
-
-export interface ToolAuthorizationAdapter {
-  createRunPolicy(runId: string): RunAuthorizationPolicy;
-  authorize(input: {
-    toolName: string;
-    args: Record<string, unknown>;
-    language: KeepseekLanguage;
-    policy: RunAuthorizationPolicy;
-  }): Promise<ToolAuthorizationDecision>;
 }
 
 const LOW_RISK_TOOLS = new Map<string, AuthorizedToolScope>([
@@ -93,151 +75,6 @@ const HIGH_RISK_TOOLS = new Map<string, AuthorizedToolScope>([
   ['keepseek_git_commit', 'git_commit'],
   ['keepseek_git_push', 'git_push']
 ]);
-
-export class ToolAuthorizationService implements ToolAuthorizationAdapter {
-  public createRunPolicy(runId: string): RunAuthorizationPolicy {
-    return {
-      runId,
-      mediumRiskPolicy: getConfiguredValidationAuthorizationPolicy(),
-      authorizedScopes: [],
-      deniedScopes: []
-    };
-  }
-
-  public async authorize(input: {
-    toolName: string;
-    args: Record<string, unknown>;
-    language: KeepseekLanguage;
-    policy: RunAuthorizationPolicy;
-  }): Promise<ToolAuthorizationDecision> {
-    const metadata = getToolAuthorizationMetadata(input.toolName, input.args);
-    if (metadata.riskLevel === 'low') {
-      return createDecision(input.toolName, metadata, true, 'low_risk', false);
-    }
-
-    // Authorization must not depend on an approval-mode selection existing. When no
-    // mode is configured the gate still refuses an untrusted workspace and still
-    // requires an explicit modal confirmation for high-risk tools.
-    const modeUnset = input.policy.approvalMode !== 'ask' && input.policy.approvalMode !== 'delegate';
-    // riskLevel is already known to be medium or high here.
-    if (modeUnset && !vscode.workspace.isTrusted) {
-      return createDecision(input.toolName, metadata, false, 'user_denied', false,
-        input.language === 'en' ? 'The workspace is not trusted. Nothing executed.' : '工作区不受信任，尚未执行。');
-    }
-    if (input.policy.approvalMode === 'delegate' && !vscode.workspace.isTrusted) {
-      return createDecision(input.toolName, metadata, false, 'user_denied', false,
-        input.language === 'en' ? 'The workspace is not trusted. Nothing executed.' : '工作区不受信任，尚未执行。');
-    }
-
-    // The Runner owns the precise review and one-time approval of these tools.
-    // A generic authorization policy cannot stand in for that decision.
-    if (input.policy.approvalMode === 'delegate'
-      && (metadata.riskLevel === 'medium' || HIGH_RISK_TOOLS.has(input.toolName))) {
-      return {
-        ...createDecision(input.toolName, metadata, false, 'user_denied', false,
-          input.language === 'en'
-            ? 'An exact approval decision is required. Nothing executed.'
-            : '需要本次精确操作的审批决定，尚未执行。'),
-        failureCode: 'approval_review_required'
-      };
-    }
-
-    if (metadata.riskLevel === 'high') {
-      // 未知工具：不在 LOW_RISK_TOOLS / HIGH_RISK_TOOLS 中，schema 未注册、handleToolCall 无法路由
-      // （default 返回 Unsupported tool），确认弹窗没有意义（确认后也无法执行）。直接静默拒绝并返回
-      // 错误，让模型改用 schema 中的精确工具名。保持 fail-closed，安全性不降级。
-      if (!HIGH_RISK_TOOLS.has(input.toolName)) {
-        return createDecision(
-          input.toolName,
-          metadata,
-          false,
-          'user_denied',
-          false,
-          input.language === 'en'
-            ? `Tool "${input.toolName}" is not registered in the current tool schema and cannot be executed. Denied without a confirmation dialog; use the exact tool name from the schema.`
-            : `工具“${input.toolName}”未在当前工具 schema 中注册，无法执行，已直接拒绝（不再弹确认窗）。请使用 schema 中的精确工具名。`
-        );
-      }
-      return await this.confirmHighRiskTool(input.toolName, metadata, input.args, input.language);
-    }
-
-    if (input.policy.approvalMode !== 'ask' && input.policy.authorizedScopes.includes(metadata.scope)) {
-      return createDecision(input.toolName, metadata, true, 'run_policy', false);
-    }
-    if (input.policy.deniedScopes.includes(metadata.scope) || input.policy.mediumRiskPolicy === 'never') {
-      return createDecision(
-        input.toolName,
-        metadata,
-        false,
-        'user_denied',
-        false,
-        input.language === 'en'
-          ? 'This medium-risk tool is not authorized for the current Agent run.'
-          : '当前 Agent 运行未授权此中风险工具。'
-      );
-    }
-    if (input.policy.approvalMode !== 'ask' && input.policy.mediumRiskPolicy === 'always') {
-      input.policy.authorizedScopes.push(metadata.scope);
-      return createDecision(input.toolName, metadata, true, 'configuration', false);
-    }
-
-    const allowRun = input.policy.approvalMode === 'ask'
-      ? input.language === 'en' ? 'Allow once' : '仅本次允许'
-      : input.language === 'en' ? 'Allow for this run' : '本轮允许';
-    const denyRun = input.policy.approvalMode === 'ask'
-      ? input.language === 'en' ? 'Deny once' : '仅本次拒绝'
-      : input.language === 'en' ? 'Deny for this run' : '本轮拒绝';
-    const selected = await vscode.window.showInformationMessage(
-      getMediumRiskPrompt(input.toolName, metadata.scope, input.args, input.language, input.policy.approvalMode === 'ask'),
-      { modal: true },
-      allowRun,
-      denyRun
-    );
-    if (selected === allowRun) {
-      input.policy.authorizedScopes.push(metadata.scope);
-      return createDecision(input.toolName, metadata, true, 'explicit_confirmation', false);
-    }
-
-    if (input.policy.approvalMode !== 'ask') input.policy.deniedScopes.push(metadata.scope);
-    return createDecision(
-      input.toolName,
-      metadata,
-      false,
-      'user_denied',
-      false,
-      input.language === 'en'
-        ? 'The user denied this tool scope for the current Agent run.'
-        : '用户已拒绝在当前 Agent 运行中授权此工具范围。'
-    );
-  }
-
-  private async confirmHighRiskTool(
-    toolName: string,
-    metadata: ToolAuthorizationMetadata,
-    args: Record<string, unknown>,
-    language: KeepseekLanguage
-  ): Promise<ToolAuthorizationDecision> {
-    const confirm = language === 'en' ? 'Confirm once' : '仅确认本次';
-    const selected = await vscode.window.showWarningMessage(
-      getHighRiskToolConfirmationPrompt(toolName, args, language),
-      { modal: true },
-      confirm
-    );
-    const allowed = selected === confirm;
-    return createDecision(
-      toolName,
-      metadata,
-      allowed,
-      allowed ? 'explicit_confirmation' : 'user_denied',
-      true,
-      allowed
-        ? undefined
-        : language === 'en'
-          ? 'High-risk operations require a separate explicit confirmation every time.'
-          : '高风险操作每次都需要单独显式确认。'
-    );
-  }
-}
 
 export function getHighRiskToolConfirmationPrompt(
   toolName: string,
@@ -300,25 +137,6 @@ export function createAuthorizationDeniedToolResult(decision: ToolAuthorizationD
   });
 }
 
-function createDecision(
-  toolName: string,
-  metadata: ToolAuthorizationMetadata,
-  allowed: boolean,
-  source: ToolAuthorizationDecision['source'],
-  requiresExplicitConfirmation: boolean,
-  reason?: string
-): ToolAuthorizationDecision {
-  return {
-    allowed,
-    toolName,
-    riskLevel: metadata.riskLevel,
-    scope: metadata.scope,
-    source,
-    requiresExplicitConfirmation,
-    reason
-  };
-}
-
 function formatHighRiskArgument(value: unknown, fallback: string): string {
   if (typeof value !== 'string') {
     return fallback;
@@ -328,25 +146,4 @@ function formatHighRiskArgument(value: unknown, fallback: string): string {
     return fallback;
   }
   return normalized.length <= 320 ? normalized : `${normalized.slice(0, 319).trimEnd()}…`;
-}
-
-function getMediumRiskPrompt(
-  toolName: string,
-  scope: AuthorizedToolScope,
-  args: Record<string, unknown>,
-  language: KeepseekLanguage,
-  once = false
-): string {
-  const script = typeof args.script === 'string' ? args.script : toolName;
-  if (once) return language === 'en'
-    ? `Allow KeepSeek to run this controlled validation once (${script})?`
-    : `允许 KeepSeek 执行本次受控验证（${script}）吗？`;
-  if (language === 'en') {
-    return scope === 'validation_test'
-      ? `Allow KeepSeek to run the controlled test task for this Agent run (${script})?`
-      : `Allow KeepSeek to run controlled compile/lint tasks for this Agent run (${script})?`;
-  }
-  return scope === 'validation_test'
-    ? `允许 KeepSeek 在本轮 Agent 运行中执行受控测试任务（${script}）吗？`
-    : `允许 KeepSeek 在本轮 Agent 运行中执行受控 compile/lint 任务（${script}）吗？`;
 }

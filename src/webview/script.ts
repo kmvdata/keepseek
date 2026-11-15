@@ -58,7 +58,6 @@ export function getScript(): string {
       backgroundAvailableScripts: [],
       backgroundDefaults: {
         maxRounds: 5,
-        maxDurationMs: 1800000,
         maxToolCalls: 60
       },
       contextUsageSessionId: '',

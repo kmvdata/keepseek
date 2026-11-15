@@ -98,7 +98,6 @@ export const modelSelectorBindingsFragment: WebviewFragment = {
         });
       }
 
-      if (commandSubagentModelSwitch) {
 
 `.slice(1)
 };
@@ -177,7 +176,6 @@ export const subagentAndPendingBindingsFragment: WebviewFragment = {
             requestId: nextModelSelectionRequestId()
           });
         });
-      }
 
 `.slice(1)
 };

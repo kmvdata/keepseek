@@ -132,12 +132,7 @@ import { normalizeWorkspaceReadRange, WorkspaceToolAdapter, WorkspaceToolService
 import { preflightSafeValidation, type ValidationPreflightResult, ValidationToolAdapter, ValidationToolService } from './tools/validationTools';
 import { SemanticToolAdapter, SemanticToolService } from './tools/semanticTools';
 import { GitToolAdapter, GitToolService } from './tools/gitTools';
-import {
-  createAuthorizationDeniedToolResult,
-  getToolAuthorizationMetadata,
-  ToolAuthorizationAdapter,
-  ToolAuthorizationService
-} from './tools/toolAuthorization';
+import { createAuthorizationDeniedToolResult, getToolAuthorizationMetadata } from './tools/toolAuthorization';
 import type { KeepseekLanguage } from '../shared/i18n';
 import { isReadableTextContent, shouldSkipTextUri } from '../shared/textFileGuards';
 import {
@@ -389,7 +384,6 @@ export class AgentLoop {
     private readonly validationTools: ValidationToolAdapter = new ValidationToolService(),
     private readonly semanticTools: SemanticToolAdapter = new SemanticToolService(workspaceTools),
     private readonly gitTools: GitToolAdapter = new GitToolService(workspaceTools),
-    private readonly toolAuthorization: ToolAuthorizationAdapter = new ToolAuthorizationService(),
     private readonly globalStorageUri?: vscode.Uri,
     private readonly subagentTools?: SubagentToolAdapter,
     private readonly approvalReviewer?: ApprovalReviewerAdapter,
@@ -679,8 +673,7 @@ export class AgentLoop {
       restored?.validationState?.pendingDraftEditIds ?? request.repairLoop?.pendingDraftEditIds,
       restored?.validationState?.validations
     );
-    const runAuthorizationPolicy = this.toolAuthorization.createRunPolicy(trace.runId);
-    runAuthorizationPolicy.approvalMode = request.persona ? 'ask' : request.approvalMode;
+    const runApprovalMode = request.persona ? 'ask' : request.approvalMode;
     const toolResultLedger: ToolResultLedgerEntry[] = [];
     // 本 run 内 native 工具轮的原样字节快照（assistant tool_calls + tool 结果），
     // 由调用方持久化到 assistant 消息，跨轮重建时逐字节还原。
@@ -890,11 +883,6 @@ export class AgentLoop {
         ? { ...responseWithUsage, traceLog, runDetails }
         : { ...responseWithUsage, runDetails };
     };
-
-    trace.record({
-      type: 'run_authorization_policy',
-      policy: runAuthorizationPolicy
-    });
 
     let phaseStarted = performance.now(), activePhase = 'initializing';
     const emitStatus = this.createStatusEmitter({ ...callbacks, onStatus: status => {
@@ -2122,7 +2110,7 @@ export class AgentLoop {
               executed: false,
               error: validationPreflight.error
             });
-            if (normalizeApprovalMode(runAuthorizationPolicy.approvalMode) === 'delegate') {
+            if (normalizeApprovalMode(runApprovalMode) === 'delegate') {
               approvalLocalPreflightFailure = validationPreflight.error;
               approvalReviewBoundaryReached = true;
               approvalReviewFailed = true;
@@ -2141,7 +2129,7 @@ export class AgentLoop {
             });
           } else {
             const authorizationMetadata = getToolAuthorizationMetadata(toolCall.function.name, toolArgs);
-            if (authorizationMetadata.riskLevel !== 'low' && runAuthorizationPolicy.approvalMode !== 'delegate') {
+            if (authorizationMetadata.riskLevel !== 'low' && runApprovalMode !== 'delegate') {
               emitStatus({
                 base: 'waiting',
                 phase: 'awaiting_authorization',
@@ -2154,7 +2142,7 @@ export class AgentLoop {
               args: toolArgs,
               request,
               agentRunId: checkpoint.taskId,
-              approvalMode: runAuthorizationPolicy.approvalMode,
+              approvalMode: runApprovalMode,
               emitStatus,
               validationPreflight,
               recovery: resumingApproval,
@@ -2176,12 +2164,12 @@ export class AgentLoop {
             if (resumingApproval && !reviewed) throw new AgentInterruptedError('waiting_for_user', request.language === 'en'
               ? 'The saved approval scope or mode changed. Restore it or request a new operation.'
               : '保存的审批范围或模式已变化。请恢复原范围或模式，或重新提出操作。');
-            authorizationDecision = reviewed?.decision ?? await abortable(this.toolAuthorization.authorize({
-              toolName: toolCall.function.name,
-              args: toolArgs,
-              language: request.language,
-              policy: runAuthorizationPolicy
-            }), request.signal);
+            // Side-effect tools are decided by the approval review above; read-only tools
+            // are always allowed. There is no user-confirmation fallback.
+            authorizationDecision = reviewed?.decision ?? createReadOnlyToolAuthorizationDecision(
+              toolCall.function.name,
+              toolArgs
+            );
             if (validationPreflight && authorizationDecision.allowed && !authorizationDecision.executionSnapshot) {
               authorizationDecision = { ...authorizationDecision, executionSnapshot: validationPreflight.snapshot.fingerprint };
             }
@@ -2215,8 +2203,8 @@ export class AgentLoop {
               type: 'tool_authorization_decision',
               toolCallId: toolCall.id,
               decision: authorizationDecision,
-              runAuthorizedScopes: [...runAuthorizationPolicy.authorizedScopes],
-              runDeniedScopes: [...runAuthorizationPolicy.deniedScopes]
+              runAuthorizedScopes: [],
+              runDeniedScopes: []
             });
             if (!authorizationDecision.allowed) {
               const review = authorizationDecision.approvalReview;
@@ -2366,7 +2354,7 @@ export class AgentLoop {
             for (const draftEditId of draftEditIds) validationState.recordDraftEdit(draftEditId);
             if (repairLoop.getState().status === 'generating_repair') {
               for (const draftEditId of draftEditIds) repairLoop.recordDraftEdit(draftEditId);
-              const detail = runAuthorizationPolicy.approvalMode === 'delegate'
+              const detail = runApprovalMode === 'delegate'
                 ? request.language === 'en'
                   ? 'Repair prepared. KeepSeek will process it automatically before the next validation.'
                   : '修复已准备。KeepSeek 会自动处理修改，然后继续验证。'
@@ -5931,4 +5919,25 @@ function isSubagentLane(value: string): value is SubagentLane {
     || value === 'review-read'
     || value === 'proposal'
     || value === 'nested-read';
+}
+
+function createReadOnlyToolAuthorizationDecision(
+  toolName: string,
+  args: Record<string, unknown>
+): ToolAuthorizationDecision {
+  const metadata = getToolAuthorizationMetadata(toolName, args);
+  if (metadata.riskLevel === 'low') {
+    return { allowed: true, requiresExplicitConfirmation: false, riskLevel: 'low', scope: metadata.scope, source: 'low_risk', toolName };
+  }
+  // A side-effect tool without a review decision must fail closed instead of executing unreviewed.
+  return {
+    allowed: false,
+    failureCode: 'approval_review_required',
+    reason: 'This operation needs an approval decision. Nothing executed.',
+    requiresExplicitConfirmation: false,
+    riskLevel: metadata.riskLevel,
+    scope: metadata.scope,
+    source: 'user_denied',
+    toolName
+  };
 }

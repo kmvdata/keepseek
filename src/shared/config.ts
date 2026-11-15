@@ -1,13 +1,12 @@
 import { KEEPSEEK_CONFIGURATION_NAMESPACE } from './identity';
 import * as vscode from 'vscode';
-import { mergeDurations, normalizeCostLimit, normalizeDuration } from '../agent/executionPolicy';
+import { normalizeCostLimit, normalizeDuration } from '../agent/executionPolicy';
 import {
   AgentSettings,
   CompressionThreshold,
   KeepseekModel,
   ModelSelection,
-  UsageCostRates,
-  ValidationAuthorizationPolicy
+  UsageCostRates
 } from './types';
 import { SESSION_HARD_RETENTION_DAYS } from '../sessions/sessionRetention';
 import {
@@ -52,7 +51,6 @@ export const DEFAULT_AGENT_MAX_TREE_UPSTREAM_TOKENS = 0;
 export const DEFAULT_SUBAGENT_MAX_UPSTREAM_TOKENS = 500_000;
 export const DEFAULT_DRAFT_RUN_TIMEOUT_MS = 120_000;
 export const DEFAULT_DRAFT_RUN_MAX_TRANSCRIPT_BYTES = 131_072;
-export const DEFAULT_MAX_REQUEST_RETRIES = 5;
 export const DEFAULT_REQUEST_RETRY_BASE_MS = 1_000;
 export const DEFAULT_MODEL_REQUEST_TIMEOUT_SECONDS = 3_600;
 export const MODEL_REQUEST_TIMEOUT_PRESETS = [
@@ -71,8 +69,6 @@ export const DEFAULT_TRACE_LEVEL: InteractionTraceLevel = 'full';
 export const DEFAULT_TRACE_LOG_RAW_STREAM = true;
 export const DEFAULT_TRACE_RETENTION_DAYS = 7;
 export const DEFAULT_TRACE_MAX_FILE_BYTES = 20_000_000;
-export const DEFAULT_BALANCE_ENDPOINT_URL = '';
-export const DEFAULT_BALANCE_REFRESH_INTERVAL_MS = 60_000;
 // Default off for prompt-cache stability: the exposed tool set must not vary with
 // the prompt text, otherwise the tools section of the request prefix changes and
 // DeepSeek's prefix cache (byte-identical from token 0) is invalidated. Users can
@@ -82,7 +78,6 @@ export const DEFAULT_SLIM_TOOL_MODE_ENABLED = false;
 export const DEFAULT_PROMPT_CACHE_TTL_MINUTES = 24 * 60;
 export const DEFAULT_TOTAL_CONTEXT_BUDGET_TOKENS = 32_000;
 export const DEFAULT_COMPRESSION_THRESHOLD: CompressionThreshold = 'balanced';
-export const DEFAULT_VALIDATION_AUTHORIZATION_POLICY: ValidationAuthorizationPolicy = 'always';
 export const DEFAULT_MAX_VALIDATION_RUNS = 3;
 export const DEFAULT_MAX_REPAIR_ITERATIONS = 2;
 export const DEFAULT_VALIDATION_TIMEOUT_MS = 120_000;
@@ -146,10 +141,6 @@ export const MIN_TRACE_RETENTION_DAYS = 1;
 export const MAX_TRACE_RETENTION_DAYS = 60;
 export const MIN_TRACE_MAX_FILE_BYTES = 1_000_000;
 export const MAX_TRACE_MAX_FILE_BYTES = 1_000_000_000;
-export const MIN_BALANCE_REFRESH_INTERVAL_MS = 10_000;
-export const MAX_BALANCE_REFRESH_INTERVAL_MS = 3_600_000;
-export const MAX_REQUEST_RETRIES = 10;
-export const MAX_REQUEST_RETRY_BASE_MS = 60_000;
 
 export type InteractionTraceLevel = 'metadata' | 'request' | 'full';
 
@@ -225,11 +216,6 @@ export function getConfiguredMaxFileBytes(): number {
   return vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE).get('maxFileBytes', DEFAULT_MAX_FILE_BYTES);
 }
 
-export function getConfiguredContextWindowTokens(model?: KeepseekModel): number {
-  // Capability fallback belongs to the centralized runtime profile resolver.
-  return getEffectiveContextWindowTokens(model);
-}
-
 export function getConfiguredUsagePricingMap(): Record<string, UsageCostRates> {
   const configured = vscode.workspace
     .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
@@ -273,15 +259,7 @@ export function getConfiguredModelUsagePricing(modelId: string): UsageCostRates 
   return getConfiguredUsagePricingMap()[exactId];
 }
 
-export function getConfiguredBalanceEndpointUrl(baseUrl: string): string {
-  const configured = vscode.workspace
-    .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
-    .get<string>('balanceEndpointUrl', DEFAULT_BALANCE_ENDPOINT_URL)
-    .trim();
-  if (configured) {
-    return configured;
-  }
-
+export function getBalanceEndpointUrl(baseUrl: string): string {
   const url = new URL(baseUrl || DEFAULT_DEEPSEEK_BASE_URL);
   // DeepSeek 官方余额端点固定为 https://api.deepseek.com/user/balance,不带
   // /v1 或 /chat/completions 前缀(baseUrl 可能是 .../v1 或 .../v1/chat/completions)。
@@ -298,18 +276,6 @@ export function getConfiguredBalanceEndpointUrl(baseUrl: string): string {
     : cleanPath;
   url.pathname = `${basePath || ''}/user/balance`;
   return url.toString();
-}
-
-export function getConfiguredBalanceRefreshIntervalMs(): number {
-  const configured = vscode.workspace
-    .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
-    .get<number>('balanceRefreshIntervalMs', DEFAULT_BALANCE_REFRESH_INTERVAL_MS);
-  return normalizeIntegerInRange(
-    configured,
-    MIN_BALANCE_REFRESH_INTERVAL_MS,
-    MAX_BALANCE_REFRESH_INTERVAL_MS,
-    DEFAULT_BALANCE_REFRESH_INTERVAL_MS
-  );
 }
 
 export function getConfiguredSlimToolModeEnabled(): boolean {
@@ -330,15 +296,6 @@ export function getConfiguredTotalContextBudgetTokens(): number {
     .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
     .get<number>('context.totalBudgetTokens', DEFAULT_TOTAL_CONTEXT_BUDGET_TOKENS);
   return normalizeIntegerInRange(value, 1_000, 96_000, DEFAULT_TOTAL_CONTEXT_BUDGET_TOKENS);
-}
-
-export function getConfiguredValidationAuthorizationPolicy(): ValidationAuthorizationPolicy {
-  const configured = vscode.workspace
-    .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
-    .get<string>('validation.authorizationPolicy', DEFAULT_VALIDATION_AUTHORIZATION_POLICY);
-  return configured === 'never' || configured === 'always'
-    ? configured
-    : DEFAULT_VALIDATION_AUTHORIZATION_POLICY;
 }
 
 export function getConfiguredMaxValidationRuns(): number {
@@ -484,11 +441,6 @@ export function isModelRequestTimeoutPreset(value: unknown): value is number {
   return MODEL_REQUEST_TIMEOUT_PRESETS.some((preset) => preset.seconds === value);
 }
 
-export function getConfiguredBackgroundMaxDurationMs(): number {
-  return mergeDurations(getConfiguredAgentMaxExecutionMs(),
-    vscode.workspace.getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE).get('background.maxDurationMs', 0));
-}
-
 export function getConfiguredBackgroundMaxToolCalls(): number {
   const configured = vscode.workspace
     .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
@@ -496,18 +448,11 @@ export function getConfiguredBackgroundMaxToolCalls(): number {
   return normalizeIntegerInRange(configured, 1, 256, DEFAULT_BACKGROUND_MAX_TOOL_CALLS);
 }
 
-export function getConfiguredMaxRequestRetries(): number {
-  const configuredLimit = vscode.workspace
-    .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
-    .get<number>('maxRequestRetries', DEFAULT_MAX_REQUEST_RETRIES);
-  return normalizeIntegerInRange(configuredLimit, 0, MAX_REQUEST_RETRIES, DEFAULT_MAX_REQUEST_RETRIES);
-}
-
 export function getConfiguredRequestRetryBaseMs(): number {
   const configuredDelay = vscode.workspace
     .getConfiguration(KEEPSEEK_CONFIGURATION_NAMESPACE)
     .get<number>('requestRetryBaseMs', DEFAULT_REQUEST_RETRY_BASE_MS);
-  return normalizeIntegerInRange(configuredDelay, 0, MAX_REQUEST_RETRY_BASE_MS, DEFAULT_REQUEST_RETRY_BASE_MS);
+  return normalizeIntegerInRange(configuredDelay, 0, 60_000, DEFAULT_REQUEST_RETRY_BASE_MS);
 }
 
 export function getConfiguredDebugMode(): boolean {

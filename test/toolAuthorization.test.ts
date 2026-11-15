@@ -12,11 +12,7 @@ import {
   RUN_DRAFT_TOOL_NAME,
   RUN_VALIDATION_TOOL_NAME
 } from '../src/agent/protocol';
-import {
-  getHighRiskToolConfirmationPrompt,
-  getToolAuthorizationMetadata,
-  ToolAuthorizationService
-} from '../src/agent/tools/toolAuthorization';
+import { getHighRiskToolConfirmationPrompt, getToolAuthorizationMetadata } from '../src/agent/tools/toolAuthorization';
 
 test('classifies read-only semantic and Git tools as low risk', () => {
   assert.deepEqual(getToolAuthorizationMetadata(FIND_REFERENCES_TOOL_NAME), {
@@ -62,21 +58,6 @@ test('separates compile/lint and test authorization scopes per run', () => {
     riskLevel: 'medium',
     scope: 'validation_test'
   });
-});
-
-test('trusted delegate policy cannot bypass precise approval for a validation or mutation', async () => {
-  const authorization = new ToolAuthorizationService();
-  const policy = { ...authorization.createRunPolicy('approval-test'), approvalMode: 'delegate' as const,
-    mediumRiskPolicy: 'always' as const, authorizedScopes: ['validation_compile_lint'] as const };
-  const authorize = (toolName: string, args = {}) => authorization.authorize({
-    toolName, args, language: 'en', policy: { ...policy, authorizedScopes: [...policy.authorizedScopes] }
-  });
-  const validation = await authorize(RUN_VALIDATION_TOOL_NAME, { script: 'compile' });
-  assert.equal(validation.allowed, false);
-  assert.equal(validation.failureCode, 'approval_review_required');
-  assert.equal((await authorize('keepseek_git_commit')).allowed, false);
-  assert.equal((await authorize(GIT_DIFF_TOOL_NAME)).allowed, true);
-  assert.equal((await authorize(RUN_DRAFT_TOOL_NAME)).allowed, true);
 });
 
 test('delete preparation stays low risk while unknown and Git mutations fail closed', () => {
