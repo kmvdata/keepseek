@@ -12,13 +12,14 @@ export function traceOwnerIndexUri(root: vscode.Uri, sessionId: string): vscode.
 }
 
 
-/** Ownership is committed before any trace bytes. Both writers and cleanup
- * share the parent session gate, including delayed performance flushes. */
+/** Ownership is committed before any trace bytes. Creating the ownership records
+ * crosses the session gate because it is a storage side effect; the steady-state
+ * byte appends must not, or diagnostics would serialize behind session
+ * persistence and make Stop appear stuck. */
 export async function withOwnedTraceWrite<T>(base: vscode.Uri, runId: string, owner: TraceOwnership | undefined, work: () => Promise<T>): Promise<T> {
   if (!owner) return work();
   const authority = new SessionDeletionAuthority(owner.root);
-  const write = async () => {
-    await authority.assertSessionIdWritable(owner.sessionId);
+  const commitOwnership = async () => {
     if (owner.root.scheme === 'file') await assertManagedStoragePath(owner.root, base);
     const uri = vscode.Uri.parse(`${base.toString()}.owner.json`);
     const stored = await readAssociatedJson(uri);
@@ -38,11 +39,22 @@ export async function withOwnedTraceWrite<T>(base: vscode.Uri, runId: string, ow
       await writeJsonAtomic(indexUri, { version: 1, sessionId: owner.sessionId, runs }, { durable: true });
       await writeJsonAtomic(uri, { version: 1, sessionId: owner.sessionId, runId }, { durable: true });
     }
-    return work();
   };
-  return owner.root.scheme === 'file' ? authority.withSessionIdGate(owner.sessionId, write) : write();
+  // Deletion is checked without the gate; only first-time ownership is gated.
+  await authority.assertSessionIdWritable(owner.sessionId);
+  const gateCommit = owner.root.scheme === 'file' && !ownedRuns.has("${owner.sessionId}:${runId}");
+  if (gateCommit) {
+    await authority.withSessionIdGate(owner.sessionId, async () => {
+      await commitOwnership();
+      ownedRuns.add("${owner.sessionId}:${runId}");
+    });
+  }
+  await authority.assertSessionIdWritable(owner.sessionId);
+  return work();
 }
 
+/** Runs whose ownership records this process has already committed. */
+const ownedRuns = new Set<string>();
 const listeners = new Set<(event: InteractionTraceEvent) => void>();
 export function recordLocalPerformance(event: InteractionTraceEvent): void {
   for (const listener of listeners) { try { listener(event); } catch { /* telemetry cannot fail a durable operation */ } }
@@ -56,7 +68,9 @@ const KEYS = new Set(['activationId', 'runtimeMarker', 'packageVersion', 'reques
   'estimatedPromptTokens', 'afterEstimatedPromptTokens', 'netReleasedTokens', 'summaryInputTokens', 'summaryOutputTokens',
   'protectedMessageCount', 'compressibleMessageCount', 'bytesWritten', 'objectsWritten', 'snapshotMs', 'encodeMs', 'commitMs',
   'loadMs', 'queueMs', 'processingMs', 'queueDepth', 'childId', 'nodesVisited', 'hashMs', 'objectIoMs', 'eventLoopMaxMs', 'eventLoopP95Ms', 'droppedEvents', 'bodyDelivered', 'envelopeBytes', 'modelMaxOutputTokens', 'costKnown',
-  'actualMaxOutputTokens', 'estimatedInputTokens', 'inputBudgetTokens', 'safetyTokens', 'effectiveWindowTokens', 'limitSource', 'eventScope']);
+  'actualMaxOutputTokens', 'estimatedInputTokens', 'inputBudgetTokens', 'safetyTokens', 'effectiveWindowTokens', 'limitSource', 'eventScope',
+  'runCloseMs', 'statusLagMs', 'flushStateMs', 'releaseMs', 'persistMs', 'gateWaitMs', 'writerWaitMs', 'queueWaitMs',
+  'continuationRounds', 'phase']);
 
 /** Independent bounded tail: four 256 KiB segments, at most 256 KiB queued.
  * Only whitelisted scalars enter this log, never history, arguments or output. */
@@ -77,7 +91,7 @@ export class PerformanceTrace {
   public constructor(private readonly base: vscode.Uri, private readonly runId: string,
     private readonly segmentBytes = 256 * 1024, private readonly maxQueuedBytes = 256 * 1024, private readonly owner?: TraceOwnership) {}
   public record(event: InteractionTraceEvent): void {
-    if (!/^(run_|upstream_(attempt|http|retry|model)|provider_first|context_|request_output|tool_(call|result|delivery)|checkpoint_|progress_|projection_|event_loop)/u.test(event.type)) return;
+    if (!/^(run_|upstream_(attempt|http|retry|model)|provider_first|context_|request_output|tool_(call|result|delivery)|checkpoint_|progress_|projection_|event_loop|storage_)/u.test(event.type)) return;
     const scalars: Record<string, unknown> = {};
     for (const [key, value] of Object.entries({ ...event, ...(event.compression as object ?? {}) })) {
       if (KEYS.has(key) && (typeof value === 'boolean' || typeof value === 'number' && Number.isFinite(value)

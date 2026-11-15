@@ -36,6 +36,7 @@ import * as vscode from 'vscode';
 import { getExplorerFileUris, getFileReferenceAuthorizationKey, resolveFileReferenceUri } from '../context/references/fileReference';
 import { AgentRunAbortedError, AgentRunner } from '../agent/runner';
 import { assertPluginSkillsCurrent } from '../agent/pluginSkillRuntime';
+import { recordLocalPerformance } from '../agent/logging/performanceTrace';
 import { assertCodexPluginSkillsEnabled } from '../skills/codexPluginSupport';
 import { SubagentRuntime } from '../agent/subagents/runtime';
 import type { SubagentModelSetting, SubagentProgressState } from '../agent/subagents/types';
@@ -6633,6 +6634,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     let currentPromptCacheDiagnostics: PromptCacheDiagnostics | undefined;
     let completedResponse: AgentResponse | undefined;
     let liveStateTimer: ReturnType<typeof setTimeout> | undefined;
+    // Host-side finalization timing: the model is already done when this is set.
+    let finalizeStartedAt: number | undefined;
     const scheduleLiveState = () => {
       if (liveStateTimer) {
         return;
@@ -7217,6 +7220,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         response.approvalToolResults = undefined;
       }
       completedResponse = response;
+      finalizeStartedAt = performance.now();
+      // Answer text is already final; the remaining work is durability.
+      this.setAgentActivity({ base: 'thinking', phase: 'saving_result' }, { post: false });
 
       if (activeSession.requestProtocol) {
         activeSession.requestProtocol.lastProviderRequestAt = new Date().toISOString();
@@ -7411,16 +7417,28 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.liveContextUsage = undefined;
       this.liveTurnUsage = undefined;
       this.sessionStore.getActiveSession().updatedAt = new Date().toISOString();
+      const finalizeMark = finalizeStartedAt ?? performance.now();
       // Release the run registered for the session admitted by this call.
       this.sessionRuns.forceRelease(admissionSessionId);
+      recordLocalPerformance({ type: 'run_finalize_release', sessionId: admissionSessionId,
+        statusLagMs: performance.now() - finalizeMark });
       this.setAbortController(admissionSessionId, undefined);
       this.setInteractionPhase(this.modelSelectionTransactions?.getSnapshot?.()?.pending ? 'preparing_context' : 'saving', options?.interactionOperation);
-      await this.applyPendingModelSelectionAfterRun();
+      // A pending model switch can refresh the catalog or open a confirmation
+      // prompt. That is not part of durable result delivery, so it runs after the
+      // run slot is released instead of blocking the next send.
+      const pendingModelSelection = Boolean(this.modelSelectionTransactions?.getSnapshot?.()?.pending);
+      if (pendingModelSelection) {
+        recordLocalPerformance({ type: 'run_finalize_model_selection_deferred', sessionId: admissionSessionId });
+      }
       this.setInteractionPhase('saving', options?.interactionOperation);
       // Push UI state (changeSets, idle status) before session persistence so a
       // slow or failing persist() can never leave the webview stuck on
       // "finalizing" without showing the pending changes.
+      const beforeFlush = performance.now();
       flushLiveState();
+      recordLocalPerformance({ type: 'run_finalize_flush_state', sessionId: admissionSessionId,
+        flushStateMs: performance.now() - beforeFlush });
       this.setAgentActivity({
         base: 'idle',
         phase: 'idle'
@@ -7432,6 +7450,15 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         // Retain the in-memory result. The outer durability barrier retries a complete revision before releasing its owner.
         this.interactionFailure = { sessionId: this.sessionStore.activeSessionId, message: this.t('runStorageFailed') + ': ' + getErrorMessage(error) };
         console.warn('[KeepSeek] Failed to persist session after Agent run:', getErrorMessage(error));
+      }
+      recordLocalPerformance({ type: 'run_finalize_persist', sessionId: admissionSessionId,
+        persistMs: performance.now() - finalizeMark });
+      // Deferred run-after work: never part of result durability, and never
+      // holding the run slot the user needs to send the next message.
+      if (pendingModelSelection) {
+        void this.applyPendingModelSelectionAfterRun().catch(() => undefined);
+      } else {
+        recordLocalPerformance({ type: 'run_finalize_model_selection_skipped', sessionId: admissionSessionId });
       }
       void this.refreshBalance();
     }

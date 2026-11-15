@@ -12,7 +12,14 @@ interface Participant { version: 1; pid: number; token: string; choosing: boolea
 interface UseRecord { version: 1; pid: number; token: string; workspaceKey: string; sessionId: string }
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const missing = (error: unknown) => ['ENOENT', 'FileNotFound'].includes(String((error as { code?: string })?.code));
-const pause = () => new Promise<void>(resolve => setTimeout(resolve, 10));
+const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+
+/** Lock-wait observation. An injected hook keeps this storage module free of
+ * the agent logging layer, which imports it back. */
+type GateWaitObserver = (sessionId: string, gateWaitMs: number) => void;
+let gateWaitObserver: GateWaitObserver | undefined;
+export function setGateWaitObserver(observer: GateWaitObserver | undefined): void { gateWaitObserver = observer; }
+
 
 /** Shared deletion authority. Lock order: session gate -> object writer lock;
  * index/manifest gates are acquired separately, never while a session gate is held.
@@ -29,7 +36,11 @@ export class SessionDeletionAuthority {
   }
   public async withSessionIdGate<T>(sessionId: string, work: () => Promise<T>): Promise<T> {
     if (!sessionId || sessionId.length > 4096) throw new Error('Invalid session identity');
-    return this.withGate(`session:${sessionId}`, work);
+    // Gate wait is the user-visible 'cannot send' window on slow shares.
+    const started = performance.now();
+    const result = await this.withGate(`session:${sessionId}`, work);
+    gateWaitObserver?.(sessionId, performance.now() - started);
+    return result;
   }
   public async withIndexGate<T>(workspaceKey: string, work: () => Promise<T>): Promise<T> {
     return this.withGate(`index:${workspaceKey}`, work);
@@ -201,10 +212,14 @@ export class SessionDeletionAuthority {
       own.choosing = false;
       await writeJsonAtomic(uri, own);
       const deadline = Date.now() + 30_000;
+      // Back off instead of polling every 10 ms: each attempt costs a readdir
+      // plus one lstat/readFile per participant, which is expensive on shares.
+      let backoffMs = 10;
       while ((await participants()).some(other => other.token !== token && (other.choosing
         || other.ticket < own.ticket || (other.ticket === own.ticket && other.token < token)))) {
         if (Date.now() > deadline) throw new Error('Storage gate is busy; retry cleanup later');
-        await pause();
+        await pause(backoffMs);
+        backoffMs = Math.min(backoffMs * 2, 200);
       }
       return await work();
     } finally { await unlink(uri.fsPath).catch(error => { if (!missing(error)) throw error; }); }

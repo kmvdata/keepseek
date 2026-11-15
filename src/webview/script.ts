@@ -659,7 +659,10 @@ ${conversationsStateFragment.source}
       running_draft_run: ['agentStatusRunningDraftRun'],
       reviewing_tool_result: ['agentStatusReviewingToolResults', 'agentStatusContinuingReasoning'],
       generating: ['agentStatusGenerating', 'agentStatusOrganizingResult', 'agentStatusWritingReply'],
-      finalizing: ['agentStatusFinalizingResponse'],
+      // A single-entry pool cannot rotate; these are genuinely different steps.
+      finalizing: ['agentStatusFinalizingResponse', 'agentStatusOrganizingResult', 'agentStatusWritingReply'],
+      // Host storage work after the answer is complete, not model generation.
+      saving_result: ['agentStatusSavingResult', 'runSavingState'],
       failed: ['agentStatusError']
     };
 
@@ -2056,7 +2059,7 @@ ${conversationsSessionListFragment.source}
         return t('agentStatusReconnecting', { attempt: activity.reconnectAttempt, max: activity.maxReconnectAttempts });
       }
       var current = state.messages.find(function(message) { return message.runState?.status === 'running'; });
-      if (current && ['requesting_model', 'reasoning', 'generating', 'planning_tool'].includes(activity.phase)) {
+      if (current && ['requesting_model', 'reasoning', 'generating', 'planning_tool', 'finalizing', 'saving_result'].includes(activity.phase)) {
         var networkAt = Date.parse(current.runState.lastNetworkAt || '');
         var contentAt = Date.parse(current.runState.lastContentAt || '');
         if (!Number.isFinite(networkAt)) return t(Date.now() - Date.parse(current.runState.requestStartedAt || '') > 60000 ? 'runConnectionSilent' : 'runWaitingHeaders');

@@ -1758,6 +1758,7 @@ export type AgentActivityPhase =
   | 'delegating'
   | 'waiting_for_subagent'
   | 'finalizing'
+  | 'saving_result'
   | 'failed';
 
 export interface AgentActivityInput {

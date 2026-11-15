@@ -1861,6 +1861,12 @@ export class AgentLoop {
           });
         }
         let continuedResponse: { content: string; finishReason?: string | null } | undefined;
+        // A continuation is another model request with its own latency. Keep the
+        // generating status so the UI never claims to be finalizing a done answer.
+        if (this.canContinueLengthLimitedResponse({ request, messages, assistant, response, draftEdits,
+          outputReserveTokens, tools, providerRunState })) {
+          emitStatus({ base: 'thinking', phase: 'generating' });
+        }
         try {
           continuedResponse = await this.tryContinueLengthLimitedResponse({
             request,
@@ -2768,7 +2774,12 @@ export class AgentLoop {
       throw error;
     } finally {
       trace.record({ type: 'run_phase', phase: activePhase, status: 'end', durationMs: performance.now() - phaseStarted });
+      // Diagnostics durability is host I/O, not model time. Record it on its own
+      // so a stalled "finalizing" status names the segment that actually held.
+      const traceCloseStarted = performance.now();
       await (trace.close?.() ?? trace.flush());
+      recordLocalPerformance({ type: 'run_trace_close', sessionId: request.sessionId, taskId: checkpoint.taskId,
+        runCloseMs: performance.now() - traceCloseStarted });
     }
   }
 

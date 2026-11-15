@@ -2,6 +2,8 @@ import { KEEPSEEK_CONFIGURATION_NAMESPACE, KEEPSEEK_PUBLISHER } from './shared/i
 import * as vscode from 'vscode';
 import { KeepseekChatViewProvider } from './provider/KeepseekChatViewProvider';
 import { GlobalSessionStorage } from './sessions/globalSessionStorage';
+import { setGateWaitObserver } from './sessions/sessionDeletionAuthority';
+import { recordLocalPerformance } from './agent/logging/performanceTrace';
 import { ChatSessionStore, getCurrentWorkspaceSessionScope } from './sessions/chatSessionStore';
 import { ProjectQueueService } from './sessions/queue/queueService';
 import { getConfiguredKeepseekLanguage } from './shared/i18n';
@@ -14,6 +16,8 @@ import { getConfigurationRegistrationDiagnostics } from './shared/configurationR
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const startupTrace = new StartupPerformanceTrace();
   startupTrace.mark('activate-start');
+  // Storage lock waits are the user-visible 'cannot send' window on slow shares.
+  setGateWaitObserver((sessionId, gateWaitMs) => recordLocalPerformance({ type: 'storage_session_gate', sessionId, gateWaitMs }));
   initializeRuntimeIdentity({ extensionUri: context.extensionUri, extensionMode: context.extensionMode,
     version: readPackageString(context.extension.packageJSON.version, '0.0.0'), remoteName: vscode.env.remoteName });
 

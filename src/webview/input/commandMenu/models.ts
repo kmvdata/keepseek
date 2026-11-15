@@ -98,13 +98,13 @@ export const modelSelectorBindingsFragment: WebviewFragment = {
         });
       }
 
-
 `.slice(1)
 };
 
 export const subagentAndPendingBindingsFragment: WebviewFragment = {
   id: 'command-menu.models.subagent-bindings',
   source: `
+      if (commandSubagentModelList) {
         commandSubagentModelList.addEventListener('click', function(event) {
           var target = event.target instanceof Element ? event.target : null;
           var profileButton = target?.closest('button[data-subagent-profile]');
@@ -176,6 +176,7 @@ export const subagentAndPendingBindingsFragment: WebviewFragment = {
             requestId: nextModelSelectionRequestId()
           });
         });
+      }
 
 `.slice(1)
 };
