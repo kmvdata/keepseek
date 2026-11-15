@@ -9,6 +9,10 @@ import { classifyHistoryCleanupError, localizeHistoryCleanupIssue, HistoryCleanu
   type HistoryCleanupIssue, type HistoryCleanupPhase } from '../sessions/historyCleanupErrors';
 import { InteractionCoordinator, deriveSessionTitleCapability, deriveHistoryCleanupCapability, type InteractionOperation, type InteractionPhase } from './interactionState';
 import { SessionRunRegistry } from './sessionRunRegistry';
+import { installWriteGateAuthority, type WriteGateResult } from '../sessions/queue/writeGate';
+import { toolNamesForMode } from '../sessions/queue/planGate';
+import { admitSubmission, decidePlanExecution } from '../sessions/queue/runGate';
+import type { WriteCapability } from '../sessions/queue/modeGate';
 import { SessionTitleCoordinator, type SessionTitleRequest, type SessionTitleRegenerationOutcome } from '../sessions/sessionTitleCoordinator';
 import { hasConsumedTitleRound, buildSessionTitleRegenerationMaterial, getSessionTitleRegenerationTaskId } from '../sessions/sessionTitle';
 import { captureSessionTitleSubmission, checkSessionTitleSubmission, type SessionTitleSubmission } from './sessionTitleCompletion';
@@ -429,6 +433,31 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
    * With parallel runs this must consult the registry: several sessions may run
    * at once, so a single global flag can no longer describe the viewed session.
    */
+  /**
+   * Write authority for the project queue (installed at activation).
+   *
+   * Only the queue head may modify the workspace. This is the enforcement point
+   * that a mode label alone could never provide: every Apply and every command
+   * consults it immediately before the side effect.
+   */
+  private authorizeProjectWrite(sessionId: string, _capability: WriteCapability): WriteGateResult {
+    const queue = this.sessionStore?.getProjectQueue?.();
+    // Without a loaded queue the gate stays permissive; the queue is the authority
+    // only once it can actually answer.
+    if (!queue) return { allowed: true };
+    const mode = this.sessionStore.getDerivedExecutionMode?.(sessionId);
+    if (mode === 'normal') return { allowed: true };
+    const position = queue.entries.findIndex(entry => entry.sessionId === sessionId);
+    const where = position >= 0 ? (' #' + (position + 1)) : '';
+    return {
+      allowed: false,
+      code: position >= 0 ? 'not_queue_head' : 'no_authority',
+      message: this.language === 'en'
+        ? 'Only the first session in the project queue may modify files or run commands.' + where
+        : '只有项目队列中的第一个会话可以修改文件或执行命令。' + where
+    };
+  }
+
   private runBelongsToViewed(sessionId = this.sessionStore.activeSessionId): boolean {
     return Boolean(sessionId) && Boolean(this.sessionRuns?.isRunning(sessionId));
   }
@@ -1124,9 +1153,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.sessionCleanupTimer = setInterval(() => {
       void this.cleanupExpiredSessions();
     }, SESSION_CLEANUP_INTERVAL_MS);
+    installWriteGateAuthority({ authorize: (sessionId, capability) => this.authorizeProjectWrite(sessionId, capability) });
   }
 
   public dispose(): void {
+    installWriteGateAuthority(undefined);
     this.titleLifecycleDisposed = true;
     this.cancelAllSessionTitleWork();
     this.sessionTitles?.dispose();
@@ -1837,6 +1868,20 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       case 'selectSession':
         await this.selectSession(message.sessionId);
         return;
+      case 'moveSessionInQueue': {
+        // Reordering the project queue is a user action on the write position,
+        // so it must go through the store's serialized CAS path.
+        if (message.direction !== 'up' && message.direction !== 'down') return;
+        const queue = this.sessionStore.getProjectQueue?.();
+        if (!queue) return;
+        const index = queue.entries.findIndex(entry => entry.sessionId === message.sessionId);
+        if (index < 0) return;
+        const target = message.direction === 'up' ? index - 1 : index + 1;
+        if (target < 0 || target >= queue.entries.length) return;
+        await this.sessionStore.moveSessionInQueue(message.sessionId, target);
+        this.postState({ immediate: true, forceFull: true });
+        return;
+      }
       case 'toggleSessionFavorite':
         if (await this.sessionStore.toggleSessionFavorite(message.sessionId)) {
           this.postState();
@@ -3108,7 +3153,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         protocol.version
       );
     }
-    return [...protocol.toolNames];
+    // The frozen lane keeps the full list; the planning mode narrows what the
+    // model is offered, so a planning session never sees a write tool at all.
+    const mode = this.sessionStore?.getDerivedExecutionMode?.(session.id)
+      ?? (session.executionMode === 'plan' ? 'plan' : 'normal');
+    return toolNamesForMode(mode, protocol.toolNames);
   }
 
   private getSelectedModel(): KeepseekModel {
@@ -6193,6 +6242,17 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       // session to the queue head so it derives `normal`. The previous head keeps
       // its own plan and simply becomes `plan`.
       if (resolution.startExecution) {
+        // Only an explicit execution of a pending plan takes the write position.
+        const decision = decidePlanExecution({
+          queue: this.sessionStore.getProjectQueue?.(),
+          sessionId: session.id,
+          hasPendingPlan: true
+        });
+        if (!decision.allowed && decision.reason === 'not_queued') {
+          vscode.window.showWarningMessage(this.t('planDecisionInvalid'));
+          this.postState();
+          return;
+        }
         try { await this.sessionStore.promoteSessionInQueue(session.id); }
         catch (error) {
           vscode.window.showErrorMessage(this.t('runStorageFailed') + ': ' + getErrorMessage(error));
@@ -6629,8 +6689,17 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       }
       const approvalMode = normalizeApprovalMode(activeSession.approvalMode);
-      const executionMode = approvalMode === 'delegate' && !options?.delegatedContinuation && isExplicitPlanOnly(trimmedPrompt)
-        ? 'plan' : normalizeExecutionMode(activeSession.executionMode);
+      // D3: a submission is admitted read-only unless the session already owns the
+            // write position (queue head) or this turn is executing an approved plan.
+            const requestedMode = approvalMode === 'delegate' && !options?.delegatedContinuation && isExplicitPlanOnly(trimmedPrompt)
+              ? 'plan' : normalizeExecutionMode(activeSession.executionMode);
+            const admission = admitSubmission({
+              queue: this.sessionStore.getProjectQueue(),
+              sessionId: activeSession.id,
+              resolvedMode: requestedMode,
+              executingPlan: Boolean(options?.planExecutionContinuation)
+            });
+            const executionMode = admission.mode;
       const explicitSubagentSelection = options?.delegatedContinuation ? undefined : resolveExplicitSubagentSelection(trimmedPrompt);
       if (explicitSubagentSelection && (activeSession.requestProtocol?.version ?? 1) < 5) {
         activeSession.requestProtocol = {

@@ -3,6 +3,7 @@ import { realpathSync } from 'node:fs';
 import * as path from 'node:path';
 import type { GitRemoteCommand } from '../approvals/authorization/commandSemantics';
 import { parseGitRefOutput, gitTransportError } from './gitReleaseEvidence';
+import { assertWriteAuthorized } from '../sessions/queue/writeGate';
 import { createControlledEnvironment } from './executionEnvironment';
 import type { RestrictedPythonSyntaxLaunch } from './restrictedPythonSyntax';
 import { StringDecoder } from 'node:string_decoder';
@@ -94,6 +95,9 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
     assertBeforeLaunch?: () => void | Promise<void>;
     onOutput: (chunk: DraftRunOutputChunk) => void;
   }): Promise<DraftRunExecutionOutcome> {
+    // Commands are workspace side effects: the queue decides which session may
+    // start one, so a non-head session is refused before any permit is used.
+    assertWriteAuthorized(input.draftRun.sessionId, 'command');
     validatePermit(input.draftRun, input.permit);
     const restricted = input.restrictedLaunch;
     const gitRemote = input.verifiedLaunch?.gitRemote;

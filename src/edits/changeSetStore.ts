@@ -2,6 +2,7 @@ import { writeJsonAtomic } from '../shared/atomicStorage';
 import { SessionDeletionAuthority } from '../sessions/sessionDeletionAuthority';
 import { hasAssociatedRecordOwner, isMissingAssociatedFile, assertManagedStoragePath, deleteAssociatedUri, readAssociatedJson, withAssociatedStoreGate, withoutDeletedSessions } from '../sessions/sessionAssociatedPersistence';
 import { createHash, randomUUID } from 'node:crypto';
+import { assertWriteAuthorized } from '../sessions/queue/writeGate';
 import { isWorkspaceSkillScaffoldPath } from '../approvals/authorization/protectedTargets';
 import { canonicalPath, isPathInside, resolveSelectedProjectRoot } from '../approvals/authorization/pathScope';
 import { assertCleanDraftEditTarget, inspectDraftEditTarget } from '../approvals/authorization/editTargets';
@@ -646,6 +647,7 @@ export class ChangeSetStore {
     if (!found || !isApplicable(found.edit)) {
       return undefined;
     }
+    assertWriteAuthorized(found.changeSet.sessionId, 'edit');
     const result = await this.applyFiles(found.changeSet, [found.edit], approval, options);
     if (result.appliedEditIds.length) {
       await this.recordAppliedResult(found.changeSet, result).catch(() => undefined);
@@ -661,6 +663,10 @@ export class ChangeSetStore {
     if (!changeSet || !hasActiveHistory(changeSet)) {
       return undefined;
     }
+    // Every apply path passes the project write gate: the queue decides which
+    // session may touch the workspace, and a non-head session must be refused
+    // here rather than relying on UI state.
+    assertWriteAuthorized(changeSet.sessionId, 'edit');
     const files = changeSet.files.filter(isApplicable);
     if (!files.length) {
       return undefined;

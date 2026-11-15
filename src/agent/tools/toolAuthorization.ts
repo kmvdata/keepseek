@@ -115,6 +115,15 @@ export class ToolAuthorizationService implements ToolAuthorizationAdapter {
       return createDecision(input.toolName, metadata, true, 'low_risk', false);
     }
 
+    // Authorization must not depend on an approval-mode selection existing. When no
+    // mode is configured the gate still refuses an untrusted workspace and still
+    // requires an explicit modal confirmation for high-risk tools.
+    const modeUnset = input.policy.approvalMode !== 'ask' && input.policy.approvalMode !== 'delegate';
+    // riskLevel is already known to be medium or high here.
+    if (modeUnset && !vscode.workspace.isTrusted) {
+      return createDecision(input.toolName, metadata, false, 'user_denied', false,
+        input.language === 'en' ? 'The workspace is not trusted. Nothing executed.' : '工作区不受信任，尚未执行。');
+    }
     if (input.policy.approvalMode === 'delegate' && !vscode.workspace.isTrusted) {
       return createDecision(input.toolName, metadata, false, 'user_denied', false,
         input.language === 'en' ? 'The workspace is not trusted. Nothing executed.' : '工作区不受信任，尚未执行。');

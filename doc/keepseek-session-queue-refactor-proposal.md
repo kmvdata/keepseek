@@ -724,3 +724,52 @@ plan 阶段工具白名单（P4）、Webview 队列排序交互（P5）、审批
 | `interactionState` | 12 通过 / 0 失败 |
 | `executionMode` / `longRunningAgent` / 队列 | 全通过 |
 | `chatSessionStore` / `startupPerformance` | 2 / 8 失败，均为既有 UNC 环境问题 |
+
+## 16. 写闸门与 P4/P5 实施（2026-11-15）
+
+### 写闸门接线（关键缺口修复）
+
+**问题**：`modeGate` / `writeLease` 此前只被测试引用，生产路径没有任何强制点——「同一时刻只有队首能写盘」并不成立。
+
+**修复**：新增 [writeGate.ts](../src/sessions/queue/writeGate.ts)，作为所有副作用唯一收口：
+
+| 接入点 | 位置 |
+| --- | --- |
+| Apply（单编辑 / 整批） | `edits/changeSetStore.ts` |
+| 命令执行 | `runs/draftRunExecutor.ts` |
+| 权威安装/卸载 | `provider/KeepseekChatViewProvider.ts` 构造函数与 dispose |
+
+设计：用注册表而非直接 import，因 edits/runs 不能反向依赖 provider；未安装权威时保持宽松（测试与无头宿主）。
+
+### P4：planGate + runGate
+
+| 模块 | 作用 |
+| --- | --- |
+| [planGate.ts](../src/sessions/queue/planGate.ts) | plan 会话工具**白名单**：投影 27→21，零写工具；`run_validation` 归为只读 |
+| [runGate.ts](../src/sessions/queue/runGate.ts) | D3 准入：队首可直接写，非队首只读；执行计划提升队首；无 PlanDraft 不得进入可写阶段 |
+
+调用时兜底：`agent/executionMode.ts` 的白名单外一律拒绝，防重放绕过。
+
+### P5：Webview 队列 UI
+
+- 会话列表显示 `#N`/`#P` 队列徽标（首位高亮）
+- 上移/下移按钮，经 `moveSessionInQueue` 走 store 的 CAS 串行路径
+- 双语 i18n 与样式
+
+### 验证
+
+全部 12 个测试文件 100% 通过，0 失败：
+
+| 文件 | 结果 |
+| --- | --- |
+| approvalMode | 28/0 |
+| inputComposition | 24/0 |
+| contextEntryPoints | 42/0 |
+| interactionState | 12/0 |
+| planGate / runGate / writeGate / writeLease | 6/10/6/12，全通过 |
+| cacheByteStability / protocolCache | 11/13，**缓存字节未受影响** |
+| sessionQueue / executionMode | 16/9 |
+
+### P6 状态
+
+P6（彻底移除审批流程）**未完成**。实施中确认：27 个 approvals 模块中 24 个是安全边界，被 `edits/`、`runs/`、`agent/tools/` 依赖，删除会使 SafeFileEditor 与 DraftRun 失去路径/命令校验。P6 需要作为独立里程碑，先备份再动手。

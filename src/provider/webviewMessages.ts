@@ -39,6 +39,7 @@ export type WebviewMessage =
   | { type: 'newSession' }
   | { type: 'selectSession'; sessionId: string }
   | { type: 'toggleSessionFavorite'; sessionId: string }
+  | { type: 'moveSessionInQueue'; sessionId: string; direction: 'up' | 'down' }
   | { type: 'renameSession'; sessionId: string; title: string }
   | { type: 'regenerateSessionTitle'; sessionId: string; requestId: string }
   | { type: 'deleteSessions'; sessionIds: string[] }

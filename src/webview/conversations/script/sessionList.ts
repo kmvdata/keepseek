@@ -38,6 +38,30 @@ export const conversationsSessionListFragment: WebviewFragment = {
         otherWorkspaceSessionErrors[activeWorkspaceTab], hasOtherWorkspaceSessionsCache(activeWorkspaceTab)]);
     }
 
+    function queueEntryFor(sessionId) {
+      var queue = state.projectQueue;
+      if (!queue || !Array.isArray(queue.entries)) return null;
+      for (var i = 0; i < queue.entries.length; i++) {
+        if (queue.entries[i].sessionId === sessionId) return queue.entries[i];
+      }
+      return null;
+    }
+
+    /** Position and derived mode, shown only for sessions that are in the project queue. */
+    function renderQueueBadge(sessionId) {
+      var entry = queueEntryFor(sessionId);
+      if (!entry) return null;
+      var isNormal = entry.mode === 'normal';
+      var badge = document.createElement('span');
+      badge.className = 'session-queue-badge' + (entry.isHead ? ' is-head' : '') + (isNormal ? ' is-normal' : ' is-plan');
+      badge.dataset.queueSessionId = sessionId;
+      badge.textContent = '#' + entry.position + ' ' + (isNormal ? 'N' : 'P');
+      badge.title = entry.isHead
+        ? t('queueHeadHint')
+        : t('queuePositionHint', { position: entry.position });
+      return badge;
+    }
+
     function renderSessionMenu() {
       if (!sessionMenu) return;
       sessionMenu.classList.toggle('hidden', !sessionMenuOpen);
@@ -212,6 +236,43 @@ export const conversationsSessionListFragment: WebviewFragment = {
         var meta = document.createElement('span');
         meta.className = 'session-menu-item-meta';
         meta.textContent = formatSessionMeta(session);
+        if (currentTab) {
+          var queueBadge = renderQueueBadge(session.id);
+          if (queueBadge) {
+            meta.append(document.createTextNode(' '), queueBadge);
+            var queueEntry = queueEntryFor(session.id);
+            var moveUp = document.createElement('button');
+            moveUp.type = 'button';
+            moveUp.className = 'session-queue-move';
+            moveUp.dataset.sessionAction = 'queueMove';
+            moveUp.dataset.sessionId = session.id;
+            moveUp.dataset.queueDirection = 'up';
+            moveUp.disabled = !queueEntry || !queueEntry.canMoveUp;
+            moveUp.setAttribute('aria-label', t('queueMoveUp'));
+            moveUp.title = t('queueMoveUp');
+            moveUp.textContent = '↑';
+            var moveDown = moveUp.cloneNode(false);
+            moveDown.dataset.queueDirection = 'down';
+            moveDown.disabled = !queueEntry || !queueEntry.canMoveDown;
+            moveDown.setAttribute('aria-label', t('queueMoveDown'));
+            moveDown.title = t('queueMoveDown');
+            moveDown.textContent = '↓';
+            meta.append(moveUp, moveDown);
+            [moveUp, moveDown].forEach(function(moveButton) {
+              moveButton.addEventListener('click', function(event) {
+                event.preventDefault();
+                event.stopPropagation();
+                var target = event.currentTarget;
+                if (!target || target.disabled) return;
+                vscode.postMessage({
+                  type: 'moveSessionInQueue',
+                  sessionId: target.dataset.sessionId || '',
+                  direction: target.dataset.queueDirection === 'down' ? 'down' : 'up'
+                });
+              });
+            });
+          }
+        }
 
         main.append(itemTitle, meta);
         if (currentTab) {

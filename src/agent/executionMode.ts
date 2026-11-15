@@ -17,6 +17,7 @@ import {
   DELETE_WORKSPACE_FILE_TOOL_NAME,
   RUN_DRAFT_TOOL_NAME
 } from './protocol';
+import { isPlanWritableTool, planWriteRefusal } from '../sessions/queue/planGate';
 import { resolveSubagentProfile } from './subagents/profiles';
 
 export type PlanDecisionAction = 'start_execution' | 'revise_plan' | 'exit_plan';
@@ -263,8 +264,15 @@ export function getPlanPhaseToolBlockReason(input: {
   toolName: string;
   args?: Record<string, unknown>;
   skills?: readonly ActivatedSkill[];
+  language?: 'zh-CN' | 'en';
 }): string | undefined {
   if (normalizeExecutionMode(input.executionMode) !== 'plan') return undefined;
+  // The planning policy is a whitelist: anything outside it is refused here as
+  // well, so a replayed or stale schema cannot smuggle a write tool through.
+  if (!isPlanWritableTool(input.toolName)
+    && !/^keepseek_(delegate_task|delegate_parallel|delegation_checkpoint)$/u.test(input.toolName)) {
+    return planWriteRefusal(input.toolName, input.language);
+  }
   if (DIRECT_IMPLEMENTATION_TOOLS.has(input.toolName)) {
     return `Tool ${input.toolName} is unavailable during the planning phase because it prepares implementation work.`;
   }
