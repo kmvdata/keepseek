@@ -690,3 +690,37 @@ P1 有意**不改变**运行时权威：`ChatSession.executionMode` 仍是运行
 ### 仍未实现（P4–P6）
 
 plan 阶段工具白名单（P4）、Webview 队列排序交互（P5）、审批移除（P6）均未开始。
+
+### 补充修复：新会话仍继承旧任务状态（2026-11-14 晚）
+
+**现象**：会话 A 运行中新建会话 B，B 的输入区显示 A 的状态，提交时提示“正在加载会话…”。
+
+**根因（三处仍为全局）**：
+
+| 位置 | 问题 |
+| --- | --- |
+| `interactionSnapshot` 的 `actionRunning` | 含全局 `activeDraftRunId`，A 执行命令时把 B 也判为 busy |
+| `InteractionCoordinator.begin` | 单 owner 槽位，A 占住后 B 取不到操作 → 提交被拒 |
+| `isStartingRun` | 读全局 `interactions.current`，B 被误判为正在启动 |
+
+**修复**：
+
+1. `actionRunning` 改为 `activeDraftRunId && activeDraftRunSessionId === sessionId`。
+2. `InteractionCoordinator` 的 `active` / `navigation` 改为**按会话的 Map**（`actives` / `navigations`）；`owns`/`update`/`finish`/`owned` 按 token 身份扫描两个 Map。
+3. 导航始终占用独立的 navigation 槽位，因此可与同会话的任务 owner 共存。
+4. `snapshot` 规则：**导航优先**（它决定正在加载哪个会话），任务 owner **只投射到自己的会话**。
+5. 新增 `currentFor(sessionId)`；`isStartingRun` 与 `cancelOperationId` 改为按当前查看会话。
+
+**契约变更**（两处旧断言按并行新语义更新）：
+
+- `navigation owns its reservation…`：允许同会话在导航期间再取 task owner；第二份 task 仍被拒。
+- `old operation scope cannot advertise a new session…`：A 有任务时 B 应为 `idle` 且 `canSubmit` 为 true（原断言为 `loading_session` / false）。
+
+**验证**：
+
+| 项目 | 结果 |
+| --- | --- |
+| 并行直测 | A、B 各自持有 owner；A 重复取被拒；B 结束时 A 仍存活 |
+| `interactionState` | 12 通过 / 0 失败 |
+| `executionMode` / `longRunningAgent` / 队列 | 全通过 |
+| `chatSessionStore` / `startupPerformance` | 2 / 8 失败，均为既有 UNC 环境问题 |

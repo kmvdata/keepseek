@@ -400,7 +400,19 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   private interactionCoordinator?: InteractionCoordinator;
   /** Host mutual-exclusion guard; UI capabilities come from interactionState. */
-  private get isStartingRun(): boolean { return Boolean(this.interactionCoordinator?.current); }
+  /** True when the VIEWED session has an operation in flight, not any session. */
+  private get isStartingRun(): boolean {
+    const viewed = this.sessionStore?.activeSessionId;
+    const coordinator = this.interactionCoordinator;
+    if (!coordinator) return false;
+    return viewed ? Boolean(coordinator.currentFor(viewed)) : Boolean(coordinator.current);
+  }
+
+  /** Operation identity for the viewed session, used by cancel projection. */
+  private viewedOperationId(): string | undefined {
+    const viewed = this.sessionStore?.activeSessionId;
+    return viewed ? this.interactionCoordinator?.currentFor(viewed)?.operationId : undefined;
+  }
   private get interactions(): InteractionCoordinator {
     return this.interactionCoordinator ??= new InteractionCoordinator({ onDiagnostic: event => console.info('[KeepSeek] interaction', event) });
   }
@@ -430,7 +442,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       sessionRecoveryReady: this.sessionRecoveryReady,
       // A run in another session is not this session's run: keep this composer idle.
       mainRunning: this.runBelongsToViewed(sessionId) && this.isBusy, contextRefreshing: this.runContextRefreshInFlight,
-      actionRunning: Boolean(this.activeDraftRunId || this.activeChangeActions?.size || this.delegatedApprovalInFlight
+      // A foreign session's command run must not make this composer look busy.
+      actionRunning: Boolean((this.activeDraftRunId && this.activeDraftRunSessionId === sessionId) || this.activeChangeActions?.size || this.delegatedApprovalInFlight
         || this.reservingManualDecision || this.reservingApprovalResume || this.draftRunBatches?.locked || this.delegatedApprovals?.hasPending(sessionId)),
       backgroundRunning: this.hasActiveBackgroundRun(),
       // A running command (activeDraftRunId) does not block navigation: it executes in
@@ -439,7 +452,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         || this.reservingManualDecision || this.reservingApprovalResume || this.draftRunBatches?.locked || this.delegatedApprovals?.hasPending(sessionId)),
       cancellable: Boolean(this.currentRunAbortController && !this.currentRunAbortController.signal.aborted
         || this.changeActionAbortController && !this.changeActionAbortController.signal.aborted || this.activeDraftRunId),
-      cancelOperationId: this.interactionCoordinator?.current?.operationId,
+      cancelOperationId: this.viewedOperationId(),
       failure: this.interactionFailure && this.interactionFailure.sessionId === sessionId ? this.interactionFailure.message
         : this.commandSettingsReadiness?.executionMode === 'error' ? (this.language === 'en' ? 'Session loading failed. Reload the window to retry.' : '会话加载失败，请重新加载窗口重试。')
         : this.runContextRefreshError ? this.t('runContextRefreshFailed', { message: getErrorMessage(this.runContextRefreshError) })

@@ -134,9 +134,10 @@ interface OwnedOperation {
  */
 export class InteractionCoordinator {
   private generation = 0;
-  private active?: OwnedOperation;
-  /** A navigation that runs alongside a task owner; never owns submit/cancel. */
-  private navigation?: OwnedOperation;
+  /** One task owner per session; parallel sessions each keep their own. */
+  private readonly actives = new Map<string, OwnedOperation>();
+  /** One navigation per session, coexisting with that session's task owner. */
+  private readonly navigations = new Map<string, OwnedOperation>();
   private readonly now: () => number;
   private readonly id: () => string;
   private readonly onDiagnostic?: (event: InteractionDiagnostic) => void;
@@ -151,32 +152,58 @@ export class InteractionCoordinator {
     this.onDiagnostic = options.onDiagnostic;
   }
 
-  public get current(): InteractionOperation | undefined { return this.active?.token; }
+  /** Task owners currently held, by session. */
+  public get current(): InteractionOperation | undefined {
+    const first = this.actives.values().next();
+    return first.done ? undefined : first.value.token;
+  }
+
+  /** Task owner token for one session. */
+  public currentFor(sessionId: string): InteractionOperation | undefined {
+    return this.actives.get(sessionId)?.token;
+  }
 
   /** Wait for the owner observed now, never an unrelated later generation. */
-  public whenSettled(): Promise<void> { return this.active?.settled ?? this.navigation?.settled ?? Promise.resolve(); }
+  public whenSettled(sessionId?: string): Promise<void> {
+    const pick = sessionId
+      ? this.actives.get(sessionId) ?? this.navigations.get(sessionId)
+      : this.actives.values().next().value ?? this.navigations.values().next().value;
+    return pick?.settled ?? Promise.resolve();
+  }
 
   public begin(kind: InteractionOperationKind, sessionId: string, phase: InteractionPhase): InteractionOperation | undefined {
-    // A navigation may coexist with a running task: the run keeps its own owner and
-    // is pinned to the session captured at admission, so opening or switching a
-    // session must not require the run to finish first.
-    if (this.active && !(kind === 'navigation' && this.active.token.kind !== 'navigation')) return undefined;
+    // Ownership is per session: a task running in session A must not prevent session B
+    // from reserving its own operation. Within one session the slot stays exclusive,
+    // and only a navigation may coexist with that session already running a task.
+    if (this.actives.has(sessionId)
+      && !(kind === 'navigation' && this.actives.get(sessionId)!.token.kind !== 'navigation')) return undefined;
     const token: InteractionOperation = Object.freeze({ operationId: this.id(), sessionId,
       generation: ++this.generation, kind, phase });
     let resolveSettled!: () => void;
     const settled = new Promise<void>(resolve => { resolveSettled = resolve; });
     const next: OwnedOperation = { token, sessionId, phase, startedAt: this.now(), settled, resolveSettled };
-    if (kind === 'navigation' && this.active) { this.navigation = next; return (this.navigation.token); }
-    this.active = next;
-    this.diagnose('begin', this.active);
+    // Navigation always occupies its own slot, so it can coexist with a task owner
+    // in the same session while still projecting onto the session it re-targets.
+    if (kind === 'navigation') {
+      this.navigations.set(sessionId, next);
+      this.diagnose('begin', next);
+      return token;
+    }
+    this.actives.set(sessionId, next);
+    this.diagnose('begin', next);
     return token;
   }
 
   /** The operation this token refers to, whether it owns the task slot or navigation. */
   private owned(token: InteractionOperation | undefined): OwnedOperation | undefined {
     if (!token) return undefined;
-    if (this.active?.token === token) return this.active;
-    if (this.navigation?.token === token) return this.navigation;
+    // Scan by identity: navigation re-targets its session id while the slot key
+    // stays at the session that reserved it.
+    for (const map of [this.actives, this.navigations]) {
+      for (const owner of map.values()) {
+        if (owner.token === token) return owner;
+      }
+    }
     return undefined;
   }
 
@@ -198,15 +225,33 @@ export class InteractionCoordinator {
   public finish(token: InteractionOperation): boolean {
     const active = this.owned(token);
     if (!active) { this.stale(token); return false; }
-    if (this.active?.token === token) this.active = undefined;
-    else if (this.navigation?.token === token) this.navigation = undefined;
+    // Match by token, not by the (possibly re-targeted) session id: navigation
+    // updates the target while the slot key remains where it was reserved.
+    for (const map of [this.actives, this.navigations]) {
+      for (const [key, owner] of map) {
+        if (owner === active) { map.delete(key); break; }
+      }
+    }
     active.resolveSettled();
     this.diagnose('finish', active);
     return true;
   }
 
   public snapshot(facts: InteractionFacts): InteractionSnapshot {
-    const shown = this.active ?? this.navigation;
+    // Prefer the viewed session's own slots; fall back to any single in-flight
+        // operation so a navigation started for another target still projects.
+    // Only this session's own operations project onto this session. A navigation
+    // re-targeted to another session is found via the single-slot fallback used
+    // when NO session owns a task, so parallel sessions never shadow each other.
+    // A task owner projects only onto its own session: parallel sessions must not
+    // inherit each other's running state. A navigation projects onto any session,
+    // because it legitimately re-targets the session it is loading.
+    // Navigation defines the visible phase while it is loading a session. A task
+    // owner projects only onto its own session so parallel sessions never inherit
+    // each other's running state.
+    const shown = this.navigations.get(facts.sessionId)
+      ?? (this.navigations.size === 1 ? this.navigations.values().next().value : undefined)
+      ?? this.actives.get(facts.sessionId);
     return deriveInteractionState(facts, shown ? {
       kind: shown.token.kind,
       operationId: shown.token.operationId,

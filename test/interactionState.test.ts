@@ -29,6 +29,10 @@ test('Host title feedback and Webview disabled reasons use the same real bilingu
 test('navigation owns its reservation before I/O but does not offer task cancellation', () => {
   const coordinator = new InteractionCoordinator();
   const owner = coordinator.begin('navigation', 'A', 'loading_session')!;
+  // Navigation keeps its own slot, so the same session may still reserve its task owner;
+  // only a second navigation (or a second task) in one session is refused.
+  const taskOwner = coordinator.begin('task', 'A', 'preparing_task');
+  assert.ok(taskOwner);
   assert.equal(coordinator.begin('task', 'A', 'preparing_task'), undefined);
   const loading = coordinator.snapshot(ready({ cancellable: true }));
   assert.equal(loading.phase, 'loading_session');
@@ -130,8 +134,9 @@ test('old operation scope cannot advertise a new session as ready or cancellable
   const other = coordinator.snapshot(ready({ sessionId: 'B', cancellable: true }));
   assert.equal(other.sessionId, 'B');
   assert.equal(other.operationId, undefined);
-  assert.equal(other.phase, 'loading_session');
-  assert.equal(other.canSubmit, false);
+  // A task in session A must not make a fresh session B look busy or unready.
+  assert.equal(other.phase, 'idle');
+  assert.equal(other.canSubmit, true);
   assert.equal(other.canCancel, false);
 });
 
