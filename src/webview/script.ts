@@ -145,6 +145,10 @@ export function getScript(): string {
     };
     var lastStateRevision = 0;
     var runStreamRevisions = new Map();
+    // Reasoning panels stay collapsed unless the user opened them. The choice is
+    // remembered across full transcript re-renders, so a streaming delta never
+    // expands a panel the user collapsed; the summary dots carry the live signal.
+    var reasoningExpandedKeys = new Set();
     var pendingSubmission = null;
     var submissionSequence = 0;
     var sessionPromptDrafts = new Map();
@@ -1397,13 +1401,17 @@ ${conversationsMenuDismissFragment.source}
         if (!row) return;
         var stick = transcript.scrollTop + transcript.clientHeight >= transcript.scrollHeight - 24;
         var body = row.querySelector('.message-body');
-        var reasoning = row.querySelector('.reasoning-block pre');
+        var reasoningBlock = row.querySelector('.reasoning-block');
+        var reasoning = reasoningBlock?.querySelector('pre');
         if (reasoningTail && !reasoning) {
-          var details = document.createElement('details'); details.className = 'reasoning-block'; details.open = true;
-          var summary = document.createElement('summary'); summary.textContent = t('thinkingLive');
-          reasoning = document.createElement('pre'); details.append(summary, reasoning); body.append(details);
+          // Reuse the shared builder so streaming and full renders cannot drift;
+          // it never opens the panel on its own.
+          reasoningBlock = createReasoningBlock(targetMessage, reasoningTail);
+          reasoning = reasoningBlock.querySelector('pre');
+          body.append(reasoningBlock);
         }
-        if (reasoningTail) reasoning.append(document.createTextNode(reasoningTail));
+        syncReasoningLive(reasoningBlock, targetMessage, Boolean(contentTail) || Boolean(body.querySelector('.message-content')));
+        if (reasoningTail && reasoning) reasoning.append(document.createTextNode(reasoningTail));
         if (contentTail) {
           var content = row.querySelector('.message-content');
           if (!content) { content = document.createElement('div'); content.className = 'message-content'; body.append(content); }
@@ -4268,16 +4276,7 @@ ${conversationsSessionListFragment.source}
 
         body.append(role);
         if (message.role === 'assistant' && message.reasoningContent) {
-          var reasoning = document.createElement('details');
-          reasoning.className = 'reasoning-block';
-          reasoning.open = Boolean(message.isStreaming);
-          var summary = document.createElement('summary');
-          summary.textContent = message.isStreaming ? t('thinkingLive') : t('thinkingLabel');
-          var reasoningContent = document.createElement('pre');
-          reasoningContent.setAttribute('aria-live', message.isStreaming ? 'polite' : 'off');
-          reasoningContent.textContent = message.reasoningContent;
-          reasoning.append(summary, reasoningContent);
-          body.append(reasoning);
+          body.append(createReasoningBlock(message));
         }
         if (message.role === 'assistant' && Array.isArray(message.usedSkills) && message.usedSkills.length) {
           body.append(createUsedSkillsNotice(message.usedSkills));
@@ -4341,6 +4340,48 @@ ${conversationsSessionListFragment.source}
       if (shouldStick) {
         transcript.scrollTop = transcript.scrollHeight;
       }
+    }
+
+    function getReasoningKey(message) {
+      return String(state.activeSessionId || '') + '|' + String(message?.id || '');
+    }
+
+    function createReasoningBlock(message, seed) {
+      var key = getReasoningKey(message);
+      var details = document.createElement('details');
+      details.className = 'reasoning-block';
+      details.dataset.reasoningKey = key;
+      // Collapsed unless the user opened this exact message earlier.
+      details.open = reasoningExpandedKeys.has(key);
+      var summary = document.createElement('summary');
+      var title = document.createElement('span');
+      title.className = 'reasoning-title';
+      title.textContent = message?.isStreaming ? t('thinkingLive') : t('thinkingLabel');
+      var dots = document.createElement('span');
+      dots.className = 'reasoning-dots';
+      dots.setAttribute('aria-hidden', 'true');
+      dots.textContent = '...';
+      summary.append(title, dots);
+      var reasoningContent = document.createElement('pre');
+      reasoningContent.textContent = typeof seed === 'string' ? seed : String(message?.reasoningContent || '');
+      details.append(summary, reasoningContent);
+      details.addEventListener('toggle', function() {
+        if (details.open) reasoningExpandedKeys.add(key); else reasoningExpandedKeys.delete(key);
+        syncReasoningLive(details, message, Boolean(message?.content));
+      });
+      syncReasoningLive(details, message, Boolean(message?.content));
+      return details;
+    }
+
+    function syncReasoningLive(details, message, hasContent) {
+      if (!details) return;
+      // The collapsed dots animate only while reasoning is really streaming; once
+      // body text starts the thinking phase is over and the dots stop.
+      var live = Boolean(message?.isStreaming) && !hasContent;
+      details.classList.toggle('is-live', live);
+      // While collapsed, the live summary is what assistive tech should hear; the
+      // reasoning text itself must not be announced chunk by chunk.
+      details.setAttribute('aria-live', live && !details.open ? 'polite' : 'off');
     }
 
     function createPlanDecisionCard(plan) {

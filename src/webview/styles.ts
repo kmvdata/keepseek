@@ -1973,6 +1973,35 @@ ${conversationsStylesFragment.source}
       font-weight: 600;
     }
 
+    /* The dots are the only live signal while collapsed: they animate only for an
+       open-ended thinking stream and hold still otherwise, so a finished or paused
+       block never costs attention or space. */
+    .reasoning-dots {
+      margin-left: 2px;
+      letter-spacing: 1px;
+      animation: reasoning-dots-pulse 1.4s ease-in-out infinite;
+      animation-play-state: paused;
+      opacity: 0.75;
+    }
+
+    .reasoning-block.is-live .reasoning-dots {
+      animation-play-state: running;
+    }
+
+    /* An expanded block already shows the text; the dots would only add noise. */
+    .reasoning-block[open] .reasoning-dots {
+      display: none;
+    }
+
+    @keyframes reasoning-dots-pulse {
+      0%, 100% { opacity: 0.2; }
+      50% { opacity: 1; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .reasoning-dots { animation: none; opacity: 0.75; }
+    }
+
     .reasoning-block pre {
       margin: 6px 0 0;
       white-space: pre-wrap;

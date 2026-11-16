@@ -10,7 +10,7 @@
 // involved.
 
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
+const { spawnSync: defaultSpawnSync } = require('node:child_process');
 
 const WINDOWS_SHIM = /\.(?:cmd|bat)$/iu;
 const CMD_SPECIAL = /[\s"^&|<>()]/u;
@@ -35,6 +35,8 @@ function buildCommandLine(command, args) {
 function createChildRunner(options = {}) {
   const isWindows = (options.platform ?? process.platform) === 'win32';
   const commandShell = options.commandShell ?? process.env.ComSpec ?? 'cmd.exe';
+  // Injectable so dispatch can be asserted without launching a process.
+  const spawnSync = options.spawnSync ?? defaultSpawnSync;
 
   // Resolve where a command would be dispatched without spawning anything, so
   // tests can assert the Windows rules while running on macOS or Linux.
@@ -44,9 +46,12 @@ function createChildRunner(options = {}) {
     }
     // `cmd /s /c` strips the outer quotes, so each literal inner quote must be
     // doubled for cmd to hand the argument through intact.
+    // Node and Bun pass the command line as one argv element without applying
+    // cmd.exe's outer-quote stripping, so an extra wrapper would arrive escaped
+    // and become part of the program name.
     return {
       executable: commandShell,
-      argv: ['/d', '/s', '/c', `"${buildCommandLine(command, args).replace(/"/gu, '""')}"`],
+      argv: ['/d', '/s', '/c', buildCommandLine(command, args)],
       viaCommandShell: true
     };
   }
@@ -58,10 +63,9 @@ function createChildRunner(options = {}) {
       // maps the share to a temporary drive for the life of the command.
       const cwd = String(spawnOptions.cwd);
       const { cwd: _ignored, ...rest } = spawnOptions;
-      // `pushd` rejects a quoted UNC path; an unquoted share name is its supported form.
-      // `cmd /s /c` strips an outer quote pair only for a single simple command,
-      // so the compound pushd line must be passed unwrapped. `pushd` also rejects
-      // a quoted UNC path, and the shim argv is rebuilt without its quoting.
+      // A compound line is never quote-stripped by `cmd /s /c`, so the shim text
+      // is rebuilt without the doubling a simple command needs. `pushd` also
+      // takes the UNC path unquoted, since a quoted share is rejected.
       const line = `pushd ${cwd} && ${buildCommandLine(command, args)} && popd`;
       return spawnSync(target.executable, ['/d', '/s', '/c', line], rest);
     }

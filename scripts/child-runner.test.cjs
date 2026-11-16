@@ -30,12 +30,12 @@ test('Windows dispatch wraps .cmd shims in cmd.exe and runs binaries directly', 
 
   assert.deepEqual(runner.plan('npm.cmd', ['run', 'package:market']), {
     executable: 'cmd.exe',
-    argv: ['/d', '/s', '/c', '"npm.cmd run package:market"'],
+    argv: ['/d', '/s', '/c', 'npm.cmd run package:market'],
     viaCommandShell: true
   });
   assert.deepEqual(runner.plan('code.cmd', ['--install-extension', 'D:\\a b\\keepseek-0.5.3.vsix']), {
     executable: 'cmd.exe',
-    argv: ['/d', '/s', '/c', '"code.cmd --install-extension ""D:\\a b\\keepseek-0.5.3.vsix"""'],
+    argv: ['/d', '/s', '/c', 'code.cmd --install-extension "D:\\a b\\keepseek-0.5.3.vsix"'],
     viaCommandShell: true
   });
   assert.deepEqual(runner.plan('C:\\Program Files\\nodejs\\node.exe', ['scripts/verify-vsix.js']), {
@@ -63,6 +63,47 @@ test('macOS and Linux dispatch never uses a shell', () => {
     // A Windows-style name must not smuggle cmd.exe onto macOS or Linux.
     assert.equal(runner.plan('npm.cmd', ['run', 'compile']).viaCommandShell, false);
   }
+});
+
+test('a UNC working directory enters the share through pushd', () => {
+  const calls = [];
+  const runner = createChildRunner({
+    platform: 'win32',
+    commandShell: 'cmd.exe',
+    spawnSync: (command, argv, options) => {
+      calls.push({ command, argv, options });
+      return { status: 0 };
+    }
+  });
+
+  // A quoted share is rejected by pushd, and a compound line is never
+  // quote-stripped, so the shim keeps the quoting its plan already produced.
+  runner.run('npm.cmd', ['run', 'compile', 'D:\\a b\\x.vsix'], { cwd: '\\\\server\\share\\repo' });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, 'cmd.exe');
+  assert.deepEqual(calls[0].argv, ['/d', '/s', '/c',
+    'pushd \\\\server\\share\\repo && npm.cmd run compile "D:\\a b\\x.vsix" && popd']);
+  // The UNC path cannot be a process working directory for cmd.exe.
+  assert.equal(calls[0].options.cwd, undefined);
+  assert.equal(calls[0].options.stdio, 'inherit');
+});
+
+test('a local working directory spawns the planned shim unchanged', () => {
+  const calls = [];
+  const runner = createChildRunner({
+    platform: 'win32',
+    commandShell: 'cmd.exe',
+    spawnSync: (command, argv, options) => {
+    calls.push({ command, argv, options });
+      return { status: 0 };
+    }
+  });
+
+  runner.run('npm.cmd', ['run', 'compile'], { cwd: 'K:\\keepseek' });
+
+  assert.deepEqual(calls[0].argv, ['/d', '/s', '/c', 'npm.cmd run compile']);
+  assert.equal(calls[0].options.cwd, 'K:\\keepseek');
 });
 
 test('runCapture executes a node script through nodeExecutable', () => {

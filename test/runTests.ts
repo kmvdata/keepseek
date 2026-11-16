@@ -98,6 +98,7 @@ import './p1SubagentInheritance.test';
 import './validationAvailability.test';
 import './workspaceToolsSearch.test';
 import './startupPerformance.test';
+import './reasoningPanel.test';
 import './freshSessionStartup.test';
 
 import './longRunningAgent.test';
