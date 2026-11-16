@@ -967,10 +967,9 @@ ${conversationsStateFragment.source}
         pendingDraftRunActions.add(action + ':' + id);
         setTransientStatus(t('draftRunCloneCreating'));
         render();
-      } else if (action === 'releaseDraftRunDependency') {
+} else if (action === 'releaseDraftRunDependency') {
         payload.specHash = String(button.dataset.specHash || '');
       }
-      vscode.postMessage(payload);
       vscode.postMessage(payload);
     }
 
@@ -3137,7 +3136,6 @@ ${conversationsSessionListFragment.source}
       var displayStatus = statusValue;
       // A dependency is only a wait while its target can still settle. Once the host
       // converged it the record is needs_replan, so it must not render as waiting.
-      var prerequisiteTerminal = Boolean(dependency) && statusValue === 'needs_replan';
       var releaseableDependency = Boolean(dependency) && statusValue === 'pending';
       if (draftRun.replacementDraftRunId && statusValue === 'needs_replan') {
         displayStatus = 'superseded';
@@ -3595,9 +3593,9 @@ ${conversationsSessionListFragment.source}
       button.className = secondary ? 'secondary' : '';
       button.dataset.draftRunId = String(draftRun.id || '');
       button.dataset.draftRunAction = action;
-      if (action === 'approveDraftRun') {
+      if (action === 'approveDraftRun' || action === 'releaseDraftRunDependency') {
         button.dataset.specHash = String(draftRun.specHash || '');
-        button.dataset.autoContinue = autoContinue === true ? 'true' : 'false';
+        if (action === 'approveDraftRun') button.dataset.autoContinue = autoContinue === true ? 'true' : 'false';
       }
       if (action === 'cloneDraftRun') {
         button.title = t(draftRun.canReproposeUndispatchedApproval === true ? 'approvalReproposeUndispatchedHint'
