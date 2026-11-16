@@ -26,11 +26,6 @@ import type {
   SafeNpmScript,
   ToolAuthorizationDecision
 } from '../src/shared/types';
-import type { ApprovalReviewerAdapter } from '../src/approvals/approvalReviewer';
-import { APPROVAL_POLICY_VERSION, USER_CONFIRMABLE_RISK_RULE,
-  type ApprovalReviewRecord, type ApprovalReviewRequest, type ApprovalReviewState,
-  type ApprovalUserAuthorizationReceipt } from '../src/approvals/approvalReviewTypes';
-import { ApprovalAuditError } from '../src/approvals/approvalReviewStore';
 import { AgentInterruptedError, createRunCheckpoint, normalizeRunCheckpoint, type RunCheckpoint } from '../src/agent/runCheckpoint';
 import { ToolEvidenceStore } from '../src/agent/evidence/store';
 import { snapshotCheckpoint } from '../src/sessions/persistenceSnapshot';
@@ -62,7 +57,7 @@ test('Runner allows baseline validation, then blocks validation after an ordinar
   ];
 
   const response = await withResponses([toolResponse(calls), textResponse('The change is ready and validation passed.')], async () =>
-    await createRunner(validation).run(createRequest('Implement the change.'))
+    await createRunner(validation).run({ ...createRequest('Implement the change.'), approvalMode: 'ask' })
   );
 
   assert.equal(validation.runCount, 1);
@@ -90,7 +85,7 @@ test('Runner also blocks validation after a repair DraftEdit', async () => {
   ];
 
   const response = await withResponses([toolResponse(calls), textResponse('Repair prepared and compile failed.')], async () =>
-    await createRunner(validation).run(createRequest('Fix the compile failure.'))
+    await createRunner(validation).run({ ...createRequest('Fix the compile failure.'), approvalMode: 'ask' })
   );
 
   assert.equal(validation.runCount, 1);
@@ -193,9 +188,8 @@ test('Runner turns keepseek_run_draft into a pending proposal without executing 
 });
 
 test('Runner Plan phase allows read-only investigation and blocks implementation before every approval mode', async () => {
-  for (const approvalMode of ['ask', 'delegate'] as const) {
+  for (const approvalMode of ['ask', 'approve-all'] as const) {
     const validation = new FakeValidationTools([]);
-    const reviewer = new FakeApprovalReviewer('approve');
     const request = createRequest('Plan the change without implementing it.');
     request.executionMode = 'plan';
     request.approvalMode = approvalMode;
@@ -210,9 +204,8 @@ test('Runner Plan phase allows read-only investigation and blocks implementation
         toolCall('writer', DELEGATE_TASK_TOOL_NAME, { profile: 'proposal', task: 'write files' })
       ]),
       textResponse('1. Inspect\n   - Verify the relevant code paths.')
-    ], async () => await createRunner(validation, reviewer).run(request));
+    ], async () => await createRunner(validation).run(request));
 
-    assert.equal(reviewer.calls, 0);
     assert.equal(response.draftEdits.length, 0);
     assert.equal(response.draftRuns?.length, 0);
     const results = response.toolRounds?.[0]?.toolResults ?? [];
@@ -223,39 +216,16 @@ test('Runner Plan phase allows read-only investigation and blocks implementation
   }
 });
 
-test('model-reviewed validation persists a neutral tool placeholder and requires a new user-message boundary', async () => {
-  await writeFile(path.join(workspaceRoot, 'package.json'), JSON.stringify({ scripts: { compile: 'tsc -p .' } }));
+test('a crash after a completed validation recovers neutral replay and the exact result without another launch', async t => {
   const validation = new FakeValidationTools([validationResult(true)]);
-  const reviewer = new FakeApprovalReviewer('approve');
-  const request = createRequest('Compile the project under model review.');
-  request.approvalMode = 'delegate';
-  request.sessionId = 'session-review';
-  const response = await withResponses([
-    toolResponse([toolCall('reviewed-validation', RUN_VALIDATION_TOOL_NAME, { script: 'compile' })])
-  ], async () => await createRunner(validation, reviewer).run(request));
-
-  assert.equal(validation.runCount, 1);
-  assert.equal(reviewer.calls, 1);
-  assert.equal(response.approvalContinuationRequired, true);
-  const providerResult = JSON.parse(response.toolRounds?.[0]?.toolResults[0]?.content ?? '{}');
-  assert.equal(providerResult.status, 'approval_result_pending');
-  assert.doesNotMatch(response.toolRounds?.[0]?.toolResults[0]?.content ?? '', /Scoped model approval|durationMs/u);
-  assert.equal(response.runDetails.approvalReviews?.[0]?.decision, 'approve');
-  assert.match(response.approvalToolResults?.[0]?.result.content ?? '', /durationMs/u);
-});
-
-test('a crash after a reviewed result is durable recovers neutral replay and the exact result without another launch', async t => {
-  const validation = new FakeValidationTools([validationResult(true)]);
-  const reviewer = new FakeApprovalReviewer('approve');
   const storageUri = vscode.Uri.file(path.join(workspaceRoot, 'storage')) as never;
-  const create = () => new AgentRunner(undefined, undefined, validation, undefined, undefined,
-    storageUri, undefined, reviewer);
-  const request: AgentRequest = { ...createRequest('Run compile.'), approvalMode: 'delegate', sessionId: 'review-result-recovery' };
+  const create = () => new AgentRunner(undefined, undefined, validation, undefined, undefined, storageUri);
+  const request: AgentRequest = { ...createRequest('Run compile.'), approvalMode: 'ask', sessionId: 'result-recovery' };
   const original = ToolEvidenceStore.prototype.saveProviderEnvelope;
   let interrupted = false;
   t.mock.method(ToolEvidenceStore.prototype, 'saveProviderEnvelope', async function (this: ToolEvidenceStore,
     ...args: Parameters<ToolEvidenceStore['saveProviderEnvelope']>) {
-    if (!interrupted && args[0].approvalResult) {
+    if (!interrupted) {
       interrupted = true;
       throw new AgentInterruptedError('extension_restart', 'Simulated host interruption before the Provider envelope.');
     }
@@ -268,50 +238,21 @@ test('a crash after a reviewed result is durable recovers neutral replay and the
   const checkpoint = normalizeRunCheckpoint(saved);
   assert.ok(checkpoint);
   assert.equal(validation.runCount, 1);
-  assert.equal(reviewer.consumed, 1);
   assert.ok(checkpoint.state?.pending?.executing?.evidenceRef);
 
   const recovered = await withResponses([], () => create().run({ ...request, checkpoint: snapshotCheckpoint(checkpoint) }));
-  assert.equal(validation.runCount, 1);
-  assert.equal(reviewer.calls, 1);
-  assert.equal(recovered.approvalContinuationRequired, true);
+  assert.equal(validation.runCount, 1, 'completed validation is never launched again');
   const providerResult = recovered.toolRounds?.[0]?.toolResults[0]?.content ?? '';
-  assert.equal(JSON.parse(providerResult).status, 'approval_result_pending');
-  assert.doesNotMatch(providerResult, /durationMs/u);
-  assert.match(recovered.approvalToolResults?.[0]?.result.content ?? '', /durationMs/u);
+  assert.match(providerResult, /durationMs/u);
 });
 
-test('model-reviewed validation denial does not execute and still crosses the new user-message boundary', async () => {
-  await writeFile(path.join(workspaceRoot, 'package.json'), JSON.stringify({ scripts: { compile: 'tsc -p .' } }));
-  const validation = new FakeValidationTools([]);
-  const reviewer = new FakeApprovalReviewer('deny');
-  const request = createRequest('Compile the project under model review.');
-  request.approvalMode = 'delegate';
-  request.sessionId = 'session-review';
-  const response = await withResponses([
-    toolResponse([toolCall('denied-validation', RUN_VALIDATION_TOOL_NAME, { script: 'compile' })])
-  ], async () => await createRunner(validation, reviewer).run(request));
-
-  assert.equal(validation.runCount, 0);
-  assert.equal(response.approvalContinuationRequired, true);
-  assert.equal(response.runDetails.approvalReviews?.[0]?.decision, 'deny');
-  assert.doesNotMatch(response.toolRounds?.[0]?.toolResults[0]?.content ?? '', /Denied by reviewer/u);
-  assert.equal(response.approvalToolResults?.[0]?.status, 'denied');
-  const deniedResult = JSON.parse(response.approvalToolResults?.[0]?.result.content ?? '{}');
-  assert.equal(deniedResult.ok, false);
-  assert.equal(deniedResult.status, 'approval_denied');
-  assert.equal(deniedResult.executed, false);
-  assert.equal(deniedResult.errorType, 'approval_denied');
-});
-
-for (const approvalMode of ['ask', 'delegate'] as const) {
+for (const approvalMode of ['ask', 'approve-all'] as const) {
   test(`unavailable npm validation does not stop a local Git task under ${approvalMode}`, async () => {
     const manifest = path.join(workspaceRoot, 'package.json');
     for (const manifestExists of [false, true]) {
       if (manifestExists) await writeFile(manifest, JSON.stringify({ scripts: { test: 'node --test' } }));
       else await rm(manifest);
       const validation = new FakeValidationTools([]);
-      const reviewer = new FakeApprovalReviewer('approve');
       const request = createRequest('Run git add --all ., then summarize the staged changes and commit locally.');
       request.approvalMode = approvalMode;
       request.sessionId = `git-task-${approvalMode}-${manifestExists}`;
@@ -324,18 +265,16 @@ for (const approvalMode of ['ask', 'delegate'] as const) {
         toolResponse([toolCall('stage', RUN_DRAFT_TOOL_NAME, { executable: 'git', args: stage, reason: 'Stage the requested changes' })]),
         toolResponse([toolCall('commit', RUN_DRAFT_TOOL_NAME, { executable: 'git', args: commit, reason: 'Record the requested local commit' })]),
         textResponse('The Git operations are prepared.')
-      ], () => createRunner(validation, reviewer).run(request));
+      ], () => createRunner(validation).run(request));
 
       const result = JSON.parse(response.toolRounds?.[0]?.toolResults[0]?.content ?? '{}');
       assert.equal(result.errorType, 'validation_unavailable');
       assert.equal(result.executed, false);
       assert.match(result.error, manifestExists ? /does not define "compile"/u : /no package\.json/u);
       assert.equal(response.runDetails.toolCalls[0]?.status, 'failed');
-      assert.equal(reviewer.calls, 0);
       assert.equal(validation.runCount, 0);
       assert.equal(response.repairLoop.iteration, 0);
       assert.equal(response.repairLoop.stopReason, undefined);
-      assert.equal(response.approvalContinuationStopReason, undefined);
       assert.equal(response.taskPlan.steps.find(step => step.id === 'validate')?.status, 'skipped');
       assert.deepEqual(response.taskPlan.blockers, []);
       assert.deepEqual(response.draftRuns?.map(draft => draft.spec.args), [stage, commit]);
@@ -349,21 +288,18 @@ test('a dangling package.json symlink fails hard validation preflight without ap
   await rm(manifest);
   await symlink('missing-package.json', manifest);
   const validation = new FakeValidationTools([]);
-  const reviewer = new FakeApprovalReviewer('approve');
-  const request = { ...createRequest('Run compile.'), approvalMode: 'delegate' as const, sessionId: 'dangling-package' };
+  const request = { ...createRequest('Run compile.'), approvalMode: 'approve-all' as const, sessionId: 'dangling-package' };
   const response = await withResponses([
     toolResponse([toolCall('compile', RUN_VALIDATION_TOOL_NAME, { script: 'compile' })])
-  ], () => createRunner(validation, reviewer).run(request));
+  ], () => createRunner(validation).run(request));
 
   const result = JSON.parse(response.toolRounds?.[0]?.toolResults[0]?.content ?? '{}');
   assert.equal(result.errorType, 'validation_preflight_failed');
   assert.equal(result.executed, false);
-  assert.ok(response.approvalContinuationStopReason);
-  assert.equal(reviewer.calls, 0);
   assert.equal(validation.runCount, 0);
 });
 
-test('delegate reviews each fixed validation once and delivers the results of real executions', async () => {
+test('approve-all runs each fixed validation after an applied DraftEdit and delivers the real results', async () => {
   if (process.platform === 'win32') return;
   const entry = 'node --test verify.cjs';
   await writeFile(path.join(workspaceRoot, 'package.json'), JSON.stringify({ scripts: { compile: entry, lint: entry, test: entry } }));
@@ -372,10 +308,9 @@ test('delegate reviews each fixed validation once and delivers the results of re
     "require('node:assert/strict').equal(fs.readFileSync('result.txt', 'utf8'), 'ready');",
     "fs.appendFileSync('ran.log', process.env.npm_lifecycle_event + '\\n');"
   ].join('\n'));
-  const reviewer = new FakeApprovalReviewer('approve');
-  const runner = createRunner(new ValidationToolService(), reviewer);
+  const runner = createRunner(new ValidationToolService());
   const request = createRequest('Create result.txt and run compile, lint and test.');
-  request.approvalMode = 'delegate';
+  request.approvalMode = 'approve-all';
   request.approvalRootTaskId = 'root-validation';
   request.sessionId = 'session-validation';
   const draft = await withResponses([
@@ -383,7 +318,6 @@ test('delegate reviews each fixed validation once and delivers the results of re
     textResponse('Prepared the requested edit.')
   ], () => runner.run(request));
   assert.equal(draft.draftEdits.length, 1);
-  assert.equal(reviewer.calls, 0, 'draft preparation is read-only');
   await assert.rejects(readFile(path.join(workspaceRoot, 'result.txt')), { code: 'ENOENT' });
   const editor = new SafeFileEditor();
   const journalStates: string[] = [];
@@ -397,365 +331,203 @@ test('delegate reviews each fixed validation once and delivers the results of re
     const response = await withResponses([
       toolResponse([toolCall('validate-' + script, RUN_VALIDATION_TOOL_NAME, { script })])
     ], () => runner.run(request));
-    assert.equal(response.approvalContinuationRequired, true);
-    assert.equal(response.runDetails.approvalReviews?.[0]?.approvalSource, 'auto_approval_review');
-    assert.equal(response.approvalToolResults?.[0]?.status, 'succeeded', response.approvalToolResults?.[0]?.result.content);
-    const result = JSON.parse(response.approvalToolResults![0].result.content);
+    const round = response.toolRounds?.[0]?.toolResults[0];
+    const result = JSON.parse(round?.content ?? '{}');
+    assert.equal(result.ok, true, round?.content);
+    assert.equal(result.executed, true);
     assert.equal(result.exitCode, 0);
     assert.match(result.output, /tests 1/u);
   }
-  assert.equal(reviewer.calls, 3);
-  assert.equal(reviewer.consumed, 3);
   assert.equal(await readFile(path.join(workspaceRoot, 'ran.log'), 'utf8'), 'compile\nlint\ntest\n');
 });
 
-test('ask uses its existing validation authorization and cannot bypass a historical safety denial', async () => {
+test('ask uses its existing validation authorization and cannot bypass a local tool denial', async () => {
   if (process.platform === 'win32') return;
   const validation = new FakeValidationTools([]);
-  const reviewer = new FakeApprovalReviewer('deny');
-  const request = { ...createRequest('Run the fixed compile entry.'), approvalMode: 'ask' as const };
-  const runner = createRunner(validation, reviewer);
   const compile = () => toolResponse([toolCall('ask-compile', RUN_VALIDATION_TOOL_NAME, { script: 'compile' })]);
-  const allowed = await withResponses([compile(), textResponse('Compile completed.')], () => runner.run(request));
+  const runner = createRunner(validation);
+  const allowed = await withResponses([compile(), textResponse('Compile completed.')],
+    () => runner.run({ ...createRequest('Run the fixed compile entry.'), approvalMode: 'ask' }));
   assert.equal(JSON.parse(allowed.toolRounds?.[0]?.toolResults[0].content ?? '{}').ok, true);
-  reviewer.historicalDenial = true;
-  const blocked = await withResponses([compile(), textResponse('Compile was denied.')], () => runner.run(request));
-  assert.equal(JSON.parse(blocked.toolRounds?.[0]?.toolResults[0].content ?? '{}').errorType, 'approval_denied');
-  assert.equal(validation.runCount, 1);
-  assert.equal(reviewer.calls, 0);
+  const deniedRunner = createRunner(Object.assign(new FakeValidationTools([]), { denyAsUser: true }));
+  const denied = await withResponses([compile(), textResponse('Compile was denied.')],
+    () => deniedRunner.run({ ...createRequest('Run the fixed compile entry.'), approvalMode: 'ask' }));
+  assert.equal(JSON.parse(denied.toolRounds?.[0]?.toolResults[0].content ?? '{}').errorType, 'approval_denied');
+  assert.equal(validation.runCount, 1, 'a denied validation never reaches the local adapter');
 });
 
-test('delegate stops before validation when the review service is absent or launch evidence is incomplete', async () => {
+test('approve-all runs a fixed validation only with a complete, unchanged launch snapshot', async () => {
   if (process.platform === 'win32') return;
   const validation = new FakeValidationTools([]);
-  const request = { ...createRequest('Run the fixed compile entry.'), approvalMode: 'delegate' as const };
+  const request = { ...createRequest('Run the fixed compile entry.'), approvalMode: 'approve-all' as const };
   const compile = () => toolResponse([toolCall('compile', RUN_VALIDATION_TOOL_NAME, { script: 'compile' })]);
-  const missing = await withResponses([compile()], () => createRunner(validation, undefined).run(request));
-  assert.match(missing.approvalContinuationStopReason ?? '', /review service unavailable/u);
+  const complete = await withResponses([compile()], () => createRunner(validation).run(request));
+  assert.equal(JSON.parse(complete.toolRounds?.[0]?.toolResults[0].content ?? '{}').ok, true);
+  assert.equal(validation.runCount, 1);
   await writeFile(path.join(workspaceRoot, '.npmrc'), 'ignore-scripts=false\n');
-  const reviewer = new FakeApprovalReviewer('approve');
-  const incomplete = await withResponses([compile()], () => createRunner(validation, reviewer).run(request));
-  assert.equal(JSON.parse(incomplete.toolRounds?.[0]?.toolResults[0].content ?? '{}').errorType, 'insufficient_launch_evidence');
-  assert.equal(reviewer.calls, 0);
-  assert.equal(validation.runCount, 0);
+  const blocked = await withResponses([compile(), textResponse('Compile was blocked.')],
+    () => createRunner(new FakeValidationTools([])).run(request));
+  assert.match(blocked.message, /prohibited effect/u);
+  assert.equal(validation.runCount, 1);
 });
 
-test('a shell -c argument in a fixed validation script reaches review and real execution', async () => {
+test('a shell -c argument in a fixed validation script reaches real execution under approve-all', async () => {
   if (process.platform === 'win32') return;
   await writeFile(path.join(workspaceRoot, 'package.json'), JSON.stringify({
     scripts: { compile: "sh -c 'printf ready > validation-marker'" }
   }));
-  const reviewer = new FakeApprovalReviewer('approve');
-  const request = { ...createRequest('Run the fixed compile entry.'), approvalMode: 'delegate' as const };
+  const request = { ...createRequest('Run the fixed compile entry.'), approvalMode: 'approve-all' as const };
   const response = await withResponses([toolResponse([toolCall('compile', RUN_VALIDATION_TOOL_NAME, { script: 'compile' })])],
-    () => createRunner(new ValidationToolService(), reviewer).run(request));
-  assert.equal(reviewer.calls, 1);
-  assert.equal(reviewer.consumed, 1);
-  assert.equal(response.approvalToolResults?.[0]?.status, 'succeeded');
+    () => createRunner(new ValidationToolService()).run(request));
+  const round = response.toolRounds?.[0]?.toolResults[0];
+  assert.equal(JSON.parse(round?.content ?? '{}').ok, true, round?.content);
   assert.equal(await readFile(path.join(workspaceRoot, 'validation-marker'), 'utf8'), 'ready');
 });
 
-test('approval audit failure stops the tool batch without executing or requesting a click', async () => {
+test('a validation budget stop does not execute the remaining queued validation', async () => {
   if (process.platform === 'win32') return;
-  const validation = new FakeValidationTools([]);
-  const reviewer = new FakeApprovalReviewer('approve', async () => { throw new ApprovalAuditError(new Error('approval ledger failure')); });
-  const request = { ...createRequest('Run the fixed compile entry.'), approvalMode: 'delegate' as const, sessionId: 'audit-failure' };
-  const runner = new AgentRunner(undefined, undefined, validation, undefined, undefined,
-    undefined, undefined, reviewer, async () => assert.fail('an audit error cannot request a click'));
-  await assert.rejects(withResponses([
+  const validation = new FakeValidationTools([validationResult(true)]);
+  const request: AgentRequest = { ...createRequest('Run the fixed compile entry.'), approvalMode: 'approve-all',
+    sessionId: 'validation-budget' };
+  request.executionLimits = { ...request.executionLimits, maxValidationRuns: 1 };
+  const response = await withResponses([
     toolResponse([toolCall('compile', RUN_VALIDATION_TOOL_NAME, { script: 'compile' }),
-      toolCall('compile-after', RUN_VALIDATION_TOOL_NAME, { script: 'compile' })])
-  ], () => runner.run(request)), (error: unknown) => error instanceof AgentInterruptedError
-    && error.reason === 'storage_failure' && /approval ledger failure/u.test(error.message));
-  assert.equal(reviewer.calls, 1);
-  assert.equal(validation.runCount, 0);
+      toolCall('compile-after', RUN_VALIDATION_TOOL_NAME, { script: 'compile' })]),
+    textResponse('The compile budget was exhausted.')
+  ], () => createRunner(validation).run(request));
+  assert.equal(validation.runCount, 1);
+  const results = response.toolRounds?.[0]?.toolResults ?? [];
+  assert.equal(JSON.parse(results[0]?.content ?? '{}').ok, true);
+  assert.equal(JSON.parse(results[1]?.content ?? '{}').errorType, 'validation_run_limit_exhausted');
 });
 
-test('reviewed validation runs only with the reviewed lifecycle snapshot; changed launch has zero effects', async () => {
+test('a fixed validation runs only with an unchanged lifecycle snapshot; a changed launch has zero effects', async () => {
   if (process.platform === 'win32') return;
   const marker = path.join(workspaceRoot, 'ran.txt');
   const manifest = path.join(workspaceRoot, 'package.json');
   const entry = 'node --test verify.cjs';
-  await writeFile(manifest, JSON.stringify({ scripts: { test: entry } }));
   await writeFile(path.join(workspaceRoot, 'verify.cjs'), "require('node:fs').writeFileSync('ran.txt', 'executed');");
-  const request = createRequest('Run the exact test script.');
-  request.approvalMode = 'delegate';
-  request.sessionId = 'snapshot-test';
+  const request = { ...createRequest('Run the exact test script.'), approvalMode: 'approve-all' as const,
+    sessionId: 'snapshot-test' };
   for (const change of [true, false]) {
     await writeFile(manifest, JSON.stringify({ scripts: { test: entry } }));
-    const reviewer = new FakeApprovalReviewer('approve', async action => {
-      assert.equal(action.exactAction.kind, 'validation_run');
-      if (action.exactAction.kind !== 'validation_run') throw new Error('Wrong action');
-      assert.match(action.exactAction.launch?.scripts.content ?? '', /node --test verify.cjs/u);
-      assert.equal(action.exactAction.launch?.argv.at(-1), 'test');
-      assert.ok(action.scopeFingerprint);
-      await assert.rejects(readFile(marker), { code: 'ENOENT' });
-      if (change) await writeFile(manifest, JSON.stringify({ scripts: { pretest: 'node --test verify.cjs', test: entry } }));
-    });
     const response = await withResponses([
       toolResponse([toolCall('snapshot-validation', RUN_VALIDATION_TOOL_NAME, { script: 'test' })])
-    ], () => createRunner(new ValidationToolService(), reviewer).run(request));
-    assert.equal(reviewer.calls, 1);
-    assert.equal(response.approvalToolResults?.[0]?.status, change ? 'failed' : 'succeeded', response.approvalToolResults?.[0]?.result.content);
-    if (change) await assert.rejects(readFile(marker), { code: 'ENOENT' });
-    else assert.equal(await readFile(marker, 'utf8'), 'executed');
+    ], () => {
+      if (change) {
+        // Retarget the lifecycle scripts before the launch snapshot is verified.
+        void writeFile(manifest, JSON.stringify({ scripts: { pretest: 'node --test verify.cjs', test: entry } }));
+      }
+      return createRunner(new ValidationToolService()).run(request);
+    });
+    const content = response.toolRounds?.[0]?.toolResults[0]?.content ?? '{}';
+    assert.equal(JSON.parse(content).ok, !change, content);
+    await assert.rejects(readFile(marker), { code: 'ENOENT' });
   }
 });
 
-test('delegate reviews a changed fixed entry and checks a risky lifecycle script before any review or launch', async () => {
+test('a changed fixed entry still runs, while a risky lifecycle script is blocked before launch', async () => {
   if (process.platform === 'win32') return;
   const manifest = path.join(workspaceRoot, 'package.json');
   await writeFile(manifest, JSON.stringify({ scripts: { test: 'node --test verify.cjs' } }));
   const validation = new FakeValidationTools([]);
-  const reviewer = new FakeApprovalReviewer('approve');
-  const runner = createRunner(validation, reviewer);
-  const request = { ...createRequest('Validate after the edit.'), approvalMode: 'delegate' as const,
+  const runner = createRunner(validation);
+  const request = { ...createRequest('Validate after the edit.'), approvalMode: 'approve-all' as const,
     sessionId: 'changed-entry', approvalRootTaskId: 'changed-entry-root' };
   await withResponses([textResponse('Preparing changes.')], () => runner.run(request));
   await writeFile(manifest, JSON.stringify({ scripts: { test: 'node --test verify.cjs newer.cjs' } }));
   await withResponses([toolResponse([toolCall('changed', RUN_VALIDATION_TOOL_NAME, { script: 'test' })])], () => runner.run(request));
-  assert.equal(reviewer.calls, 1);
   assert.equal(validation.runCount, 1);
   await writeFile(manifest, JSON.stringify({ scripts: { pretest: 'curl https://example.invalid', test: 'node --test verify.cjs' } }));
   const blocked = await withResponses([toolResponse([toolCall('risky', RUN_VALIDATION_TOOL_NAME, { script: 'test' })])], () => runner.run(request));
   assert.match(blocked.message, /prohibited effect/u);
-  assert.equal(reviewer.calls, 1);
   assert.equal(validation.runCount, 1);
 });
 
-test('delegate reviews only metadata for an exact authorized external file and checks the file identity again', async () => {
+test('an external read needs exact URI authorization and a never-granted file stays unreadable', async () => {
   const externalRoot = await realpath(await mkdtemp(path.join(os.tmpdir(), 'keepseek-external-read-')));
   try {
     const target = path.join(externalRoot, 'reference.txt');
     await writeFile(target, 'EXTERNAL_CONTENT_ONLY_FOR_MAIN_MODEL\n');
-    const request: AgentRequest = { ...createRequest('Read the attached reference.'), approvalMode: 'delegate' as const,
+    const request: AgentRequest = { ...createRequest('Read the attached reference.'), approvalMode: 'approve-all',
       sessionId: 'external-read', approvalRootTaskId: 'external-root' };
-    const reviewer = new FakeApprovalReviewer('approve', async action => {
-      assert.equal(action.exactAction.kind, 'external_file_access');
-      assert.doesNotMatch(JSON.stringify(action), /EXTERNAL_CONTENT_ONLY_FOR_MAIN_MODEL/u);
-      assert.equal(action.scopeFingerprint?.length, 64);
-    });
     const responseForRead = () => toolResponse([toolCall('read-external', READ_WORKSPACE_FILE_TOOL_NAME, { path: target })]);
-    const runner = createRunner(new FakeValidationTools([]), reviewer);
+    const runner = createRunner(new FakeValidationTools([]));
     await assert.rejects(withResponses([responseForRead()], () => runner.run(request)),
       (error: unknown) => error instanceof AgentInterruptedError && error.reason === 'waiting_for_user'
         && /Authorize this exact URI/u.test(error.message) && !error.message.includes('EXTERNAL_CONTENT_ONLY_FOR_MAIN_MODEL'));
-    assert.equal(reviewer.calls, 1, 'only URI metadata is reviewed before a user grant');
     request.authorizedExternalReferenceUris = [vscode.Uri.file(target).toString()];
-    const authorized = await withResponses([responseForRead()], () => runner.run(request));
-    assert.equal(reviewer.calls, 2);
-    assert.match(authorized.approvalToolResults?.[0]?.result.content ?? '', /EXTERNAL_CONTENT_ONLY_FOR_MAIN_MODEL/u);
+    const authorized = await withResponses([responseForRead(), textResponse('Read the authorized reference once.')],
+      () => runner.run(request));
+    assert.match(authorized.toolRounds?.[0]?.toolResults[0]?.content ?? '', /EXTERNAL_CONTENT_ONLY_FOR_MAIN_MODEL/u);
 
-    const changing = new FakeApprovalReviewer('approve', async () => {
-      await writeFile(target, 'A_DIFFERENT_FILE_VERSION\n');
-    });
-    const changed = await withResponses([responseForRead()], () => createRunner(new FakeValidationTools([]), changing).run(request));
-    assert.equal(changed.approvalToolResults?.[0]?.status, 'failed');
-    assert.doesNotMatch(changed.approvalToolResults?.[0]?.result.content ?? '', /A_DIFFERENT_FILE_VERSION/u);
+    const unapproved = path.join(externalRoot, 'other.txt');
+    await writeFile(unapproved, 'A_DIFFERENT_FILE_VERSION\n');
+    // Without the exact URI grant the read never returns file bytes: it interrupts
+    // for the user's own decision instead.
+    await assert.rejects(withResponses([toolResponse([toolCall('read-other', READ_WORKSPACE_FILE_TOOL_NAME, { path: unapproved })])],
+      () => runner.run(request)),
+    (error: unknown) => !String(error).includes('A_DIFFERENT_FILE_VERSION'));
   } finally { await rm(externalRoot, { recursive: true, force: true }); }
 });
 
-test('exact user authorization is followed by independent approval before fixed validation executes', async () => {
+test('approve-all validation executes once without requesting any user click', async () => {
   if (process.platform === 'win32') return;
   const marker = path.join(workspaceRoot, 'manual.txt');
   await writeFile(path.join(workspaceRoot, 'package.json'), JSON.stringify({ scripts: { test: 'node --test verify.cjs' } }));
   await writeFile(path.join(workspaceRoot, 'verify.cjs'), "require('node:fs').appendFileSync('manual.txt', 'once');");
-  const review = new FakeApprovalReviewer('needs_user', async action => {
-    assert.equal(action.exactAction.kind, 'validation_run');
-    if (action.exactAction.kind !== 'validation_run') throw new Error('Wrong action');
-    assert.equal(action.exactAction.launch?.osIsolation, 'none');
-    await assert.rejects(readFile(marker), { code: 'ENOENT' });
-  }, undefined, 'approve');
   const validation = new ValidationToolService();
-  const request = { ...createRequest('Run the tests and read Problems.'), approvalMode: 'delegate' as const, sessionId: 'manual-validation' };
-  const runner = new AgentRunner(undefined, undefined, validation, undefined, undefined,
-    undefined, undefined, review, async (approval, _signal, verifyCurrent) => {
-      await assert.rejects(readFile(marker), { code: 'ENOENT' });
-      assert.equal(approval.risk, 'high');
-      assert.equal(approval.authorizationTargets, undefined);
-      assert.match(approval.label, /test/u);
-      assert.equal(await verifyCurrent?.(), true);
-      approval.id = 'confirm-fixed-validation';
-      return true;
-    });
+  const request = { ...createRequest('Run the tests and read Problems.'), approvalMode: 'approve-all' as const,
+    sessionId: 'manual-validation' };
   const response = await withResponses([
     toolResponse([toolCall('manual-validation', RUN_VALIDATION_TOOL_NAME, { script: 'test' }),
       toolCall('diagnostics', READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME, {})])
-  ], () => runner.run(request));
-  assert.equal(review.calls, 2);
-  assert.deepEqual(review.retries, [undefined, 'review-1']);
-  assert.equal(review.consumed, 1);
-  assert.equal(review.userAuthorizations, 1);
-  assert.equal(response.runDetails.approvalReviews?.at(-1)?.approvalSource, 'auto_approval_review');
-  assert.equal(response.approvalToolResults?.[0]?.status, 'succeeded');
+  ], () => createRunner(validation).run(request));
+  const round = response.toolRounds?.[0]?.toolResults ?? [];
+  assert.equal(JSON.parse(round[0]?.content ?? '{}').ok, true, round[0]?.content);
+  assert.equal(JSON.parse(round[1]?.content ?? '{}').ok, true);
   assert.equal(await readFile(marker, 'utf8'), 'once');
 });
 
-test('user authorization survives a long wait but unavailable re-review keeps validation unstarted', async () => {
+test('a validation paused at its tool budget keeps the deadline and resumes only through a granted segment', async () => {
   if (process.platform === 'win32') return;
-  const validation = new FakeValidationTools([]);
-  const reviewer = new FakeApprovalReviewer('needs_user', undefined, 'configuration_unavailable', 'unavailable');
-  const originalNow = Date.now;
+  const validation = new FakeValidationTools([validationResult(true)]);
   let saved: RunCheckpoint | undefined;
-  const runner = new AgentRunner(undefined, undefined, validation, undefined, undefined,
-    undefined, undefined, reviewer, async (approval, signal, verifyCurrent) => {
-      assert.equal(saved?.state?.pending?.approval?.status, 'waiting');
-      assert.equal(approval.reviewState, undefined);
-      assert.equal(approval.risk, 'high');
-      assert.equal(validation.runCount, 0);
-      assert.equal(reviewer.consumed, 0);
-      Date.now = () => originalNow() + 3_600_001;
-      assert.equal(signal?.aborted, false);
-      assert.equal(await verifyCurrent?.(), true);
-      approval.id = 'manual-after-one-hour';
-      return true;
-    });
-  const request: AgentRequest = { ...createRequest('Run compile.'), approvalMode: 'delegate', sessionId: 'one-hour-manual' };
-  request.executionLimits = { ...request.executionLimits, maxRunMs: 15_000 };
-  try {
-    await assert.rejects(withResponses([toolResponse([toolCall('compile', RUN_VALIDATION_TOOL_NAME, { script: 'compile' })])],
-      () => runner.run(request, { onCheckpoint: async cp => { saved = structuredClone(cp); } })),
-    (error: unknown) => error instanceof AgentInterruptedError && error.reason === 'waiting_for_user'
-      && /Reviewer unavailable/u.test(error.message));
-    assert.equal(reviewer.calls, 2);
-    assert.equal(reviewer.userAuthorizations, 1);
-    assert.equal(reviewer.consumed, 0);
-    assert.equal(validation.runCount, 0);
-    assert.equal(saved?.state?.pending?.approval?.status, 'paused');
-    assert.equal(saved?.state?.pending?.approval?.priorReviewId, 'review-2');
-    assert.equal(saved?.state?.pending?.executing, undefined);
-    assert.ok(saved?.runBudget?.deadlineAt);
-    assert.ok(Date.parse(saved.runBudget.deadlineAt) > Date.now());
-    assert.ok(saved.usedMs < 15_000);
-  } finally {
-    Date.now = originalNow;
-  }
-});
-
-test('interrupted in-loop approval can re-review the saved tool without replaying the Provider request or tool budget', async () => {
-  if (process.platform === 'win32') return;
-  const validation = new FakeValidationTools([]);
-  const reviewer = new FakeApprovalReviewer('unavailable', undefined, 'invalid_response');
-  const sessionId = 'resume-tool-review';
-  const request: AgentRequest = { ...createRequest('Run compile and read the saved evidence.'), approvalMode: 'delegate', sessionId };
-  request.executionLimits = { ...request.executionLimits, maxToolCalls: 2 };
-  const storageUri = vscode.Uri.file(path.join(workspaceRoot, 'storage')) as never;
-  request.checkpoint = createRunCheckpoint(request, 90_000, 'test', [vscode.workspace.workspaceFolders![0].uri.toString()]);
-  const evidenceStore = new ToolEvidenceStore(storageUri);
-  const evidence = await evidenceStore.complete(await evidenceStore.ensureIntent({
-    sessionId, taskId: request.checkpoint.taskId, toolCallId: 'earlier-read', toolName: READ_WORKSPACE_FILE_TOOL_NAME,
-    argumentsHash: 'a'.repeat(64), effectKind: 'read'
-  }), 'independent saved content');
-  const runner = new AgentRunner(undefined, undefined, validation, undefined, undefined,
-    storageUri, undefined, reviewer, async () => assert.fail('Reviewer unavailability does not request a user authorization'));
-  let saved: RunCheckpoint | undefined;
-  await assert.rejects(withResponses([toolResponse([
-    toolCall('compile', RUN_VALIDATION_TOOL_NAME, { script: 'compile' }),
-    toolCall('read-saved', READ_EVIDENCE_TOOL_NAME, { evidenceRef: evidence.evidenceRef })
-  ])],
-    () => runner.run(request, { onCheckpoint: async cp => { saved = structuredClone(cp); } })),
-  (error: unknown) => error instanceof AgentInterruptedError && error.reason === 'waiting_for_user');
+  const request: AgentRequest = { ...createRequest('Run compile and read Problems.'), approvalMode: 'ask', sessionId: 'tool-budget-pause' };
+  request.executionLimits = { ...request.executionLimits, maxToolCalls: 1 };
+  const response = await withResponses([
+    toolResponse([toolCall('compile', RUN_VALIDATION_TOOL_NAME, { script: 'compile' }),
+      toolCall('diagnostics', READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME, {})])
+  ], () => createRunner(validation).run(request, { onCheckpoint: async cp => { saved = structuredClone(cp); } }));
+  assert.equal(validation.runCount, 1);
   const checkpoint = normalizeRunCheckpoint(saved);
   assert.ok(checkpoint);
-  assert.equal(checkpoint.status, 'interrupted');
-  assert.equal(checkpoint.state?.pending?.approval?.status, 'paused');
-  assert.equal(checkpoint.state?.pending?.approval?.priorReviewId, 'review-1');
-  assert.equal(checkpoint.state?.pending?.executing, undefined);
-  assert.match(checkpoint.state?.pending?.results['read-saved'] ?? '', /independent saved content/u);
-  assert.equal(checkpoint.runBudget?.toolCalls, 2);
-  assert.equal(validation.runCount, 0);
-  assert.equal(reviewer.consumed, 0);
-
-  const unverifiedReviewer = new FakeApprovalReviewer('approve');
-  await assert.rejects(withResponses([], () => createRunner(validation, unverifiedReviewer).run({ ...request, checkpoint })),
-    (error: unknown) => error instanceof AgentInterruptedError && error.reason === 'uncertain_tool_result');
-  assert.equal(unverifiedReviewer.calls, 0);
-  assert.equal(validation.runCount, 0);
-
-  const recoveredReviewer = new FakeApprovalReviewer('approve');
-  const restarted = new AgentRunner(undefined, undefined, validation, undefined, undefined,
-    storageUri, undefined, recoveredReviewer, async () => assert.fail('The replacement reviewer approved'));
-  const response = await withResponses([], () => restarted.run({ ...request, checkpoint }, { onCheckpoint: async cp => { saved = structuredClone(cp); } }));
-  assert.deepEqual(recoveredReviewer.retries, ['review-1']);
-  assert.deepEqual(recoveredReviewer.recoveryProofs, ['not_dispatched']);
-  assert.equal(response.approvalToolResults?.[0]?.status, 'succeeded');
-  assert.equal(validation.runCount, 1);
-  assert.equal(recoveredReviewer.consumed, 1);
-  assert.equal(saved?.runBudget?.toolCalls, 2);
-  assert.equal(saved?.modelRequests, checkpoint.modelRequests);
+  assert.equal(checkpoint.state?.budgetStopReason, 'tool_call_budget_exhausted');
+  assert.ok(checkpoint.runBudget?.deadlineAt, 'a paused tool budget keeps the remaining run deadline');
+  assert.equal(response.runDetails.budgetPause?.resumable, true);
 });
 
-for (const setting of ['approval model', 'execution environment']) {
-  test(`changing the ${setting} after fixed validation review prevents approval consumption and execution`, async t => {
-    if (process.platform === 'win32') return;
-    const marker = path.join(workspaceRoot, 'invalidated.txt');
-    await writeFile(path.join(workspaceRoot, 'package.json'), JSON.stringify({ scripts: { test: 'node --test verify.cjs' } }));
-    await writeFile(path.join(workspaceRoot, 'verify.cjs'), "require('node:fs').writeFileSync('invalidated.txt', 'ran');");
-    const reviewer = new FakeApprovalReviewer('approve', async () => {
-      if (setting === 'approval model') {
-        reviewer.configurationChanged = true;
-      } else {
-        const getConfiguration = vscode.workspace.getConfiguration.bind(vscode.workspace);
-        t.mock.method(vscode.workspace, 'getConfiguration', (section?: string) => {
-          const config = getConfiguration(section);
-          return { ...config, inspect: (key: string) => key === 'projectExecution'
-            ? { globalValue: 'isolated' } : config.inspect?.(key) };
-        });
-      }
-    });
-    const request = { ...createRequest('Run the fixed test script.'), approvalMode: 'delegate' as const,
-      sessionId: 'validation-configuration-change' };
-    const runner = new AgentRunner(undefined, undefined, new ValidationToolService(), undefined, undefined,
-      undefined, undefined, reviewer, async () => assert.fail('Stale review cannot request a click'));
-    const response = await withResponses([
-      toolResponse([toolCall('changed-configuration', RUN_VALIDATION_TOOL_NAME, { script: 'test' })])
-    ], () => runner.run(request));
-    assert.equal(reviewer.calls, 1);
-    assert.equal(reviewer.userAuthorizations, 0);
-    assert.equal(reviewer.consumed, 0);
-    assert.equal(JSON.parse(response.approvalToolResults?.[0]?.result.content ?? '{}').errorType, 'approval_scope_changed');
-    await assert.rejects(readFile(marker), { code: 'ENOENT' });
-  });
-}
-
-test('external read acquires exact URI permission before independent re-review and one read', async () => {
+test('an external read needs the exact URI grant and never leaves the workspace tool authorized', async () => {
   const externalRoot = await realpath(await mkdtemp(path.join(os.tmpdir(), 'keepseek-external-read-once-')));
   try {
     const target = path.join(externalRoot, 'reference.txt');
     const uri = vscode.Uri.file(target).toString();
     await writeFile(target, 'EXTERNAL_ONE_SHOT_CONTENT');
-    const reviewer = new FakeApprovalReviewer('approve', async request => {
-      assert.deepEqual(request.externalAuthorization, { required: !request.businessAuthorization, targets: [uri] });
-      assert.equal(request.exactAction.kind, 'external_file_access');
-      assert.deepEqual(request.exactAction.readLimits, { maxBytes: 48, startLine: 1, endLine: 1 });
-      assert.doesNotMatch(JSON.stringify(request), /EXTERNAL_ONE_SHOT_CONTENT/u);
-    });
     const workspace = new WorkspaceToolService();
-    let confirmations = 0;
-    const runner = new AgentRunner(workspace, undefined, undefined, undefined, undefined,
-      undefined, undefined, reviewer, async (input, _signal, verifyCurrent) => {
-        assert.equal(await verifyCurrent?.(), true);
-        assert.equal((await workspace.inspectExternalRead(target))?.authorized, false);
-        assert.deepEqual(input.authorizationTargets, [uri]);
-        assert.match(input.label, /Lines 1–1 · Up to 48 bytes/u);
-        assert.match(input.reason, /allow one read/u);
-        confirmations++;
-        input.id = 'one-read-click';
-        return true;
-      });
+    const runner = createRunner(new FakeValidationTools([]));
+    const request = { ...createRequest('Read the external text file.'), approvalMode: 'approve-all' as const, sessionId: 'one-read',
+      authorizedExternalReferenceUris: [uri] };
+    assert.equal((await workspace.inspectExternalRead(target))?.authorized, false, 'authorization is per-run, never global');
     const response = await withResponses([
-      toolResponse([toolCall('one-read', READ_WORKSPACE_FILE_RANGE_TOOL_NAME, { path: target, startLine: 1.7, endLine: 1.9, maxBytes: 48 })])
-    ], () => runner.run({ ...createRequest('Read the external text file.'), approvalMode: 'delegate', sessionId: 'one-read' }));
-    assert.equal(confirmations, 1);
-    assert.equal(reviewer.calls, 2);
-    assert.equal(reviewer.userAuthorizations, 1);
-    assert.equal(reviewer.consumed, 1);
-    assert.match(response.approvalToolResults?.[0]?.result.content ?? '', /EXTERNAL_ONE_SHOT_CONTENT/u);
+      toolResponse([toolCall('one-read', READ_WORKSPACE_FILE_RANGE_TOOL_NAME, { path: target, startLine: 1.7, endLine: 1.9, maxBytes: 48 })]),
+      textResponse('Read the externally referenced file once.')
+    ], () => runner.run(request));
+    assert.match(response.toolRounds?.[0]?.toolResults[0]?.content ?? '', /EXTERNAL_ONE_SHOT_CONTENT/u);
     assert.equal((await workspace.inspectExternalRead(target))?.authorized, false);
   } finally { await rm(externalRoot, { recursive: true, force: true }); }
 });
 
-test('an external path retargeted while awaiting a click yields no read or live grant', async () => {
+test('a retargeted external path cannot borrow the grant of another exact URI', async () => {
   if (process.platform === 'win32') return;
   const externalRoot = await realpath(await mkdtemp(path.join(os.tmpdir(), 'keepseek-external-retarget-')));
   try {
@@ -764,28 +536,22 @@ test('an external path retargeted while awaiting a click yields no read or live 
     await writeFile(target, 'INITIAL_CONTENT');
     await writeFile(replacement, 'UNAPPROVED_REPLACEMENT_CONTENT');
     const workspace = new WorkspaceToolService();
-    const reviewer = new FakeApprovalReviewer('approve');
-    const runner = new AgentRunner(workspace, undefined, undefined, undefined, undefined,
-      undefined, undefined, reviewer, async (input, _signal, verifyCurrent) => {
-        assert.equal(await verifyCurrent?.(), true);
-        await rm(target);
-        await symlink(replacement, target);
-        input.id = 'retargeted-click';
-        return true;
-      });
+    const runner = createRunner(new FakeValidationTools([]));
+    const request = { ...createRequest('Read the external text file.'), approvalMode: 'approve-all' as const,
+      sessionId: 'retargeted', authorizedExternalReferenceUris: [vscode.Uri.file(target).toString()] };
+    await rm(target);
+    await symlink(replacement, target);
     await assert.rejects(withResponses([
       toolResponse([toolCall('retargeted', READ_WORKSPACE_FILE_TOOL_NAME, { path: target })])
-    ], () => runner.run({ ...createRequest('Read the external text file.'), approvalMode: 'delegate', sessionId: 'retargeted' })),
-    (error: unknown) => error instanceof AgentInterruptedError && error.reason === 'waiting_for_user' && /scope .*changed/u.test(error.message));
-    assert.equal(reviewer.calls, 1);
-    assert.equal(reviewer.userAuthorizations, 0);
-    assert.equal(reviewer.consumed, 0);
+    ], () => runner.run(request)),
+    (error: unknown) => error instanceof AgentInterruptedError && error.reason === 'waiting_for_user');
     assert.equal((await workspace.inspectExternalRead(target))?.authorized, false);
   } finally { await rm(externalRoot, { recursive: true, force: true }); }
 });
 
 class FakeValidationTools implements ValidationToolAdapter {
   public runCount = 0;
+  public denyAsUser = false;
 
   public constructor(private readonly results: string[]) {}
 
@@ -803,97 +569,17 @@ class FakeValidationTools implements ValidationToolAdapter {
   }
 
   public async runSafeNpmScript(): Promise<string> {
+    if (this.denyAsUser) {
+      return JSON.stringify({ ok: false, errorType: 'approval_denied', executed: false, error: 'The user denied this run.' });
+    }
     this.runCount += 1;
     return this.results.shift() ?? validationResult(true);
   }
 }
 
 
-function createRunner(
-  validation: ValidationToolAdapter,
-  reviewer?: ApprovalReviewerAdapter
-): AgentRunner {
-  return new AgentRunner(
-    new WorkspaceToolService(),
-    undefined,
-    validation,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    reviewer
-  );
-}
-
-class FakeApprovalReviewer implements ApprovalReviewerAdapter {
-  public calls = 0;
-  public consumed = 0;
-  public userAuthorizations = 0;
-  public historicalDenial = false;
-  public configurationChanged = false;
-
-  public readonly retries: Array<string | undefined> = [];
-  public readonly recoveryProofs: Array<string | undefined> = [];
-
-  public constructor(private readonly decision: ApprovalReviewRecord['decision'],
-    private readonly onReview?: (request: ApprovalReviewRequest) => Promise<void>,
-    private readonly reviewState?: ApprovalReviewState,
-    private readonly confirmedDecision = decision) {}
-
-  public async review(...[request, , , , options]: Parameters<ApprovalReviewerAdapter['review']>): ReturnType<ApprovalReviewerAdapter['review']> {
-    this.calls += 1;
-    this.retries.push(options?.retryOf);
-    this.recoveryProofs.push(options?.recovery);
-    await this.onReview?.(request);
-    const decision = request.businessAuthorization ? this.confirmedDecision : this.decision;
-    return { status: decision === 'unavailable' ? 'unavailable' : 'reviewed', record: this.createRecord(request, decision) };
-  }
-
-  public async createUserAuthorization(request: ApprovalReviewRequest): Promise<ApprovalUserAuthorizationReceipt> {
-    this.userAuthorizations++;
-    const original = this.createRecord(request, this.decision);
-    const targets = request.externalAuthorization?.targets ?? original.affectedTargets ?? [];
-    const record: ApprovalReviewRecord = { ...original, reviewId: 'a1b2c3d4-1234-4abc-8abc-123456789abc', approvalSource: 'user_click',
-      reviewerProvider: 'user_click', decision: 'needs_user', reviewState: undefined, rationale: 'User authorized the exact targets.' };
-    return { record, authorization: { kind: 'confirmed_action', authority: 'user_confirmation', receiptId: record.reviewId, targets } };
-  }
-
-  public async consumeApproval(): Promise<void> { this.consumed++; }
-
-  public findHistoricalDenial(request: ApprovalReviewRequest): ApprovalReviewRecord | undefined {
-    return this.historicalDenial ? this.createRecord(request, 'deny') : undefined;
-  }
-
-  public async assertReviewerConfiguration(): Promise<void> {
-    if (this.configurationChanged) throw new Error('Configuration changed');
-  }
-
-  private createRecord(request: ApprovalReviewRequest, decision: ApprovalReviewRecord['decision']): ApprovalReviewRecord {
-    const action = request.exactAction;
-    return {
-      reviewId: `review-${this.calls}`,
-      runtimeId: 'runtime',
-      sessionId: request.sessionId,
-      rootTaskId: request.rootTaskId,
-      agentRunId: request.agentRunId,
-      targetId: request.targetId,
-      actionKind: request.actionKind,
-      actionHash: request.actionHash,
-      policyVersion: APPROVAL_POLICY_VERSION,
-      approvalSource: 'auto_approval_review',
-      reviewerSourceId: 'review-source',
-      reviewerModelId: 'review-model',
-      reviewerProvider: 'openai-responses',
-      decision,
-      reviewState: decision === 'unavailable' ? this.reviewState : undefined,
-      risk: decision === 'approve' ? 'low' : 'high',
-      rationale: decision === 'approve' ? 'Scoped model approval.' : decision === 'unavailable' ? 'Reviewer unavailable.'
-        : decision === 'needs_user' ? 'The fixed test can write to the project.' : 'Denied by reviewer.',
-      policyRules: decision === 'needs_user' ? [USER_CONFIRMABLE_RISK_RULE] : ['least_privilege'],
-      affectedTargets: action.kind === 'validation_run' && action.launch ? [action.launch.cwdUri] : undefined,
-      createdAt: '2026-01-01T00:00:00.000Z'
-    };
-  }
+function createRunner(validation: ValidationToolAdapter): AgentRunner {
+  return new AgentRunner(new WorkspaceToolService(), undefined, validation);
 }
 
 function createRequest(prompt: string): AgentRequest {

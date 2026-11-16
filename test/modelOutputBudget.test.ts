@@ -15,9 +15,9 @@ import type { ModelSourceProvider } from '../src/accounts/types';
 import type { AgentRequest, ContextUsageEstimate, ProviderUsageLedgerRecord } from '../src/shared/types';
 import { checkpointCopy, normalizeRunCheckpoint, recoveryBlocker, type RunCheckpoint } from '../src/agent/runCheckpoint';
 import { getAgentRuntimeProfile } from '../src/shared/modelProfiles';
-import { requestApprovalReviewText } from '../src/approvals/oneShotTextRequest';
 import { calculateOutputBudget } from '../src/shared/outputBudget';
 import { applyProviderRequestBudget, resolveProviderRequestBudget } from '../src/agent/requestBudget';
+import { requestOneShotText } from '../src/agent/oneShotTextRequest';
 import { HistoryCompressor } from '../src/agent/historyCompressor';
 import { ExecutionCostBudget } from '../src/agent/executionPolicy';
 import { StreamParser } from '../src/agent/providers/streamParser';
@@ -228,21 +228,21 @@ test('request-relative capacity has no percentage cap or illegal positive floor'
   assert.equal(isContextTooLongError(new Error('max_tokens must be at most 8192; model context window maximum is 1024000')), false);
 });
 
-test('reviewer real transport uses its own model cap across all protocols', async () => {
+test('the auxiliary one-shot request refuses to run without its owning task budget', async () => {
   const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => { calls++; return chat({ content: 'unused' }); }) as typeof fetch;
   try {
     for (const provider of ['qwencloud', 'openai-responses', 'anthropic-compatible'] as const) {
-      let body: Record<string, unknown> = {};
-      globalThis.fetch = (async (_url, init) => { body = JSON.parse(String(init?.body)); return reply(provider, 'stop', '{"decision":"deny"}'); }) as typeof fetch;
-      const req = request(provider, 32768, 'reviewer-source');
-      await requestApprovalReviewText({ model: req.model, sourceConfig: req.sourceConfig!, systemPrompt: 'review', userPrompt: 'evidence', language: 'en' });
-      assert.equal(body[provider === 'openai-responses' ? 'max_output_tokens' : 'max_tokens'], 32768);
-      assert.equal(body.tools, undefined);
+      const req = request(provider, 32768, 'title-source');
+      // Title naming is a task-owned auxiliary action: without the owning cost
+      // and run budget it must fail closed before any transport is dispatched.
+      await assert.rejects(requestOneShotText({ model: req.model, sourceConfig: req.sourceConfig!, systemPrompt: 'title',
+        userPrompt: 'name this session', language: 'en', purpose: 'session_title', maxOutputTokens: 512 }), /owning task budget/u);
     }
+    assert.equal(calls, 0, 'no auxiliary request without a task budget');
   } finally { globalThis.fetch = original; }
-});
-
-test('long continuation keeps full text beyond legacy token-times-four and cumulative limits', async () => {
+});test('long continuation keeps full text beyond legacy token-times-four and cumulative limits', async () => {
   const originalFetch = globalThis.fetch;
   const originalConfiguration = vscode.workspace.getConfiguration;
   vscode.workspace.getConfiguration = () => ({
@@ -338,19 +338,22 @@ test('summary transport uses its own configured model across all protocols and r
   } finally { globalThis.fetch = original; }
 });
 
-test('reviewer cannot bypass a positive task cost limit on an unpriceable source', async () => {
-  const original = globalThis.fetch;
+test('a standalone summary is never dispatched while a positive task cost limit is configured', async () => {
+  const originalConfiguration = vscode.workspace.getConfiguration;
+  const originalFetch = globalThis.fetch;
   let calls = 0;
+  vscode.workspace.getConfiguration = () => ({ get: <T>(key: string, fallback: T): T => key === 'agent.maxCost' ? 1 as T : fallback,
+    update: async () => undefined, inspect: () => undefined }) as ReturnType<typeof vscode.workspace.getConfiguration>;
   globalThis.fetch = (async () => { calls++; return chat({ content: 'unused' }); }) as typeof fetch;
   try {
     const input = request();
-    await assert.rejects(requestApprovalReviewText({ model: input.model, sourceConfig: input.sourceConfig!, systemPrompt: 'review',
-      userPrompt: 'evidence', language: 'en', taskCostBudget: new ExecutionCostBudget(1) }), /cannot be priced/u);
+    const compressor = new HistoryCompressor() as unknown as { completeSummary(value: object): Promise<{ content: string }> };
+    await assert.rejects(compressor.completeSummary({ model: input.model, sourceConfig: input.sourceConfig,
+      messages: [{ role: 'user', content: 'summarize' }], maxTokens: 100, language: 'en', usageSource: 'summary',
+      taskCostBudget: new ExecutionCostBudget(1) }), /no shared task cost reservation/u);
     assert.equal(calls, 0);
-  } finally { globalThis.fetch = original; }
-});
-
-test('truncated tools drain a bounded usage tail without returning any executable call', async () => {
+  } finally { vscode.workspace.getConfiguration = originalConfiguration; globalThis.fetch = originalFetch; }
+});test('truncated tools drain a bounded usage tail without returning any executable call', async () => {
   let usage: unknown;
   let cancelled = false;
   const bytes = new TextEncoder().encode(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ ...tool, function: { ...tool.function, arguments: '{' } }] }, finish_reason: 'length' }] })}\n\n`

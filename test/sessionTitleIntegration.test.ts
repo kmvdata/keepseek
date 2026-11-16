@@ -5,23 +5,22 @@ import { test } from 'node:test';
 import * as vscode from './stubs/vscode';
 import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
 import type { InteractionCoordinator } from '../src/provider/interactionState';
-import { DelegatedApprovalQueue } from '../src/agent/approvalMode';
 import { ChatSessionStore, createEmptySession, type StoredWorkspaceSessionState } from '../src/sessions/chatSessionStore';
 import { SessionTitleCoordinator } from '../src/sessions/sessionTitleCoordinator';
 import { buildSessionTitleRegenerationMaterial } from '../src/sessions/sessionTitle';
 import type { SessionTitleSubmission } from '../src/provider/sessionTitleCompletion';
 import type { SessionTitleRequestInput } from '../src/provider/sessionTitleRequest';
 import type { SessionTitleRequest } from '../src/sessions/sessionTitleCoordinator';
-import type { UserTaskBudget } from '../src/sessions/userTaskBudget';
 import type { AgentRequest, AgentResponse, ChatMessage, ChatSession } from '../src/shared/types';
 
 type Parent = Pick<AgentRequest, 'model' | 'sourceConfig'>;
+type Budget = NonNullable<ChatSession['userTaskBudgets']>[string];
 type Candidate = { submission: SessionTitleSubmission; parentRequest: Parent; durable: boolean };
 type Host = {
   rememberSessionTitleSubmission(session: ChatSession, message: ChatMessage, parent: Parent): void;
   flushSessionTitleCompletions(): void;
   maybeAutoContinueDraftRun(): Promise<void>;
-  loadTaskBudget(session: ChatSession, link: NonNullable<ChatMessage['userTask']>): Promise<UserTaskBudget | undefined>;
+  loadTaskBudget(session: ChatSession, link: NonNullable<ChatMessage['userTask']>): Promise<Budget | undefined>;
   sendPrompt(prompt: string, sourceId: string, modelId: string): Promise<AgentResponse | undefined>;
   sessionTitleCandidates: Map<string, Map<string, Candidate>>;
   sessionTitles: {
@@ -58,7 +57,6 @@ function fixture() {
   const b = createEmptySession(); b.id = 'session-b';
   const sessions = new Map([[a.id, a], [b.id, b]]);
   let active = a;
-  const queue = new DelegatedApprovalQueue();
   const calls: Array<{ sessionId: string; taskId: string; request: (input: SessionTitleRequest) => Promise<string> }> = [];
   const parent: Parent = { model: { id: 'main-a', label: 'Main A', sourceId: 'source-a', provider: 'deepseek' },
     sourceConfig: { sourceId: 'source-a', provider: 'deepseek', apiKey: 'test-key', baseUrl: 'https://a.invalid', supportsBilling: false } };
@@ -71,7 +69,7 @@ function fixture() {
     sessionTitles: { isRunning: () => false, completeResult: async (sessionId: string, taskId: string, request: (input: SessionTitleRequest) => Promise<string>) => {
       calls.push({ sessionId, taskId, request }); return { outcome: 'updated' };
     }, cancel: () => {}, cancelAll: () => {} },
-    delegatedApprovals: queue, delegatedApprovalInFlight: false, draftRunAutoContinueInFlight: false,
+    draftRunAutoContinueInFlight: false,
     isBusy: false, activeChangeActions: new Set(),
     draftRunBatches: { pending: false, locked: false, cancel: () => {} },
     draftRuns: { claimReadyAutoContinuation: () => undefined },
@@ -84,7 +82,7 @@ function fixture() {
     globalStorageUri: vscode.Uri.file('/tmp/keepseek-title-integration'), sourceStore: {}, subagentSettingsStore: {},
     t: (key: string) => key
   }) as Host;
-  return { a, b, host, parent, calls, store, queue,
+  return { a, b, host, parent, calls, store,
     activate: (session: ChatSession) => { active = session; store.activeSessionId = session.id; } };
 }
 
@@ -110,7 +108,7 @@ test('a durable accepted user input dispatches immediately while the main answer
 test('internal approval, command, plan and repair inputs never manufacture title submissions', async () => {
   const f = fixture();
   const user = turn(f.a);
-  for (const reason of ['approval', 'command', 'plan', 'repair', 'recovery'] as const) {
+  for (const reason of ['command', 'plan', 'repair', 'recovery'] as const) {
     const internal: ChatMessage = { id: `internal-${reason}`, role: 'user', content: 'HOST_CONTINUATION_SECRET', createdAt: '',
       userTask: { ...user.userTask!, reason },
       contextMeta: { isProtected: true, protectedReason: 'delegated_approval_result', displayKind: 'delegated_auto_continue' } };
@@ -135,7 +133,7 @@ test('switching to B preserves A source snapshot and loads/publishes only A task
   f.parent.model.id = 'mutated';
   f.parent.sourceConfig = { ...f.parent.sourceConfig!, sourceId: 'mutated' };
   f.activate(f.b); f.host.selectedSourceId = 'source-b'; f.host.selectedModelId = 'main-b';
-  const budget = { version: 1, usedMs: 1000, maxExecutionMs: 0 } as UserTaskBudget;
+  const budget: Budget = { version: 1, usedMs: 1000, maxExecutionMs: 0 };
   f.a.userTaskBudgets = { root: budget };
   const loaded: string[] = [];
   Object.assign(f.host, { loadTaskBudget: async (session: ChatSession) => { loaded.push(session.id); return budget; } });
@@ -375,12 +373,11 @@ test('storage readiness and trust still block production title dispatch', async 
   await settleHost();
 });
 
-test('a pending main runtime, queued approval and tool work do not delay an accepted input title', async () => {
+test('a pending main runtime and in-flight side-effect work do not delay an accepted input title', async () => {
   const f = fixture();
   const user = turn(f.a, 'parallel-purpose');
-  Object.assign(f.host, { isBusy: true, delegatedApprovalInFlight: true, draftRunAutoContinueInFlight: true,
+  Object.assign(f.host, { isBusy: true, draftRunAutoContinueInFlight: true,
     activeChangeActions: new Set(['pending-apply']), taskClock: { owns: () => true } });
-  f.queue.enqueue({ sessionId: f.a.id, rootTaskId: 'parallel-purpose', runId: 'segment', editIds: ['edit'], draftRunIds: [] });
   f.host.rememberSessionTitleSubmission(f.a, user, f.parent);
   f.host.flushSessionTitleCompletions();
   assert.equal(f.calls.length, 1, 'the accepted user body is already the complete title material');

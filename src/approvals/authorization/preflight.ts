@@ -47,7 +47,9 @@ export function evaluateAutomaticRunAuthorization(run: DraftRun, grants: ExactOp
   if (run.spec.externalCwd && scope.externalUris.length) scopeUris.add(run.spec.cwdUri);
   const requiresNetworkGrant = mode === 'ask' && needsExactNetworkGrant(run, semantics, remoteScope);
   const requiresExactGrant = scopeUris.size > 0 || requiresNetworkGrant;
-  const grantMissing = requiresExactGrant && !grants.matches(draftRunIdentity(run), scope);
+  // Approve all executes without any authorization prompt, so a missing grant
+  // is not a refusal; Ask still requires the exact external grant.
+  const grantMissing = mode !== 'approve-all' && requiresExactGrant && !grants.matches(draftRunIdentity(run), scope);
   const launchRefusal = getDraftRunLaunchRefusal(scope);
   const ineligible = launchRefusal ? { code: 'insufficient_launch_evidence' as const, reason: launchRefusal }
     : mode === 'ask' ? inspectProjectRunEligibility(run, scope, semantics, reason) : undefined;

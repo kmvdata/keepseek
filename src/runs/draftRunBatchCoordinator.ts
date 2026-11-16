@@ -1,6 +1,6 @@
 import { hasExactCommandScope, inspectDraftRunScope, type CommandScope } from '../approvals/authorization/commandScope';
 import { randomUUID } from 'node:crypto';
-import type { DraftRun, DraftRunBatchSnapshot, DraftRunBatchState } from '../shared/types';
+import type { ApprovalMode, DraftRun, DraftRunBatchSnapshot, DraftRunBatchState } from '../shared/types';
 import type { DraftRunStore } from './draftRunStore';
 import type { HistoryTruncationScope } from '../sessions/historyTruncation';
 import { canIsolateDraftRunFailure, inspectDraftRunDependencies, inspectGitAncestorPrerequisite, orderDraftRunDependencies } from './draftRunDependencies';
@@ -127,6 +127,8 @@ export class DraftRunBatchCoordinator {
     authorizedUris: ReadonlySet<string>;
     rootTaskRunIds?: ReadonlySet<string>;
     selectedProjectUri?: string;
+    /** Approve all executes without a reviewer, a prompt or a grant request. */
+    approvalMode?: ApprovalMode;
     verifyEditDependencies?: (run: DraftRun, scope: CommandScope) => Promise<void>;
     assertContext: () => void;
     onCurrent: (run: DraftRun | undefined) => void;
@@ -145,9 +147,11 @@ export class DraftRunBatchCoordinator {
       for (const [index, entry] of op.state.entries.entries()) {
         op.state.currentIndex = index + 1;
         const run = this.store.validateApprovalBoundary(entry.draftRunId, input.authorizedUris, entry.specHash);
+        // An earlier command may create this one's working directory, so the
+        // batch preflight tolerates a missing cwd and rechecks it when its turn runs.
         const scope = await inspectDraftRunScope(run, false, undefined, false, input.selectedProjectUri, true);
         assertValid();
-        if (!hasExactCommandScope(scope, run.spec.cwdUri, input.authorizedUris)) {
+        if (input.approvalMode !== 'approve-all' && !hasExactCommandScope(scope, run.spec.cwdUri, input.authorizedUris)) {
           throw new Error('A command needs individual external scope authorization. / 命令需要逐项授权外部范围。');
         }
       }
@@ -195,7 +199,7 @@ export class DraftRunBatchCoordinator {
           result = await this.store.approveAndRun(entry.draftRunId, input.authorizedUris, {
             signal: op.controller.signal, expectedSpecHash: entry.specHash,
             rootTaskRunIds: input.rootTaskRunIds,
-            selectedProjectUri: input.selectedProjectUri,
+            selectedProjectUri: input.selectedProjectUri, approvalMode: input.approvalMode,
             verifyScope: async inspectScope => {
               if (!input.verifyEditDependencies) return;
               const scope = await inspectScope();

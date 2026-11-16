@@ -6,11 +6,6 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { test } from 'node:test';
 import * as vscode from './stubs/vscode';
-import { ModelSourceStore } from '../src/accounts/accountStore';
-import { ApprovalReviewerService } from '../src/approvals/approvalReviewer';
-import { ApprovalReviewStore } from '../src/approvals/approvalReviewStore';
-import { createDraftRunReviewRequest } from '../src/approvals/approvalReviewSurface';
-import { APPROVAL_POLICY_VERSION } from '../src/approvals/approvalReviewTypes';
 import { ExactOperationGrants, inspectAutomaticRunAuthorization, assertAutomaticRunAuthorization } from '../src/approvals/authorization';
 import { DraftRunAuthorizationService } from '../src/runs/draftRunAuthorization';
 import { SpawnDraftRunExecutor } from '../src/runs/draftRunExecutor';
@@ -20,7 +15,7 @@ import { interpretGitQueryResult, normalizeGitQueryResult } from '../src/runs/gi
 import { inspectDraftRunDependencyFacts } from '../src/runs/draftRunDependencies';
 import type { DraftRun } from '../src/shared/types';
 
-test('bounded Git queries preserve literal argv through real delegate and explicit ask launches', async t => {
+test('bounded Git queries preserve literal argv through real user-approved launches', async t => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'keepseek-local-query-')));
   const workspace = path.join(root, 'workspace');
   await mkdir(workspace);
@@ -43,24 +38,12 @@ test('bounded Git queries preserve literal argv through real delegate and explic
   git('commit', '--allow-empty', '-m', 'after tag again');
   git('tag', '-a', '-m', 'annotated fixture', 'v0.5.3', '0.5.0');
   git('branch', 'v0.5.3', 'HEAD');
+  // The launch identity must reflect this fixture repo, not extra system-wide
+  // Git configuration (for example a diff.astextplain textconv driver).
+  process.env.GIT_CONFIG_NOSYSTEM = '1';
+  process.env.GIT_CONFIG_GLOBAL = path.join(root, 'gitconfig-empty');
+  await writeFile(process.env.GIT_CONFIG_GLOBAL, '');
   const storage = vscode.Uri.file(path.join(root, 'storage')) as never;
-  const reviews = new ApprovalReviewStore(storage);
-  await reviews.initialize();
-  const sourceStore = new ModelSourceStore(storage);
-  await sourceStore.createSource({ id: 'query-source', provider: 'openai-compatible', name: 'Query source',
-    apiKey: 'fixture-only', models: [{ id: 'query-model' }] });
-  const modelContext = { model: { id: 'query-model', sourceId: 'query-source', provider: 'openai-compatible' as const,
-    label: 'Query model', contextWindowTokens: 32768, maxOutputTokens: 4096 } };
-  let reviewerCalls = 0;
-  const reviewer = new ApprovalReviewerService({ globalStorageUri: storage, workspaceKey: 'query-fixture',
-    sourceStore, store: reviews, getAutoSetting: () => ({ mode: 'follow-main' }),
-    requestText: async input => {
-      reviewerCalls++;
-      assert.equal(input.model.id, modelContext.model.id);
-      const { exactAction } = JSON.parse(input.userPrompt.split('\n')[2]);
-      return JSON.stringify({ decision: 'approve', risk: 'low', reason: 'Finite verified query.', policyRules: ['direct_user_goal'],
-        saferAlternative: '', affectedTargets: [exactAction.cwdUri] });
-    } });
   const executor = new SpawnDraftRunExecutor();
   const spawn = t.mock.method(childProcess, 'spawn');
   const launches = () => spawn.mock.calls.map(({ arguments: [, argv, options] }) => {
@@ -78,7 +61,7 @@ test('bounded Git queries preserve literal argv through real delegate and explic
       } });
     },
     cancel: id => executor.cancel(id), showTerminal: id => executor.showTerminal(id), dispose: () => executor.dispose()
-  }, new DraftRunAuthorizationService(reviews));
+  }, new DraftRunAuthorizationService());
   t.after(async () => {
     await runs.flush(); runs.dispose();
     Object.assign(vscode.workspace, saved);
@@ -109,41 +92,30 @@ test('bounded Git queries preserve literal argv through real delegate and explic
   assert.equal(runs.cloneAsPending(legacy.id), undefined);
   assert.equal(launches().length, 0, 'loading, rendering and attempting to run the historical card cannot launch it');
 
-  const execute = async (args: string[], mode: 'ask' | 'delegate' = 'delegate') => {
+  // Every launch is the exact ask-mode user-approved DraftRun: scope inspection
+  // prepares evidence, then the explicit user click supplies the only authority.
+  const execute = async (args: string[]) => {
     const proposal = await proposalFor(args);
     const [run] = runs.addProposals({ proposals: [proposal], ...ownership });
     assert.equal(run.status, 'pending');
     assert.equal(run.approvedAt, undefined);
     assert.equal(run.executionStarted, false);
     const grants = new ExactOperationGrants();
-    const decision = await inspectAutomaticRunAuthorization(run, grants, mode);
+    const decision = await inspectAutomaticRunAuthorization(run, grants, 'ask');
     assert.equal(decision.allowed, true, decision.refusal?.reason);
     assert.equal(decision.reviewable, true, JSON.stringify(decision.scope.diagnostics));
-    let result: DraftRun | undefined;
-    if (mode === 'delegate') {
-      const { record } = await reviewer.review({
-        ...createDraftRunReviewRequest({ draftRun: run, scope: decision.scope, rootTaskId: 'same-root', language: 'en',
-          history: [{ id: 'query-user', role: 'user', content: 'Inspect the requested repository objects.', createdAt: new Date().toISOString() }] }),
-        approvalMode: 'delegate', scopeFingerprint: decision.scope.fingerprint
-      }, modelContext);
-      assert.equal(record.decision, 'approve', record.rationale);
-      result = await runs.approveAndRun(run.id, decision.authorizedUris, {
-        delegatedApproval: () => true,
-        verifyScope: () => assertAutomaticRunAuthorization(run, grants, decision.scope.fingerprint, 'delegate'),
-        approvalRecord: { ...record, expectedSource: 'auto_approval_review', workspaceTrusted: true }
-      });
-    } else {
-      assert.equal(runs.get(run.id)?.status, 'pending', 'scope verification is not user approval');
-      result = await runs.approveAndRun(run.id, decision.authorizedUris, { expectedSpecHash: run.specHash, userApproval: () => true });
-      assert.equal(result?.authorizationSource, 'user_click');
-    }
+    assert.equal(runs.get(run.id)?.status, 'pending', 'scope verification is not user approval');
+    assert.equal(launches().length, 0, 'inspection alone never launches');
+    const result = await runs.approveAndRun(run.id, decision.authorizedUris, { approvalMode: 'ask',
+      expectedSpecHash: run.specHash, userApproval: () => true,
+      verifyScope: () => assertAutomaticRunAuthorization(run, grants, decision.scope.fingerprint, 'ask') });
     assert.ok(result);
+    assert.equal(result.authorizationSource, 'user_click');
     assert.equal(result.executionStarted, true);
     assert.equal(result.executionPhase, 'exited');
     assert.equal(await runs.approveAndRun(run.id, decision.authorizedUris), undefined, 'completed runs do not relaunch');
     return result;
-  };
-  const original = [
+  };  const original = [
     ['log', '--oneline', '--no-decorate', '0.5.0..HEAD'],
     ['tag', '--list', '0.5.0'],
     ['merge-base', '--is-ancestor', '0.5.0', 'HEAD'],
@@ -237,7 +209,7 @@ test('bounded Git queries preserve literal argv through real delegate and explic
   assert.deepEqual(prefixed.gitQueryResult?.values, [taggedCommit]);
   const lightweight = await execute(['rev-parse', '--verify', 'refs/tags/0.5.0^{commit}']);
   assert.deepEqual(lightweight.gitQueryResult?.values, [taggedCommit]);
-  const asked = await execute(['rev-parse', '--verify', '--quiet', '--end-of-options', 'v0.5.3^{commit}'], 'ask');
+  const asked = await execute(['rev-parse', '--verify', '--quiet', '--end-of-options', 'v0.5.3^{commit}']);
   assert.equal(asked.status, 'done');
   assert.deepEqual(asked.gitQueryResult?.values, [taggedCommit]);
   assert.equal(stdoutById.get(asked.id)?.trim(), taggedCommit, 'quiet verify emits exactly one full object ID on stdout');
@@ -272,7 +244,7 @@ test('bounded Git queries preserve literal argv through real delegate and explic
   const external = path.join(root, 'external');
   await mkdir(external);
   const [outside] = runs.addProposals({ proposals: [await proposalFor(historicalArgs, external)], ...ownership });
-  const outsideAuthorization = await inspectAutomaticRunAuthorization(outside, new ExactOperationGrants(), 'delegate');
+  const outsideAuthorization = await inspectAutomaticRunAuthorization(outside, new ExactOperationGrants(), 'ask');
   assert.equal(outsideAuthorization.requiresExactGrant, true);
   assert.equal(outsideAuthorization.reviewable, false);
   assert.equal(outsideAuthorization.refusal?.code, 'insufficient_launch_evidence');
@@ -281,37 +253,39 @@ test('bounded Git queries preserve literal argv through real delegate and explic
     proposalFor(historicalArgs), proposalFor(historicalArgs), proposalFor(historicalArgs)
   ]), ...ownership });
   vscode.workspace.isTrusted = false;
-  await assert.rejects(inspectAutomaticRunAuthorization(untrusted, new ExactOperationGrants(), 'delegate'), /workspace is not trusted/u);
+  await assert.rejects(inspectAutomaticRunAuthorization(untrusted, new ExactOperationGrants(), 'ask'), /workspace is not trusted/u);
   assert.equal((await runs.approveAndRun(untrusted.id, new Set()))?.executionStarted, false);
   vscode.workspace.isTrusted = true;
   assert.equal((await runs.approveAndRun(cancelled.id, new Set(), { userApproval: () => true, signal: AbortSignal.abort() }))?.executionStarted, false);
   git('config', 'remote.origin.promisor', 'true');
-  assert.equal((await inspectAutomaticRunAuthorization(unverified, new ExactOperationGrants(), 'delegate')).refusal?.code, 'insufficient_launch_evidence');
+  assert.equal((await inspectAutomaticRunAuthorization(unverified, new ExactOperationGrants(), 'ask')).refusal?.code, 'insufficient_launch_evidence');
   git('config', '--unset', 'remote.origin.promisor');
   if (process.platform !== 'win32') {
     const shim = path.join(workspace, 'git');
     await writeFile(shim, '#!/bin/sh\nexit 99\n', { mode: 0o700 });
     const proposal = await createDraftRunProposal({ executable: shim, args: historicalArgs, reason: 'Unverified Git launcher' });
     const [untrustedLauncher] = runs.addProposals({ proposals: [proposal], ...ownership });
-    assert.equal((await inspectAutomaticRunAuthorization(untrustedLauncher, new ExactOperationGrants(), 'delegate')).refusal?.code,
+    assert.equal((await inspectAutomaticRunAuthorization(untrustedLauncher, new ExactOperationGrants(), 'ask')).refusal?.code,
       'insufficient_launch_evidence');
     await rm(shim);
   }
+  // Without a reviewer there is no stored denial: a refused click (revoked
+  // authority) and a spec-hash mismatch both keep the query inert.
   const [denied] = runs.addProposals({ proposals: [await proposalFor(historicalArgs)], ...ownership });
-  await reviews.add({ sessionId: denied.sessionId, agentRunId: denied.agentRunId, rootTaskId: 'same-root', targetId: 'denied-prior-id',
-    actionKind: 'draft_run_execute', actionHash: denied.specHash, policyVersion: APPROVAL_POLICY_VERSION, approvalSource: 'local_policy',
-    reviewerSourceId: '', reviewerModelId: '', reviewerProvider: 'local_policy', decision: 'deny', risk: 'critical',
-    rationale: 'Existing hard denial fixture', policyRules: ['fixture'] });
-  const deniedAttempt = await runs.approveAndRun(denied.id, new Set(), { expectedSpecHash: denied.specHash, userApproval: () => true });
+  const deniedAttempt = await runs.approveAndRun(denied.id, new Set(), { expectedSpecHash: denied.specHash, userApproval: () => false });
   assert.equal(deniedAttempt?.executionStarted, false);
-  assert.equal(deniedAttempt?.error, 'Existing hard denial fixture');
+  assert.equal(deniedAttempt?.status, 'pending', 'a refused click never becomes a failed execution');
+  assert.match(deniedAttempt?.approvalHold?.reason ?? '', /cancelled or revoked/u);
+  const mismatched = await runs.approveAndRun(denied.id, new Set(), { expectedSpecHash: 'e'.repeat(64), userApproval: () => true });
+  assert.equal(mismatched?.executionStarted, false);
+  assert.equal(mismatched?.status, 'failed');
+  assert.match(mismatched?.error ?? '', /changed after review/u);
   assert.equal(git('for-each-ref', '--format=%(refname) %(objectname)'), refsBefore);
   assert.deepEqual(await readFile(indexFile), indexBefore);
   assert.deepEqual(await readFile(path.join(workspace, 'tracked.txt')), worktreeBefore);
   assert.equal(git('--no-optional-locks', 'status', '--porcelain'), '');
-  assert.equal(reviewerCalls, 20);
-  assert.equal(launches().length, 21, 'historical and refused commands add no launch to the 21 approved queries');
-  t.diagnostic('21 real DraftRun launches (20 delegate reviews, 1 explicit ask), 9 verify launches and 0 historical launches.');
+  assert.equal(launches().length, 21, 'historical and refused commands add no launch to the 21 user-approved queries');
+  t.diagnostic('21 real ask-mode DraftRun launches, 9 scope inspections and 0 historical or refused launches.');
 });
 
 test('verify output must be one full SHA-1 or SHA-256 object ID', () => {

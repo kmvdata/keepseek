@@ -61,7 +61,7 @@ test('invalid target, empty input and reused replacement identity never prepare 
   assert.equal(session.pendingHistoryTruncation, undefined);
 });
 
-for (const mode of ['ask', 'delegate'] as const) {
+for (const mode of ['ask', 'approve-all'] as const) {
   for (const target of ['u1', 'u2', 'u3']) {
     test(`${mode}: ${target} edits have identical truncation semantics for changed and unchanged text`, async () => {
       for (const unchanged of [true, false]) {

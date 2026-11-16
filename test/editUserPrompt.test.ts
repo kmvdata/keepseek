@@ -9,13 +9,12 @@ import * as vscode from './stubs/vscode';
 import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
 import type { PromptReferenceInput, WebviewMessage } from '../src/provider/webviewMessages';
 import { ModelSourceStore } from '../src/accounts/accountStore';
-import { DelegatedApprovalQueue } from '../src/agent/approvalMode';
 import { createRunCheckpoint, type RunCheckpoint } from '../src/agent/runCheckpoint';
 import { RunDetailsBuilder } from '../src/agent/logging/runDetails';
 import { getAgentToolNamesForPrompt } from '../src/agent/protocol';
 import { buildProviderRequestProjection } from '../src/agent/providerRequestProjection';
-import { ApprovalReviewStore } from '../src/approvals/approvalReviewStore';
 import { ExactOperationGrants } from '../src/approvals/authorization';
+import { SessionRunRegistry } from '../src/provider/sessionRunRegistry';
 import { ChangeSetStore } from '../src/edits/changeSetStore';
 import { DraftDiffService } from '../src/edits/draftDiffService';
 import { SafeFileEditor } from '../src/edits/safeFileEditor';
@@ -38,11 +37,9 @@ type Host = {
   handleMessage(message: WebviewMessage): Promise<void>;
   isBusy?: boolean;
   isStartingRun?: boolean;
-  delegatedApprovalInFlight?: boolean;
   draftRunAutoContinueInFlight?: boolean;
   activeDraftRunId?: string;
   activeChangeActions: Set<string>;
-  manualToolApproval?: { view: { id: string }; decide(reason: string): void };
   recoverHistoryTruncation(session: ReturnType<ChatSessionStore['getActiveSession']>): Promise<void>;
   handleDraftRunStoreEvent(event: DraftRunStoreEvent): void;
   flushDraftRunOutputEvent(): void;
@@ -56,7 +53,6 @@ type Host = {
 test('real submission preparation never acknowledges acceptance or dispatches a model before user bytes are durable', async () => {
   await fixture('ask', async f => {
     const prompt = 'Keep this draft when the initial user write fails';
-    f.queue.cancel();
     const feedback: Array<{ type?: string; requestId?: string; status?: string }> = [];
     Object.assign(f.host, { postToWebview: (message: typeof feedback[number]) => feedback.push(message) });
     const persist = f.sessions.persist.bind(f.sessions);
@@ -75,7 +71,7 @@ test('real submission preparation never acknowledges acceptance or dispatches a 
   });
 });
 
-for (const mode of ['ask', 'delegate'] as const) {
+for (const mode of ['ask', 'approve-all'] as const) {
   for (const index of [0, 1, 2]) {
     for (const changed of [false, true]) {
       test(`${mode} editing user ${index + 1} ${changed ? 'with changes' : 'unchanged'} truncates sources, preserves earlier records and starts a new task`, async () => {
@@ -97,10 +93,6 @@ for (const mode of ['ask', 'delegate'] as const) {
           assert.deepEqual(f.session.messages.slice(0, index * 2).map(stableHistoryMessage), preserved);
           assert.ok(f.session.messages.every(message => !removedIds.has(message.id)));
           assert.equal(f.session.requestProtocol?.toolNames?.join(','), f.frozenToolNames.join(','));
-          assert.equal(f.queue.take(f.session.id), undefined);
-          assert.equal(f.session.pendingApproval, undefined);
-          assert.equal(f.session.approvalProcessing, undefined);
-          assert.ok(f.manualCancelled());
           const content = replacement.providerContent ?? replacement.content;
           for (let source = 0; source < 3; source++) {
             const pending = f.runs.get(f.pendingIds[source])!;
@@ -132,7 +124,7 @@ for (const mode of ['ask', 'delegate'] as const) {
 }
 
 test('late checkpoint, old manual button and stale approval response cannot restore a truncated source', async () => {
-  await fixture('delegate', async f => {
+  await fixture('ask', async f => {
     const removed = f.assistants[2];
     const checkpoint = structuredClone(removed.runCheckpoint!);
     const lateProposal = await createDraftRunProposal({ executable: 'node', args: ['--version'], reason: 'Late proposal' });
@@ -142,11 +134,11 @@ test('late checkpoint, old manual button and stale approval response cannot rest
     const before = JSON.stringify(f.session.messages);
     await f.host.saveAgentCheckpoint(f.session, removed, checkpoint);
     assert.equal(f.runs.get(lateProposal.id), undefined);
-    f.host.queueResponseApprovals(f.session, removed, checkpoint.finalResponse);
-    assert.equal(f.queue.take(f.session.id), undefined);
-    await f.host.handleMessage({ type: 'resolveValidationApproval', id: 'old-manual', approve: true });
+    // A stale decision for a card from the truncated source is inert: the source
+    // relationship and the message list stay byte-identical.
+    await f.host.handleMessage({ type: 'rejectDraftRun', id: 'old-manual' });
     assert.equal(JSON.stringify(f.session.messages), before);
-    assert.equal(f.session.pendingApproval, undefined);
+    assert.equal(f.runs.get('old-manual'), undefined);
   });
 });
 
@@ -156,7 +148,7 @@ test('empty prompt, invalid target and busy command, reviewer, Apply or continua
     const runsBefore = JSON.stringify(f.runs.toWebviewState(f.session.id));
     await f.host.sendPrompt('   ', 'source', 'model', {}, { replaceMessageId: f.users[1].id });
     await f.host.sendPrompt('new', 'source', 'model', {}, { replaceMessageId: 'missing' });
-    for (const flag of ['isBusy', 'delegatedApprovalInFlight', 'draftRunAutoContinueInFlight'] as const) {
+    for (const flag of ['isBusy', 'draftRunAutoContinueInFlight'] as const) {
       f.host[flag] = true;
       await f.host.sendPrompt('new', 'source', 'model', {}, { replaceMessageId: f.users[1].id });
       f.host[flag] = false;
@@ -312,7 +304,7 @@ test('editing a middle user drops deleted suffix context archives and preserves 
   });
 });
 
-for (const mode of ['ask', 'delegate'] as const) {
+for (const mode of ['ask', 'approve-all'] as const) {
   test(`${mode}: editing the first user rebases deleted implicit Skill context and excludes its stale archive`, async () => {
     await fixture(mode, async f => {
       const deletedSkill = 'DELETED_FIRST_TASK_IMPLICIT_SKILL_INSTRUCTION';
@@ -344,7 +336,7 @@ for (const mode of ['ask', 'delegate'] as const) {
   });
 }
 
-async function fixture(mode: 'ask' | 'delegate', body: (f: Awaited<ReturnType<typeof createFixture>>) => Promise<void>): Promise<void> {
+async function fixture(mode: 'ask' | 'approve-all', body: (f: Awaited<ReturnType<typeof createFixture>>) => Promise<void>): Promise<void> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-edit-user-'));
   const folders = vscode.workspace.workspaceFolders;
   const trusted = vscode.workspace.isTrusted;
@@ -352,7 +344,7 @@ async function fixture(mode: 'ask' | 'delegate', body: (f: Awaited<ReturnType<ty
   try { f = await createFixture(root, mode); await body(f); }
   finally {
     if (f) {
-      await f.runs.flush(); await f.edits.flush(); await f.storage.flush(); await f.reviews.flush();
+      await f.runs.flush(); await f.edits.flush(); await f.storage.flush();
       f.runs.dispose(); f.diff.dispose(); f.clock.dispose();
     }
     vscode.workspace.workspaceFolders = folders; vscode.workspace.isTrusted = trusted;
@@ -367,7 +359,7 @@ function stableHistoryMessage(message: ChatMessage): string {
   return JSON.stringify(history);
 }
 
-async function createFixture(root: string, mode: 'ask' | 'delegate') {
+async function createFixture(root: string, mode: 'ask' | 'approve-all') {
   const workspace = path.join(root, 'project'); await mkdir(workspace);
   vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file(workspace), name: 'project' }];
   vscode.workspace.isTrusted = true;
@@ -396,9 +388,8 @@ async function createFixture(root: string, mode: 'ask' | 'delegate') {
   }
   const sourceStore = new ModelSourceStore(uri);
   await sourceStore.createSource({ id: 'source', provider: 'openai-compatible', name: 'Test', apiKey: 'fake-key', models: [{ id: 'model' }] });
-  const reviews = new ApprovalReviewStore(uri); await reviews.initialize();
   const runs = new DraftRunStore(uri, { execute: async () => ({ exitCode: 0, timedOut: false, cancelled: false }),
-    cancel: () => false, showTerminal: () => false, dispose: () => {} }, new DraftRunAuthorizationService(reviews));
+    cancel: () => false, showTerminal: () => false, dispose: () => {} }, new DraftRunAuthorizationService());
   const diff = new DraftDiffService();
   const edits = new ChangeSetStore(new SafeFileEditor(), diff, sessions, uri, key => key);
   const pendingIds: string[] = [], doneIds: string[] = [];
@@ -406,7 +397,7 @@ async function createFixture(root: string, mode: 'ask' | 'delegate') {
     const pending = await createDraftRunProposal({ executable: 'node', args: ['--version'], reason: `Pending ${i}` });
     const done = await createDraftRunProposal({ executable: 'node', args: ['--version'], reason: `Done ${i}` });
     runs.addProposals({ proposals: [pending, done], agentRunId: assistants[i].runCheckpoint!.taskId, sessionId: session.id, messageId: assistants[i].id });
-    await runs.approveAndRun(done.id, new Set());
+    await runs.approveAndRun(done.id, new Set(), { approvalMode: session.approvalMode });
     if (i < 2) runs.bindResultsToMessage([done.id], users[2].id);
     pendingIds.push(pending.id); doneIds.push(done.id);
     edits.addDraftEdits({ edits: [createFullTextDraftEdit({ id: `edit-${i}`, uri: vscode.Uri.file(path.join(workspace, `new-${i}.txt`)).toString(), label: `new-${i}.txt`,
@@ -414,22 +405,15 @@ async function createFixture(root: string, mode: 'ask' | 'delegate') {
     runId: assistants[i].runCheckpoint!.taskId, sessionId: session.id, messageId: assistants[i].id });
   }
   const effectFile = path.join(workspace, 'already-applied.txt'); await writeFile(effectFile, 'already happened\n');
-  const queue = new DelegatedApprovalQueue();
-  queue.enqueue({ sessionId: session.id, runId: assistants[2].runCheckpoint!.taskId, editIds: ['edit-2'], draftRunIds: [pendingIds[2]] });
-  session.approvalProcessing = { version: 2, runId: assistants[2].runCheckpoint!.taskId, rootTaskId: users[2].id,
-    mode: 'delegate', status: 'blocked', targets: [{ id: pendingIds[2], kind: 'command', status: 'manual_required' }], updatedAt: '' };
-  session.pendingApproval = { version: 1, id: 'old-manual', sessionId: session.id, rootTaskId: users[2].id, agentRunId: assistants[2].runCheckpoint!.taskId,
-    targetId: pendingIds[2], actionHash: runs.get(pendingIds[2])!.specHash, label: 'Old command', reason: 'Permission needed', status: 'waiting' };
   const response = { runId: 'new-trace', message: 'New answer', draftEdits: [], draftRuns: [],
     runDetails: new RunDetailsBuilder({ runId: 'new-trace', modelId: 'model', thinkingEnabled: false }).build('succeeded') } as unknown as AgentResponse;
   const clock = new UserTaskClock();
   const requests: AgentRequest[] = [];
   const webviewEvents: unknown[] = [];
-  let cancelled = false;
   const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
     globalStorageUri: uri, language: 'en', sessionStore: sessions, sourceStore, taskClock: clock,
-    changeSets: edits, draftRuns: runs, draftRunBatches: new DraftRunBatchCoordinator(runs), approvalReviews: reviews,
-    delegatedApprovals: queue, externalEffectGrants: new ExactOperationGrants(), authorizedExternalExecutionUris: new Set(),
+    changeSets: edits, draftRuns: runs, draftRunBatches: new DraftRunBatchCoordinator(runs),
+    externalEffectGrants: new ExactOperationGrants(), authorizedExternalExecutionUris: new Set(),
     authorizedExternalReferenceUris: new Set(), activeChangeActions: new Set(), sessionReady: true, approvalDataReady: true, requestContextReady: true,
     commandSettingsReadiness: { mainModel: 'ready', subagentModel: 'ready', executionMode: 'ready', approvalMode: 'ready' },
     runContextReadiness: 'ready', stateRevision: 0,
@@ -440,6 +424,7 @@ async function createFixture(root: string, mode: 'ask' | 'delegate') {
     fileContext: { getAll: () => [] }, agentSettings: settings, availableModels: [model], selectedSourceId: 'source', selectedModelId: 'model',
     modelSelectionTransactions: { beginRun: () => {} }, repairLoopsBySession: new Map(), taskPlansBySession: new Map(),
     currentRunContextsBySession: new Map(), slimToolNamesBySession: new Map(), sessionTraceLogUris: new Map(), approvalMainContexts: new Map(),
+    sessionRuns: new SessionRunRegistry(), runAbortControllers: new Map<string, AbortController>(), visibleMessageLimits: new Map<string, number>(),
     backgroundRunCoordinator: { getActiveRun: () => undefined }, hasActiveBackgroundRun: () => false,
     skillStore: { getManifests: () => [], getManifest: () => undefined, invalidateImplicitSkillSnapshot: () => {} },
     refreshModelSourceState: async () => {}, awaitRunContextRefresh: async () => true,
@@ -456,13 +441,7 @@ async function createFixture(root: string, mode: 'ask' | 'delegate') {
     applyPromptCacheDiagnostics: () => [], createRunCacheSummary: () => undefined, applyPendingModelSelectionAfterRun: async () => {},
     postState: () => {}, postToWebview: (value: unknown) => webviewEvents.push(value), setAgentActivity: () => {}, refreshBalance: async () => {},
     scheduleDraftRunAutoContinuation: () => {}, queueResponseApprovals: () => {}, checkpointActivityDepth: 0,
-    getApprovalReviewerModelContext: async () => undefined
   }) as Host;
-  host.manualToolApproval = { view: { id: 'old-manual' }, decide: reason => {
-    assert.ok(['history_changed', 'stale_request'].includes(reason));
-    cancelled = true;
-    host.manualToolApproval = undefined;
-  } };
   // Run the production stale-source enqueue guard explicitly in the late-result test.
   const send = host.sendPrompt.bind(host);
   host.sendPrompt = async (...args) => {
@@ -470,6 +449,6 @@ async function createFixture(root: string, mode: 'ask' | 'delegate') {
     host.queueResponseApprovals = (KeepseekChatViewProvider.prototype as unknown as Host).queueResponseApprovals;
     return result;
   };
-  return { root, session, sessions, users, assistants, host, requests, runs, edits, reviews, queue, clock, storage, diff,
-    pendingIds, doneIds, effectFile, response, frozenToolNames, webviewEvents, manualCancelled: () => cancelled };
+  return { root, session, sessions, users, assistants, host, requests, runs, edits, clock, storage, diff,
+    pendingIds, doneIds, effectFile, response, frozenToolNames, webviewEvents };
 }

@@ -22,8 +22,7 @@ import {
   getConfiguredAgentMaxExecutionMs,
   getConfiguredEvidenceMaxBytes,
   getConfiguredPatchSettings,
-  getConfiguredProviderInlineResultMaxChars,
-  getConfiguredWorkspaceReadMaxBytes
+  getConfiguredProviderInlineResultMaxChars
 } from '../shared/config';
 import { createHash, randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
@@ -120,8 +119,8 @@ import {
   createContextUsageEstimateFromMessages,
   createContextUsageEstimateFromResponses
 } from './contextUsage';
-import { normalizeWorkspaceReadRange, WorkspaceToolAdapter, WorkspaceToolService } from './tools/workspaceTools';
-import { preflightSafeValidation, type ValidationPreflightResult, ValidationToolAdapter, ValidationToolService } from './tools/validationTools';
+import { WorkspaceToolAdapter, WorkspaceToolService } from './tools/workspaceTools';
+import { preflightSafeValidation, ValidationToolAdapter, ValidationToolService } from './tools/validationTools';
 import { SemanticToolAdapter, SemanticToolService } from './tools/semanticTools';
 import { GitToolAdapter, GitToolService } from './tools/gitTools';
 import { createAuthorizationDeniedToolResult, getToolAuthorizationMetadata } from './tools/toolAuthorization';
@@ -455,11 +454,6 @@ export class AgentLoop {
     cp.attempt++; cp.status = 'running'; cp.stopReason = undefined; cp.error = undefined;
     const ownClock = new ExecutionClock(limit, cp.usedMs);
     const clocks = request.taskClock ? [ownClock, request.taskClock] : [ownClock];
-    const restoreActiveDeadline = () => {
-      const remaining = Math.min(...clocks.map(clock => clock.remainingMs));
-      const deadline = Math.min(Date.now() + remaining, parentRunBudget?.deadlineAt ?? Infinity);
-      activeRunBudget.state.deadlineAt = Number.isFinite(deadline) ? new Date(deadline).toISOString() : undefined;
-    };
     let releases: Array<() => void> = [];
     const resumeClock = () => { if (!releases.length) releases = clocks.map((clock) => clock.enter()); };
     const suspendClock = () => { releases.forEach((release) => release()); releases = []; };
@@ -2554,7 +2548,8 @@ export class AgentLoop {
         }, { finishReason: budgetReason, stopped: true });
       }
       let failedPlan;
-      if (error instanceof AgentInterruptedError && error.reason === 'waiting_for_user') {
+      const approvalPaused = error instanceof AgentInterruptedError && error.reason === 'waiting_for_user';
+      if (approvalPaused) {
         const plan = taskPlan.getPlan();
         failedPlan = { ...plan, status: 'blocked' as const, blockers: [...plan.blockers, error.message] };
       } else if (error instanceof AgentRunAbortedError || request.signal?.aborted) {

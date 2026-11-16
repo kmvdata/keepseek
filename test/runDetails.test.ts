@@ -11,41 +11,32 @@ import { getScript } from '../src/webview/script';
 import { createWebviewDomHarness } from './webviewDomHarness';
 
 describe('RunDetailsBuilder', () => {
-  it('restores audit snapshots and renders approval provenance and interruption in both languages', () => {
+  it('restores authorization audit snapshots and renders their source, redaction and execution outcome in both languages', () => {
     const builder = new RunDetailsBuilder({ runId: 'review-run', modelId: 'main-model', thinkingEnabled: false });
     const timestamp = '2026-11-11T00:00:00.000Z';
-    const baseReview = { sessionId: 'A', rootTaskId: 'task', agentRunId: 'review-run', targetId: 'exact-target',
-      actionKind: 'draft_run_execute', createdAt: timestamp, risk: 'low', rationale: 'Fixture rationale', decision: 'approve' };
     const session = normalizeStoredSessions({ sessions: [{ id: 'A', title: 'Audit', createdAt: timestamp,
       messages: [{ id: 'assistant', role: 'assistant', content: '', createdAt: timestamp, runDetails: { ...builder.build(),
-        authorizations: [{ toolName: 'coarse-source', allowed: true, riskLevel: 'low', scope: 'validation', source: 'delegated_approver' }],
-        approvalReviews: [
-          { ...baseReview, reviewId: 'historical-host', approvalSource: 'host_policy', policyVersion: 2 },
-          { ...baseReview, reviewId: 'historical-model', approvalSource: 'auto_approval_review', policyVersion: 5,
-            reviewerModelId: 'older-reviewer', projectApproval: true },
-          { ...baseReview, reviewId: 'historical-user', approvalSource: 'user_click', policyVersion: 2 },
-          { ...baseReview, reviewId: 'new-review', approvalSource: 'auto_approval_review', policyVersion: 6,
-            reviewerSourceId: 'review-source', reviewerModelId: 'actual-reviewer', decision: 'needs_user', risk: 'critical' },
-          { ...baseReview, reviewId: 'project-review', approvalSource: 'auto_approval_review', policyVersion: 7,
-            reviewerSourceId: 'review-source', reviewerModelId: 'project-reviewer', projectApproval: true },
-          { ...baseReview, reviewId: 'invalid-config', approvalSource: 'auto_approval_review', policyVersion: 7,
-            reviewerModelId: 'never-requested', decision: 'unavailable', reviewState: 'configuration_unavailable', projectApproval: true },
-          { ...baseReview, reviewId: 'interrupted', approvalSource: 'auto_approval_review', policyVersion: 6,
-            decision: 'unavailable', reviewState: 'in_progress', exactAction: { secret: 'never-display' } }
+        authorizations: [
+          { toolName: 'read_file', allowed: true, riskLevel: 'low', scope: 'workspace_read', source: 'low_risk' },
+          { toolName: 'run_validation', allowed: true, riskLevel: 'medium', scope: 'validation_test',
+            source: 'delegated_approver', reason: 'Project script apiKey=[redacted]' },
+          { toolName: 'write_file', allowed: false, riskLevel: 'high', scope: 'workspace_write', source: 'user_denied' }
         ] } }]
     }] }, { key: 'workspace:ui', name: 'UI', folderUris: [] })[0];
-    const reviews = session.messages[0].runDetails?.approvalReviews;
-    assert.deepEqual(reviews?.map(review => review.policyVersion), [2, 5, 2, 6, 7, 7, 6]);
-    assert.deepEqual(reviews?.filter(review => review.projectApproval).map(review => review.reviewId), ['project-review']);
-    assert.equal(reviews?.at(-1)?.reviewState, 'interrupted');
-    assert.doesNotMatch(JSON.stringify(reviews), /never-display/u);
+    const authorizations = session.messages[0].runDetails?.authorizations ?? [];
+    assert.deepEqual(authorizations.map(record => record.toolName), ['read_file', 'run_validation', 'write_file']);
+    assert.deepEqual(authorizations.map(record => record.allowed), [true, true, false]);
+    assert.equal(authorizations[2].riskLevel, 'high');
+    assert.equal(authorizations[1].scope, 'validation_test');
+    assert.equal(authorizations[1].reason, 'Project script apiKey=[redacted]');
+    assert.doesNotMatch(JSON.stringify(authorizations), /secret-forbidden/u);
     for (const language of ['zh-CN', 'en'] as const) {
       const view = createWebviewDomHarness();
       view.receive({ type: 'state', revision: 1, state: { activeSessionId: session.id, language, messages: session.messages,
-        approvalMode: 'delegate', draftRuns: [
+        approvalMode: 'approve-all', draftRuns: [
           { id: 'exact-target', sessionId: session.id, messageId: 'assistant', status: 'done', executionStarted: true,
-            executionPhase: 'exited', exitCode: 0, spec: { executable: 'node', args: ['entry.js'], reason: 'Project script' },
-            approvalReview: reviews?.find(review => review.reviewId === 'project-review') },
+            executionPhase: 'exited', exitCode: 0, authorizationSource: 'delegated_approver',
+            spec: { executable: 'node', args: ['entry.js'], reason: 'Project script' } },
           { id: 'unknown', sessionId: session.id, messageId: 'assistant', status: 'failed', executionStarted: true,
             executionPhase: 'result_unknown', exitCode: 13, spec: { executable: 'node', args: ['other.js'] } }
         ],
@@ -54,17 +45,14 @@ describe('RunDetailsBuilder', () => {
       const details = transcript.querySelector('.run-details');
       assert.ok(details);
       const labels = WEBVIEW_TRANSLATIONS[language];
-      for (const label of [labels.approvalSourceHost, labels.approvalSourceDelegatedExecution, labels.approvalNeedsUser,
-        labels.approvalRiskCritical, labels.approvalReviewState_configuration_unavailable, labels.approvalReviewState_interrupted,
-        labels.approvalProjectAutoApproved, labels.runDetailsCommandResults, labels.draftRunExitCode.replace('{code}', '0')]) {
+      for (const label of [labels.runDetailsCommandResults, labels.draftRunExitCode.replace('{code}', '0'),
+        labels.approvalSourceLabel, 'read_file', 'run_validation', 'write_file', 'workspace_read', 'workspace_write']) {
         assert.ok(details.textContent.includes(label), label);
       }
-      assert.match(details.textContent, /review-source \/ actual-reviewer/u);
-      assert.match(details.textContent, /review-source \/ project-reviewer/u);
-      assert.doesNotMatch(details.textContent, /never-requested|never-display/u);
-      assert.equal(details.textContent.split(labels.approvalSourceHost).length - 1, 1);
+      assert.ok(details.textContent.includes('user_denied'), 'an unmapped authorization source stays literal');
+      assert.ok(details.textContent.includes('apiKey=[redacted]'));
+      assert.doesNotMatch(details.textContent, /never-display|secret-forbidden/u);
       const card = transcript.querySelector('[data-draft-run-id="exact-target"]');
-      assert.ok(card?.textContent.includes(labels.approvalProjectAutoApproved));
       assert.ok(card?.textContent.includes(labels.draftRunExitCode.replace('{code}', '0')));
       assert.ok(!transcript.textContent.includes(labels.draftRunExitCode.replace('{code}', '13')));
       assert.equal(transcript.querySelector('button[data-manual-approval-action]'), null);

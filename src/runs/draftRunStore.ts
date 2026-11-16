@@ -25,7 +25,7 @@ import { executionSegmentId } from '../sessions/userTask';
 import { hasExactCommandScope, type CommandScope } from '../approvals/authorization/commandScope';
 import { analyzeDraftRunEffects, inspectDraftRunScope, checkDraftRunApprovalBoundary, validateDraftRunBeforeApproval } from '../approvals/authorization';
 import { DraftRunAuthorizationService } from './draftRunAuthorization';
-import { redactSensitiveReviewText } from '../approvals/approvalPolicy';
+import { redactSensitiveReviewText } from '../approvals/sensitiveText';
 import { normalizeApprovalDependency, normalizeDraftRunReplan, type ApprovalDependency, type DraftRunReplanResult } from '../approvals/approvalProcessing';
 import { normalizeGitPushAttempt, normalizeGitReleaseEvidence, type GitPushAttempt, type GitReleaseEvidence } from './gitReleaseEvidence';
 import type { VerifiedDraftRunLaunch } from './draftRunExecutor';
@@ -700,6 +700,8 @@ export class DraftRunStore {
       userApproval?: () => boolean;
       expectedSpecHash?: string;
       rootTaskRunIds?: ReadonlySet<string>;
+      /** Selected approval mode; Ask keeps every user confirmation. */
+      approvalMode?: ApprovalMode;
     } = {}
   ): Promise<DraftRun | undefined> {
     const draftRun = this.draftRuns.get(id);
@@ -732,7 +734,7 @@ export class DraftRunStore {
         // runs only through the host approval path and never in a plain batch.
         if (restricted) throw new Error('Restricted validation requires its own automatic approval.');
         let fingerprint: string | undefined;
-        const approvalMode = 'ask' as const;
+        const approvalMode = options.approvalMode ?? 'ask';
         const verifyScope = async () => {
           await this.assertDependencyFacts(draftRun, authorizedExternalReferenceUris, options.rootTaskRunIds, options.selectedProjectUri);
           let inspection: Promise<CommandScope> | undefined;

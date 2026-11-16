@@ -1,10 +1,6 @@
 import { normalizeProviderReplay } from './providerReplayNormalization';
 import { normalizePendingHistoryTruncation } from './historyTruncation';
-import { normalizeManualApproval, normalizeManualApprovals } from '../approvals/manualApproval';
-import { APPROVAL_POLICY_VERSION, MAX_APPROVAL_TARGETS, normalizeApprovalAttemptFailures, normalizeApprovalExecutionIsolation,
-  normalizeApprovalReviewAttempts, normalizeApprovalReviewState, normalizeBusinessAuthorization } from '../approvals/approvalReviewTypes';
 import { normalizeUserTaskBudgets } from './userTaskBudget';
-import { normalizeApprovalProcessing } from '../approvals/approvalProcessing';
 import { normalizeUserTask } from './userTask';
 import { reconcileExecutionTime } from './executionTimeStats';
 import { normalizeRequestBudget } from '../agent/requestBudget';
@@ -496,9 +492,6 @@ ormal while another session is ahead of it in the
     const copied: ChatSession = {
       ...source,
       pendingHistoryTruncation: undefined,
-      pendingApproval: undefined,
-      pendingApprovals: undefined,
-      approvalProcessing: undefined,
       approvalMode: this.approvalModeValue,
       executionMode: 'normal',
       planWorkflows: undefined,
@@ -1370,8 +1363,6 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
       autoTitle,
       messages,
       approvalMode: normalizeStoredApprovalMode(item.approvalMode),
-      pendingApproval: normalizeManualApproval(item.pendingApproval),
-      pendingApprovals: normalizeManualApprovals(item.pendingApprovals, item.id),
       pendingHistoryTruncation: normalizePendingHistoryTruncation(item.pendingHistoryTruncation, item.id, normalizeStoredMessage),
       executionMode: normalizeExecutionMode(item.executionMode),
       planWorkflows: normalizePlanWorkflowRecords(item.planWorkflows, item.id),
@@ -1387,7 +1378,6 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
       repairLoop: normalizeRepairLoopState(item.repairLoop),
       contextUsage: normalizeContextUsageEstimateValue(item.contextUsage),
       executionTime: reconcileExecutionTime(item.executionTime, messages),
-      approvalProcessing: normalizeApprovalProcessing(item.approvalProcessing),
       userTaskBudgets: normalizeUserTaskBudgets(item.userTaskBudgets),
       usageStats: normalizeSessionUsageStatsValue(item.usageStats),
       usageLedger: normalizeUsageLedgerValue(item.usageLedger),
@@ -1593,7 +1583,7 @@ function normalizeAgentToolResult(value: unknown): AgentToolResult | undefined {
   };
 }
 
-function normalizeRunDetails(value: unknown, restoring = false): ChatMessage['runDetails'] {
+function normalizeRunDetails(value: unknown, _restoring = false): ChatMessage['runDetails'] {
   if (!isRecord(value) || typeof value.runId !== 'string' || typeof value.modelId !== 'string') {
     return undefined;
   }
@@ -1654,45 +1644,6 @@ function normalizeRunDetails(value: unknown, restoring = false): ChatMessage['ru
           reason: typeof authorization.reason === 'string' ? authorization.reason.slice(0, 240) : undefined
         }))
       : [],
-    approvalReviews: Array.isArray(value.approvalReviews)
-      ? value.approvalReviews.filter(isRecord).slice(0, 100).map((review) => ({
-          reviewId: typeof review.reviewId === 'string' ? review.reviewId : '',
-          sessionId: typeof review.sessionId === 'string' ? review.sessionId : '',
-          rootTaskId: typeof review.rootTaskId === 'string' ? review.rootTaskId : '',
-          agentRunId: typeof review.agentRunId === 'string' ? review.agentRunId : '',
-          targetId: typeof review.targetId === 'string' ? review.targetId : '',
-          actionKind: review.actionKind as import('../approvals/approvalReviewTypes').ApprovalActionKind,
-          policyVersion: normalizeNonNegativeInteger(review.policyVersion),
-          approvalMode: (review.approvalMode === 'delegate' ? review.approvalMode : undefined) as import('../approvals/approvalReviewTypes').ApprovalReviewDisplay['approvalMode'],
-          osIsolation: normalizeApprovalExecutionIsolation(review.osIsolation),
-          businessAuthorization: normalizeBusinessAuthorization(review.businessAuthorization),
-          authorizationPending: review.authorizationPending === true ? true as const : undefined,
-          projectApproval: review.projectApproval === true && typeof review.policyVersion === 'number'
-            && Number.isInteger(review.policyVersion) && review.policyVersion >= 7
-            && review.approvalSource === 'auto_approval_review' && review.decision === 'approve' && review.reviewState === undefined
-            && typeof review.reviewerModelId === 'string' && review.reviewerModelId.length > 0
-            && (review.risk === 'low' || review.risk === 'medium' || review.risk === 'high'
-              && review.policyVersion === APPROVAL_POLICY_VERSION && normalizeBusinessAuthorization(review.businessAuthorization)) ? true as const : undefined,
-          approvalSource: review.approvalSource as import('../approvals/approvalReviewTypes').ApprovalReviewSource,
-          reviewerSourceId: typeof review.reviewerSourceId === 'string' ? review.reviewerSourceId : '',
-          reviewerModelId: typeof review.reviewerModelId === 'string' ? review.reviewerModelId : '',
-          reviewerProvider: typeof review.reviewerProvider === 'string' ? review.reviewerProvider : '',
-          decision: (review.decision === 'approve' || review.decision === 'needs_user' || review.decision === 'deny' ? review.decision : 'unavailable') as import('../approvals/approvalReviewTypes').ApprovalReviewDisplay['decision'],
-          reviewState: restoring && review.reviewState === 'in_progress' ? 'interrupted' as const : normalizeApprovalReviewState(review.reviewState),
-          reviewAttempts: normalizeApprovalReviewAttempts(review.reviewAttempts),
-          attemptFailures: normalizeApprovalAttemptFailures(review.attemptFailures),
-          riskUnassessed: review.riskUnassessed === true ? true as const : undefined,
-          risk: (review.risk === 'low' || review.risk === 'medium' || review.risk === 'critical' ? review.risk : 'high') as import('../approvals/approvalReviewTypes').ApprovalReviewRisk,
-          rationale: typeof review.rationale === 'string' ? review.rationale.slice(0, 800) : '',
-          affectedTargets: Array.isArray(review.affectedTargets)
-            ? review.affectedTargets.filter((target): target is string => typeof target === 'string').slice(0, MAX_APPROVAL_TARGETS).map(target => target.slice(0, 300)) : undefined,
-          saferAlternative: typeof review.saferAlternative === 'string' ? review.saferAlternative.slice(0, 1200) : undefined,
-          createdAt: normalizeSessionTimestamp(review.createdAt, new Date().toISOString()),
-          priorReviewId: typeof review.priorReviewId === 'string' ? review.priorReviewId : undefined,
-          userRequestId: typeof review.userRequestId === 'string' ? review.userRequestId : undefined,
-          consumedAt: normalizeOptionalTimestamp(review.consumedAt)
-        })).filter((review) => Boolean(review.reviewId))
-      : undefined,
     changeSets: Array.isArray(value.changeSets)
       ? value.changeSets.filter(isRecord).slice(0, 20).map((changeSet) => ({
           id: typeof changeSet.id === 'string' ? changeSet.id : '',
@@ -1888,12 +1839,7 @@ function normalizeRunDetailsTaskPlan(value: unknown): NonNullable<ChatMessage['r
 }
 
 function normalizeAuthorizationSource(value: unknown): NonNullable<ChatMessage['runDetails']>['authorizations'][number]['source'] {
-  return value === 'low_risk'
-    || value === 'model_reviewer'
-    || value === 'delegated_approver'
-    || value === 'user_denied'
-    ? value
-    : 'user_denied';
+  return value === 'low_risk' || value === 'user_denied' ? value : 'user_denied';
 }
 
 function normalizeChangeSetStatus(value: unknown): NonNullable<ChatMessage['runDetails']>['changeSets'][number]['status'] {

@@ -160,7 +160,8 @@ export const commandMenuTemplateFragment: WebviewFragment = {
               </span>
               <span id="commandApprovalModeValue" class="command-row-value command-model-current" data-i18n="approvalAsk">请求批准</span>
             </button>
-            <div id="commandApprovalModeList" class="command-model-list hidden" role="group" aria-label="审批模式" data-i18n-aria-label="approvalMode"></div>            <div class="command-control-row command-compression-row">
+            <div id="commandApprovalModeList" class="command-model-list hidden" role="group" aria-label="审批模式" data-i18n-aria-label="approvalMode"></div>
+            <div class="command-control-row command-compression-row">
               <span class="command-row-main">
                 <span class="command-row-title" data-i18n="compressionThreshold">自动压缩阈值</span>
                 <span

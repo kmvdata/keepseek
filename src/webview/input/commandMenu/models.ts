@@ -125,27 +125,17 @@ export const subagentAndPendingBindingsFragment: WebviewFragment = {
           event.preventDefault();
           event.stopPropagation();
           var selectedProfile = button.dataset.subagentModelProfile || commandSubagentModelProfile || 'research';
-          var isApproval = selectedProfile === 'approval';
-          if (isApproval && isApprovalReviewerSelectionLocked()) { return; }
           var mode = button.dataset.subagentModelMode || 'follow-main';
           var statusValue = t('subagentModelFollowMain');
           if (mode === 'fixed') {
             var sourceId = button.dataset.sourceId || '';
             var modelId = button.dataset.modelId || '';
             if (!sourceId || !modelId) { return; }
-            if (isApproval) {
-              vscode.postMessage({ type: 'setApprovalModel', mode: 'fixed', sourceId: sourceId, modelId: modelId });
-            } else {
-              vscode.postMessage({ type: 'setSubagentModel', mode: 'fixed', sourceId: sourceId, modelId: modelId, profile: selectedProfile === 'default' ? undefined : selectedProfile });
-            }
+            vscode.postMessage({ type: 'setSubagentModel', mode: 'fixed', sourceId: sourceId, modelId: modelId, profile: selectedProfile === 'default' ? undefined : selectedProfile });
             var model = findModelForSelection(Array.isArray(state.models) ? state.models : [], sourceId, modelId);
             statusValue = getModelDisplayLabel(model);
           } else {
-            if (isApproval) {
-              vscode.postMessage({ type: 'setApprovalModel', mode: 'follow-main' });
-            } else {
-              vscode.postMessage({ type: 'setSubagentModel', mode: 'follow-main', profile: selectedProfile === 'default' ? undefined : selectedProfile });
-            }
+            vscode.postMessage({ type: 'setSubagentModel', mode: 'follow-main', profile: selectedProfile === 'default' ? undefined : selectedProfile });
           }
           commandSubagentModelProfile = '';
           renderCommandSubagentModel();
@@ -368,23 +358,21 @@ export const modelControlsRenderFragment: WebviewFragment = {
         commandSubagentModelList.classList.toggle('hidden', !commandSubagentModelListOpen);
         commandSubagentModelList.innerHTML = '';
 
-        ['default', 'research', 'review', 'proposal', 'approval'].forEach(function(profile) {
-          var isApproval = profile === 'approval';
-          var rawSetting = isApproval ? state.approvalReviewerSetting || { mode: 'follow-main' }
-            : allSettings.profiles && allSettings.profiles[profile]
+        ['default', 'research', 'review', 'proposal'].forEach(function(profile) {
+          var rawSetting = allSettings.profiles && allSettings.profiles[profile]
             ? allSettings.profiles[profile]
             : allSettings.default && typeof allSettings.default === 'object' ? allSettings.default : { mode: 'follow-main' };
-          var profileLocked = locked || (isApproval && isApprovalReviewerSelectionLocked());
+          var profileLocked = locked;
           var profileLockText = lockText || (profileLocked ? getApprovalModeLockText() : '');
-          var profileModels = isApproval ? models.filter(function(model) { return model.agentCompatible !== false && model.sourceId; }) : models;
+          var profileModels = models;
           var isFixed = rawSetting.mode === 'fixed';
           var isFollowMain = rawSetting.mode === 'follow-main';
           var sourceId = isFixed && typeof rawSetting.sourceId === 'string' ? rawSetting.sourceId : '';
           var modelId = isFixed && typeof rawSetting.modelId === 'string' ? rawSetting.modelId : '';
           var selectedModel = isFixed ? findModelForSelection(profileModels, sourceId, modelId) : isFollowMain ? mainModel : null;
-          var currentText = isApproval && rawSetting.error ? rawSetting.error : selectedModel
+          var currentText = selectedModel
             ? getModelSourceLabel(selectedModel) + ' / ' + getModelDisplayLabel(selectedModel)
-            : isFixed ? t(isApproval ? 'approvalModelUnavailable' : 'subagentModelUnavailable') : readinessText || t('modelsEmpty');
+            : isFixed ? t('subagentModelUnavailable') : readinessText || t('modelsEmpty');
           var expanded = profile === commandSubagentModelProfile;
 
           var profileRow = document.createElement('div');
@@ -393,12 +381,10 @@ export const modelControlsRenderFragment: WebviewFragment = {
           var profileLabel = document.createElement('span');
           profileLabel.className = 'command-subagent-profile-label';
           profileLabel.textContent = getCommandModelProfileLabel(profile);
-          if (isApproval) { profileLabel.title = t('approvalModelHint'); }
 
           var profileButton = document.createElement('button');
           profileButton.type = 'button';
           profileButton.className = 'command-subagent-profile-model-button';
-          if (isApproval) { profileButton.id = 'commandApprovalModelButton'; }
           profileButton.dataset.subagentProfile = profile;
           profileButton.disabled = profileLocked;
           profileButton.setAttribute('aria-expanded', expanded ? 'true' : 'false');
@@ -420,7 +406,6 @@ export const modelControlsRenderFragment: WebviewFragment = {
           }
           var profileModelText = document.createElement('span');
           profileModelText.className = 'command-subagent-profile-model-text';
-          if (isApproval) { profileModelText.id = 'commandApprovalModelValue'; profileModelText.title = currentText; }
           profileModelText.textContent = currentText;
           profileButton.append(profileModelText);
 
@@ -449,7 +434,7 @@ export const modelControlsRenderFragment: WebviewFragment = {
       }
 
       function getCommandModelProfileLabel(profile) {
-        return t(profile === 'approval' ? 'approvalModelTitle' : 'subagentProfile_' + profile);
+        return t('subagentProfile_' + profile);
       }
 
       function appendCommandSubagentModelOptions(input) {
@@ -545,11 +530,6 @@ export const modelControlsLockingFragment: WebviewFragment = {
       function isApprovalModeSelectionLocked() {
         return getCommandSettingReadiness('approvalMode') !== 'ready'
           || Boolean(state.isBusy && state.approvalMode === 'ask');
-      }
-
-      function isApprovalReviewerSelectionLocked() {
-        return isSubagentModelSelectionLocked() || getCommandSettingReadiness('approvalMode') !== 'ready'
-          || Boolean(state.manualToolApproval);
       }
 
       function getCommandSettingReadiness(key) {

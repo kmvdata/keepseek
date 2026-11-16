@@ -20,9 +20,6 @@ export interface DroppedFileReferenceInput {
 }
 
 export type WebviewMessage =
-  | { type: 'resumeApprovalProcessing'; sessionId?: string; runId?: string; rootTaskId?: string; targetId?: string; authorizeTargetId?: string; confirmTargetId?: string }
-  | { type: 'resolveValidationApproval'; id: string; sessionId?: string; runtimeId?: string; approve: boolean }
-  | { type: 'retryManualApproval'; id: string; sessionId?: string; runtimeId?: string }
   | { type: 'setApprovalMode'; mode: ApprovalMode }
   | { type: 'setExecutionMode'; mode: ExecutionMode }
   | { type: 'resolvePlanDecision'; planId: string; action: 'start_execution' | 'revise_plan' | 'exit_plan' }
@@ -49,8 +46,7 @@ export type WebviewMessage =
   | { type: 'deleteOtherWorkspaceSessions'; workspaceKey: string; sessionIds: string[] }
   | { type: 'deleteOtherWorkspace'; workspaceKey: string }
   | { type: 'setSelectedModel'; requestId: string; sourceId: string; modelId: string }
-  | { type: 'configureApprovalModel' }
-  | { type: 'setApprovalModel'; mode: 'follow-main' | 'fixed'; sourceId?: string; modelId?: string }
+
   | { type: 'setSubagentModel'; mode: 'follow-main' | 'fixed'; profile?: 'research' | 'review' | 'proposal'; sourceId?: string; modelId?: string }
   | { type: 'cancelPendingModelSelection'; requestId: string }
   | { type: 'setAgentSettings'; settings: Partial<AgentSettings> }

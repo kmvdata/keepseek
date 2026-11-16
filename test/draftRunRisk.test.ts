@@ -6,10 +6,6 @@ import * as path from 'node:path';
 import { test, type TestContext } from 'node:test';
 import './registerVscodeStub';
 import * as vscode from './stubs/vscode';
-import { ModelSourceStore } from '../src/accounts/accountStore';
-import { ApprovalReviewerService } from '../src/approvals/approvalReviewer';
-import { ApprovalReviewStore } from '../src/approvals/approvalReviewStore';
-import { createDraftRunReviewRequest } from '../src/approvals/approvalReviewSurface';
 import { analyzeCommand, analyzeDraftRunEffects, assertAutomaticRunAuthorization, draftRunIdentity,
   evaluateAutomaticRunAuthorization, ExactOperationGrants, inspectAutomaticRunAuthorization, inspectGitCommandReplan,
   validateDraftRunBeforeApproval } from '../src/approvals/authorization';
@@ -32,43 +28,44 @@ test('DraftRun read-only analysis is conservative advice rather than authorizati
   assert.match(assessment.evidence.join(' '), /advisory, not a safety proof/u);
 });
 
-test('delegate preserves literal Git argv and verifies independent repository reads', async t => {
+test('ask preserves literal Git argv and verifies independent repository reads', async t => {
   const commands = [
     ['ls-files', '-s', '--', 'game_pywin.log', 'game_pywin.log.1', 'game_pywin.log.2', 'game_pywin.log.3'],
     ['log', '--oneline', '--all', '--', 'game_pywin.log'],
     ['log', '--oneline', '--', 'game_pywin.log'],
     ['status', '--porcelain=v1']
   ];
-  for (const args of [...commands, ['log', '--first-parent', '--oneline', 'HEAD']]) {
+  for (const args of commands) {
     const spec = createSpec('git', args);
-    const advice = analyzeCommandCapability(spec, undefined, 'delegate');
+    const advice = analyzeCommandCapability(spec, undefined, 'ask');
     assert.equal(advice.supported, true);
     assert.ok(advice.diagnostics.every(item => !item.blocking));
     assert.deepEqual(spec.args, args);
   }
-  assert.equal(analyzeCommandCapability(createSpec('git', ['log', '--first-parent', 'HEAD']), undefined, 'ask').supported, false);
-  if (process.platform === 'win32') return;
+  // --first-parent stays outside the host argv grammar, so it must fail closed.
+  assert.equal(analyzeCommandCapability(createSpec('git', ['log', '--first-parent', '--oneline', 'HEAD']), undefined, 'ask').supported, false);
+  if (process.platform === 'win32') return t.skip('POSIX-only Git verification');
   const { workspace, createRun } = await projectScriptFixture(t);
   execFileSync('/usr/bin/git', ['init', '-q'], { cwd: workspace });
   const grants = new ExactOperationGrants();
   for (const args of commands) {
     const input = { executable: '/usr/bin/git', args, reason: 'Inspect project logs.' };
-    const proposal = await createDraftRunProposal(input, 'delegate');
+    const proposal = await createDraftRunProposal(input, 'ask');
     assert.equal(proposal.capabilityDiagnostic, undefined);
     const run = { ...await createRun(input.executable, args), ...proposal };
-    const decision = await inspectAutomaticRunAuthorization(run, grants, 'delegate');
+    const decision = await inspectAutomaticRunAuthorization(run, grants, 'ask');
     assert.equal(decision.reviewable, true, decision.refusal?.reason);
     assert.equal(decision.allowed, true);
     assert.equal(decision.scope.verifiedProjectCommand, true);
     assert.deepEqual(run.spec.args, args);
     assert.equal(await isIndependentDraftRunCheck(run, decision.authorizedUris), true);
-    await validateDraftRunBeforeApproval(run, decision.authorizedUris, decision.scope, 'delegate');
+    await validateDraftRunBeforeApproval(run, decision.authorizedUris, decision.scope, 'ask');
     const missingBoundary = { ...decision.scope, projectExecution: undefined };
-    assert.equal(evaluateAutomaticRunAuthorization(run, grants, 'delegate', false, missingBoundary).reviewable, false);
-    await assert.rejects(validateDraftRunBeforeApproval(run, decision.authorizedUris, missingBoundary, 'delegate'), /execution boundary/u);
+    assert.equal(evaluateAutomaticRunAuthorization(run, grants, 'ask', false, missingBoundary).reviewable, false);
+    await assert.rejects(validateDraftRunBeforeApproval(run, decision.authorizedUris, missingBoundary, 'ask'), /execution boundary/u);
   }
   const mirror = await createRun('/usr/bin/git', ['push', '--mirror', 'origin']);
-  const blocked = await inspectAutomaticRunAuthorization(mirror, grants, 'delegate');
+  const blocked = await inspectAutomaticRunAuthorization(mirror, grants, 'ask');
   assert.equal(blocked.refusal?.code, 'hard_blocked');
 });
 
@@ -81,7 +78,7 @@ test('Git log --all does not claim independent scope when linked worktree refs a
     'commit', '--allow-empty', '-m', 'baseline');
   git('worktree', 'add', '--detach', path.join(root, 'linked'));
   const run = await createRun('/usr/bin/git', ['log', '--oneline', '--all']);
-  const decision = await inspectAutomaticRunAuthorization(run, new ExactOperationGrants(), 'delegate');
+  const decision = await inspectAutomaticRunAuthorization(run, new ExactOperationGrants(), 'ask');
   assert.equal(decision.reviewable, false);
   assert.match(decision.refusal?.reason ?? '', /linked worktree refs/u);
   assert.equal(await isIndependentDraftRunCheck(run, decision.authorizedUris), false);
@@ -97,7 +94,7 @@ test('explicit network and file targets remain visible for unfamiliar command op
   const file = vscode.Uri.file(path.join(root, 'external target.txt')).toString();
   const args = [`--target=${url}`, `--input=${file}`];
   const run = await createRun('/usr/bin/make', args);
-  const decision = await inspectAutomaticRunAuthorization(run, grants, 'delegate');
+  const decision = await inspectAutomaticRunAuthorization(run, grants, 'ask');
   assert.equal(decision.reviewable, true, decision.refusal?.reason);
   assert.equal(decision.allowed, false);
   assert.equal(decision.requiresNetworkGrant, true);
@@ -106,7 +103,7 @@ test('explicit network and file targets remain visible for unfamiliar command op
   assert.deepEqual(run.spec.args, args);
   assert.deepEqual(analyzeCommand(createSpec('echo', [url])).networkTargets, undefined);
   const systemOutput = await createRun('/usr/bin/make', ['--output=file:///etc/keepseek-sentinel']);
-  await assert.rejects(inspectAutomaticRunAuthorization(systemOutput, grants, 'delegate'), /Protected credential|system target/u);
+  await assert.rejects(inspectAutomaticRunAuthorization(systemOutput, grants, 'ask'), /Protected credential|system target/u);
 });
 
 test('inline shell programs expose execution and unknown scope without pretending to parse shell text', () => {
@@ -389,16 +386,16 @@ test('bare Git log refs retain protected path checks for real worktree/index mat
     // No log or file content is executed/read; the fixed index/config probes
     // establish the ambiguity and the host rejects it before dispatch.
     assert.throws(() => git('rev-parse', '--verify', '--end-of-options', `${operand}^{object}`));
-    await assert.rejects(inspectAutomaticRunAuthorization(await createRun('/usr/bin/git', ['log', '--oneline', operand]), grants, 'delegate'), /Protected credential/u);
+    await assert.rejects(inspectAutomaticRunAuthorization(await createRun('/usr/bin/git', ['log', '--oneline', operand]), grants, 'ask'), /Protected credential/u);
   }
   for (const operand of ['0.5.0', '0.5.0..HEAD', '0.5.0^{commit}', 'README.md/feature']) {
-    const authorization = await inspectAutomaticRunAuthorization(await createRun('/usr/bin/git', ['log', '--oneline', operand]), grants, 'delegate');
+    const authorization = await inspectAutomaticRunAuthorization(await createRun('/usr/bin/git', ['log', '--oneline', operand]), grants, 'ask');
     assert.equal(authorization.allowed, true, operand);
     assert.equal(authorization.reviewable, true, operand);
     assert.ok(authorization.scope.verifiedLauncher, operand);
     assert.equal(authorization.scope.paths.some(target => target.role === 'read_path'), false, 'a genuine revision is not a virtual filesystem target');
   }
-  const ordinaryPath = await inspectAutomaticRunAuthorization(await createRun('/usr/bin/git', ['log', '--oneline', 'README.md']), grants, 'delegate');
+  const ordinaryPath = await inspectAutomaticRunAuthorization(await createRun('/usr/bin/git', ['log', '--oneline', 'README.md']), grants, 'ask');
   assert.equal(ordinaryPath.allowed, true);
   assert.ok(ordinaryPath.scope.paths.some(target => target.role === 'read_path' && target.uri === vscode.Uri.file(path.join(workspace, 'README.md')).toString()));
 });
@@ -408,22 +405,22 @@ test('missing Git repository evidence is recoverable diagnosis while the origina
   const { createRun } = await projectScriptFixture(t);
   const run = await createRun('/usr/bin/git', ['log', '--oneline', '--no-decorate', 'HEAD']);
   const grants = new ExactOperationGrants();
-  const decision = await inspectAutomaticRunAuthorization(run, grants, 'delegate');
+  const decision = await inspectAutomaticRunAuthorization(run, grants, 'ask');
   assert.equal(decision.allowed, false);
   assert.equal(decision.reviewable, false);
   assert.equal(decision.refusal?.code, 'insufficient_launch_evidence');
   assert.match(decision.refusal.reason, /No Git repository/u);
   assert.equal(decision.scope.gitCwd, undefined);
   assert.equal(decision.scope.uncertain, true);
-  await assert.rejects(assertAutomaticRunAuthorization(run, grants, decision.scope.fingerprint, 'delegate'), /Nothing executed/u);
+  await assert.rejects(assertAutomaticRunAuthorization(run, grants, decision.scope.fingerprint, 'ask'), /Nothing executed/u);
   // Scope consent cannot manufacture missing executable/repository evidence.
   grants.grant(draftRunIdentity(run), decision.scope);
-  const granted = await inspectAutomaticRunAuthorization(run, grants, 'delegate');
+  const granted = await inspectAutomaticRunAuthorization(run, grants, 'ask');
   assert.equal(granted.allowed, false);
   assert.equal(granted.refusal?.code, 'insufficient_launch_evidence');
 
   const pager = await createRun('/usr/bin/git', ['-c', 'core.pager=cat', 'status', '--porcelain=v1']);
-  const pagerDecision = await inspectAutomaticRunAuthorization(pager, grants, 'delegate');
+  const pagerDecision = await inspectAutomaticRunAuthorization(pager, grants, 'ask');
   assert.equal(pagerDecision.reviewable, false);
   assert.equal(pagerDecision.refusal?.code, 'insufficient_launch_evidence');
 });
@@ -437,7 +434,7 @@ test('missing Git evidence never downgrades explicit configuration or helper res
     ['diff', '--ext-diff', 'HEAD']
   ]) {
     const run = await createRun('/usr/bin/git', args);
-    const decision = await inspectAutomaticRunAuthorization(run, new ExactOperationGrants(), 'delegate');
+    const decision = await inspectAutomaticRunAuthorization(run, new ExactOperationGrants(), 'ask');
     assert.equal(decision.allowed, false, JSON.stringify(args));
     assert.equal(decision.refusal?.code, 'hard_blocked', JSON.stringify(args));
     assert.equal(decision.scope.gitCwd, undefined);
@@ -450,11 +447,11 @@ test('an unresolved executable stays outside reviewer and exact-consent eligibil
   const { workspace, createRun } = await projectScriptFixture(t);
   const run = await createRun(path.join(workspace, 'does-not-exist'), []);
   const grants = new ExactOperationGrants();
-  const decision = await inspectAutomaticRunAuthorization(run, grants, 'delegate');
+  const decision = await inspectAutomaticRunAuthorization(run, grants, 'ask');
   assert.equal(decision.refusal?.code, 'insufficient_launch_evidence');
   assert.equal(decision.reviewable, false);
   assert.equal(decision.allowed, false);
-  await assert.rejects(assertAutomaticRunAuthorization(run, grants, decision.scope.fingerprint, 'delegate'), /Nothing executed/u);
+  await assert.rejects(assertAutomaticRunAuthorization(run, grants, decision.scope.fingerprint, 'ask'), /Nothing executed/u);
 });
 
 test('exact network consent binds a command even when there are no external filesystem targets', async t => {
@@ -462,19 +459,19 @@ test('exact network consent binds a command even when there are no external file
   const { createRun } = await projectScriptFixture(t);
   const grants = new ExactOperationGrants();
   const run = await createRun('/usr/bin/curl', ['-q', '--fail', 'https://example.invalid']);
-  const missing = await inspectAutomaticRunAuthorization(run, grants, 'delegate');
+  const missing = await inspectAutomaticRunAuthorization(run, grants, 'ask');
   assert.equal(missing.refusal?.code, 'external_authorization_required');
   assert.equal(missing.reviewable, true);
   assert.equal(missing.requiresExactGrant, true);
   assert.deepEqual(missing.scope.externalUris, []);
   grants.grant(draftRunIdentity(run), missing.scope);
-  assert.equal((await inspectAutomaticRunAuthorization(run, grants, 'delegate')).allowed, true);
+  assert.equal((await inspectAutomaticRunAuthorization(run, grants, 'ask')).allowed, true);
   const other = await createRun('/usr/bin/curl', ['-q', '--fail', 'https://another.example.invalid']);
-  assert.equal((await inspectAutomaticRunAuthorization(other, grants, 'delegate')).allowed, false);
+  assert.equal((await inspectAutomaticRunAuthorization(other, grants, 'ask')).allowed, false);
   grants.revoke(draftRunIdentity(run), missing.scope);
-  assert.equal((await inspectAutomaticRunAuthorization(run, grants, 'delegate')).allowed, false);
+  assert.equal((await inspectAutomaticRunAuthorization(run, grants, 'ask')).allowed, false);
   const loopback = await createRun('/usr/bin/curl', ['-q', '--fail', 'http://127.0.0.1:65535/health']);
-  assert.equal((await inspectAutomaticRunAuthorization(loopback, grants, 'delegate')).requiresExactGrant, false);
+  assert.equal((await inspectAutomaticRunAuthorization(loopback, grants, 'ask')).requiresExactGrant, false);
 });
 
 test('Git remote pregrant inspection binds local metadata and leaves bare config validation for authorized inspection', async t => {
@@ -489,14 +486,14 @@ test('Git remote pregrant inspection binds local metadata and leaves bare config
   const run = await createRun('/usr/bin/git', ['ls-remote', '--tags', 'origin']);
   const grants = new ExactOperationGrants();
   git('--git-dir', remote, 'config', 'core.bare', 'false');
-  const metadata = await inspectAutomaticRunAuthorization(run, grants, 'delegate', 'metadata');
+  const metadata = await inspectAutomaticRunAuthorization(run, grants, 'ask', 'metadata');
   assert.equal(metadata.reviewable, true);
   assert.equal(metadata.scope.gitRemote?.destination, remote);
-  await assert.rejects(inspectAutomaticRunAuthorization(run, grants, 'delegate', true), /destination configuration/u);
+  await assert.rejects(inspectAutomaticRunAuthorization(run, grants, 'ask', true), /destination configuration/u);
   git('--git-dir', remote, 'config', 'core.bare', 'true');
-  const currentMetadata = await inspectAutomaticRunAuthorization(run, grants, 'delegate', 'metadata');
+  const currentMetadata = await inspectAutomaticRunAuthorization(run, grants, 'ask', 'metadata');
   assert.notEqual(currentMetadata.scope.fingerprint, metadata.scope.fingerprint);
-  await assertAutomaticRunAuthorization(run, grants, currentMetadata.scope.fingerprint, 'delegate', true);
+  await assertAutomaticRunAuthorization(run, grants, currentMetadata.scope.fingerprint, 'ask', true);
 });
 
 test('Git remote argv recognizes bounded reads, current-branch pushes, and exact leases', () => {
@@ -589,7 +586,6 @@ test('Git replanning keeps the exact pager correction for ask mode', () => {
   assert.deepEqual(diagnosis?.candidateArgs, ['--no-pager', '--no-optional-locks', 'status', '--porcelain=v1']);
   assert.ok(analyzeCommand(spec).reasons.some(reason => reason.code === 'git_configuration'));
   assert.equal(analyzeCommandCapability(spec, undefined, 'ask').supported, false);
-  assert.equal(analyzeCommandCapability(spec, undefined, 'delegate').supported, true);
   assert.deepEqual(analyzeCommand({ ...spec, args: diagnosis!.candidateArgs! }).reasons.map(reason => reason.code), ['git_runtime']);
 
   for (const args of [
@@ -746,7 +742,7 @@ test('command preflight binds a verified project script to its current identity 
   const { root, workspace, shell, script, relativeScript, createRun } = await projectScriptFixture(t);
   const grants = new ExactOperationGrants();
   const run = await createRun(shell, [relativeScript]);
-  const approval = await inspectAutomaticRunAuthorization(run, grants, 'delegate');
+  const approval = await inspectAutomaticRunAuthorization(run, grants, 'ask');
   assert.equal(approval.allowed, true);
   assert.equal(approval.reviewable, true);
   assert.equal(approval.scope.trustedProjectScript, true);
@@ -757,7 +753,7 @@ test('command preflight binds a verified project script to its current identity 
   await writeFile(configPath, 'outside data\n');
   const configUri = vscode.Uri.file(configPath).toString();
   const withConfig = await createRun(shell, [relativeScript, `--config=${configPath}`]);
-  const outside = await inspectAutomaticRunAuthorization(withConfig, grants, 'delegate');
+  const outside = await inspectAutomaticRunAuthorization(withConfig, grants, 'ask');
   assert.equal(outside.allowed, false);
   assert.equal(outside.reviewable, true);
   assert.equal(outside.requiresExactGrant, true);
@@ -765,76 +761,56 @@ test('command preflight binds a verified project script to its current identity 
   assert.deepEqual([...outside.scopeUris], [configUri]);
   assert.deepEqual(outside.scope.externalUris, [configUri]);
   grants.grant(draftRunIdentity(withConfig), outside.scope);
-  const granted = await inspectAutomaticRunAuthorization(withConfig, grants, 'delegate');
+  const granted = await inspectAutomaticRunAuthorization(withConfig, grants, 'ask');
   assert.equal(granted.allowed, true);
   assert.deepEqual([...granted.authorizedUris], [configUri]);
 
   assert.equal(approval.scope.cwd, vscode.Uri.file(workspace).toString());
-  await assertAutomaticRunAuthorization(run, grants, approval.scope.fingerprint, 'delegate');
+  await assertAutomaticRunAuthorization(run, grants, approval.scope.fingerprint, 'ask');
   await writeFile(script, '#!/bin/sh\nprintf "%s\\n" "new version"\n');
-  const changed = await inspectAutomaticRunAuthorization(run, grants, 'delegate');
+  const changed = await inspectAutomaticRunAuthorization(run, grants, 'ask');
   assert.equal(changed.reviewable, true);
   assert.notEqual(changed.scope.fingerprint, approval.scope.fingerprint);
-  await assert.rejects(assertAutomaticRunAuthorization(run, grants, approval.scope.fingerprint, 'delegate'), /scope or launch identity changed/u);
-  assert.equal((await inspectAutomaticRunAuthorization(withConfig, grants, 'delegate')).allowed, false, 'the grant is bound to the inspected script');
+  await assert.rejects(assertAutomaticRunAuthorization(run, grants, approval.scope.fingerprint, 'ask'), /scope or launch identity changed/u);
+  assert.equal((await inspectAutomaticRunAuthorization(withConfig, grants, 'ask')).allowed, false, 'the grant is bound to the inspected script');
   grants.revoke(draftRunIdentity(withConfig), granted.scope);
   assert.equal(grants.matches(draftRunIdentity(withConfig), granted.scope), false);
 });
 
-test('independent review executes a project script once and preserves its literal argv', async t => {
+test('ask approval executes a project script once and preserves its literal argv', async t => {
   if (process.platform === 'win32') return t.skip('POSIX system shell verification required');
   const { root, shell, script, relativeScript, createRun } = await projectScriptFixture(t);
-  await writeFile(script, '#!/bin/sh\nprintf "%s\\n" "$1"\n');
+  await writeFile(script, '#!/bin/sh\nprintf "%s\n" "$1"\n');
   const value = '参数 ; $(printf unexpected)';
   const proposal = await createRun(shell, [relativeScript, value]);
   const globalStorageUri = vscode.Uri.file(root) as never;
-  const reviews = new ApprovalReviewStore(globalStorageUri);
-  await reviews.initialize();
-  let reviewCalls = 0;
-  const reviewer = new ApprovalReviewerService({ globalStorageUri, workspaceKey: 'project',
-    sourceStore: new ModelSourceStore(globalStorageUri), store: reviews,
-    getAutoSetting: () => ({ mode: 'follow-main' }),
-    requestText: async () => {
-      reviewCalls++;
-      return JSON.stringify({ decision: 'approve', risk: 'medium', reason: 'Exact project script.',
-        policyRules: ['bounded_project_script'], saferAlternative: '', affectedTargets: [script] });
-    } });
-  const runs = new DraftRunStore(globalStorageUri, new SpawnDraftRunExecutor(), new DraftRunAuthorizationService(reviews));
+  const runs = new DraftRunStore(globalStorageUri, new SpawnDraftRunExecutor(), new DraftRunAuthorizationService());
   try {
     const [run] = runs.addProposals({ proposals: [proposal], sessionId: proposal.sessionId, agentRunId: proposal.agentRunId });
+    assert.equal(run.status, 'pending');
+    assert.equal(run.approvedAt, undefined);
     const grants = new ExactOperationGrants();
-    const { allowed, scope, authorizedUris } = await inspectAutomaticRunAuthorization(run, grants, 'delegate');
-    assert.equal(allowed, true);
-    const { record } = await reviewer.review({
-      ...createDraftRunReviewRequest({ draftRun: run, scope, history: [], language: 'en' }),
-      approvalMode: 'delegate', scopeFingerprint: scope.fingerprint,
-      originalGoalSummary: 'Run this project script with the exact literal argument.'
-    }, {
-      model: { id: 'fixture-model', label: 'Fixture', provider: 'openai-responses', sourceId: 'fixture-source',
-        contextWindowTokens: 64_000, maxOutputTokens: 2_000 },
-      sourceConfig: { sourceId: 'fixture-source', provider: 'openai-responses', apiKey: 'fixture-key',
-        baseUrl: 'https://example.invalid/v1', supportsBilling: false }
-    });
-    assert.equal(reviewCalls, 1);
-    assert.equal(record.approvalSource, 'auto_approval_review');
-    assert.equal(record.decision, 'approve', record.rationale);
-    assert.equal(record.risk, 'medium');
+    const { allowed, scope, authorizedUris } = await inspectAutomaticRunAuthorization(run, grants, 'ask');
+    assert.equal(allowed, true, scope.reasons.join('; '));
+    // Preparing the exact scope is not user approval: nothing was dispatched.
+    assert.equal(runs.get(run.id)?.status, 'pending');
     const result = await runs.approveAndRun(run.id, authorizedUris, {
-      delegatedApproval: () => true,
-      verifyScope: () => assertAutomaticRunAuthorization(run, grants, scope.fingerprint, 'delegate'),
-      approvalRecord: { ...record, expectedSource: 'auto_approval_review', workspaceTrusted: vscode.workspace.isTrusted }
+      approvalMode: 'ask',
+      expectedSpecHash: run.specHash,
+      userApproval: () => true,
+      verifyScope: () => assertAutomaticRunAuthorization(run, grants, scope.fingerprint, 'ask')
     });
     assert.equal(result?.status, 'done', result?.error);
-    assert.equal(result.exitCode, 0);
+    assert.equal(result?.exitCode, 0);
+    assert.equal(result?.authorizationSource, 'user_click');
+    assert.deepEqual(result?.spec.args, [relativeScript, value], 'the literal argument never re-enters a shell');
     assert.equal(runs.toWebviewState(run.sessionId)[0].output, `${value}\n`);
-    assert.ok(reviews.get(record.reviewId)?.consumedAt);
     assert.equal(await runs.approveAndRun(run.id, authorizedUris), undefined);
   } finally {
     await runs.flush();
     runs.dispose();
   }
 });
-
 test('inline shell, PATH shims and external scripts do not inherit verified project launch evidence', async t => {
   if (process.platform === 'win32') return t.skip('POSIX system shell and symlinks required');
   const { root, workspace, shell, relativeScript, createRun } = await projectScriptFixture(t);
@@ -903,7 +879,7 @@ test('project launch scope binds custom launchers and canonical selected-root ta
   const projectUri = vscode.Uri.file(project).toString();
   const cwdUri = vscode.Uri.file(workspace).toString();
   const scopeFor = async (executable: string, args: string[], selected = cwdUri) =>
-    inspectAutomaticRunAuthorization(await createRun(executable, args), new ExactOperationGrants(), 'delegate', false, selected);
+    inspectAutomaticRunAuthorization(await createRun(executable, args), new ExactOperationGrants(), 'ask', false, selected);
 
   const custom = await scopeFor(entry, ['--arbitrary-flag']);
   assert.equal(custom.allowed, true, custom.reason);
@@ -947,7 +923,7 @@ test('verified package lifecycle retains manifest identity and external target r
   await writeManifest('node ./entry.js');
   const run = await createRun('bun', ['run', 'fixture', '--', '--anything']);
   const grants = new ExactOperationGrants();
-  const initial = await inspectAutomaticRunAuthorization(run, grants, 'delegate');
+  const initial = await inspectAutomaticRunAuthorization(run, grants, 'ask');
   if (!initial.scope.trustedProjectScript) return t.skip('A supported native Bun install with default lifecycle configuration is unavailable');
   assert.equal(initial.allowed, true);
   assert.equal(initial.scope.projectScriptEntryUri, vscode.Uri.file(manifest).toString());
@@ -955,14 +931,14 @@ test('verified package lifecycle retains manifest identity and external target r
   assert.ok(initial.scope.paths.some(target => target.uri === vscode.Uri.file(entry).toString() && target.role === 'lifecycle_script'));
 
   await writeManifest('node ./entry.js https://example.invalid/upload');
-  const withNetwork = await inspectAutomaticRunAuthorization(run, grants, 'delegate');
+  const withNetwork = await inspectAutomaticRunAuthorization(run, grants, 'ask');
   assert.equal(withNetwork.requiresNetworkGrant, true);
   assert.equal(withNetwork.allowed, false);
   assert.notEqual(withNetwork.scope.fingerprint, initial.scope.fingerprint);
   assert.deepEqual(withNetwork.scope.semantics?.networkTargets, ['https://example.invalid/upload']);
 
   await writeManifest('rm -rf /');
-  await assert.rejects(inspectAutomaticRunAuthorization(run, grants, 'delegate'), /Protected command/u);
+  await assert.rejects(inspectAutomaticRunAuthorization(run, grants, 'ask'), /Protected command/u);
 });
 
 test('controlled validation retains its narrow blocking policy', () => {

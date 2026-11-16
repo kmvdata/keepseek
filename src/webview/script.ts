@@ -1353,8 +1353,6 @@ ${conversationsMenuDismissFragment.source}
           // Missing fields in an old or partial message cannot carry another
           // session's interaction lease into the newly selected session.
           delete state.interaction;
-          delete state.approvalProcessing;
-          delete state.approvalRecovery;
           delete state.manualToolApprovals;
           delete state.manualToolApproval;
           delete state.pendingApproval;
@@ -1435,8 +1433,6 @@ ${conversationsMenuDismissFragment.source}
         pendingDraftRunApprovals.delete(String(message.draftRun?.id || ''));
         upsertDraftRun(message.draftRun);
         render();
-      } else if (message.type === 'approvalReviewerModelResult') {
-        setTransientStatus(message.success ? t('approvalModelSaved') : (message.error || t('approvalModelSaveFailed')), false, 'global');
       } else if (message.type === 'draftRunBatchFeedback') {
         pendingDraftRunBatchSnapshot = '';
         render();
@@ -1808,8 +1804,7 @@ ${conversationsTitleRefreshFragment.source}
       if (backgroundLabel) {
         backgroundLabel.textContent = t('backgroundRun') + ' · ' + normalizeValidationScript(run.goal?.script);
       }
-      var statusKey = state.approvalMode === 'delegate' && run.status === 'waiting_for_authorization'
-        ? 'approvalProcessingNow' : 'backgroundStatus_' + run.status;
+      var statusKey = 'backgroundStatus_' + run.status;
       var statusLabel = t(statusKey);
       if (statusLabel === statusKey) statusLabel = run.status || t('backgroundIdle');
       statusLabel += ' · ' + t('backgroundProgress', {
@@ -1823,7 +1818,7 @@ ${conversationsTitleRefreshFragment.source}
       backgroundStatus.textContent = statusLabel;
       if (backgroundResume) {
         var canResume = run?.status === 'waiting_for_apply' && state.repairLoop?.status === 'ready_for_validation' && !state.isBusy;
-        backgroundResume.classList.toggle('hidden', state.approvalMode === 'delegate' || run?.status !== 'waiting_for_apply');
+        backgroundResume.classList.toggle('hidden', run?.status !== 'waiting_for_apply');
         backgroundResume.disabled = !canResume;
       }
       if (backgroundStop) {
@@ -2801,8 +2796,7 @@ ${conversationsSessionListFragment.source}
       renderPlanNote(planBlockers, t('planBlockers'), Array.isArray(plan.blockers) ? plan.blockers.join('\\n') : '');
       renderPlanNote(planCompletion, t('planCompletion'), plan.completionSummary || '');
       if (planContinueRepair) {
-        var canContinueRepair = state.approvalMode !== 'delegate'
-          && state.repairLoop?.status === 'ready_for_validation' && canSubmitPrompt() && !isBackgroundActive();
+        var canContinueRepair = state.repairLoop?.status === 'ready_for_validation' && canSubmitPrompt() && !isBackgroundActive();
         planContinueRepair.classList.toggle('hidden', !canContinueRepair);
         planContinueRepair.disabled = !canContinueRepair;
       }
@@ -3165,11 +3159,11 @@ ${conversationsSessionListFragment.source}
         displayStatus = 'waiting_approval';
       } else if (statusValue === 'pending' && (needsAuthorization || !externalAuthorized)) {
         displayStatus = 'needs_authorization';
-      } else if (statusValue === 'pending' && state.approvalMode === 'delegate' && !state.isBusy) {
-        displayStatus = target ? 'blocked' : 'awaiting_submission';
       } else if (statusValue === 'pending' && state.approvalMode !== 'ask'
         && !['manual_required', 'denied', 'review_unavailable', 'needs_authorization'].includes(target?.status)) {
-        displayStatus = 'preparing';
+        // Approve all hands the draft to the host automatically; until it starts the
+        // card reports that it is awaiting submission rather than under review.
+        displayStatus = 'awaiting_submission';
       }
       var card = document.createElement('section');
       card.className = 'draft-run-card draft-run-' + statusValue;
@@ -3255,34 +3249,32 @@ ${conversationsSessionListFragment.source}
       var diagnostic = replan?.reason || capability?.reason
         || (target?.status === 'needs_replan' && targetReason !== t('approvalReplanHistoricalStop') ? targetReason : undefined);
       if (diagnostic) appendApprovalStateNote(header, t('approvalCommandReplanReason', { reason: diagnostic }));
+      // A held draft is reported read-only; there is no reviewer or resume path.
+      // A retained historical decision stays visible as read-only text.
+      if (isApprovalSafetyDenied(draftRun.approvalReview) && draftRun.approvalReview.rationale) {
+        appendApprovalStateNote(header, String(draftRun.approvalReview.rationale));
+      }
+      if (approvalHold) {
+        appendApprovalStateNote(header, [approvalWaitingLabel ? t(approvalWaitingLabel) : '', approvalHold.reason].filter(Boolean).join(' · '));
+      }
       var candidateArgs = capability?.candidateArgs || replan?.candidateArgs;
       if (displayStatus === 'needs_replan' && !recoveryLabel && (diagnostic || Array.isArray(candidateArgs))) {
         appendApprovalStateNote(header, Array.isArray(candidateArgs)
           ? t('draftRunCorrectionCandidate', { command: formatShellCommand(spec.executable, candidateArgs, spec.env) })
           : t('draftRunCorrectionNextStep'), true);
       }
-      var canResumeReplacement = displayStatus === 'superseded' && canResumeApproval(target);
-      if ((target?.status === 'needs_replan' || displayStatus === 'superseded' && !canResumeReplacement)
+      if ((target?.status === 'needs_replan' || displayStatus === 'superseded')
         && targetReason && targetReason !== diagnostic
         && (!recoveryLabel || targetReason !== t('approvalReplanHistoricalStop'))) {
         appendApprovalStateNote(header, targetReason);
       }
-      if (canResumeReplacement) {
-        appendAutomaticApprovalState(header, actions, draftRun.id, draftRun.approvalReview, draftRun.approvalHold);
-      } else if (releaseableDependency) {
+      if (releaseableDependency) {
         // A wait that can no longer resolve must stay actionable. Releasing clears the
         // wait only; running still rechecks the scope and the current approval policy.
         actions.append(createDraftRunActionButton(t('approvalReleaseDependency'), 'releaseDraftRunDependency', draftRun, false));
         actions.append(createDraftRunActionButton(t('draftRunReject'), 'rejectDraftRun', draftRun, true));
       } else if (!dependency && displayStatus !== 'superseded' && target?.status !== 'dependency_blocked') {
         appendDraftRunActions(actions, draftRun, header, target, approvalBlocked, externalAuthorized, needsAuthorization);
-      }
-      var processing = state.approvalProcessing;
-      if (displayStatus === 'needs_replan' && !recoveryLabel && canResumeApproval(target)
-        && processing.runId === draftRun.agentRunId
-        && processing.targets.find(function(item) { return item.status === 'needs_replan'; })?.id === draftRun.id) {
-        appendApprovalStateNote(header, t('approvalInterrupted'));
-        appendApprovalResumeAction(actions, 'approvalResumeProcessing', draftRun.id);
       }
       if (actions.children.length) header.append(actions);
 
@@ -3419,13 +3411,12 @@ ${conversationsSessionListFragment.source}
     }
 
     function getApprovalTarget(id) {
-      var targets = state.approvalProcessing?.targets;
-      return Array.isArray(targets) ? targets.find(function(item) { return item.id === id; }) : undefined;
+      void id;
+      return undefined;
     }
 
     function isHeldDraftRunApproval(target) {
-      return ['blocked', 'paused', 'waiting_user', 'stopped'].includes(state.approvalProcessing?.status) && target
-        && !['executed', 'already_processed'].includes(target.status);
+      return Boolean(target && target.status === 'paused');
     }
 
     function getApprovalWaitingLabel(target, hold) {
@@ -3465,89 +3456,13 @@ ${conversationsSessionListFragment.source}
       notices.append(note);
     }
 
-    function canResumeApproval(target) {
-      var processing = state.approvalProcessing;
-      if (state.approvalMode !== 'delegate' || state.isBusy || processing?.version !== 2
-        || !['blocked', 'paused', 'waiting_user'].includes(processing.status) || processing.canResume !== true
-        || !target || target.canResume === false
-        || !['needs_replan', 'needs_authorization', 'external_authorization_required',
-          'manual_required', 'paused', 'review_unavailable', 'insufficient_launch_evidence'].includes(target.status)) return false;
-      var recovery = state.approvalRecovery;
-      return recovery?.canResume === true && recovery.sessionId === state.activeSessionId
-        && recovery.runId === processing.runId && recovery.rootTaskId === processing.rootTaskId;
-    }
-
-    function appendApprovalResumeAction(actions, label, targetId) {
-      if (!canResumeApproval(getApprovalTarget(targetId))) return;
-      var recovery = state.approvalRecovery;
-      var button = document.createElement('button');
-      button.type = 'button';
-      button.dataset.approvalResumeTargetId = targetId;
-      button.textContent = t(label);
-      button.title = t('approvalResumeHint');
-      button.disabled = !state.startup?.sideEffectsReady;
-      button.addEventListener('click', function() {
-        if (button.disabled || !canResumeApproval(getApprovalTarget(targetId))) return;
-        if (recovery !== state.approvalRecovery) return;
-        button.disabled = true;
-        vscode.postMessage({ type: 'resumeApprovalProcessing', sessionId: recovery.sessionId,
-          runId: recovery.runId, rootTaskId: recovery.rootTaskId, targetId: targetId });
-      });
-      actions.append(button);
-    }
-
-    function appendAutomaticApprovalState(notices, actions, id, review, hold, headingShowsStatus) {
-      var processing = state.approvalProcessing;
-      var target = getApprovalTarget(id);
-      var denied = target && target.status === 'denied' || review && review.decision === 'deny';
-      var active = target && ['processing', 'replanning'].includes(processing?.status);
-      var recoverable = canResumeApproval(target);
-      var waitingLabel = getApprovalWaitingLabel(target, hold);
-      var fallback = active ? processing.status === 'replanning' ? 'approvalReplanningNow' : 'approvalProcessingNow'
-        : recoverable ? 'approvalInterrupted'
-        : state.approvalMode === 'delegate' && !state.isBusy ? (target ? 'approvalAutoStopped' : 'approvalAutoInactive') : 'approvalAutoWaiting';
-      if (target?.dependency) appendApprovalStateNote(notices, formatApprovalDependency(target.dependency));
-      if (!target?.dependency || target.reason) {
-        var reason = getApprovalDisplayReason(target?.reason || hold?.reason)
-          || (denied && review ? review.rationale : undefined)
-          || (review?.reviewState ? getApprovalDecisionLabel(review) : undefined);
-        var status = target?.status === 'insufficient_launch_evidence' ? t('approvalNeedsEvidence')
-          : waitingLabel && !headingShowsStatus ? t(waitingLabel) : '';
-        if (reason || status || !waitingLabel) {
-          appendApprovalStateNote(notices, [status, reason].filter(Boolean).join(' · ') || t(fallback), Boolean(waitingLabel) || (!reason && !recoverable));
-        }
-      }
-      if (recoverable && !denied && !getManualApprovalRows().some(function(manual) {
-        return manual.targetId === id && ['waiting', 'interrupted', 'paused'].includes(manual.status);
-      })) {
-        appendApprovalResumeAction(actions, target?.status === 'review_unavailable' ? 'approvalRetryReview'
-          : waitingLabel ? 'approvalRecheckPaused' : 'approvalResumeProcessing', id);
-      }
-      var recovery = state.approvalRecovery;
-      if (!target && recovery?.canResume === true && recovery.sessionId === state.activeSessionId
-        && (recovery.unqueuedDraftIds?.includes(id) || recovery.unqueuedEditIds?.includes(id))) {
-        var resume = document.createElement('button');
-        resume.type = 'button';
-        resume.dataset.approvalResumeTargetId = id;
-        resume.textContent = t('approvalSubmitForReview', {
-          count: (recovery.unqueuedDraftIds?.length || 0) + (recovery.unqueuedEditIds?.length || 0)
-        });
-        resume.disabled = !state.startup?.sideEffectsReady;
-        resume.addEventListener('click', function() {
-          if (resume.disabled || recovery !== state.approvalRecovery) return;
-          resume.disabled = true;
-          vscode.postMessage({ type: 'resumeApprovalProcessing', sessionId: recovery.sessionId,
-            runId: recovery.runId, rootTaskId: recovery.rootTaskId, targetId: id });
-        });
-        actions.append(resume);
-      }
-    }
-
     function appendDraftRunActions(container, draftRun, notices, target, approvalBlocked, externalAuthorized, needsAuthorization) {
       var statusValue = String(draftRun.status || 'pending');
       var isOwnRunning = String(state.activeDraftRunId || '') === String(draftRun.id || '');
       if (statusValue === 'needs_replan' || target?.status === 'needs_replan') {
-        if (statusValue === 'needs_replan' && state.approvalMode === 'ask' && !approvalBlocked
+        // Copying a blocked argv back into the composer never executes anything, so
+        // Ask and Approve all expose the same correction action.
+        if (statusValue === 'needs_replan' && !approvalBlocked
           && !draftRun.spec?.restricted && !draftRun.replacementDraftRunId) {
           container.append(createDraftRunActionButton(t('draftRunCloneForCorrection'), 'cloneDraftRun', draftRun, true));
         }
@@ -3555,10 +3470,7 @@ ${conversationsSessionListFragment.source}
       }
       if (statusValue === 'pending') {
         if (draftRun.spec?.restricted) return;
-        if (state.approvalMode !== 'ask' || draftRun.approvalHold) {
-          appendAutomaticApprovalState(notices, container, draftRun.id, draftRun.approvalReview, draftRun.approvalHold, true);
-          return;
-        }
+        if (state.approvalMode !== 'ask' || draftRun.approvalHold) return;
         if (approvalBlocked || isHeldDraftRunApproval(target) || (needsAuthorization && externalAuthorized)) {
           var reason = getApprovalDisplayReason(target?.reason);
           if (reason) appendApprovalStateNote(notices, reason);
@@ -3581,10 +3493,7 @@ ${conversationsSessionListFragment.source}
         var uncertainResult = ['failed', 'cancelled'].includes(statusValue)
           && !(draftRun.executionStarted === false && ['not_dispatched', 'spawn_failed'].includes(draftRun.executionPhase))
           && !(draftRun.executionStarted === true && draftRun.executionPhase === 'exited');
-        if (state.approvalMode === 'delegate' && draftRun.canReproposeUndispatchedApproval === true && !approvalBlocked
-          && draftRun.executionStarted === false && draftRun.executionPhase === 'not_dispatched') {
-          container.append(createDraftRunActionButton(t('approvalReproposeUndispatched'), 'cloneDraftRun', draftRun, true));
-        } else if (state.approvalMode !== 'delegate' && !draftRun.spec?.restricted && !draftRun.replacementDraftRunId && !uncertainResult) {
+        if (!draftRun.spec?.restricted && !draftRun.replacementDraftRunId && !uncertainResult) {
           container.append(createDraftRunActionButton(t('draftRunClone'), 'cloneDraftRun', draftRun, true));
         }
       }
@@ -3837,11 +3746,11 @@ ${conversationsSessionListFragment.source}
         actions.append(createEditActionButton(t('previewDiff'), 'openDraftDiff', edit.id, true));
       }
       if (allowActions && (edit.status === 'pending' || edit.status === 'apply_failed' || edit.status === 'interrupted')) {
-        if (state.approvalMode === 'ask') {
-          if (!isApprovalSafetyDenied(edit.approvalReview) && !isHeldDraftRunApproval(getApprovalTarget(edit.id))) {
-            actions.append(createEditActionButton(t('apply'), 'applyDraftEdit', edit.id, false));
-          }
-        } else appendAutomaticApprovalState(chip, actions, edit.id, edit.approvalReview);
+        // A held or historically denied edit is never actionable.
+        if (state.approvalMode === 'ask' && !isApprovalSafetyDenied(edit.approvalReview)
+          && !isHeldDraftRunApproval(getApprovalTarget(edit.id))) {
+          actions.append(createEditActionButton(t('apply'), 'applyDraftEdit', edit.id, false));
+        }
         actions.append(createEditActionButton(t('discard'), 'discardDraftEdit', edit.id, true));
       } else if (allowActions && (edit.status === 'applied' || edit.status === 'revert_failed')) {
         actions.append(createEditActionButton(t('revert'), 'revertDraftEdit', edit.id, true));
@@ -4040,113 +3949,6 @@ ${conversationsSessionListFragment.source}
       }
     }
 
-    function getManualApprovalRows() {
-      return Array.isArray(state.manualToolApprovals) ? state.manualToolApprovals.filter(function(row) {
-        return row && row.sessionId === state.activeSessionId;
-      }) : [];
-    }
-
-    function createManualApprovalCard(manual) {
-      var waiting = manual.status === 'waiting';
-      var recoverable = ['interrupted', 'paused'].includes(manual.status);
-      var titleKey = waiting ? 'approvalWaitingUser' : recoverable ? 'approvalPaused'
-        : manual.status === 'approved' ? 'approvalUserApproved'
-        : manual.status === 'rejected' ? 'approvalCancelAction' : 'approvalCancelled';
-      var card = document.createElement('section');
-      card.className = 'draft-run-card manual-approval-card';
-      card.setAttribute('aria-label', t(titleKey));
-      var heading = document.createElement('div');
-      heading.className = 'draft-run-title';
-      heading.textContent = t(titleKey);
-      card.append(heading);
-      var label = document.createElement('div');
-      label.className = 'approval-operation-label';
-      label.textContent = manual.label;
-      card.append(label);
-
-      var reviewStateKey = 'approvalReviewState_' + manual.reviewState;
-      var reviewStateLabel = t(reviewStateKey);
-      if (manual.reviewState && reviewStateLabel !== reviewStateKey) {
-        appendApprovalStateNote(card, t('approvalReplyUnavailable') + ' · ' + reviewStateLabel);
-      } else if (manual.risk) {
-        appendApprovalStateNote(card, t('approvalReviewRisk') + ' · ' + getApprovalRiskLabel(manual.risk));
-      }
-      if (manual.reason) appendApprovalStateNote(card, manual.reason, waiting || recoverable);
-      if (manual.resolutionReason) {
-        var resolutionKey = 'approvalRequestReason_' + manual.resolutionReason;
-        var resolution = t(resolutionKey);
-        appendApprovalStateNote(card, t('approvalRequestReason', { reason: resolution === resolutionKey ? manual.resolutionReason : resolution }), recoverable);
-      }
-      if (waiting) appendApprovalStateNote(card, t('approvalManualPrompt'), true);
-      if (recoverable) appendApprovalStateNote(card, t('approvalInterrupted'), true);
-
-      var authorizationTargets = Array.isArray(manual.authorizationTargets) ? manual.authorizationTargets : [];
-      var affectedTargets = Array.isArray(manual.affectedTargets) ? manual.affectedTargets.filter(function(target) {
-        return !authorizationTargets.includes(target);
-      }) : [];
-      [
-        { title: 'approvalExactAuthorizationTargets', targets: authorizationTargets },
-        { title: 'approvalAffectedTargets', targets: affectedTargets }
-      ].forEach(function(group) {
-        if (!group.targets.length) return;
-        var scope = document.createElement('div');
-        scope.className = 'approval-exact-scope';
-        var scopeLabel = document.createElement('div');
-        scopeLabel.textContent = t(group.title);
-        var targets = document.createElement('ul');
-        group.targets.forEach(function(target) {
-          var item = document.createElement('li');
-          item.textContent = target;
-          targets.append(item);
-        });
-        scope.append(scopeLabel, targets);
-        card.append(scope);
-      });
-      var exactAction = manual.exactAction;
-      if (exactAction) {
-        var exact = document.createElement('details');
-        var title = document.createElement('summary');
-        title.textContent = t('approvalExactDetails');
-        var payload = document.createElement('pre');
-        payload.className = 'approval-exact-payload';
-        payload.textContent = typeof exactAction === 'string' ? exactAction : JSON.stringify(exactAction, null, 2);
-        exact.append(title, payload);
-        card.append(exact);
-      }
-
-      var actions = document.createElement('div');
-      actions.className = 'draft-run-actions';
-      if (recoverable && manual.canResume === true && manual.targetId) {
-        appendApprovalResumeAction(actions, 'approvalRecheckPaused', manual.targetId);
-      }
-      if (waiting && manual.canDecide === true && manual.canRetry !== true) {
-        appendManualApprovalButton(actions, manual, 'approve', 'approvalAuthorizeForReview');
-        appendManualApprovalButton(actions, manual, 'reject', 'approvalCancelAction');
-      }
-      if (waiting && manual.canRetry === true) appendManualApprovalButton(actions, manual, 'retry', 'approvalRetryReview');
-      if (actions.children.length) card.append(actions);
-      return card;
-    }
-
-    function appendManualApprovalButton(actions, manual, decision, label) {
-      var button = document.createElement('button');
-      button.type = 'button';
-      button.dataset.manualApprovalId = manual.id;
-      button.dataset.manualApprovalAction = decision;
-      button.disabled = pendingManualApprovalIds.has(manual.id) || !state.startup?.sideEffectsReady;
-      button.textContent = t(label);
-      button.addEventListener('click', function() {
-        if (button.disabled || pendingManualApprovalIds.has(manual.id)
-          || !getManualApprovalRows().includes(manual)) return;
-        pendingManualApprovalIds.add(manual.id);
-        for (var action of actions.querySelectorAll('button')) action.disabled = true;
-        var identity = { id: manual.id, sessionId: manual.sessionId, runtimeId: manual.runtimeId };
-        vscode.postMessage(decision === 'retry' ? { type: 'retryManualApproval', ...identity }
-          : { type: 'resolveValidationApproval', ...identity, approve: decision === 'approve' });
-      });
-      actions.append(button);
-    }
-
     function renderTranscript(changeSetProjection, draftRunProjection) {
       var shouldStick = transcript.scrollTop + transcript.clientHeight >= transcript.scrollHeight - 24;
       planRegion.remove();
@@ -4170,15 +3972,8 @@ ${conversationsSessionListFragment.source}
         transcript.append(loadOlder);
       }
 
-      var manualApprovals = getManualApprovalRows();
-      var waitingApprovalIds = new Set(manualApprovals.filter(function(row) {
-        return row.status === 'waiting' && (row.canDecide || row.canRetry);
-      })
-        .map(function(row) { return row.id; }));
-      for (var pendingId of pendingManualApprovalIds) {
-        if (!waitingApprovalIds.has(pendingId)) pendingManualApprovalIds.delete(pendingId);
-      }
-      if (!state.messages.length && !hasUnlinkedDrafts && !manualApprovals.length) {
+      pendingManualApprovalIds.clear();
+      if (!state.messages.length && !hasUnlinkedDrafts) {
         var empty = document.createElement('div');
         empty.className = 'transcript-empty';
         var icon = document.createElement('div');
@@ -4313,7 +4108,7 @@ ${conversationsSessionListFragment.source}
           var planWorkflow = Array.isArray(state.planWorkflows)
             ? state.planWorkflows.find(function(plan) { return plan && plan.assistantMessageId === message.id; })
             : null;
-          if (planWorkflow && (state.approvalMode !== 'delegate' || planWorkflow.status !== 'pending')) body.append(createPlanDecisionCard(planWorkflow));
+          if (planWorkflow) body.append(createPlanDecisionCard(planWorkflow));
         }
 
         if (message.role === 'assistant' && message.runState) {
@@ -4334,7 +4129,6 @@ ${conversationsSessionListFragment.source}
       }
 
       transcript.append(unlinkedChangeSetRegion);
-      manualApprovals.forEach(function(manual) { transcript.append(createManualApprovalCard(manual)); });
       renderUnlinkedChangeSets(changeSetProjection.unlinked, draftRunProjection.unlinked);
 
       if (shouldStick) {
@@ -4448,9 +4242,7 @@ ${conversationsSessionListFragment.source}
       var detail = document.createElement('div');
       detail.textContent = run.blocker || (run.outputFailure ? (state.language === 'en' ? 'Continue regenerates smaller complete calls from the saved round. Completed tools will be reused.' : '继续任务将从已保存的模型轮起点生成较小的完整调用，并复用已完成的工具结果。') : t('runRecoveryNotice'));
       panel.append(detail);
-      var approvalStopped = state.approvalMode === 'delegate' && state.approvalProcessing?.status === 'stopped'
-        && state.approvalProcessing?.rootTaskId === message.userTask?.id;
-      if (run.canResume && !approvalStopped) {
+      if (run.canResume) {
         var button = document.createElement('button');
         button.type = 'button'; button.textContent = t('runContinue');
         button.dataset.runAction = 'continueTask'; button.dataset.messageId = message.id;
@@ -4475,14 +4267,6 @@ ${conversationsSessionListFragment.source}
       grid.className = 'run-details-grid';
       if (message.userTask) appendRunDetailRow(grid, t('runDetailsUserTask'), message.userTask.id);
       if (message.runState) appendRunDetailRow(grid, t('runDetailsExecutionSegment'), message.runState.taskId);
-      var processing = state.approvalProcessing;
-      if (processing && message.runState && processing.runId === message.runState.taskId) {
-        appendRunDetailRow(grid, t('runDetailsApprovalOutcome'), (processing.targets || []).map(function(target) {
-          return [target.id + ' · ' + target.status, target.failureCode, getApprovalDisplayReason(target.reason, true),
-            target.replan?.reason && target.replan.reason !== target.reason ? t('approvalCommandReplanReason', { reason: target.replan.reason }) : '',
-            target.dependency ? formatApprovalDependency(target.dependency) : ''].filter(Boolean).join(' · ');
-        }).concat(getApprovalDisplayReason(processing.reason, true) || []).join('\\n') || processing.status);
-      }
       appendRunDetailRow(grid, t('runDetailsModel'), details.modelId || '—');
       appendRunDetailRow(grid, t('runDetailsSource'), getRunSourceLabel(details.sourceId, details.modelId));
       appendRunDetailRow(grid, t('runDetailsProtocol'), details.protocol || details.provider || '—');

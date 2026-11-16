@@ -41,7 +41,9 @@ export async function validateDraftRunBeforeApproval(
   scope?: CommandScope,
   mode?: ApprovalMode
 ): Promise<void> {
-  checkDraftRunApprovalBoundary(draftRun, authorizedExternalReferenceUris);
+  // Approve all is a straight-through mode: it neither verifies the launch
+  // profile nor waits for an external-directory authorization.
+  if (mode !== 'approve-all') checkDraftRunApprovalBoundary(draftRun, authorizedExternalReferenceUris);
   if (!scope) {
     const cwdUri = vscode.Uri.parse(draftRun.spec.cwdUri);
     const stat = await vscode.workspace.fs.stat(cwdUri);
@@ -53,7 +55,7 @@ export async function validateDraftRunBeforeApproval(
       && !authorizedExternalReferenceUris.has(cwdUri.toString())) {
       throw new Error(`Authorize the exact external working directory before running this DraftRun: ${cwdUri.toString()}`);
     }
-  } else {
+  } else if (mode !== 'approve-all') {
     const launchFailure = getDraftRunLaunchRefusal(scope);
     if (launchFailure) throw new Error(launchFailure);
   }
@@ -61,7 +63,7 @@ export async function validateDraftRunBeforeApproval(
     throw new Error(scope?.projectExecutionUnavailable
       ?? 'The project execution boundary is missing. / 缺少工程执行边界。');
   }
-  checkDraftRunApprovalBoundary(draftRun, authorizedExternalReferenceUris);
+  if (mode !== 'approve-all') checkDraftRunApprovalBoundary(draftRun, authorizedExternalReferenceUris);
   const diagnosis = analyzeCommandCapability(draftRun.spec, scope?.semantics, mode).diagnostics.find(item => item.blocking);
   if (diagnosis) throw new CommandCapabilityError(diagnosis);
 }

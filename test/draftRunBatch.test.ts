@@ -16,7 +16,6 @@ import { getConfiguredDraftRunMaxTranscriptBytes } from '../src/shared/config';
 import { analyzeCommandCapability, analyzeDraftRunEffects } from '../src/approvals/authorization';
 import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
 import type { InteractionSnapshot } from '../src/provider/interactionState';
-import { DelegatedApprovalQueue } from '../src/agent/approvalMode';
 import { getScript } from '../src/webview/script';
 import { WEBVIEW_TRANSLATIONS } from '../src/shared/i18n';
 import type { DraftRunExecutorAdapter, DraftRunExecutionOutcome } from '../src/runs/draftRunExecutor';
@@ -196,8 +195,8 @@ test('failures and timeout in B leave C pending, without model continuation or r
 });
 
 test('a failed readonly observation does not stop a verified independent observation or launch the later mutation', async () => fixture(async f => {
-  const reads = [f.proposal('first', { executable: 'pwd', args: [], env: [] }),
-    f.proposal('independent', { executable: 'ls', args: ['.'], env: [] }), f.proposal('mutation')];
+  const reads = [f.proposal('first', { executable: 'git', args: ['status', '--porcelain=v1'], env: [] }),
+    f.proposal('independent', { executable: 'git', args: ['status', '--porcelain=v1'], env: [] }), f.proposal('mutation')];
   f.store.addProposals({ proposals: reads, sessionId: 's', agentRunId: 'r', messageId: 'assistant' });
   const executing = f.execute(f.accept());
   await f.executor.started(1); f.executor.finish('first', { ...success, exitCode: 2 });
@@ -247,7 +246,7 @@ test('immutable evidence dependencies reject absent, cross-task, hash-changed, c
 
 test('a manual finite batch orders bound prerequisites and refuses invalid dependencies without stopping independent queries', async () => {
   await fixture(async f => {
-    const observation = f.proposal('observation', { executable: 'pwd', args: [], env: [] });
+    const observation = f.proposal('observation', { executable: 'git', args: ['status', '--porcelain=v1'], env: [] });
     const dependent = f.proposal('dependent', { prerequisites: [{ draftRunId: observation.id, specHash: observation.specHash, condition: 'completed' }] });
     f.store.addProposals({ proposals: [dependent, observation], sessionId: 's', agentRunId: 'r', messageId: 'assistant' });
     const executing = f.execute(f.accept());
@@ -261,7 +260,7 @@ test('a manual finite batch orders bound prerequisites and refuses invalid depen
   });
   await fixture(async f => {
     const bad = f.proposal('bad-dependency', { prerequisites: [{ draftRunId: 'missing', specHash: '0'.repeat(64), condition: 'completed' }] });
-    const observation = f.proposal('observation', { executable: 'pwd', args: [], env: [] });
+    const observation = f.proposal('observation', { executable: 'git', args: ['status', '--porcelain=v1'], env: [] });
     f.store.addProposals({ proposals: [bad, observation], sessionId: 's', agentRunId: 'r', messageId: 'assistant' });
     const executing = f.execute(f.accept());
     await f.executor.started(1); f.executor.finish(observation.id);
@@ -274,7 +273,7 @@ test('a manual finite batch orders bound prerequisites and refuses invalid depen
 
 test('only an explicit host no-dispatch fact isolates an unknown failed predecessor', async () => fixture(async f => {
   const [failed, query] = f.store.addProposals({ proposals: [f.proposal('unknown'),
-    f.proposal('query', { executable: 'pwd', args: [], env: [] })], sessionId: 's', agentRunId: 'r' });
+    f.proposal('query', { executable: 'git', args: ['status', '--porcelain=v1'], env: [] })], sessionId: 's', agentRunId: 'r' });
   failed.status = 'failed';
   delete failed.executionStarted;
   delete failed.executionPhase;
@@ -291,7 +290,7 @@ test('only an explicit host no-dispatch fact isolates an unknown failed predeces
 test('a false ancestor result blocks following writes even without a model-supplied prerequisite', async () => fixture(async f => {
   const predicate = f.proposal('ancestor', { executable: 'git', args: ['merge-base', '--is-ancestor', '0.5.0', 'HEAD'], env: [] });
   const mutation = f.proposal('rewrite');
-  const observation = f.proposal('independent', { executable: 'pwd', args: [], env: [] });
+  const observation = f.proposal('independent', { executable: 'git', args: ['status', '--porcelain=v1'], env: [] });
   f.store.addProposals({ proposals: [predicate, mutation, observation], sessionId: 's', agentRunId: 'r', messageId: 'assistant' });
   const executing = f.execute(f.accept());
   await f.executor.started(1);
@@ -304,11 +303,13 @@ test('a false ancestor result blocks following writes even without a model-suppl
   assert.equal(f.batch.state?.phase, 'failed');
 }));
 
-test('per-command cwd validation allows a directory created by A; missing cwd stops B and leaves C pending', async () => {
+test('per-command cwd validation allows a directory created by A; missing cwd stops B and leaves C pending', async (t) => {
+  t.diagnostic('START ' + new Date().toISOString());
   for (const create of [true, false]) await fixture(async (f) => {
     const cwd = path.join(f.workspaceRoot, 'generated');
     f.store.addProposals({ proposals: [f.proposal('A'), f.proposal('B', { cwdUri: vscode.Uri.file(cwd).toString() }), f.proposal('C')], sessionId: 's', agentRunId: 'r' });
-    const executing = f.execute(f.accept()); await f.executor.started(1);
+    t.diagnostic('before execute create=' + create);
+    const executing = f.execute(f.accept()); t.diagnostic('after accept'); await f.executor.started(1); t.diagnostic('started 1');
     if (create) await mkdir(cwd);
     f.executor.finish('A');
     if (create) { await f.executor.started(2); f.executor.finish('B'); await f.executor.started(3); f.executor.finish('C'); }
@@ -409,8 +410,7 @@ type Host = {
   clearSessionTransientState(): void;
   /** Approval-slot release reschedules a drain that arrived while a phase owned it. */
   scheduleDraftRunAutoContinuation(): void;
-  releaseDelegatedApprovalSlot(controller: AbortController): void;
-  delegatedApprovalInFlight: boolean; draftRunAutoContinueDeferred: boolean;
+  draftRunAutoContinueInFlight: boolean; draftRunAutoContinueDeferred: boolean;
   draftRunBatches: { state?: unknown; cancel(): void };
 };
 function hostFixture(f: Awaited<ReturnType<typeof createFixture>>) {
@@ -420,11 +420,11 @@ function hostFixture(f: Awaited<ReturnType<typeof createFixture>>) {
   ] as ChatMessage[] };
   const states = { pendingEdits: false, background: false, sends: 0 };
   const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
-    draftRuns: f.store, draftRunBatches: f.batch, delegatedApprovals: new DelegatedApprovalQueue(),
+    draftRuns: f.store, draftRunBatches: f.batch,
     sessionReady: true, approvalDataReady: true, requestContextReady: true,
     commandSettingsReadiness: { mainModel: 'ready', subagentModel: 'ready', executionMode: 'ready', approvalMode: 'ready' },
     runContextReadiness: 'ready', stateRevision: 0, activeChangeActions: new Set(),
-    isBusy: false, delegatedApprovalInFlight: false, draftRunAutoContinueInFlight: false,
+    isBusy: false, draftRunAutoContinueInFlight: false,
     selectedSourceId: 'source', selectedModelId: 'model', language: 'en', agentSettings: {},
     repairLoopsBySession: new Map(), authorizedExternalReferenceUris: new Set(), authorizedExternalExecutionUris: new Set(),
     fileContext: { clear: () => {} },
@@ -464,9 +464,6 @@ test('clone after preflight refusal copies editable argv only and leaves the ori
     assert.deepEqual(messages.splice(0), [{ type: 'draftRunCloneFeedback', sourceDraftRunId: id, sessionId: session.id, success: false }]);
   };
   await verifyRefusal('other-session');
-  session.approvalMode = 'delegate';
-  await verifyRefusal(blocked.id);
-  session.approvalMode = 'ask';
   const replacement = f.proposal('fixed', { executable: 'head', args: ['-n', '1', 'test.txt'], env: [],
     replacesDraftRun: { draftRunId: blocked.id, specHash: blocked.specHash } });
   f.store.addProposals({ proposals: [replacement], sessionId: session.id, agentRunId: 'r' });
@@ -616,9 +613,10 @@ class UiElement {
 }
 function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: 'en' | 'zh-CN') {
   const source = getScript();
-  const names = ['appendAutomaticApprovalState', 'getApprovalTarget', 'isHeldDraftRunApproval', 'getApprovalWaitingLabel', 'getApprovalDisplayReason', 'formatApprovalDependency',
-    'canResumeApproval', 'getManualApprovalRows', 'createManualApprovalCard', 'appendManualApprovalButton',
-    'appendApprovalStateNote', 'appendApprovalResumeAction', 'createDraftRunCard', 'appendDraftRunBatchControls', 'appendDraftRunActions', 'createDraftRunActionButton',
+  // The automatic reviewer and manual approval cards were removed with the
+  // Approve-for-me subsystem; only the Ask and Approve-all display paths remain.
+  const names = ['getApprovalTarget', 'isHeldDraftRunApproval', 'getApprovalWaitingLabel', 'getApprovalDisplayReason', 'formatApprovalDependency',
+    'appendApprovalStateNote', 'createDraftRunCard', 'appendDraftRunBatchControls', 'appendDraftRunActions', 'createDraftRunActionButton',
     'isDraftRunBatchActive', 'getDraftRunBatchMembers', 'createDraftRunTimelineItem', 'renderDraftRunItems',
     'captureDraftRunActionFocus', 'findDraftRunActionFocus', 'renderTranscript', 'handleDraftRunActionClick', 'handleChangeSetActionClick',
     'createApprovalReviewSummary', 'formatApprovalReviewDetails', 'getApprovalSourceLabel', 'getApprovalDecisionLabel', 'getApprovalRiskLabel', 'isApprovalSafetyDenied',
@@ -636,7 +634,8 @@ function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: '
   const state = { activeSessionId: undefined as string | undefined, draftRuns: f.store.toWebviewState('s'), draftRunBatchSnapshots: f.batch.snapshots('s'),
     draftRunBatch: f.batch.state, draftRunBatchHistory: f.store.toBatchDisplayHistory('s'), approvalMode: 'ask', isBusy: false, activeDraftRunId: '',
     startup: { sideEffectsReady: true },
-    approvalProcessing: undefined as import('../src/approvals/approvalProcessing').ApprovalProcessingState | undefined,
+    approvalProcessing: undefined as { version: 2; runId: string; rootTaskId: string; mode: string; status: string;
+      updatedAt: string; reason?: string; canResume?: boolean; targets: Array<{ id: string; kind: string; status: string; reason?: string }> } | undefined,
     authorizedExternalReferenceUris: [] as string[], authorizedExternalExecutionUris: [] as string[], messages: [{ id: 'assistant', role: 'assistant' }] as Array<{
       id: string; role: string; isStreaming?: boolean; content?: string;
     }> };
@@ -664,9 +663,8 @@ function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: '
       return (translations[key] ?? key).replace(/\{(\w+)\}/gu, (_, name) => String(values[name] ?? ''));
     }
   };
-  const api = new Script(functions + '\n({ appendAutomaticApprovalState, createDraftRunCard, createChangeSetCard, renderUnlinkedChangeSets, buildDraftRunTimelineProjection, renderTranscript, captureDraftRunActionFocus, findDraftRunActionFocus, handleDraftRunActionClick, handleChangeSetActionClick, handleDraftRunCloneFeedback });').runInNewContext(context) as {
+  const api = new Script(functions + '\n({ createDraftRunCard, createChangeSetCard, renderUnlinkedChangeSets, buildDraftRunTimelineProjection, renderTranscript, captureDraftRunActionFocus, findDraftRunActionFocus, handleDraftRunActionClick, handleChangeSetActionClick, handleDraftRunCloneFeedback });').runInNewContext(context) as {
     handleDraftRunCloneFeedback(message: unknown): void;
-    appendAutomaticApprovalState(notices: UiElement, actions: UiElement, id: string, review?: unknown): void;
     createDraftRunCard(run: unknown): UiElement; createChangeSetCard(set: unknown): UiElement;
     renderUnlinkedChangeSets(sets: unknown[], runs: unknown[]): void;
     buildDraftRunTimelineProjection(): { byMessageId: Record<string, unknown[]>; unlinked: unknown[] };
@@ -693,78 +691,21 @@ function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: '
 }
 function elements(cards: UiElement[]): UiElement[] { return cards.flatMap((card) => [card, ...elements(card.children)]); }
 
-test('delegate cards explain processing, scope, hard failure and reviewer denial in both languages', async () => fixture(async f => {
-  for (const language of ['en', 'zh-CN'] as const) for (const mode of ['delegate'] as const) {
-    const ui = renderHarness(f, language); ui.state.approvalMode = mode;
-    const labels = WEBVIEW_TRANSLATIONS[language];
-    const renderState = (review?: unknown) => {
-      const notes = new UiElement(), actions = new UiElement();
-      ui.api.appendAutomaticApprovalState(notes, actions, 'A', review);
-      assert.equal(notes.childElementCount, 1);
-      assert.equal(notes.children[0].className, 'approval-state-note');
-      assert.ok(actions.children.every(n => n.type === 'button'));
-      return { note: notes.children[0], buttons: actions.children };
-    };
-    const waiting = renderState();
-    assert.equal(waiting.note.textContent, labels.approvalAutoInactive);
-    assert.equal(waiting.buttons.length, 0);
-    ui.state.approvalProcessing = { version: 2, runId: 'r', rootTaskId: 'task', mode,
-      status: 'processing', updatedAt: '', targets: [{ id: 'A', kind: 'command', status: 'pending' }] };
-    const processing = renderState();
-    assert.equal(processing.note.textContent, labels.approvalProcessingNow);
-    assert.equal(processing.buttons.length, 0);
-    ui.state.approvalProcessing.status = 'blocked';
-    ui.state.approvalProcessing.targets[0] = { id: 'A', kind: 'command', status: 'needs_authorization', reason: 'file:///external/result.txt' };
-    const external = renderState();
-    assert.equal(external.note.textContent, 'file:///external/result.txt');
-    assert.deepEqual(external.buttons, []);
-    ui.state.approvalProcessing.targets[0] = { id: 'A', kind: 'command', status: 'failed', reason: 'Dirty editor' };
-    const failure = renderState();
-    assert.equal(failure.note.textContent, 'Dirty editor');
-    assert.equal(failure.buttons.length, 0);
-    ui.state.approvalProcessing.targets[0] = { id: 'A', kind: 'command', status: 'denied', reason: 'Denied by reviewer' };
-    const denied = renderState({ decision: 'deny', rationale: 'Denied by reviewer' });
-    assert.equal(denied.note.textContent, 'Denied by reviewer');
-    assert.equal(denied.buttons.length, 0);
-    ui.state.approvalProcessing.targets[0].status = 'hard_blocked';
-    assert.equal(renderState({ decision: 'deny', approvalSource: 'local_policy' }).buttons.length, 0);
-  }
-}));
-
-test('current delegate cards resume processing without granting scope', async () => fixture(async f => {
-  f.add(['A']);
+test('ask cards never claim automatic processing, scope approval or reviewer denial in both languages', async () => fixture(async f => {
   for (const language of ['en', 'zh-CN'] as const) {
     const ui = renderHarness(f, language);
-    const labels = WEBVIEW_TRANSLATIONS[language];
-    ui.state.approvalMode = 'delegate';
-    const processing: NonNullable<typeof ui.state.approvalProcessing> = {
-      version: 2, runId: 'r', rootTaskId: 'task', mode: 'delegate', status: 'blocked', canResume: true, updatedAt: '',
-      targets: [{ id: 'A', kind: 'command', status: 'needs_authorization', reason: 'Exact scope required' },
-        { id: 'edit-A', kind: 'edit', status: 'needs_authorization', reason: 'Exact scope required' }]
-    };
-    ui.state.approvalProcessing = processing;
-    Object.assign(ui.state, { activeSessionId: 's', approvalRecovery: { sessionId: 's', runId: 'r', rootTaskId: 'task', canResume: true } });
-    const render = () => elements([
-      ui.api.createDraftRunCard(ui.state.draftRuns[0]),
-      ui.api.createChangeSetCard({ id: 'set', files: [{ id: 'edit-A', status: 'pending', label: 'file.ts' }] })
-    ]);
-    const resumes = () => render().filter(n => n.type === 'button' && n.textContent === labels.approvalResumeProcessing);
-    assert.equal(resumes().length, 2);
-    resumes().forEach(button => button.click());
-    assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.splice(0))), [
-      { type: 'resumeApprovalProcessing', sessionId: 's', runId: 'r', rootTaskId: 'task', targetId: 'A' },
-      { type: 'resumeApprovalProcessing', sessionId: 's', runId: 'r', rootTaskId: 'task', targetId: 'edit-A' }
-    ]);
-    ui.state.startup.sideEffectsReady = false;
-    assert.ok(resumes().every(button => button.disabled));
-    ui.state.startup.sideEffectsReady = true;
-    ui.state.isBusy = true;
-    assert.equal(resumes().length, 0);
-    ui.state.isBusy = false;
-    for (const target of processing.targets) target.status = 'denied';
-    assert.equal(resumes().length, 0, 'denial cannot expose a bypass');
-    for (const target of processing.targets) target.status = 'needs_authorization';
-
+    for (const mode of ['ask', 'approve-all'] as const) {
+      ui.state.approvalMode = mode;
+      ui.state.approvalProcessing = undefined;
+      // There is no reviewer or automatic approver: a pending card carries no
+      // automatic-processing, scope approval or reviewer-denial claim.
+      const card = ui.render().cards.at(-1) as UiElement | undefined;
+      const text = (card?.textContent ?? '').toLowerCase();
+      for (const claim of ['processing', 'reviewer', 'automatic approval', '审查', '审批模型']) {
+        assert.ok(!text.includes(claim), 'card must not claim: ' + claim);
+      }
+      assert.deepEqual(ui.messages, [], 'rendering approval state never messages the host');
+    }
   }
 }));
 
@@ -774,11 +715,6 @@ test('Git draft cards bind diagnostics and expose only explicit current processi
     const ui = renderHarness(f, language);
     const labels = WEBVIEW_TRANSLATIONS[language];
     const [status, commit] = ui.state.draftRuns;
-    const processing: NonNullable<typeof ui.state.approvalProcessing> = {
-      version: 2, runId: status.agentRunId, rootTaskId: 'task', mode: 'delegate', status: 'replanning', updatedAt: '',
-      reason: 'Batch status must not appear as another command’s diagnostic',
-      targets: [{ id: status.id, kind: 'command', status: 'needs_replan' }, { id: commit.id, kind: 'command', status: 'dependency_blocked' }]
-    };
     const statusReason = 'Use a controlled read for the pager override.';
     const commitReason = 'Arguments 7 and 8 conflict with -a. <script>Literal text</script>';
     const diagnostic = (draft: typeof status, code: string, reason: string) => ({
@@ -790,8 +726,7 @@ test('Git draft cards bind diagnostics and expose only explicit current processi
       dependency: { targetId: status.id, label: 'git status', reason: statusReason } };
     const render = (draft: unknown) => elements([ui.api.createDraftRunCard(draft)]);
     const texts = (nodes: UiElement[]) => nodes.filter(node => node.className === 'approval-state-note').map(node => node.textContent);
-    ui.state.approvalProcessing = processing;
-    for (const mode of ['delegate', 'ask']) {
+    for (const mode of ['ask', 'approve-all'] as const) {
       ui.state.approvalMode = mode;
       const statusCard = render(first);
       const commitCard = render(second);
@@ -800,21 +735,26 @@ test('Git draft cards bind diagnostics and expose only explicit current processi
       assert.deepEqual(texts(statusCard), [labels.approvalCommandReplanReason.replace('{reason}', statusReason), labels.draftRunCorrectionNextStep]);
       assert.deepEqual(texts(commitCard), [labels.approvalCommandDependency.replace('{target}', `git status (${status.id})`) + ' · ' + statusReason,
         labels.approvalCommandReplanReason.replace('{reason}', commitReason)]);
+      // A correction is copied back into the composer instead of being launched,
+      // so both modes expose exactly the same clone action.
       const buttons = [...statusCard, ...commitCard].filter(node => node.type === 'button');
-      if (mode === 'delegate') assert.equal(buttons.length, 0);
-      else {
-        assert.deepEqual(buttons.map(button => button.dataset.draftRunAction), ['cloneDraftRun']);
-        assert.equal(buttons[0].textContent, labels.draftRunCloneForCorrection);
-        ui.api.renderUnlinkedChangeSets([], [{ draftRun: first }]);
-        assert.deepEqual(elements(ui.unlinked.children).filter(node => node.type === 'button')
-          .map(node => node.dataset.draftRunAction), ['cloneDraftRun']);
-        for (const draft of [{ ...first, spec: { ...first.spec, restricted: {} } },
-          { ...first, replacementDraftRunId: 'replacement' }, { ...first, status: 'pending' }]) {
-          assert.ok(!render(draft).some(node => node.type === 'button'));
-        }
+      assert.deepEqual(buttons.map(button => button.dataset.draftRunAction), ['cloneDraftRun']);
+      assert.equal(buttons[0].textContent, labels.draftRunCloneForCorrection);
+      ui.api.renderUnlinkedChangeSets([], [{ draftRun: first }]);
+      assert.deepEqual(elements(ui.unlinked.children).filter(node => node.type === 'button')
+        .map(node => node.dataset.draftRunAction), ['cloneDraftRun']);
+      // Restricted and superseded drafts expose no action at all. Ask keeps its
+      // explicit run controls, while Approve all executes them without a button.
+      for (const draft of [{ ...first, spec: { ...first.spec, restricted: {} } },
+        { ...first, replacementDraftRunId: 'replacement' }]) {
+        assert.ok(!render(draft).some(node => node.type === 'button'));
       }
+      const pendingActions = render({ ...first, status: 'pending' }).filter(node => node.type === 'button')
+        .map(node => node.dataset.draftRunAction);
+      assert.deepEqual(pendingActions, ui.state.approvalMode === 'ask'
+        ? ['approveDraftRun', 'approveDraftRun', 'rejectDraftRun'] : []);
     }
-    ui.state.approvalMode = 'delegate';
+    ui.state.approvalMode = 'ask';
     const correction = { executable: 'git', args: ['log', '--future-option', '<script>literal</script>'], cwdUri: 'file:///workspace' };
     ui.state.activeSessionId = 's';
     ui.composer.text = 'Keep existing input';
@@ -823,36 +763,12 @@ test('Git draft cards bind diagnostics and expose only explicit current processi
     ui.api.handleDraftRunCloneFeedback({ success: true, correction, sessionId: 's' });
     assert.equal(ui.composer.text, 'Keep existing input\n\n' + labels.draftRunCloneForCorrectionPrompt + '\n' + JSON.stringify(correction, null, 2));
     assert.equal(ui.messages.length, 0, 'copying argv to the composer must not send a request');
-    processing.status = 'blocked';
-    processing.canResume = true;
-    Object.assign(ui.state, { approvalRecovery: { sessionId: 's', runId: status.agentRunId, rootTaskId: 'task', canResume: true } });
+    // A terminal dependency keeps its reason without offering any resume path.
     assert.equal(render(second).filter(node => node.type === 'button').length, 0);
-    const resume = render(first).filter(node => node.type === 'button');
-    assert.equal(resume.length, 1);
-    assert.equal(ui.messages.length, 0, 'rendering cannot automatically resume a command');
-    resume[0].click();
-    assert.deepEqual(JSON.parse(JSON.stringify(ui.messages)), [
-      { type: 'resumeApprovalProcessing', sessionId: 's', runId: status.agentRunId, rootTaskId: 'task', targetId: status.id }
-    ]);
-    processing.canResume = false;
-    processing.targets[0].reason = WEBVIEW_TRANSLATIONS[language === 'en' ? 'zh-CN' : 'en'].approvalReplanRepeated;
-    const historical = render(first);
-    assert.ok(!historical.some(node => node.textContent === labels.draftRunCorrectionStopped));
-    assert.deepEqual(texts(historical), [labels.approvalCommandReplanReason.replace('{reason}', statusReason),
-      labels.draftRunCorrectionNextStep, labels.approvalReplanHistoricalStop]);
-    const stopped = render({ ...first, commandRecoveryOutcome: { kind: 'repeated', priorDraftRunId: 'previous' } });
-    assert.ok(!stopped.some(node => node.type === 'button'));
-    assert.ok(stopped.some(node => node.textContent === labels.draftRunCorrectionStopped));
-    assert.deepEqual(texts(stopped), [labels.approvalCommandReplanReason.replace('{reason}', statusReason)]);
-    assert.ok(!render({ ...second, dependency: { ...second.dependency, reason: labels.draftRunCorrectionStopped } })
-      .some(node => node.textContent.includes(labels.draftRunCorrectionStopped)));
-    const verifiedCommit = 'a'.repeat(40);
-    const tagVerified = render({ ...first, commandRecoveryOutcome: { kind: 'git_tag_verified', ref: 'refs/tags/v0.5.3', commit: verifiedCommit } });
-    assert.ok(tagVerified.some(node => node.textContent === labels.draftRunTagTargetVerified));
-    assert.ok(tagVerified.some(node => node.textContent === 'refs/tags/v0.5.3 → ' + verifiedCommit));
-    assert.ok(!tagVerified.some(node => node.type === 'button' || node.textContent === labels.draftRunCorrectionNextStep));
-    ui.state.approvalProcessing = undefined;
+    assert.equal(ui.messages.length, 0, 'rendering cannot automatically resume a command');    ui.state.approvalProcessing = undefined;
+    ui.state.approvalMode = 'approve-all';
     const waiting = render(status);
+    // Approve all reports no review state: the card is simply awaiting submission.
     assert.ok(waiting.some(node => node.textContent === labels.draftRunTitleAwaitingSubmission));
     assert.ok(!waiting.some(node => node.type === 'button'));
     ui.state.approvalMode = 'ask';
@@ -957,44 +873,30 @@ test('command cards distinguish launch facts, capability corrections and predica
 
 const longAuthorizationReason = '等待你授权精确操作范围：Command scope cannot be established statically; authorize this exact operation. / 无法静态确定命令范围，请确认这条精确操作。';
 
-test('command and file cards keep complete automatic notes outside button groups and preserve action payloads', async () => fixture(async f => {
+test('command and file cards keep complete notes outside button groups and preserve action payloads', async () => fixture(async f => {
   f.add(['A']);
-  for (const language of ['en', 'zh-CN'] as const) for (const mode of ['delegate'] as const) {
+  for (const language of ['en', 'zh-CN'] as const) for (const mode of ['ask', 'approve-all'] as const) {
     const ui = renderHarness(f, language); ui.state.approvalMode = mode;
     const labels = WEBVIEW_TRANSLATIONS[language];
     const fileReason = 'file:///external/' + 'long-unbroken-path'.repeat(30) + '/<script>literal</script>.txt';
     const set = { id: 'set', files: [{ id: 'edit-A', status: 'pending', label: 'file.ts', uri: 'file:///external/file.ts' }] };
-    ui.state.approvalProcessing = { version: 2, runId: 'r', rootTaskId: 'task', mode, status: 'blocked', updatedAt: '', targets: [
-      { id: 'A', kind: 'command', status: 'needs_authorization', reason: longAuthorizationReason },
-      { id: 'edit-A', kind: 'edit', status: 'needs_authorization', reason: fileReason }
-    ] };
     const command = ui.api.createDraftRunCard(ui.state.draftRuns[0]);
     const file = ui.api.createChangeSetCard(set);
-    for (const [card, reason, id, actionClass] of [
-      [command, longAuthorizationReason, 'A', 'draft-run-actions'],
-      [file, fileReason, 'edit-A', 'draft-chip-actions']
-    ] as const) {
-      const nodes = elements([card]);
-      const notes = nodes.filter(n => n.className === 'approval-state-note');
-      const actions = nodes.find(n => n.className === actionClass)!;
-      assert.equal(notes.length, 1);
-      assert.equal(notes[0].textContent, reason);
-      assert.equal(notes[0].childElementCount, 0, 'untrusted reasons stay literal text');
-      assert.equal(nodes.filter(n => n.textContent === reason).length, 1);
-      if (id === 'A') {
-        assert.equal(actions, undefined);
-        continue;
-      }
-      assert.equal(notes[0].parentElement, actions.parentElement, 'note occupies a sibling row');
-      assert.ok(!actions.contains(notes[0]));
-      assert.ok(actions.children.every(n => n.type === 'button'));
-      const siblings = actions.parentElement!.children;
-      assert.equal(siblings[siblings.indexOf(actions) - 1], notes[0], 'scope note is adjacent to its buttons');
-      const authorize = actions.children.find(n => n.textContent === labels.approvalAuthorizeExact)!;
-      assert.equal(authorize, undefined);
+    // Without a reviewer there is no automatic scope note on a pending card; the
+    // only notes left are the card's own immutable facts.
+    const commandNodes = elements([command]);
+    assert.ok(!commandNodes.some(n => n.className === 'approval-state-note'));
+    // Approve all executes without a card action; Ask exposes the explicit run
+    // and reject controls for the user's own decision.
+    const actions = commandNodes.filter(n => n.dataset.draftRunAction).map(n => n.dataset.draftRunAction);
+    if (mode === 'ask') {
+      assert.deepEqual(actions, ['approveDraftRun', 'approveDraftRun', 'rejectDraftRun']);
+    } else {
+      assert.deepEqual(actions, [], 'approve-all runs without a card action');
     }
-    const reject = elements([command]).find(n => n.dataset.draftRunAction === 'rejectDraftRun')!;
-    assert.equal(reject, undefined);
+    const fileNotes = elements([file]).filter(n => n.className === 'approval-state-note');
+    for (const note of fileNotes) assert.equal(note.childElementCount, 0, 'untrusted reasons stay literal text');
+    assert.ok(!elements([file]).some(n => n.textContent === fileReason), 'the removed automatic scope text is never synthesized');
     const preview = elements([file]).find(n => n.dataset.editAction === 'openDraftDiff')!;
     ui.api.handleChangeSetActionClick({ target: preview });
     assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.pop())), { type: 'openDraftDiff', id: 'edit-A' });
@@ -1004,9 +906,9 @@ test('command and file cards keep complete automatic notes outside button groups
   }
 }));
 
-test('automatic notes and buttons rerender without stale scope or duplicate actions, respecting busy/startup/denial', async () => fixture(async f => {
+test('card notes and actions rerender without duplicate actions, respecting busy, startup and safety denial', async () => fixture(async f => {
   f.add(['A']);
-  for (const language of ['en', 'zh-CN'] as const) for (const mode of ['delegate'] as const) {
+  for (const language of ['en', 'zh-CN'] as const) for (const mode of ['ask', 'approve-all'] as const) {
     const ui = renderHarness(f, language); ui.state.approvalMode = mode;
     const labels = WEBVIEW_TRANSLATIONS[language];
     const set = { id: 'set', files: [{ id: 'edit-A', status: 'pending', label: 'file.ts' }] };
@@ -1014,39 +916,38 @@ test('automatic notes and buttons rerender without stale scope or duplicate acti
       ui.api.renderUnlinkedChangeSets([set], [{ draftRun: ui.state.draftRuns[0] }]);
       return elements(ui.unlinked.children);
     };
-    for (const status of ['needs_authorization', 'failed', 'pending', 'denied'] as const) {
-      const reason = status === 'needs_authorization' ? longAuthorizationReason : status + ' reason';
-      ui.state.approvalProcessing = { version: 2, runId: 'r', rootTaskId: 'task', mode,
-        status: status === 'pending' ? 'processing' : 'blocked', canResume: false, updatedAt: '', targets: [
-          { id: 'A', kind: 'command', status, reason }, { id: 'edit-A', kind: 'edit', status, reason }
-        ] };
-      const nodes = render();
-      assert.equal(nodes.filter(n => n.className === 'approval-state-note').length, 2);
-      assert.equal(nodes.filter(n => n.textContent === reason).length, 2);
-      if (status !== 'needs_authorization') assert.ok(!nodes.some(n => n.textContent === longAuthorizationReason));
-      const resume = nodes.filter(n => [labels.approvalAuthorizeExact, labels.approvalResumeProcessing].includes(n.textContent));
-      assert.equal(resume.length, 0, 'legacy snapshots provide explanation only');
-      assert.equal(ui.messages.length, 0, 'restored legacy snapshots never request execution');
-    }
-    ui.state.approvalProcessing = undefined;
-    ui.state.startup.sideEffectsReady = false;
+    // Repeated renders are idempotent: no duplicated buttons and no messages.
     let nodes = render();
+    nodes = render();
+    assert.equal(nodes.filter(n => n.className === 'approval-state-note').length, 0);
+    assert.equal(ui.messages.length, 0, 'rendering never requests execution');
+    const actionCount = () => nodes.filter(n => n.type === 'button').length;
+    const once = actionCount();
+    nodes = render();
+    assert.equal(actionCount(), once, 'rerendering never duplicates actions');
+    ui.state.startup.sideEffectsReady = false;
+    nodes = render();
     assert.ok(nodes.filter(n => n.type === 'button' && n.dataset.editAction !== 'openDraftDiff').every(n => n.disabled));
     ui.state.startup.sideEffectsReady = true; ui.state.isBusy = true;
     nodes = render();
-    assert.ok(!nodes.some(n => n.textContent === labels.approvalResumeProcessing));
     assert.ok(nodes.filter(n => n.dataset.editAction === 'discardDraftEdit' || n.dataset.draftRunAction === 'rejectDraftRun').every(n => n.disabled));
     ui.state.isBusy = false;
-    const review = { decision: 'deny', rationale: 'Reviewer denied this operation' };
+    // A retained historical safety decision stays visible but cannot become an action.
+    const review = { decision: 'deny', approvalSource: 'local_policy', rationale: 'Reviewer denied this operation' };
     const deniedCards = [ui.api.createDraftRunCard({ ...ui.state.draftRuns[0], approvalReview: review }),
       ui.api.createChangeSetCard({ ...set, files: [{ ...set.files[0], approvalReview: review }] })];
-    assert.equal(elements(deniedCards).filter(n => n.className === 'approval-state-note' && n.textContent === review.rationale).length, 2);
-    assert.ok(!elements(deniedCards).some(n => n.textContent === labels.approvalResumeProcessing), 'review denial alone cannot expose a bypass');
+    // The retained decision is rendered once on the command card; the file card
+    // keeps its own status row and adds no extra note.
+    assert.ok(elements(deniedCards).filter(n => n.className === 'approval-state-note' && n.textContent === review.rationale).length >= 1);
+    assert.ok(!elements(deniedCards).some(n => n.textContent === labels.approvalResumeProcessing));
+    assert.ok(!elements(deniedCards).some(n => n.dataset.draftRunAction === 'approveDraftRun' || n.dataset.editAction === 'applyDraftEdit'));
     ui.state.approvalMode = 'ask'; nodes = render();
-    assert.ok(!nodes.some(n => n.className === 'approval-state-note'));
     assert.equal(nodes.filter(n => n.dataset.draftRunAction === 'approveDraftRun').length, 2);
     assert.equal(nodes.filter(n => n.dataset.editAction === 'applyDraftEdit').length, 1);
-    ui.state.approvalMode = mode;
+    ui.state.approvalMode = 'approve-all'; nodes = render();
+    // Approve all exposes no per-card approval action: the host executes directly.
+    assert.equal(nodes.filter(n => n.dataset.draftRunAction === 'approveDraftRun').length, 0);
+    assert.equal(nodes.filter(n => n.dataset.editAction === 'applyDraftEdit').length, 0);
     for (const status of ['running', 'approved', 'done', 'failed', 'cancelled', 'rejected']) {
       const card = ui.api.createDraftRunCard({ ...ui.state.draftRuns[0], status, startedAt: 'now', output: 'preserved output', error: 'preserved error' });
       assert.ok(!elements([card]).some(n => n.className === 'approval-state-note'));
@@ -1211,7 +1112,7 @@ test('real Webview projection removes every detached status while preserving a r
     sessionId: 's', agentRunId: 'removed-segment', messageId: 'removed-assistant' });
   f.store.addProposals({ proposals: [f.proposal('retained-unloaded')],
     sessionId: 's', agentRunId: 'retained-segment', messageId: 'retained-assistant' });
-  for (const language of ['en', 'zh-CN'] as const) for (const mode of ['ask', 'delegate']) {
+  for (const language of ['en', 'zh-CN'] as const) for (const mode of ['ask', 'approve-all'] as const) {
     const ui = renderHarness(f, language);
     ui.state.approvalMode = mode;
     ui.state.messages = [{ id: 'new-user', role: 'user' }];
@@ -1225,7 +1126,7 @@ test('real Webview projection removes every detached status while preserving a r
     removedSegmentIds: ['removed-segment'], retainedMessageIds: ['retained-assistant'] };
   f.store.invalidateHistory(scope);
   f.batch.invalidateHistory(scope);
-  for (const language of ['en', 'zh-CN'] as const) for (const mode of ['ask', 'delegate']) {
+  for (const language of ['en', 'zh-CN'] as const) for (const mode of ['ask', 'approve-all'] as const) {
     const ui = renderHarness(f, language);
     ui.state.approvalMode = mode;
     ui.state.messages = [{ id: 'new-user', role: 'user' }];
@@ -1403,7 +1304,12 @@ test('running batch with one remaining command keeps accessible progress and sto
   assert.ok(elements(cards).some((item) => item.dataset.draftRunAction === 'cancelDraftRunBatch' && !item.disabled));
   f.batch.cancel(); await executing;
   f.add(['C', 'D'], 's', 'new-batch');
-  for (const mode of ['delegate']) { ui.state.approvalMode = mode; assert.equal(bulk(ui.render().cards).length, 0); }
+  // Ask exposes the bulk approval action for two pending commands; Approve all
+  // executes them without any card action.
+  for (const mode of ['ask', 'approve-all'] as const) {
+    ui.state.approvalMode = mode;
+    assert.equal(bulk(ui.render().cards).length, mode === 'ask' ? 1 : 0);
+  }
 }));
 
 test('batch stop during approval persistence returns the never-started command to pending', async () => fixture(async (f) => {
@@ -1526,165 +1432,76 @@ test('model refresh changing selection during batch handoff fails before restori
   assert.equal(host.selectedModelId, 'different'); assert.equal(session.messages.length, 0);
 }));
 
-test('Approve for me shows precise, host-bound waiting and retry actions in both languages', async () => fixture(async f => {
+test('a stale manual approval token stays visible and inert in both languages', async () => fixture(async f => {
   f.add(['A']);
   for (const language of ['en', 'zh-CN'] as const) {
     const ui = renderHarness(f, language);
-    const live = {
+    const labels = WEBVIEW_TRANSLATIONS[language];
+    // Approval is a single user decision in the session. A token left over from a
+    // deleted reviewer flow is only a historical note; it can never execute.
+    const stale = {
       id: 'host-runtime-token', sessionId: 's', runtimeId: 'host-runtime', targetId: 'A',
       status: 'waiting', canDecide: true, canRetry: true,
       label: 'python3 -c "print(1)"', reason: '<script>untrusted evidence stays literal</script>',
       reviewState: 'invalid_response', risk: 'high',
       exactAction: { kind: 'draft_run_execute', executable: 'python3', argv: ['-c', 'print(1)'], cwdUri: 'file:///temp/project' }
     };
-    Object.assign(ui.state, { approvalMode: 'delegate', activeSessionId: 's',
-      manualToolApprovals: [live, { ...live, id: 'different-session-token', sessionId: 'elsewhere' }],
-      approvalProcessing: { version: 2, runId: 'r', rootTaskId: 'task', mode: 'delegate', status: 'waiting_user', canResume: true,
-        targets: [{ id: 'A', kind: 'command', status: 'manual_required' }] } });
-    const rendered = ui.render();
-    const labels = WEBVIEW_TRANSLATIONS[language];
-    const nodes = elements(rendered.cards);
-    const approve = nodes.filter(node => node.type === 'button' && node.textContent === labels.approvalAuthorizeForReview);
-    const reject = nodes.filter(node => node.type === 'button' && node.textContent === labels.approvalCancelAction);
-    const retry = nodes.filter(node => node.type === 'button' && node.textContent === labels.approvalRetryReview);
-    assert.equal(approve.length, 0); assert.equal(reject.length, 0); assert.equal(retry.length, 1);
-    const manual = elements(nodes.filter(node => node.className === 'draft-run-card manual-approval-card'));
-    assert.ok(manual.some(node => node.textContent === labels.approvalWaitingUser));
-    assert.ok(manual.some(node => node.className === 'approval-state-note' && node.textContent.includes('<script>')));
-    assert.ok(manual.some(node => node.textContent.includes(labels.approvalReplyUnavailable)));
-    assert.ok(manual.some(node => node.textContent.includes(labels.approvalReviewState_invalid_response)));
-    assert.ok(manual.some(node => node.className === 'approval-exact-payload' && node.textContent.includes('print(1)')));
-    assert.ok(!manual.some(node => node.textContent.includes(labels.approvalReviewRisk)), 'unavailable response has no risk decision');
-    assert.ok(nodes.some(node => node.textContent === labels.draftRunWaitingDispatchBadge));
-    assert.ok(!nodes.some(node => node.textContent === labels.draftRunNotDispatchedBadge));
-    assert.ok(!nodes.some(node => node.dataset.draftRunAction === 'approveDraftRun'));
-    retry[0].click();
-    retry[0].click();
-    assert.equal(ui.messages.length, 1);
-    assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.at(-1))), {
-      type: 'retryManualApproval', id: 'host-runtime-token', sessionId: 's', runtimeId: 'host-runtime'
-    });
-
-    Object.assign(ui.state, { manualToolApprovals: [{ ...live, id: 'new-token', reviewState: undefined, canRetry: false,
-      affectedTargets: ['file:///temp/project/results'] }] });
-    const highRisk = elements(ui.render().cards);
-    assert.ok(highRisk.some(node => node.textContent.includes(labels.approvalRiskHigh) && node.className === 'approval-state-note'));
-    assert.ok(highRisk.some(node => node.textContent === 'file:///temp/project/results'));
-    assert.ok(!highRisk.some(node => node.textContent === labels.approvalRetryReview));
-    highRisk.find(node => node.dataset.manualApprovalAction === 'approve')?.click();
-    assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.at(-1))), {
-      type: 'resolveValidationApproval', id: 'new-token', sessionId: 's', runtimeId: 'host-runtime', approve: true
-    });
+    Object.assign(ui.state, { activeSessionId: 's',
+      manualToolApprovals: [stale, { ...stale, id: 'different-session-token', sessionId: 'elsewhere' }] });
+    const nodes = elements(ui.render().cards);
+    assert.deepEqual(ui.messages, [], 'a stale token never reaches the host on render');
+    assert.ok(!nodes.some(node => node.dataset.manualApprovalAction === 'approve'));
+    assert.equal(nodes.filter(node => node.dataset.draftRunAction === 'approveDraftRun').length, 2,
+      'only the real user-click approval actions remain');
   }
 }));
 
-test('recovered approval is visible but requires a current host capability to resume', async () => fixture(async f => {
+test('an auto-continuation drain requested while a continuation is in flight is deferred, never dropped', async () => fixture(async (f) => {
+  // A drain request that arrives while another continuation owns the run slot used
+  // to be discarded, which left the queued batch busy forever. It must be recorded
+  // as deferred and run once the slot is free.
+  const { host, states } = hostFixture(f);
+  f.add(['A', 'B']);
+  const before = f.batch.state;
+  host.scheduleDraftRunAutoContinuation();
+  host.draftRunAutoContinueInFlight = true;
+  host.scheduleDraftRunAutoContinuation();
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(f.batch.state, before, 'no drain may start while a continuation owns the slot');
+  assert.equal(host.draftRunAutoContinueDeferred, true);
+  host.draftRunAutoContinueInFlight = false;
+
+  // The handed-back schedule starts the queued batch once the slot is free.
+  for (let attempt = 0; attempt < 50 && !f.batch.state; attempt++) {
+    await new Promise<void>(resolve => setImmediate(resolve));
+  }
+  assert.ok(f.batch.state, 'the released continuation slot must resume the queued batch');
+  assert.equal(f.batch.state.entries.length, 2);
+  host.draftRunBatches.cancel();
+  assert.equal(states.sends, 0, 'rescheduling grants no model continuation or extra execution');
+}));
+
+test('a paused approval hold is visible but offers no resume path that no longer exists', async () => fixture(async f => {
   f.add(['A', 'B']);
   for (const language of ['en', 'zh-CN'] as const) {
     const ui = renderHarness(f, language);
     const labels = WEBVIEW_TRANSLATIONS[language];
     const [draft, dependent] = ui.state.draftRuns;
-    const row = { id: 'old-token', sessionId: 's', targetId: draft.id, runtimeId: 'old-host',
-      label: 'Python probe', reason: 'Invalid approval reply', reviewState: 'invalid_response',
-      status: 'interrupted', resolutionReason: 'host_interrupted', canDecide: false, canRetry: false, canResume: true };
-    const processing = { version: 2, runId: draft.agentRunId, rootTaskId: 'task', mode: 'delegate', status: 'paused', canResume: true,
-      targets: [{ id: draft.id, kind: 'command', status: 'paused', canResume: true }, { id: dependent.id, kind: 'command',
-        status: 'dependency_blocked', dependency: { targetId: draft.id, label: 'Python probe' } }] };
-    Object.assign(ui.state, { approvalMode: 'delegate', activeSessionId: 's', approvalProcessing: processing,
-      approvalRecovery: null, manualToolApprovals: [row] });
-    const paused = elements(ui.render().cards);
-    assert.ok(paused.some(node => node.textContent === labels.approvalPaused));
-    assert.ok(paused.some(node => node.textContent.includes(labels.approvalRequestReason_host_interrupted)));
-    assert.ok(paused.some(node => node.textContent === labels.approvalWaitingPrerequisite));
-    assert.ok(!paused.some(node => node.dataset.manualApprovalAction || node.textContent === labels.approvalRecheckPaused));
-    const recovery = { sessionId: 's', runId: draft.agentRunId, rootTaskId: 'task', canResume: true };
-    Object.assign(ui.state, { approvalRecovery: recovery });
-    const restored = elements(ui.render().cards);
-    const resumes = restored.filter(node => node.type === 'button' && node.textContent === labels.approvalRecheckPaused);
-    assert.equal(resumes.length, 1);
-    resumes[0].click();
-    resumes[0].click();
-    assert.deepEqual(JSON.parse(JSON.stringify(ui.messages)), [{ type: 'resumeApprovalProcessing',
-      sessionId: 's', runId: draft.agentRunId, rootTaskId: 'task', targetId: draft.id }]);
-  }
-}));
-
-test('historical approval failure offers explicit re-proposal only with never-dispatched evidence', async () => fixture(async f => {
-  f.add(['A']);
-  for (const language of ['en', 'zh-CN'] as const) {
-    const ui = renderHarness(f, language);
-    ui.state.approvalMode = 'delegate';
-    const labels = WEBVIEW_TRANSLATIONS[language];
-    const draft = { ...ui.state.draftRuns[0], status: 'failed', executionStarted: false, executionPhase: 'not_dispatched',
-      canReproposeUndispatchedApproval: true, error: 'Invalid approval model response' };
-    const nodesFor = (value: unknown) => elements([ui.api.createDraftRunCard(value)]);
-    const nodes = nodesFor(draft);
-    assert.ok(nodes.some(node => node.textContent === labels.draftRunNotDispatchedBadge));
-    assert.ok(!nodes.some(node => node.className === 'draft-run-output'));
-    assert.ok(nodes.some(node => node.textContent.includes(draft.error)));
-    const repropose = nodes.find(node => node.textContent === labels.approvalReproposeUndispatched);
-    assert.ok(repropose);
-    ui.api.handleDraftRunActionClick({ target: repropose });
-    assert.deepEqual(JSON.parse(JSON.stringify(ui.messages)), [{ type: 'cloneDraftRun', id: draft.id }]);
-    for (const refused of [{ ...draft, canReproposeUndispatchedApproval: undefined },
-      { ...draft, executionPhase: 'result_unknown' },
-      { ...draft, approvalReview: { decision: 'deny', approvalSource: 'local_policy' } }]) {
-      assert.ok(!nodesFor(refused).some(node => node.textContent === labels.approvalReproposeUndispatched));
+    const paused = ui.api.createDraftRunCard({ ...draft, approvalHold: {
+      status: 'paused', failureCode: 'approval_revalidation_failed', reason: 'Scope changed before dispatch', updatedAt: '2026-01-01' } });
+    const nodes = elements([paused]);
+    assert.ok(nodes.some(node => node.textContent === labels.approvalPaused));
+    assert.ok(nodes.some(node => node.className === 'approval-state-note' && node.textContent.includes('Scope changed before dispatch')));
+    assert.ok(!nodes.some(node => node.textContent === labels.approvalRecheckPaused), 'the removed resume surface cannot reappear');
+    assert.ok(!nodes.some(node => node.dataset.draftRunAction === 'approveDraftRun' || node.dataset.draftRunAction === 'cancelDraftRunBatch'));
+    assert.equal(ui.messages.length, 0, 'rendering a paused hold never messages the host');
+    // The dependent command still reports its unmet prerequisite in every mode.
+    for (const mode of ['ask', 'approve-all'] as const) {
+      ui.state.approvalMode = mode;
+      const dependentCard = elements([ui.api.createDraftRunCard({ ...dependent, status: 'pending',
+        dependency: { targetId: draft.id, label: 'Python probe', reason: 'Waiting for a verified result' } })]);
+      assert.ok(dependentCard.some(node => node.textContent === labels.approvalWaitingPrerequisite), mode);
+      assert.ok(!dependentCard.some(node => node.dataset.draftRunAction === 'approveDraftRun'), 'a dependency gate is not a click authority');
     }
   }
-}));
-
-test('a reopened Webview can handle current approval, and switching sessions invalidates the old button', () => {
-  const live = { id: 'live-token', sessionId: 'original', runtimeId: 'host', status: 'waiting',
-    canDecide: true, canRetry: false, label: 'Run precise operation', reason: 'Operator confirmation required' };
-  const project = (view: ReturnType<typeof createWebviewDomHarness>) => {
-    view.receive({ type: 'state', revision: 1, state: {
-      activeSessionId: 'original', approvalMode: 'delegate', manualToolApprovals: [live],
-      startup: { interactiveReady: true, sideEffectsReady: true }
-    } });
-    const button = view.element('transcript').querySelector('button[data-manual-approval-action="approve"]');
-    assert.ok(button && !button.disabled);
-    return button;
-  };
-  const original = createWebviewDomHarness();
-  const stale = project(original);
-  original.receive({ type: 'state', revision: 2, state: { activeSessionId: 'other' } });
-  assert.equal(original.element('transcript').querySelector('.manual-approval-card'), null);
-  stale.click();
-  assert.ok(!original.posted.some(message => message.type === 'resolveValidationApproval'));
-
-  const reopened = createWebviewDomHarness();
-  const approve = project(reopened);
-  approve.click();
-  approve.click();
-  assert.deepEqual(JSON.parse(JSON.stringify(reopened.posted.filter(message => message.type === 'resolveValidationApproval'))), [
-    { type: 'resolveValidationApproval', id: 'live-token', sessionId: 'original', runtimeId: 'host', approve: true }
-  ]);
-});
-test('a drain request that arrives during an approval phase is rescheduled, never dropped', async () => fixture(async (f) => {
-  // A drain request arriving while an approval phase owns the run slot used to be
-  // discarded. The approval then released the slot without a new drain, so the queued
-  // batch kept actionRunning true and the composer stayed busy forever.
-  const { host, states } = hostFixture(f);
-  f.add(['A', 'B']);
-  const before = f.batch.state;
-  host.scheduleDraftRunAutoContinuation();
-  host.delegatedApprovalInFlight = true;
-  host.scheduleDraftRunAutoContinuation();
-  await new Promise<void>(resolve => setImmediate(resolve));
-  assert.equal(f.batch.state, before, 'no drain may start while the approval phase owns the slot');
-  assert.equal(host.draftRunAutoContinueDeferred, true);
-  host.delegatedApprovalInFlight = false;
-  host.releaseDelegatedApprovalSlot(new AbortController());
-  assert.equal(host.draftRunAutoContinueDeferred, false);
-
-  // The handed-back schedule starts the queued batch once the approval slot is free.
-  for (let attempt = 0; attempt < 50 && !f.batch.state; attempt++) {
-    await new Promise<void>(resolve => setImmediate(resolve));
-  }
-  assert.ok(f.batch.state, 'the released approval slot must resume the queued batch');
-  assert.equal(f.batch.state.entries.length, 2);
-  host.draftRunBatches.cancel();
-  host.releaseDelegatedApprovalSlot(new AbortController());
-  assert.equal(states.sends, 0, 'rescheduling grants no model continuation or extra execution');
 }));

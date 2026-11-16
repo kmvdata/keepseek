@@ -255,19 +255,54 @@ test('approval mode persists for the project and is inherited by every new or se
 
   await store.initialize();
   assert.equal(store.approvalMode, 'ask');
-  assert.equal(await store.setApprovalMode('delegate'), true);
-  assert.equal(storage.saved?.approvalMode, 'delegate');
+  assert.equal(await store.setApprovalMode('approve-all'), true);
+  assert.equal(storage.saved?.approvalMode, 'approve-all');
 
   const created = await store.createNewSession('en');
-  assert.equal(created.approvalMode, 'delegate');
+  assert.equal(created.approvalMode, 'approve-all');
 
   const selected = await store.selectSession(older.id);
-  assert.equal(selected?.approvalMode, 'delegate');
+  assert.equal(selected?.approvalMode, 'approve-all');
 
   const restarted = new ChatSessionStore(storage, 'en', workspaceScope);
   await restarted.initialize();
-  assert.equal(restarted.approvalMode, 'delegate');
-  assert.equal(restarted.getActiveSession().approvalMode, 'delegate');
+  assert.equal(restarted.approvalMode, 'approve-all');
+  assert.equal(restarted.getActiveSession().approvalMode, 'approve-all');
+});
+
+test('approve-all survives a global storage round trip while the removed delegate mode normalizes to ask', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-approval-mode-roundtrip-'));
+  const storageUri = vscode.Uri.file(root) as never;
+  const storage = new GlobalSessionStorage(storageUri);
+  t.after(async () => { await storage.flush(); await rm(root, { recursive: true, force: true }); });
+  const workspaceScope: WorkspaceSessionScope = {
+    key: 'workspace:approval-mode-roundtrip',
+    name: 'Approval Round Trip',
+    folderUris: []
+  };
+
+  const store = new ChatSessionStore(storage, 'en', workspaceScope);
+  await store.initialize();
+  assert.equal(await store.setApprovalMode('approve-all'), true);
+  store.messages.push({ ...createMessage(0), content: 'Submitted bytes that must persist' });
+  await store.persist();
+
+  const reloaded = new ChatSessionStore(storage, 'en', workspaceScope);
+  await reloaded.initialize();
+  assert.equal(reloaded.approvalMode, 'approve-all');
+  assert.equal(reloaded.getActiveSession().approvalMode, 'approve-all');
+
+  const legacySession = reloaded.getActiveSession();
+  await storage.saveWorkspace(workspaceScope, {
+    activeSessionId: legacySession.id,
+    approvalMode: 'delegate' as never,
+    sessions: [{ ...legacySession, approvalMode: 'delegate' as never }]
+  });
+
+  const normalized = new ChatSessionStore(storage, 'en', workspaceScope);
+  await normalized.initialize();
+  assert.equal(normalized.approvalMode, 'ask');
+  assert.equal(normalized.getActiveSession().approvalMode, 'ask');
 });
 
 test('the project queue decides normal/plan instead of a per-session flag', async () => {
@@ -322,15 +357,15 @@ test('legacy workspace approval mode migrates from its active session', async ()
     folderUris: []
   };
   const active = createSession('active', [createMessage(0)], workspaceScope);
-  active.approvalMode = 'delegate';
+  active.approvalMode = 'approve-all';
   const storage = new MemorySessionStorage({ activeSessionId: active.id, sessions: [active] });
   const store = new ChatSessionStore(storage, 'en', workspaceScope);
 
   await store.initialize();
-  assert.equal(store.approvalMode, 'delegate');
+  assert.equal(store.approvalMode, 'approve-all');
   const created = await store.createNewSession('en');
-  assert.equal(created.approvalMode, 'delegate');
-  assert.equal(storage.saved?.approvalMode, 'delegate');
+  assert.equal(created.approvalMode, 'approve-all');
+  assert.equal(storage.saved?.approvalMode, 'approve-all');
 });
 
 test('stored project approval mode overrides stale per-session values on load', async () => {
@@ -343,14 +378,14 @@ test('stored project approval mode overrides stale per-session values on load', 
   active.approvalMode = 'ask';
   const storage = new MemorySessionStorage({
     activeSessionId: active.id,
-    approvalMode: 'delegate',
+    approvalMode: 'approve-all',
     sessions: [active]
   });
   const store = new ChatSessionStore(storage, 'en', workspaceScope);
 
   await store.initialize();
-  assert.equal(store.approvalMode, 'delegate');
-  assert.equal(store.getActiveSession().approvalMode, 'delegate');
+  assert.equal(store.approvalMode, 'approve-all');
+  assert.equal(store.getActiveSession().approvalMode, 'approve-all');
 });
 
 test('unsupported approval mode is rejected without broadening authorization', async () => {
@@ -362,6 +397,7 @@ test('unsupported approval mode is rejected without broadening authorization', a
   await store.initialize();
   assert.equal(store.approvalMode, 'ask');
   assert.equal(await store.setApprovalMode('model_review' as never), false);
+  assert.equal(await store.setApprovalMode('delegate' as never), false);
   assert.deepEqual(store.getActiveSession().messages.map(message => ({ content: message.content, expandedContent: message.expandedContent, providerContent: message.providerContent })), originalMessages);
 });
 
@@ -379,7 +415,7 @@ test('global storage isolates project approval modes and copied sessions use the
 
   const first = new ChatSessionStore(storage, 'en', firstScope);
   await first.initialize();
-  await first.setApprovalMode('delegate');
+  await first.setApprovalMode('approve-all');
   await first.setExecutionMode('plan');
   first.messages.push({ ...createMessage(0), content: 'An actual submitted task to copy across workspaces' });
   await first.persist();
@@ -388,20 +424,20 @@ test('global storage isolates project approval modes and copied sessions use the
   const second = new ChatSessionStore(storage, 'en', secondScope);
   await second.initialize();
   assert.equal(second.approvalMode, 'ask');
-  await second.setApprovalMode('delegate');
+  await second.setApprovalMode('approve-all');
   const copied = await second.copyOtherWorkspaceSession(firstScope.key, firstSessionId);
-  assert.equal(copied?.approvalMode, 'delegate');
+  assert.equal(copied?.approvalMode, 'approve-all');
   assert.equal(copied?.executionMode, 'normal');
   assert.equal(copied?.planWorkflows, undefined);
 
   const restartedFirst = new ChatSessionStore(new GlobalSessionStorage(storageUri), 'en', firstScope);
   await restartedFirst.initialize();
-  assert.equal(restartedFirst.approvalMode, 'delegate');
-  assert.equal((await restartedFirst.createNewSession('en')).approvalMode, 'delegate');
+  assert.equal(restartedFirst.approvalMode, 'approve-all');
+  assert.equal((await restartedFirst.createNewSession('en')).approvalMode, 'approve-all');
 
   const restartedSecond = new ChatSessionStore(new GlobalSessionStorage(storageUri), 'en', secondScope);
   await restartedSecond.initialize();
-  assert.equal(restartedSecond.approvalMode, 'delegate');
+  assert.equal(restartedSecond.approvalMode, 'approve-all');
 });
 
 test('copying another workspace session refuses a pending or malformed history journal before creating a new identity', async () => {
@@ -438,7 +474,7 @@ test('cleanup replaces a deleted active session with a blank normal session with
   active.executionMode = 'plan';
   other.contextInstructions = ' stable\n instructions ';
   other.messages[0].expandedContent = ' expanded\n bytes ';
-  const storage = new MemorySessionStorage({ activeSessionId: active.id, sessions: [active, other], approvalMode: 'delegate' });
+  const storage = new MemorySessionStorage({ activeSessionId: active.id, sessions: [active, other], approvalMode: 'approve-all' });
   const adapter: ChatSessionStorageAdapter = storage;
   adapter.isSessionDeleted = async (_workspaceKey, id) => id === active.id;
   let bodyReads = 0;
@@ -453,7 +489,7 @@ test('cleanup replaces a deleted active session with a blank normal session with
   assert.notEqual(store.activeSessionId, other.id);
   assert.equal(store.messages.length, 0);
   assert.equal(store.getActiveSession().executionMode, 'normal');
-  assert.equal(store.getActiveSession().approvalMode, 'delegate');
+  assert.equal(store.getActiveSession().approvalMode, 'approve-all');
   assert.equal(bodyReads, 0);
   assert.equal(JSON.stringify([retained.messages, retained.contextInstructions, retained.requestProtocol]), before);
   assert.equal(storage.saved?.activeSessionId, store.activeSessionId);
@@ -645,7 +681,7 @@ test('bounded selection and legacy wrapper preserve the same fields, mode normal
     for (const fixture of [bounded, legacy]) {
       fixture.target.approvalMode = 'ask';
       fixture.target.executionMode = executionMode as ChatSession['executionMode'];
-      await fixture.store.setApprovalMode('delegate');
+      await fixture.store.setApprovalMode('approve-all');
     }
     const before = new Date().toISOString();
     const saving: string[] = [];
@@ -659,7 +695,7 @@ test('bounded selection and legacy wrapper preserve the same fields, mode normal
     assert.equal(legacyResult?.updatedAt, before);
     if (result.status !== 'selected') throw new Error('expected selected session');
     assert.deepEqual(result.session, legacyResult);
-    assert.equal(result.session.approvalMode, 'delegate');
+    assert.equal(result.session.approvalMode, 'approve-all');
     assert.equal(result.session.executionMode, executionMode === 'plan' ? 'plan' : 'normal');
     assert.deepEqual(saving, [bounded.target.id]);
     assert.equal(bounded.storage.saved?.activeSessionId, bounded.target.id);
@@ -841,3 +877,4 @@ test('execution timing survives persistence, repeated saves, session switches an
   await restarted.selectSession(second.id);
   assert.equal(executionTimeView(restarted.getActiveSession()).totalMs, 0);
 });
+

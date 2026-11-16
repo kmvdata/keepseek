@@ -158,8 +158,11 @@ test('Plan tool guard permits investigation but rejects implementation before au
   }) ?? '', /continuations are unavailable/u);
   assert.equal(getPlanPhaseToolBlockReason({ executionMode: 'normal', toolName: RUN_DRAFT_TOOL_NAME }), undefined);
 
+  // The plan-phase guard must be evaluated before any side-effect tool can run.
   const runnerSource = await readFile(path.join(process.cwd(), 'src/agent/runner.ts'), 'utf8');
-  assert.ok(runnerSource.indexOf('getPlanPhaseToolBlockReason') < runnerSource.indexOf('this.toolAuthorization.authorize'));
+  const guardIndex = runnerSource.indexOf('const planPhaseBlockReason = getPlanPhaseToolBlockReason(');
+  assert.ok(guardIndex >= 0, 'runner evaluates the plan-phase guard');
+  assert.ok(guardIndex < runnerSource.indexOf('if (planPhaseBlockReason) {'), 'runner blocks on the guard before tool execution');
 });
 
 test('pending plans are content-bound, latest-only, restartable, and resolved only once', () => {
@@ -217,7 +220,7 @@ test('pending plans are content-bound, latest-only, restartable, and resolved on
 });
 
 test('revise, exit, replacement, edit resend, and approval modes preserve independent state', () => {
-  for (const approvalMode of ['ask', 'delegate'] as const) {
+  for (const approvalMode of ['ask', 'approve-all'] as const) {
     const session = planSession('session-' + approvalMode, approvalMode);
     const plan = registerPendingPlan({
       session,
@@ -237,7 +240,7 @@ test('revise, exit, replacement, edit resend, and approval modes preserve indepe
     assert.equal(session.approvalMode, approvalMode);
   }
 
-  const reviseSession = planSession('revise', 'delegate');
+  const reviseSession = planSession('revise', 'approve-all');
   const old = registerPendingPlan({
     session: reviseSession, userMessageId: 'u1', assistantMessageId: 'a1',
     content: reviseSession.messages[1].content, id: 'old'
@@ -262,7 +265,7 @@ test('revise, exit, replacement, edit resend, and approval modes preserve indepe
   assert.equal(invalidatePlansForRemovedMessages(reviseSession, new Set(['a2'])), true);
   assert.equal(replacement.status, 'superseded');
 
-  const exitSession = planSession('exit', 'delegate');
+  const exitSession = planSession('exit', 'approve-all');
   const exitPlan = registerPendingPlan({
     session: exitSession, userMessageId: 'u1', assistantMessageId: 'a1',
     content: exitSession.messages[1].content, id: 'exit-plan'
@@ -276,7 +279,7 @@ test('revise, exit, replacement, edit resend, and approval modes preserve indepe
   assert.equal(exited.ok, true);
   assert.equal(exited.ok && exited.startExecution, false);
   assert.equal(exitSession.executionMode, 'normal');
-  assert.equal(exitSession.approvalMode, 'delegate');
+  assert.equal(exitSession.approvalMode, 'approve-all');
 
   const directRevision = planSession('direct-revision', 'ask');
   registerPendingPlan({
@@ -288,7 +291,7 @@ test('revise, exit, replacement, edit resend, and approval modes preserve indepe
 });
 
 test('implementation artifacts invalidate a Plan response regardless of approval mode', () => {
-  for (const approvalMode of ['ask', 'delegate'] as const) {
+  for (const approvalMode of ['ask', 'approve-all'] as const) {
     void approvalMode;
     assert.equal(hasPlanImplementationArtifacts({
       draftEdits: [{ id: 'edit' }] as never,
@@ -305,7 +308,7 @@ test('implementation artifacts invalidate a Plan response regardless of approval
 });
 
 test('only the host plan-decision message starts a fresh protected implementation turn', async () => {
-  const session = planSession('host-session', 'delegate');
+  const session = planSession('host-session', 'approve-all');
   const plan = registerPendingPlan({
     session,
     userMessageId: 'u1',
@@ -349,7 +352,7 @@ test('only the host plan-decision message starts a fresh protected implementatio
   };
 
   assert.equal(session.executionMode, 'plan');
-  assert.equal(sends.length, 0, 'an old plan card cannot grant delegate authority');
+  assert.equal(sends.length, 0, 'an old plan card cannot grant approve-all authority');
   session.approvalMode = 'ask';
   await provider.handleMessage({ type: 'resolvePlanDecision', planId: plan.id, action: 'start_execution' });
   assert.equal(session.executionMode, 'normal');

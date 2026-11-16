@@ -10,46 +10,52 @@ import { DraftRunAuthorizationService } from '../src/runs/draftRunAuthorization'
 import { SpawnDraftRunExecutor } from '../src/runs/draftRunExecutor';
 import * as isolation from '../src/runs/projectExecutionIsolation';
 import { hashDraftRunSpec } from '../src/runs/draftRunProposal';
-import type { DraftRun, DraftRunSpec } from '../src/shared/types';
-import { APPROVAL_POLICY_VERSION, type ApprovalRecordMatch } from '../src/approvals/approvalReviewTypes';
-import { ApprovalReviewStore } from '../src/approvals/approvalReviewStore';
+import type { DraftRun, DraftRunSpec, ExecutionPermit } from '../src/shared/types';
 import { clearCreatedTerminals, createdTerminals } from './stubs/vscode';
 
-test('delegated execution requires its matching approval record and remains single-use', async t => {
-  const storage = await mkdtemp(path.join(os.tmpdir(), 'keepseek-executor-approval-'));
+test('a user-click permit binds the immutable command and its effects to a single dispatch', async t => {
+  const storage = await mkdtemp(path.join(os.tmpdir(), 'keepseek-executor-permit-'));
   const executor = new SpawnDraftRunExecutor();
   t.after(async () => { executor.dispose(); await rm(storage, { recursive: true, force: true }); });
-  const draftRun = createDraftRun(['-e', 'process.stdout.write("delegated")']);
+  const draftRun = createDraftRun(['-e', 'process.stdout.write("permit")']);
   const workspace = path.join(storage, 'project');
   await mkdir(workspace);
   draftRun.spec.cwdUri = vscode.Uri.file(workspace).toString();
   draftRun.specHash = hashDraftRunSpec(draftRun.spec);
-  const approvalStore = new ApprovalReviewStore(vscode.Uri.file(storage) as never);
-  await approvalStore.initialize();
-  const authorization = new DraftRunAuthorizationService(approvalStore);
-  const record = await approvalStore.add({
-    sessionId: draftRun.sessionId, rootTaskId: draftRun.agentRunId, agentRunId: draftRun.agentRunId,
-    targetId: draftRun.id, actionKind: 'draft_run_execute', actionHash: draftRun.specHash,
-    policyVersion: APPROVAL_POLICY_VERSION, approvalSource: 'auto_approval_review', approvalMode: 'delegate',
-    scopeFingerprint: 'b'.repeat(64),
-    reviewerConfigFingerprint: 'a'.repeat(64), reviewerProvider: 'openai-compatible', reviewerModelId: 'fixture-model',
-    reviewerSourceId: 'fixture-source', decision: 'approve', risk: 'low', rationale: 'Exact fixture approval.', policyRules: ['direct_user_goal']
-  });
-  const match: ApprovalRecordMatch = {
-    ...record, expectedSource: 'auto_approval_review', workspaceTrusted: true
-  };
-  await assert.rejects(authorization.createDelegatedPermit(draftRun, () => false, match), /no longer authorized/u);
-  await assert.rejects(authorization.createDelegatedPermit(draftRun, () => true, { ...match, policyVersion: 5 }), /matching approval/u);
-  const permit = await authorization.createDelegatedPermit(draftRun, () => true, match);
-  await assert.rejects(authorization.createDelegatedPermit(draftRun, () => true, match), /matching approval/u);
-  await assert.rejects(executor.execute({ draftRun, permit, onOutput: () => {} }), /approval record/u);
-  draftRun.authorizationSource = 'delegated_approver';
+  const authorization = new DraftRunAuthorizationService();
+  const permit = authorization.createUserClickPermit(draftRun);
+  assert.equal(permit.draftRunId, draftRun.id);
+  assert.equal(permit.specHash, draftRun.specHash);
+  assert.equal(permit.source, 'user_click');
+  assert.deepEqual(permit.allowedEffects, draftRun.effectAssessment.effects);
+  assert.ok(permit.expiresAt > Date.now());
+  assert.throws(() => authorization.createUserClickPermit({
+    spec: { ...draftRun.spec, executable: 'git', args: ['commit', '-a', '-m', 'title', 'loose-fragment'] }
+  } as Parameters<DraftRunAuthorizationService['createUserClickPermit']>[0]), /positional arguments/u);
+  await assert.rejects(executor.execute({ draftRun, permit: { ...permit, specHash: 'f'.repeat(64) }, onOutput: () => {} }),
+    /does not match the immutable command/u);
+  await assert.rejects(executor.execute({ draftRun, permit: { ...permit, allowedEffects: [] }, onOutput: () => {} }),
+    /effects exceed the execution permit/u);
   const cwd = vscode.Uri.parse(draftRun.spec.cwdUri).fsPath;
   const projectExecution = await isolation.inspectProjectExecution(cwd, cwd, draftRun.spec.executable);
   const result = await executor.execute({ draftRun, permit,
     verifiedLaunch: { cwd, executable: draftRun.spec.executable, projectExecution }, onOutput: () => {} });
   assert.equal(result.exitCode, 0);
+  assert.equal(result.started, true);
   await assert.rejects(executor.execute({ draftRun, permit, onOutput: () => {} }), /already consumed/u);
+});
+
+test('a delegated or readonly permit without recorded approval authority is refused before dispatch', async () => {
+  const executor = new SpawnDraftRunExecutor();
+  try {
+    const draftRun = createDraftRun(['-e', 'process.stdout.write("must-not-run")']);
+    const userPermit = new DraftRunAuthorizationService().createUserClickPermit(draftRun);
+    const delegated: ExecutionPermit = { ...userPermit, source: 'delegated_approver' };
+    await assert.rejects(executor.execute({ draftRun, permit: delegated, onOutput: () => {} }),
+      /delegated approval record/u);
+    await assert.rejects(executor.execute({ draftRun, permit: { ...userPermit, source: 'readonly_policy' }, onOutput: () => {} }),
+      /user-click or delegated approval permit/u);
+  } finally { executor.dispose(); }
 });
 
 test('SpawnDraftRunExecutor passes a literal argv with shell disabled and consumes the permit once', async () => {

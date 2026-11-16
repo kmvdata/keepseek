@@ -41,11 +41,11 @@ describe('background validation availability', () => {
     assert.deepEqual(await getAvailableSafeValidationScripts(), []);
   });
 
-  it('does not run delegated validation with only local tool authorization', async () => {
+  it('does not run ask validation with only local tool authorization', async () => {
     await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({ scripts: { test: 'node record.cjs' } }));
     await fs.writeFile(path.join(root, 'record.cjs'), "require('node:fs').writeFileSync('ran', 'unexpected');");
     const result = JSON.parse(await new ValidationToolService().runSafeNpmScript({
-      script: 'test', language: 'en', approvalMode: 'delegate', expectedSnapshot: 'host-claimed-snapshot',
+      script: 'test', language: 'en', approvalMode: 'ask', expectedSnapshot: 'host-claimed-snapshot',
       authorization: { allowed: true, toolName: RUN_VALIDATION_TOOL_NAME, riskLevel: 'medium', scope: 'validation_test',
         source: 'user_denied', requiresExplicitConfirmation: false }
     }));
@@ -63,7 +63,7 @@ describe('background validation availability', () => {
     const secret = 'FIXTURE_TOKEN_EXCLUDED_FROM_REVIEW';
     await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({ scripts: { compile: 'tsc' } }));
     await fs.writeFile(config, `//registry.example.invalid/:_authToken=${secret}\n`);
-    const inspect = () => preflightSafeValidation({ script: 'compile', language: 'en', approvalMode: 'delegate' });
+    const inspect = () => preflightSafeValidation({ script: 'compile', language: 'en', approvalMode: 'ask' });
     const first = await inspect();
     assert.equal(first.status, 'ready');
     assert.doesNotMatch(JSON.stringify(first.snapshot), new RegExp(secret, 'u'));

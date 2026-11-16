@@ -20,7 +20,7 @@ test('a real user input is nameable before any assistant answer exists', () => {
   assert.deepEqual(checkSessionTitleSubmission(session, submission), { ready: true, taskId: 'root-1', messageId: 'user-1' });
 });
 
-test('assistant streaming, failure, cancellation and approval work do not gate an accepted user purpose', () => {
+test('assistant streaming, failure and cancellation do not gate an accepted user purpose', () => {
   const { session, user, submission } = fixture();
   for (const status of ['running', 'failed', 'cancelled', 'waiting', 'blocked'] as const) {
     session.messages.splice(1, session.messages.length, { id: 'assistant-1', role: 'assistant', content: 'partial answer', createdAt: '',
@@ -29,7 +29,6 @@ test('assistant streaming, failure, cancellation and approval work do not gate a
     assert.equal(checkSessionTitleSubmission(session, submission).ready, true);
   }
   session.repairLoop = { status: 'running_validation', iteration: 1, maxIterations: 3, pendingDraftEditIds: [] };
-  session.approvalProcessing = { version: 2, rootTaskId: 'root-1', runId: 'segment-1', mode: 'delegate', status: 'processing', targets: [], updatedAt: '' };
   assert.equal(checkSessionTitleSubmission(session, submission).ready, true);
 });
 

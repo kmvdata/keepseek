@@ -124,7 +124,8 @@ export class Uri {
   }
 
   public static joinPath(base: Uri, ...segments: string[]): Uri {
-    return Uri.file(path.join(base.fsPath, ...segments));
+    // VS Code normalizes '.' and '..' segments; path.join alone would keep them.
+    return Uri.file(path.resolve(base.fsPath, ...segments));
   }
 
   public with(change: { scheme?: string; path?: string }): Uri {

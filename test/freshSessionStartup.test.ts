@@ -201,7 +201,7 @@ test('creating, configuring and deleting sessions never persists blank replaceme
   await store.initialize({ fresh: true });
   const first = store.getActiveSession();
   await store.setExecutionMode('plan');
-  await store.setApprovalMode('delegate');
+  assert.equal(await store.setApprovalMode('approve-all'), true);
   assert.equal(store.getActiveSession(), first);
   assert.deepEqual(store.getSessionSummaries(), []);
   assert.deepEqual((await storage.loadWorkspace(scope, { fresh: true })).sessionSummaries, []);

@@ -7,7 +7,6 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import * as vscode from './stubs/vscode';
 import { UsageLedgerStore } from '../src/agent/usageLedgerStore';
-import { ApprovalReviewStore } from '../src/approvals/approvalReviewStore';
 import { deleteStoredChangeSetsForSession } from '../src/edits/changeSetStore';
 import { DraftRunStore } from '../src/runs/draftRunStore';
 import { hashDraftRunSpec } from '../src/runs/draftRunProposal';
@@ -26,24 +25,22 @@ async function tombstone(uri: import('vscode').Uri, id: string) {
     workspaceKey: 'workspace', sessionId: id, operationId: 'synthetic', confirmedAt: new Date().toISOString(), phase: 'committed' }));
 }
 
-test('unloaded approval and command records are removed without replacing another project record', async () => fixture(async (directory, uri) => {
-  const approvals = { version: 1, records: [{ reviewId: 'deleted', sessionId: 'delete' }, { reviewId: 'retained', sessionId: 'retain', rationale: 'untouched' }] };
+test('unloaded command records are removed without replacing another project record', () => fixture(async (directory, uri) => {
   const commands = { version: 1, draftRuns: [{ id: 'deleted', sessionId: 'delete' }, { id: 'retained', sessionId: 'retain', output: 'untouched' }],
     batchDisplays: [{ operationId: 'deleted', sessionId: 'delete' }, { operationId: 'retained', sessionId: 'retain' }] };
-  await writeFile(join(directory, 'approval-reviews.json'), JSON.stringify(approvals));
   await writeFile(join(directory, 'draft-runs.json'), JSON.stringify(commands));
   await tombstone(uri, 'delete');
-  await new ApprovalReviewStore(uri).deleteSession('delete');
   // An unloaded store may flush an empty resident snapshot. It must preserve the
   // valid disk record from another project; test command deletion with a store
   // that has no scheduled proposals so it never normalizes the retained record.
   const runs = new DraftRunStore(uri);
   await runs.deleteSession('delete');
   runs.dispose();
-  assert.deepEqual(JSON.parse(await readFile(join(directory, 'approval-reviews.json'), 'utf8')).records, [approvals.records[1]]);
   const stored = JSON.parse(await readFile(join(directory, 'draft-runs.json'), 'utf8'));
   assert.ok(stored.draftRuns.every((record: { sessionId: string }) => record.sessionId !== 'delete'));
   assert.ok(stored.batchDisplays.every((record: { sessionId: string }) => record.sessionId !== 'delete'));
+  assert.deepEqual(stored.draftRuns, [commands.draftRuns[1]], 'another project record is not rewritten');
+  assert.deepEqual(stored.batchDisplays, [commands.batchDisplays[1]]);
 }));
 
 test('unloaded current ChangeSet owners are reclaimed while shared checkpoints remain', async () => fixture(async (directory, uri) => {

@@ -6,9 +6,10 @@ import { test } from 'node:test';
 import * as vscode from 'vscode';
 import { ModelSourceStore } from '../src/accounts/accountStore';
 import type { ModelSourceConfigSnapshot, ModelSourceProvider } from '../src/accounts/types';
+import { ExecutionCostBudget, LogicalRunBudget, SharedUpstreamTokenBudget, normalizeLogicalRunBudgetLimits } from '../src/agent/executionPolicy';
 import { HistoryCompressor } from '../src/agent/historyCompressor';
 import { AgentRunner } from '../src/agent/runner';
-import { requestApprovalReviewText } from '../src/approvals/oneShotTextRequest';
+import { requestOneShotText } from '../src/agent/oneShotTextRequest';
 import { ToolResultAdmissionController } from '../src/agent/toolResultAdmission';
 import type {
   DeepSeekFunctionTool,
@@ -96,11 +97,13 @@ interface CapturedRequest {
   authorization: string | undefined;
 }
 
-test('summary and reviewer requests share the default timeout regardless of source and model', async (t) => {
+test('summary and session-title requests share the same default request timeout regardless of source and model', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
   const originalFetch = globalThis.fetch;
   try {
-    for (const lane of ['summary', 'reviewer'] as const) {
+    // The approval-reviewer lane was removed with the automatic approval
+    // subsystem; the remaining tool-free auxiliary lane is the session title.
+    for (const lane of ['summary', 'subagent'] as const) {
       let signal: AbortSignal | undefined;
       let dispatched!: () => void;
       const started = new Promise<void>((resolve) => { dispatched = resolve; });
@@ -123,10 +126,17 @@ test('summary and reviewer requests share the default timeout regardless of sour
           model, messages: [{ role: 'user', content: 'summarize' }], maxTokens: 100,
           language: 'en', usageSource: 'summary', sourceConfig
         }).then((result) => result.content)
-        : requestApprovalReviewText({ model, sourceConfig, language: 'en', systemPrompt: 'review', userPrompt: 'draft' });
+        : requestOneShotText({ model, sourceConfig, language: 'en', systemPrompt: 'title',
+          userPrompt: 'name this session', purpose: 'session_title', maxOutputTokens: 32,
+          taskCostBudget: new ExecutionCostBudget(0),
+          taskRunBudget: new LogicalRunBudget(undefined, normalizeLogicalRunBudgetLimits({ maxModelRequests: 0, maxToolRounds: 0, maxToolCalls: 0,
+            maxContinuations: 0, maxContextEpochRollovers: 0, maxUpstreamTokens: 0, maxTreeUpstreamTokens: 0,
+            maxContinuationOutputTokens: 0, maxContinuationOutputChars: 0 })!, new SharedUpstreamTokenBudget(0, 0), 0) });
       await started;
-      t.mock.timers.tick(120_001);
-      assert.equal(signal?.aborted, false, `${lane} must not retain its old fixed timeout`);
+      // A session-title request keeps its own bounded 30s cap; the summary lane
+      // must not retain the removed fixed reviewer timeout.
+      t.mock.timers.tick(lane === 'summary' ? 120_001 : 1_000);
+      assert.equal(signal?.aborted, false, `${lane} must not abort before its own deadline`);
       complete(new Response('data: ' + JSON.stringify({ choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }] })
         + '\n\ndata: [DONE]\n\n'));
       assert.equal(await pending, 'ok');
