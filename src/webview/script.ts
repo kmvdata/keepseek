@@ -967,7 +967,10 @@ ${conversationsStateFragment.source}
         pendingDraftRunActions.add(action + ':' + id);
         setTransientStatus(t('draftRunCloneCreating'));
         render();
+      } else if (action === 'releaseDraftRunDependency') {
+        payload.specHash = String(button.dataset.specHash || '');
       }
+      vscode.postMessage(payload);
       vscode.postMessage(payload);
     }
 
@@ -1905,7 +1908,10 @@ ${conversationsSessionListFragment.source}
           : interaction.waitingReason === 'recovery' ? 'startupRecoveringSession'
           : interaction.waitingReason === 'context' ? 'startupLoadingRequestContext'
           : interaction.waitingReason === 'saving' ? 'startupSavingSession' : '';
-        var key = waitingKey || (phase === 'loading_session' ? 'startupLoadingSessions'
+        // A delegated operation that needs the user's own decision is not a generic
+        // 'applying an operation': name it so the stop never looks unexplained.
+        var manualKey = interaction.awaitingManualApproval ? 'approvalWaitingUser' : '';
+        var key = manualKey || waitingKey || (phase === 'loading_session' ? 'startupLoadingSessions'
           : phase === 'preparing_context' ? 'startupLoadingRequestContext'
           : phase === 'preparing_task' ? 'agentStatusPreparingRequest'
           : phase === 'saving' ? 'runSavingState'
@@ -3129,6 +3135,10 @@ ${conversationsSessionListFragment.source}
       var recoveryLabel = recoveryOutcome?.kind === 'repeated' ? 'draftRunCorrectionStopped'
         : recoveryOutcome?.kind === 'git_tag_verified' ? 'draftRunTagTargetVerified' : undefined;
       var displayStatus = statusValue;
+      // A dependency is only a wait while its target can still settle. Once the host
+      // converged it the record is needs_replan, so it must not render as waiting.
+      var prerequisiteTerminal = Boolean(dependency) && statusValue === 'needs_replan';
+      var releaseableDependency = Boolean(dependency) && statusValue === 'pending';
       if (draftRun.replacementDraftRunId && statusValue === 'needs_replan') {
         displayStatus = 'superseded';
       } else if ((dependency || target?.status === 'dependency_blocked') && !['done', 'running', 'approved'].includes(statusValue)) {
@@ -3253,6 +3263,11 @@ ${conversationsSessionListFragment.source}
       }
       if (canResumeReplacement) {
         appendAutomaticApprovalState(header, actions, draftRun.id, draftRun.approvalReview, draftRun.approvalHold);
+      } else if (releaseableDependency) {
+        // A wait that can no longer resolve must stay actionable. Releasing clears the
+        // wait only; running still rechecks the scope and the current approval policy.
+        actions.append(createDraftRunActionButton(t('approvalReleaseDependency'), 'releaseDraftRunDependency', draftRun, false));
+        actions.append(createDraftRunActionButton(t('draftRunReject'), 'rejectDraftRun', draftRun, true));
       } else if (!dependency && displayStatus !== 'superseded' && target?.status !== 'dependency_blocked') {
         appendDraftRunActions(actions, draftRun, header, target, approvalBlocked, externalAuthorized, needsAuthorization);
       }

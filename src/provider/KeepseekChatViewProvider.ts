@@ -122,7 +122,7 @@ import {
 } from '../agent/executionMode';
 import { DraftRunAuthorizationService } from '../runs/draftRunAuthorization';
 import { DraftRunBatchCoordinator } from '../runs/draftRunBatchCoordinator';
-import { canIsolateDraftRunFailure, draftRunEditDependencyTargets, inspectDraftRunDependencies, inspectGitAncestorPrerequisite, isIndependentDraftRunCheck, orderDraftRunDependencies } from '../runs/draftRunDependencies';
+import { canIsolateDraftRunFailure, draftRunEditDependencyTargets, inspectDraftRunDependencies, inspectGitAncestorPrerequisite, isIndependentDraftRunCheck, isTerminalDependencyCode, orderDraftRunDependencies } from '../runs/draftRunDependencies';
 import { commandCapabilityReplan, commandRecoveryKey, findCommandRecoveryObservation,
   mergeCommandRecoveryObservations, observeCommandRecovery, MAX_COMMAND_RECOVERY_KEYS } from '../runs/commandRecovery';
 import type { DraftRunBatchSnapshot, DraftRunBatchState } from '../shared/types';
@@ -267,6 +267,11 @@ const SESSION_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 const INITIAL_VISIBLE_MESSAGE_COUNT = 30;
 const MESSAGE_PAGE_SIZE = 50;
 const MAX_DELETE_CONFIRMATION_PATHS = 10;
+/** How long a manual approval may wait for the user before it settles itself. */
+const MANUAL_APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
+/** Host-bound manual approval outcome; 'expired' only comes from the bounded wait. */
+type ManualApprovalReply = 'pending' | 'approved' | 'rejected' | 'invalidated';
+type ManualDecisionReply = ManualApprovalReply | 'expired';
 
 type StartupLoadState = 'loading' | 'ready' | 'error';
 
@@ -476,6 +481,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       // A foreign session's command run must not make this composer look busy.
       actionRunning: Boolean((this.activeDraftRunId && this.activeDraftRunSessionId === sessionId) || this.activeChangeActions?.size || this.delegatedApprovalInFlight
         || this.reservingManualDecision || this.reservingApprovalResume || this.draftRunBatches?.locked || this.delegatedApprovals?.hasPending(sessionId)),
+      awaitingManualApproval: this.hasPendingBatchManualApproval(sessionId),
       backgroundRunning: this.hasActiveBackgroundRun(),
       // A running command (activeDraftRunId) does not block navigation: it executes in
       // its own session. Actions that mutate the viewed session still do.
@@ -581,6 +587,26 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       : reason === 'user_cancelled' ? 'cancelled' : 'interrupted';
   }
 
+  /**
+   * Wait for the user's decision, but never without an end. The timeout settles the
+   * same decision the host dialog uses for cancellation, so the approval phase always
+   * leaves 'waiting' and releases the composer. The timer is unref'd so a pending
+   * decision cannot hold the extension host alive.
+   */
+  private waitForManualDecision(
+    answer: Promise<ManualApprovalResolutionReason>,
+    decide: (reason: ManualApprovalResolutionReason) => void,
+    timeoutMs: number = MANUAL_APPROVAL_TIMEOUT_MS
+  ): Promise<ManualApprovalResolutionReason> {
+    if (!(timeoutMs > 0)) return answer;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<ManualApprovalResolutionReason>(resolve => {
+      timer = setTimeout(() => { decide('user_cancelled'); resolve('user_cancelled'); }, timeoutMs);
+      timer.unref?.();
+    });
+    return Promise.race([answer, timeout]).finally(() => { if (timer) clearTimeout(timer); });
+  }
+
   private async requestManualToolApproval(
     view: ManualToolApproval, signal?: AbortSignal, verifyCurrent?: () => Promise<void | boolean>
   ): Promise<boolean> {
@@ -618,7 +644,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         this.postState({ immediate: true, omitMessages: true });
       } else decide('stale_request');
 
-      let result = await answer;
+      let result = await this.waitForManualDecision(answer, decide);
       if (result === 'user_approved' || result === 'user_rejected') {
         if (!valid() || (verifyCurrent && await verifyCurrent() === false) || !valid()) result = 'stale_request';
       }
@@ -642,7 +668,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async prepareBatchManualApproval(view: ManualToolApproval, verifyCurrent: () => Promise<void | boolean>,
-    signal?: AbortSignal): Promise<'pending' | 'approved' | 'rejected' | 'invalidated'> {
+    signal?: AbortSignal): Promise<ManualApprovalReply> {
     const request = view.request;
     const session = this.sessionStore.getActiveSession();
     if (!request?.scopeFingerprint || !view.priorReviewId) return 'invalidated';
@@ -700,6 +726,39 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.batchManualApprovals.set(snapshot.id, { snapshot, request, epoch });
     this.postState({ immediate: true, omitMessages: true });
     return 'pending';
+  }
+
+  /**
+   * Wait for the host confirmation, but never forever. On expiry the host dialog model
+   * receives the same 'user_cancelled' decision it would get from Stop, so the approval
+   * phase always leaves 'waiting' and releases the composer.
+   */
+  private waitBatchManualDecision(
+    answer: Promise<ManualApprovalReply>,
+    view: ManualToolApproval,
+    timeoutMs: number = MANUAL_APPROVAL_TIMEOUT_MS
+  ): Promise<ManualDecisionReply> {
+    if (!(timeoutMs > 0)) return answer;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<'expired'>(resolve => {
+      timer = setTimeout(() => {
+        const pending = [...(this.batchManualApprovals?.values() ?? [])].find(item => item.request === view.request);
+        if (pending) {
+          this.batchManualApprovals?.delete(pending.snapshot.id);
+          this.settleManualApproval(pending.snapshot, 'user_cancelled');
+          this.postState({ immediate: true, omitMessages: true });
+        }
+        resolve('expired');
+      }, timeoutMs);
+      timer.unref?.();
+    });
+    return Promise.race([answer, expired]).finally(() => { if (timer) clearTimeout(timer); });
+  }
+
+  /** True while an open host confirmation waits for this session's decision. */
+  private hasPendingBatchManualApproval(sessionId: string): boolean {
+    return [...(this.batchManualApprovals?.values() ?? [])]
+      .some(item => item.request.sessionId === sessionId && item.snapshot.status === 'waiting');
   }
 
   private invalidateManualApprovals(reason: ManualApprovalResolutionReason): void {
@@ -975,6 +1034,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private pendingDraftRunOutputEvent: DraftRunStoreEvent | undefined;
   private draftRunAutoContinueTimer: ReturnType<typeof setTimeout> | undefined;
   private draftRunAutoContinueInFlight = false;
+  /** A drain request arrived while an approval phase owned the slot; its release reschedules. */
+  private draftRunAutoContinueDeferred = false;
   private liveContextUsage: ContextUsageEstimate | undefined;
   private liveTurnUsage: TurnUsageStats | undefined;
   /** 防并发：同一 Provider 同时只允许一个余额刷新流程；限流按来源全局共享。 */
@@ -1704,7 +1765,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleMessageImpl(message: WebviewMessage, webviewId: string): Promise<void> {
-    console.log("HMI type=", message.type, "isBusy=", this.isBusy, "approvalReady=", this.approvalDataReady, "ctxReady=", this.requestContextReady);
     if (message.type === 'sendPrompt' || message.type === 'editUserPrompt') {
       await this.handleSubmission(message);
       return;
@@ -2250,6 +2310,14 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       case 'rejectDraftRun':
         if (!this.isBusy && !this.isStartingRun && !this.runContextRefreshInFlight && !this.activeDraftRunId) {
           this.draftRuns.reject(message.id);
+          this.postState();
+        }
+        return;
+      case 'releaseDraftRunDependency':
+        // Clearing a wait grants nothing: the command stays pending and any later
+        // approval revalidates its scope, prerequisites and policy from scratch.
+        if (!this.isBusy && !this.isStartingRun && !this.runContextRefreshInFlight && !this.activeDraftRunId
+          && this.draftRuns.clearSatisfiedDependency(message.id, message.specHash)) {
           this.postState();
         }
         return;
@@ -8668,14 +8736,31 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   private scheduleDraftRunAutoContinuation(): void {
     if (!this.approvalDataReady || !this.requestContextReady) return;
-    if (this.draftRunAutoContinueTimer || this.draftRunAutoContinueInFlight || this.delegatedApprovalInFlight) {
+    if (this.draftRunAutoContinueTimer || this.draftRunAutoContinueInFlight) {
       return;
     }
+    // An approval phase owns the run slot synchronously before its first await.
+    // Dropping the request here would lose the only drain scheduled for a batch
+    // enqueued while that phase is still settling; the approval finally block
+    // reschedules instead, so the queue is always drained afterwards.
+    if (this.delegatedApprovalInFlight) {
+      this.draftRunAutoContinueDeferred = true;
+      return;
+    }
+    this.draftRunAutoContinueDeferred = false;
     this.draftRunAutoContinueTimer = setTimeout(() => {
       this.draftRunAutoContinueTimer = undefined;
       void this.maybeAutoContinueDraftRun();
     }, 0);
     this.draftRunAutoContinueTimer.unref?.();
+  }
+
+  /** Release the approval-owned slot and hand any ignored schedule back to the drain. */
+  private releaseDelegatedApprovalSlot(controller: AbortController): void {
+    this.delegatedApprovals.finish(controller);
+    const deferred = this.draftRunAutoContinueDeferred;
+    this.draftRunAutoContinueDeferred = false;
+    if (deferred) this.scheduleDraftRunAutoContinuation();
   }
 
   private async maybeAutoContinueDraftRun(): Promise<void> {
@@ -8689,7 +8774,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       await this.maybeAutoContinueDraftRunBatch();
       return;
     }
-    if (this.delegatedApprovalInFlight) return;
+    // A running approval phase owns the slot; its release reschedules this drain.
+    if (this.delegatedApprovalInFlight) {
+      this.draftRunAutoContinueDeferred = true;
+      return;
+    }
     let processedDelegatedBatch = false;
     while (!this.isBusy && !this.isStartingRun && !this.activeDraftRunId && !this.activeChangeActions?.size) {
       const session = this.sessionStore.getActiveSession();
@@ -8699,8 +8788,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         && background?.status === 'waiting_for_authorization' && background.sessionId === session.id)) break;
       const next = this.delegatedApprovals.take(session.id);
       if (!next) break;
-      await this.executeDelegatedApprovals(next);
       processedDelegatedBatch = true;
+      await this.executeDelegatedApprovals(next);
     }
     if (processedDelegatedBatch) return;
     if (this.draftRunAutoContinueInFlight
@@ -8857,7 +8946,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     } catch (error) {
       this.delegatedApprovals.finish(next.controller);
       vscode.window.showWarningMessage(getErrorMessage(error));
-    } finally { if (use) await this.releaseHistorySessionUse(next.batch.sessionId, use); }
+    } finally {
+      if (use) await this.releaseHistorySessionUse(next.batch.sessionId, use);
+      // Covers every path that left the batch queued instead of claiming it.
+      this.releaseDelegatedApprovalSlot(next.controller);
+    }
   }
 
   private async executeDelegatedApprovalsWithUse(next: NonNullable<ReturnType<DelegatedApprovalQueue['take']>>): Promise<void> {
@@ -8890,7 +8983,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const sameCompletedBatch = isCompletedApprovalBatch(priorProcessing, batch);
     if (sameCompletedBatch || !batch.resume && priorProcessing?.runId === batch.runId
       && ['waiting_user', 'paused'].includes(priorProcessing.status)) {
-      work?.finish(); this.delegatedApprovals.finish(controller); return;
+      work?.finish(); this.releaseDelegatedApprovalSlot(controller); return;
     }
     const explicitCorrection = taskLinkForGoal?.reason === 'recovery'
       && session.messages.some(message => message.role === 'user' && message.userTask?.id === rootTaskId
@@ -8924,14 +9017,26 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       const target = processing.targets.find(item => item.id === id)!;
       target.dependency = dependency;
       report(id, 'dependency_blocked', reason, code);
+if (dependency && (!code || ['dependency_unsettled', 'dependency_independence_unverified'].includes(code))
+        && (this.draftRuns.get(dependency.targetId)?.status === 'pending'
       if (dependency && (!code || ['dependency_unsettled', 'dependency_independence_unverified'].includes(code))
         && (this.draftRuns.get(dependency.targetId)?.status === 'pending'
         || this.changeSets.getPendingEdit(dependency.targetId))) {
         const prerequisite = processing.targets.find(item => item.id === dependency.targetId);
         target.canResume = !prerequisite || prerequisite.canResume || prerequisite.status === 'pending' || undefined;
       }
-    };
-    const pauseUnstarted = (target: typeof processing.targets[number], reason?: string, code?: string) => {
+      // A dependency whose target can never settle must converge instead of waiting.
+      // The record becomes needs_replan so the card stays actionable without granting
+      // any authority; a later approval revalidates the immutable spec from scratch.
+      const waitingRun = dependency && isTerminalDependencyCode(code) ? this.draftRuns.get(id) : undefined;
+      if (dependency && waitingRun
+        && this.draftRuns.settleTerminalDependency(id, waitingRun.specHash,
+          reason ?? dependency.reason ?? this.t('approvalDependencyBlocked'))) {
+        // Keep the projected approval target and the stored record consistent.
+        target.status = 'needs_replan';
+        target.dependency = undefined;
+        draftDispositionChanged = true;
+      }
       if (target.dependency && !processing.targets.some(prerequisite => prerequisite.id === target.dependency?.targetId
         && ['executed', 'already_processed'].includes(prerequisite.status))) {
         awaitDependency(target.id, target.dependency, target.reason ?? target.dependency.reason ?? this.t('approvalDependencyBlocked'));
@@ -9232,7 +9337,15 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           saveSafety();
           const manual: ManualToolApproval = { id: '', sessionId: batch.sessionId, label, reason, request,
             priorReviewId: reviewerRecord.reviewId, authorizationTargets: options?.targets };
-          const answer = await this.prepareBatchManualApproval(manual, verifyCurrent, controller.signal);
+          // Bound the host confirmation so a pending request cannot own the composer
+          // indefinitely. A timeout pauses the target and releases the phase.
+          const pendingAnswer = this.prepareBatchManualApproval(manual, verifyCurrent, controller.signal);
+          pendingAnswer.catch(() => undefined);
+          const answer = await this.waitBatchManualDecision(pendingAnswer, manual);
+          if (answer === 'expired') {
+            report(request.targetId, 'paused', this.t('approvalManualConfirmationTimeout'), 'awaiting_user_expired');
+            return undefined;
+          }
           if (!isAuthorized()) return undefined;
           if (answer !== 'approved') {
             if (answer === 'rejected') {
@@ -10355,18 +10468,23 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         vscode.window.showErrorMessage(this.interactionFailure.message);
       } finally {
         releaseSafety?.(); safetyClock?.dispose(); work?.finish();
-        this.delegatedApprovals.finish(controller);
+        this.releaseDelegatedApprovalSlot(controller);
         this.interactions.finish(operation);
         this.delegatedApprovalInFlight = false;
         this.activeDraftRunId = undefined;
       this.activeDraftRunSessionId = undefined;
         if (this.currentRunAbortController === controller) this.currentRunAbortController = undefined;
       }
+      // The phase no longer owns the run slot, so nothing may keep reporting an
+      // approval-in-progress activity. Operations that still await the user are
+      // named as such; everything else returns to idle.
       if (processing.status === 'waiting_user' || processing.status === 'paused') {
-        this.setAgentActivity({ base: 'waiting', phase: 'awaiting_manual_approval', detail: processing.reason });
+        this.setAgentActivity({ base: 'waiting', phase: 'awaiting_manual_approval', detail: processing.reason }, { post: false });
+      } else {
+        this.setAgentActivity({ base: 'idle', phase: 'idle' }, { post: false });
       }
       if (processing.status === 'stopped') {
-        this.setAgentActivity({ base: 'stopped', phase: 'finalizing', detail: processing.reason ?? this.t('approvalAutoStopped') });
+        this.setAgentActivity({ base: 'stopped', phase: 'finalizing', detail: processing.reason ?? this.t('approvalAutoStopped') }, { post: false });
         if (batch.backgroundRunId && this.backgroundRunCoordinator.getActiveRun()?.id === batch.backgroundRunId && this.hasActiveBackgroundRun()) {
           this.backgroundRunCoordinator.fail(processing.reason ?? this.t('approvalAutoStopped'));
         }

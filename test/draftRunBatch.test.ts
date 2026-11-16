@@ -407,6 +407,11 @@ type Host = {
   interactionSnapshot(revision: number): InteractionSnapshot;
   activeDraftRunId?: string; repairLoopsBySession: Map<string, unknown>;
   clearSessionTransientState(): void;
+  /** Approval-slot release reschedules a drain that arrived while a phase owned it. */
+  scheduleDraftRunAutoContinuation(): void;
+  releaseDelegatedApprovalSlot(controller: AbortController): void;
+  delegatedApprovalInFlight: boolean; draftRunAutoContinueDeferred: boolean;
+  draftRunBatches: { state?: unknown; cancel(): void };
 };
 function hostFixture(f: Awaited<ReturnType<typeof createFixture>>) {
   const session = { id: 's', approvalMode: 'ask', messages: [
@@ -1656,3 +1661,30 @@ test('a reopened Webview can handle current approval, and switching sessions inv
     { type: 'resolveValidationApproval', id: 'live-token', sessionId: 'original', runtimeId: 'host', approve: true }
   ]);
 });
+test('a drain request that arrives during an approval phase is rescheduled, never dropped', async () => fixture(async (f) => {
+  // A drain request arriving while an approval phase owns the run slot used to be
+  // discarded. The approval then released the slot without a new drain, so the queued
+  // batch kept actionRunning true and the composer stayed busy forever.
+  const { host, states } = hostFixture(f);
+  f.add(['A', 'B']);
+  const before = f.batch.state;
+  host.scheduleDraftRunAutoContinuation();
+  host.delegatedApprovalInFlight = true;
+  host.scheduleDraftRunAutoContinuation();
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(f.batch.state, before, 'no drain may start while the approval phase owns the slot');
+  assert.equal(host.draftRunAutoContinueDeferred, true);
+  host.delegatedApprovalInFlight = false;
+  host.releaseDelegatedApprovalSlot(new AbortController());
+  assert.equal(host.draftRunAutoContinueDeferred, false);
+
+  // The handed-back schedule starts the queued batch once the approval slot is free.
+  for (let attempt = 0; attempt < 50 && !f.batch.state; attempt++) {
+    await new Promise<void>(resolve => setImmediate(resolve));
+  }
+  assert.ok(f.batch.state, 'the released approval slot must resume the queued batch');
+  assert.equal(f.batch.state.entries.length, 2);
+  host.draftRunBatches.cancel();
+  host.releaseDelegatedApprovalSlot(new AbortController());
+  assert.equal(states.sends, 0, 'rescheduling grants no model continuation or extra execution');
+}));

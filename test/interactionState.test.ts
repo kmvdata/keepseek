@@ -233,3 +233,19 @@ test('title capability explains missing initialization, trust and model without 
   }
   assert.deepEqual(deriveSessionTitleCapability(titleReady()), { available: true });
 });
+test('an open host confirmation names its wait instead of hiding behind a generic action', () => {
+  // The operation still owns the composer: submitting stays closed for both parties.
+  const waiting = deriveInteractionState(ready({ actionRunning: true, awaitingManualApproval: true }),
+    { kind: 'continuation', operationId: 'op-confirm', sessionId: 'A', phase: 'action' });
+  assert.equal(waiting.phase, 'action');
+  assert.equal(waiting.canSubmit, false);
+  assert.equal(waiting.awaitingManualApproval, true,
+    'the Webview must say the composer waits for the user, not for a generic operation');
+  // Any other action phase never claims to wait for the user.
+  const applying = deriveInteractionState(ready({ actionRunning: true }),
+    { kind: 'continuation', operationId: 'op-apply', sessionId: 'A', phase: 'action' });
+  assert.equal(applying.awaitingManualApproval, undefined);
+  // Once the decision settles the flag disappears with the owner.
+  assert.equal(deriveInteractionState(ready()).awaitingManualApproval, undefined);
+  assert.equal(deriveInteractionState(ready()).canSubmit, true);
+});

@@ -22,4 +22,5 @@ dist/
 # Logs
 *.log
 npm-debug.log*
+.tmp-*
 .reasonix/

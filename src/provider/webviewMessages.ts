@@ -129,5 +129,6 @@ export type WebviewMessage =
   | { type: 'rejectDraftRun'; id: string }
   | { type: 'cancelDraftRun'; id: string }
   | { type: 'cloneDraftRun'; id: string }
+  | { type: 'releaseDraftRunDependency'; id: string; specHash: string }
   | { type: 'authorizeDraftRunCwd'; id: string }
   | { type: 'openDraftRunTerminal'; id: string };

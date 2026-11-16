@@ -81,6 +81,8 @@ export interface InteractionFacts {
   starting?: boolean;
   contextRefreshing?: boolean;
   actionRunning?: boolean;
+  /** A host confirmation is open: the composer is busy because it waits for the user. */
+  awaitingManualApproval?: boolean;
   /** Action kinds that mutate the viewed session (not a running command). */
   navigationBlockingAction?: boolean;
   /** Only the existing exclusive background task policy belongs here. */
@@ -104,6 +106,8 @@ export interface InteractionSnapshot {
   canCancel: boolean;
   cancelOperationId?: string;
   blockingReason?: string;
+  /** Present only while the host waits for an explicit decision from the user. */
+  awaitingManualApproval?: boolean;
   waitingReason?: InteractionWaitingReason;
 }
 
@@ -332,6 +336,7 @@ export function deriveInteractionState(facts: InteractionFacts, operation?: {
     canCancel,
     ...(canCancel ? { cancelOperationId } : {}),
     ...(waitingReason ? { waitingReason } : {}),
+    ...(facts.awaitingManualApproval ? { awaitingManualApproval: true } : {}),
     ...(blockingReason ? { blockingReason } : {})
   };
 }

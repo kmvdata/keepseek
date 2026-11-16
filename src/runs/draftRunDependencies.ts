@@ -14,6 +14,17 @@ export interface DraftRunDependencyDecision {
   dependency?: ApprovalDependency;
 }
 
+/** Codes that no amount of waiting can resolve. A card may only present a dependency
+ * as a wait while its target can still settle, so callers treat these as terminal and
+ * converge the record instead of leaving it pending forever. */
+export const TERMINAL_DEPENDENCY_CODES: ReadonlySet<NonNullable<DraftRunDependencyDecision['code']>> =
+  new Set(['dependency_missing', 'dependency_identity', 'dependency_cycle', 'dependency_condition', 'dependency_stale']);
+
+export function isTerminalDependencyCode(code: string | undefined): boolean {
+  return code !== undefined
+    && TERMINAL_DEPENDENCY_CODES.has(code as NonNullable<DraftRunDependencyDecision['code']>);
+}
+
 /** Match task-owned edits before binding a launch. An entry that will be created
  * by Apply still has a usable path identity, without treating it as launchable. */
 export async function draftRunEditDependencyTargets(run: Pick<DraftRun, 'spec'>): Promise<ReadonlySet<string>> {

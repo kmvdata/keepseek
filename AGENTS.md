@@ -24,6 +24,8 @@ bun run package:market
 
 开发调试按 F5。市场包只用 `bun run package:market`，禁止 `vsce package --no-dependencies`。
 
+调试脚本、探针、一次性测试输出和备份一律写到系统临时目录或已忽略的 `out-test/`，不得在仓库内创建 `.tmp-*` 文件；`.gitignore` 与 `.vscodeignore` 里的 `.tmp-*` 只是兜底，不是存放位置。
+
 ## 存储初始基线
 
 0.5.2 视为初始版本。扩展身份为 `keepseek.keepseek`（发布者 `keepseek`），磁盘根为宿主原生应用数据目录下的 `com.kmvdata.keepseek`，所有 Store 必须共用同一 `file:` URI。不读取、不迁移旧扩展、旧账号、旧配置或旧协议数据；不要新增 fallback、双写或迁移桥。只支持当前格式，保留当前原子提交、跨进程锁、损坏校验、删除墓碑和中断恢复。格式版本号与发布版本独立，详见 `doc/keepseek-storage-baseline.md`。

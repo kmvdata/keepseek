@@ -169,7 +169,33 @@ export class DraftRunStore {
         this.draftRuns.set(draftRun.id, draftRun);
         this.knownDraftRunIds.add(draftRun.id);
       }
+      // A dependency can outlive the target that could ever satisfy it. Keeping such a
+      // record would surface it forever as a waiting card that blocks approvals, batches
+      // and continuations without ever moving, so converge it at load time.
       for (const draftRun of this.draftRuns.values()) {
+        const dependency = draftRun.dependency;
+        if (!dependency || draftRun.status !== 'pending' || !hasNeverDispatched(draftRun)) continue;
+        const prior = this.draftRuns.get(dependency.targetId);
+        const stillSettleable = prior !== undefined && prior.sessionId === draftRun.sessionId
+          && !prior.historyInvalidationId && !prior.historyOriginUnverified && !prior.replacementDraftRunId
+          && ['pending', 'approved', 'running'].includes(prior.status);
+        if (stillSettleable) continue;
+        const settledAt = new Date().toISOString();
+        draftRun.dependency = undefined;
+        draftRun.executionStarted = false;
+        draftRun.executionPhase = 'not_dispatched';
+        draftRun.updatedAt = settledAt;
+        if (prior?.status === 'done') {
+          draftRun.error = undefined;
+        } else {
+          draftRun.status = 'needs_replan';
+          draftRun.error = dependency.reason ?? 'A prerequisite can no longer complete. / 前置操作已无法完成。';
+          draftRun.finishedAt ??= settledAt;
+        }
+        repairedInterruptedRun = true;
+      }
+      for (const draftRun of this.draftRuns.values()) {
+        const linkedId = draftRun.replacementDraftRunId;
         const linkedId = draftRun.replacementDraftRunId;
         if (!linkedId) continue;
         const replacement = this.draftRuns.get(linkedId);
@@ -541,6 +567,43 @@ export class DraftRunStore {
     if (!draft || isHistoryInactive(draft) || draft.status !== 'pending' || !hasNeverDispatched(draft)
       || draft.specHash !== expectedSpecHash || this.approving.has(id)) return false;
     draft.dependency = normalizeApprovalDependency(dependency);
+    draft.updatedAt = new Date().toISOString();
+    this.emitState(draft);
+    this.schedulePersist();
+    return true;
+  }
+
+  /**
+   * Resolve one dependency that can never become satisfied. A waiting dependency is
+   * only meaningful while its target can still settle; a terminal one would otherwise
+   * freeze the card, the approval batch and the automatic continuation permanently.
+   *
+   * needs_replan keeps the proposal editable without granting authority: any later
+   * approval revalidates the immutable spec and its prerequisites from scratch.
+   */
+  public settleTerminalDependency(id: string, expectedSpecHash: string, reason: string): boolean {
+    const draft = this.draftRuns.get(id);
+    if (!draft || isHistoryInactive(draft) || draft.status !== 'pending' || !hasNeverDispatched(draft)
+      || draft.specHash !== expectedSpecHash || this.approving.has(id) || !draft.dependency) return false;
+    const now = new Date().toISOString();
+    draft.status = 'needs_replan';
+    draft.dependency = undefined;
+    draft.executionStarted = false;
+    draft.executionPhase = 'not_dispatched';
+    draft.error = reason;
+    draft.updatedAt = now;
+    draft.finishedAt ??= now;
+    this.emitState(draft);
+    this.schedulePersist();
+    return true;
+  }
+
+  /** Releases a dependency whose target already completed with verified evidence. */
+  public clearSatisfiedDependency(id: string, expectedSpecHash: string): boolean {
+    const draft = this.draftRuns.get(id);
+    if (!draft || isHistoryInactive(draft) || draft.status !== 'pending' || draft.specHash !== expectedSpecHash
+      || this.approving.has(id) || !draft.dependency) return false;
+    draft.dependency = undefined;
     draft.updatedAt = new Date().toISOString();
     this.emitState(draft);
     this.schedulePersist();
