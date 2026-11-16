@@ -2,7 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
+const { run: runChild } = require('./child-runner.cjs');
 
 const root = path.resolve(__dirname, '..');
 const packageJson = require(path.join(root, 'package.json'));
@@ -63,7 +63,9 @@ function npmCommand() {
 }
 
 function run(command, args) {
-  const result = spawnSync(command, args, { cwd: root, stdio: 'inherit' });
+  // Windows .cmd shims (npm.cmd, vsce.cmd) cannot be spawned directly by Node
+  // or Bun; child-runner routes them through cmd.exe with exact argv quoting.
+  const result = runChild(command, args, { cwd: root, stdio: 'inherit' });
   if (result.error) {
     fail(`Failed to run ${formatCommand(command, args)}: ${result.error.message}`);
   }

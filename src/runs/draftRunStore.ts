@@ -196,7 +196,6 @@ export class DraftRunStore {
       }
       for (const draftRun of this.draftRuns.values()) {
         const linkedId = draftRun.replacementDraftRunId;
-        const linkedId = draftRun.replacementDraftRunId;
         if (!linkedId) continue;
         const replacement = this.draftRuns.get(linkedId);
         const linkMatches = replacement !== undefined && replacement.sessionId === draftRun.sessionId

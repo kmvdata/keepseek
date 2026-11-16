@@ -9013,12 +9013,21 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     };
     const blocked = () => processing.targets.some(target => !['executed', 'already_processed'].includes(target.status)
       && !restrictedSyntaxFailures.has(target.id));
+    // A target whose review never ran keeps its immutable spec and becomes resumable:
+    // nothing was dispatched, so a later approval revalidates from scratch. The pending
+    // command record follows the projected target so both surfaces stay consistent.
+    const pauseUnstarted = (target: typeof processing.targets[number], reason?: string, code?: string) => {
+      report(target.id, 'paused', reason, code);
+      if (target.kind !== 'command') return;
+      const run = this.draftRuns.get(target.id);
+      if (run?.sessionId !== batch.sessionId || run.agentRunId !== batch.runId || run.status !== 'pending') return;
+      draftDispositionChanged = this.draftRuns.setPendingApproval(run.id, run.specHash,
+        { status: 'paused', reason: target.reason, failureCode: code }) || draftDispositionChanged;
+    };
     const awaitDependency = (id: string, dependency: typeof processing.targets[number]['dependency'], reason?: string, code?: string) => {
       const target = processing.targets.find(item => item.id === id)!;
       target.dependency = dependency;
       report(id, 'dependency_blocked', reason, code);
-if (dependency && (!code || ['dependency_unsettled', 'dependency_independence_unverified'].includes(code))
-        && (this.draftRuns.get(dependency.targetId)?.status === 'pending'
       if (dependency && (!code || ['dependency_unsettled', 'dependency_independence_unverified'].includes(code))
         && (this.draftRuns.get(dependency.targetId)?.status === 'pending'
         || this.changeSets.getPendingEdit(dependency.targetId))) {

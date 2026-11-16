@@ -9,15 +9,21 @@
 // shebang scripts), so argv is passed through untouched and no shell is ever
 // involved.
 
+const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const WINDOWS_SHIM = /\.(?:cmd|bat)$/iu;
 const CMD_SPECIAL = /[\s"^&|<>()]/u;
+const UNC_PATH = /^[\\/]{2}[^\\/]/u;
 
 function quoteForCmd(value) {
   const text = String(value);
   if (text === '') return '""';
   return CMD_SPECIAL.test(text) ? `"${text.replace(/"/gu, '""')}"` : text;
+}
+
+function isUncPath(value) {
+  return typeof value === 'string' && UNC_PATH.test(value);
 }
 
 function buildCommandLine(command, args) {
@@ -36,15 +42,29 @@ function createChildRunner(options = {}) {
     if (!isWindows || !WINDOWS_SHIM.test(command)) {
       return { executable: command, argv: [...args], viaCommandShell: false };
     }
+    // `cmd /s /c` strips the outer quotes, so each literal inner quote must be
+    // doubled for cmd to hand the argument through intact.
     return {
       executable: commandShell,
-      argv: ['/d', '/s', '/c', `"${buildCommandLine(command, args)}"`],
+      argv: ['/d', '/s', '/c', `"${buildCommandLine(command, args).replace(/"/gu, '""')}"`],
       viaCommandShell: true
     };
   }
 
-  function spawn(command, args, spawnOptions) {
+  function spawn(command, args, spawnOptions = {}) {
     const target = plan(command, args);
+    if (target.viaCommandShell && isUncPath(spawnOptions.cwd)) {
+      // cmd.exe cannot start in a UNC directory, so enter it via pushd, which
+      // maps the share to a temporary drive for the life of the command.
+      const cwd = String(spawnOptions.cwd);
+      const { cwd: _ignored, ...rest } = spawnOptions;
+      // `pushd` rejects a quoted UNC path; an unquoted share name is its supported form.
+      // `cmd /s /c` strips an outer quote pair only for a single simple command,
+      // so the compound pushd line must be passed unwrapped. `pushd` also rejects
+      // a quoted UNC path, and the shim argv is rebuilt without its quoting.
+      const line = `pushd ${cwd} && ${buildCommandLine(command, args)} && popd`;
+      return spawnSync(target.executable, ['/d', '/s', '/c', line], rest);
+    }
     return spawnSync(target.executable, target.argv, spawnOptions);
   }
 

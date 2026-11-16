@@ -2,7 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
+const { run: runChild, runCapture: captureChild } = require('./child-runner.cjs');
 
 const root = path.resolve(__dirname, '..');
 const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
@@ -79,10 +79,7 @@ function readRequiredString(value, fieldName) {
 }
 
 function run(command, args) {
-  const result = spawnSync(command, args, {
-    cwd: root,
-    stdio: 'inherit'
-  });
+  const result = runChild(command, args, { cwd: root, stdio: 'inherit' });
 
   if (result.error) {
     fail(`Failed to run ${formatCommand(command, args)}: ${result.error.message}`);
@@ -104,10 +101,7 @@ function getInstalledExtensionVersion(extensionId) {
 }
 
 function runCapture(command, args) {
-  const result = spawnSync(command, args, {
-    cwd: root,
-    encoding: 'utf8'
-  });
+  const result = captureChild(command, args, { cwd: root, encoding: 'utf8' });
 
   if (result.error) {
     fail(`Failed to run ${formatCommand(command, args)}: ${result.error.message}`);
