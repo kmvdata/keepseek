@@ -120,18 +120,7 @@
           "pattern": "^(?:|sha256:[a-f0-9]{64})$",
           "markdownDescription": "Immutable ID of a trusted, preinstalled Linux Docker toolchain image for isolated Windows execution, for example `sha256:…`. The image must include the tools the project needs. User settings only. / Windows 隔离执行使用的可信、已在本地安装的 Linux Docker 工具链镜像 ID，例如 `sha256:…`。镜像需包含工程所需工具，仅使用用户设置。"
         },
-        "kmvdata.keepseek.autoApprovalReviewer": {
-          "type": "object",
-          "default": { "mode": "follow-main" },
-          "scope": "application",
-          "properties": {
-            "mode": { "type": "string", "enum": ["follow-main", "fixed"], "default": "follow-main" },
-            "sourceId": { "type": "string" },
-            "modelId": { "type": "string" }
-          },
-          "additionalProperties": false,
-          "markdownDescription": "Independent approval model for Approve for me. Follows the actual main model of the task segment, or uses a fixed sourceId and modelId. User settings only; independent of subagent models. / 帮我审批的独立审批模型。跟随任务执行段的实际主模型，或固定账号 ID 与模型 ID。仅使用用户设置，与普通子代理模型无关。"
-        },
+
         "kmvdata.keepseek.thinkingEnabled": {
           "type": "boolean",
           "default": true,

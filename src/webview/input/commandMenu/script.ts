@@ -88,6 +88,7 @@ export const commandMenuImplementationFragment: WebviewFragment = {
         commandModelListOpen = false;
         commandSubagentModelListOpen = false;
         commandSubagentModelProfile = '';
+        commandApprovalModeListOpen = false;
         commandSkillListOpen = false;
         commandMenu.classList.add('hidden');
         commandMenuButton.classList.remove('is-active');
@@ -135,6 +136,11 @@ export const commandMenuImplementationFragment: WebviewFragment = {
             focusFirstCommandMenuControl(subagentModelOptions);
             return;
           }
+          if (target === commandApprovalModeSwitch) {
+            event.preventDefault();
+            openCommandApprovalModeListAndFocus();
+            return;
+          }
           if (target === commandSkillsMainButton || target === commandSkillsButton) {
             event.preventDefault();
             openCommandSkillListAndFocus();
@@ -166,6 +172,13 @@ export const commandMenuImplementationFragment: WebviewFragment = {
             commandSubagentModelProfile = '';
             renderCommandMenu();
             if (commandSubagentModelSwitch) { commandSubagentModelSwitch.focus(); }
+            return;
+          }
+          if (commandApprovalModeListOpen && commandApprovalModeList && (commandApprovalModeList.contains(target) || target === commandApprovalModeSwitch)) {
+            event.preventDefault();
+            commandApprovalModeListOpen = false;
+            renderCommandMenu();
+            if (commandApprovalModeSwitch) { commandApprovalModeSwitch.focus(); }
             return;
           }
           if (commandSkillListOpen && commandSkillList && (commandSkillList.contains(target) || target === commandSkillsMainButton || target === commandSkillsButton || target === commandCreateSkillButton)) {
@@ -210,6 +223,7 @@ export const commandMenuImplementationFragment: WebviewFragment = {
         if (!commandModelSwitch || isModelSelectionLocked()) { return; }
         commandModelListOpen = true;
         commandSubagentModelListOpen = false;
+        commandApprovalModeListOpen = false;
         commandSkillListOpen = false;
         renderCommandMenu();
         focusFirstCommandMenuControl(commandModelList);
@@ -220,17 +234,30 @@ export const commandMenuImplementationFragment: WebviewFragment = {
         commandSubagentModelListOpen = true;
         commandSubagentModelProfile = '';
         commandModelListOpen = false;
+        commandApprovalModeListOpen = false;
         commandSkillListOpen = false;
         renderCommandMenu();
         focusFirstCommandMenuControl(commandSubagentModelList);
       }
 
 
+      function openCommandApprovalModeListAndFocus() {
+        if (!commandApprovalModeSwitch || isApprovalModeSelectionLocked()) { return; }
+        commandApprovalModeListOpen = true;
+        commandModelListOpen = false;
+        commandSubagentModelListOpen = false;
+        commandSubagentModelProfile = '';
+        commandSkillListOpen = false;
+        renderCommandMenu();
+        focusFirstCommandMenuControl(commandApprovalModeList);
+      }
+
       function openCommandSkillListAndFocus() {
         if ((!commandSkillsMainButton && !commandSkillsButton) || !canChangeContext()) { return; }
         commandSkillListOpen = true;
         commandModelListOpen = false;
         commandSubagentModelListOpen = false;
+        commandApprovalModeListOpen = false;
         vscode.postMessage({ type: 'requestSkills' });
         renderCommandMenu();
         focusFirstCommandMenuControl(commandSkillList);
@@ -307,8 +334,10 @@ export const commandMenuRenderFragment: WebviewFragment = {
         }
         commandMenu.classList.toggle('is-readonly', !canChangeContext());
         commandMenu.classList.toggle('allows-model-selection', Boolean(state.isBusy && !isModelSelectionLocked()));
+        commandMenu.classList.toggle('allows-approval-selection', Boolean(state.isBusy && !isApprovalModeSelectionLocked()));
         renderCommandModel();
         renderCommandSubagentModel();
+        renderCommandApprovalMode();
         renderCompressionThreshold();
         renderCommandSkillFilter();
         renderCommandSkills();

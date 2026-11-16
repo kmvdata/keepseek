@@ -1,5 +1,4 @@
-import { redactSensitiveReviewText } from '../../approvals/approvalPolicy';
-import { APPROVAL_POLICY_VERSION } from '../../approvals/approvalReviewTypes';
+import { redactSensitiveReviewText } from '../../approvals/sensitiveText';
 import { spawn } from 'node:child_process';
 import { terminateProcessTree } from '../../runs/draftRunExecutor';
 import { getProjectExecutionMode, prepareProjectExecution, ProjectExecutionUnavailableError } from '../../runs/projectExecutionIsolation';
@@ -93,14 +92,11 @@ export class ValidationToolService implements ValidationToolAdapter {
     }
 
     const expectedScope = input.script === 'test' ? 'validation_test' : 'validation_compile_lint';
-    const review = input.authorization.approvalReview;
-    const approvalMode = input.authorization.source === 'model_reviewer' ? 'delegate' : input.approvalMode;
+    const approvalMode = input.approvalMode;
     if (!input.authorization.allowed
       || input.authorization.toolName !== RUN_VALIDATION_TOOL_NAME
       || input.authorization.riskLevel !== 'medium'
-      || input.authorization.scope !== expectedScope
-      || (approvalMode === 'delegate' && (review?.decision !== 'approve' || review.policyVersion !== APPROVAL_POLICY_VERSION
-        || review.approvalSource !== 'auto_approval_review' || review.reviewState || !input.expectedSnapshot))) {
+      || input.authorization.scope !== expectedScope) {
       return JSON.stringify(createResult({
         workspaceFolder: workspaceFolder.name,
         authorization: input.authorization,
@@ -129,8 +125,7 @@ export class ValidationToolService implements ValidationToolAdapter {
       const snapshot = await inspectValidationSnapshot(workspaceFolder, input.script, approvalMode);
       if (!vscode.workspace.isTrusted || input.signal?.aborted || !vscode.workspace.workspaceFolders?.includes(workspaceFolder)
         || !snapshot.evidenceComplete
-        || (input.expectedSnapshot && input.expectedSnapshot !== snapshot.fingerprint)
-        || (input.authorization.approvalReview && !input.expectedSnapshot)) {
+        || (input.expectedSnapshot && input.expectedSnapshot !== snapshot.fingerprint)) {
         throw new Error(localizeValidation(input.language, 'snapshotChanged'));
       }
       const remainingMs = input.runDeadlineAt === undefined ? timeoutMs : Math.min(timeoutMs, input.runDeadlineAt - Date.now());
@@ -197,7 +192,7 @@ export async function getAvailableSafeValidationScripts(approvalMode?: ApprovalM
     return [];
   }
   const scripts = await readNpmScripts(workspaceFolder);
-  const isolated = approvalMode === 'delegate' && getProjectExecutionMode() === 'isolated';
+  const isolated = approvalMode === 'ask' && getProjectExecutionMode() === 'isolated';
   const definitions = SAFE_NPM_SCRIPT_ORDER.map((script) => ({ script, definition: scripts?.[script] }));
   return definitions
     .filter((entry): entry is { script: SafeNpmScript; definition: string } =>

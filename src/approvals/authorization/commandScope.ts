@@ -9,7 +9,7 @@ import type { ApprovalMode, DraftRun } from '../../shared/types';
 import { createControlledEnvironment } from '../../runs/executionEnvironment';
 import { getProjectExecutionMode, inspectProjectExecution, isProjectExecutionEnvNameSupported,
   type ProjectExecutionBoundary } from '../../runs/projectExecutionIsolation';
-import { findSensitiveEvidence } from '../approvalPolicy';
+import { findSensitiveEvidence } from '../sensitiveText';
 import { assertOperationPath, isGitProjectSkillPath, isProtectedOperationPath } from './protectedTargets';
 import type { GitRemoteScope } from './gitRemoteScope';
 import { inspectLocalGitScope, type GitTagSnapshot } from './localGitScope';
@@ -65,7 +65,7 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectR
   tagSnapshot?: { ref: string; signal: AbortSignal }, allowUnresolvedLauncher = false, selectedProjectUri?: string,
   inspection: boolean | ApprovalMode = false): Promise<CommandScope> {
   const allowMissingCwd = inspection === true;
-  const delegate = inspection === 'delegate';
+  const delegate = inspection === 'ask';
   const parsed = analyzeCommand(run.spec);
   const usesProjectExecution = delegate && !parsed.gitRemote && !run.spec.restricted;
   const isolated = usesProjectExecution && getProjectExecutionMode() !== 'host';

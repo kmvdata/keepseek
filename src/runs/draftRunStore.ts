@@ -25,8 +25,6 @@ import { executionSegmentId } from '../sessions/userTask';
 import { hasExactCommandScope, type CommandScope } from '../approvals/authorization/commandScope';
 import { analyzeDraftRunEffects, inspectDraftRunScope, checkDraftRunApprovalBoundary, validateDraftRunBeforeApproval } from '../approvals/authorization';
 import { DraftRunAuthorizationService } from './draftRunAuthorization';
-import type { ApprovalRecordMatch, ApprovalReviewRecord } from '../approvals/approvalReviewTypes';
-import { ApprovalAuditError, toApprovalReviewDisplay } from '../approvals/approvalReviewStore';
 import { redactSensitiveReviewText } from '../approvals/approvalPolicy';
 import { normalizeApprovalDependency, normalizeDraftRunReplan, type ApprovalDependency, type DraftRunReplanResult } from '../approvals/approvalProcessing';
 import { normalizeGitPushAttempt, normalizeGitReleaseEvidence, type GitPushAttempt, type GitReleaseEvidence } from './gitReleaseEvidence';
@@ -66,7 +64,7 @@ const UNSAFE_CONTROL_CHARACTER_PATTERN = new RegExp('[\\x00-\\x08\\x0B\\x0C\\x0E
 
 export type WebviewDraftRun = Omit<DraftRun, 'outputHead' | 'outputTail' | 'gitCommitPlan' | 'gitPushAttempt' | 'commandRecoveryResponse'> & {
   output: string;
-  canReproposeUndispatchedApproval?: true;
+
 };
 
 export interface DraftRunStoreEvent {
@@ -135,7 +133,7 @@ export class DraftRunStore {
           || draftRun.approvalHold?.status === 'waiting_user' || draftRun.status === 'pending' && draftRun.spec.restricted)) {
           // The persisted running boundary precedes all adapter calls. Approved
           // records with an explicit no-dispatch fact can request a fresh decision.
-          const directAsk = draftRun.authorizationSource === 'user_click' && !draftRun.approvalReview && !draftRun.approvalHold;
+          const directAsk = draftRun.authorizationSource === 'user_click' && !draftRun.approvalHold;
           draftRun.status = 'pending';
           draftRun.authorizationSource = undefined;
           draftRun.approvedAt = undefined;
@@ -308,7 +306,7 @@ export class DraftRunStore {
     return Array.from(this.draftRuns.values())
       .filter((draftRun) => draftRun.sessionId === sessionId && !isHistoryInactive(draftRun))
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
-      .map(run => toWebviewDraftRun(run, this.canReproposeUndispatchedApproval(run)));
+      .map(run => toWebviewDraftRun(run));
   }
 
   /** Presentation metadata only; it is never consulted by approval or execution. */
@@ -489,14 +487,6 @@ export class DraftRunStore {
     this.schedulePersist();
   }
 
-  public attachApprovalReview(id: string, record: ApprovalReviewRecord): boolean {
-    const draftRun = this.draftRuns.get(id);
-    if (!draftRun || isHistoryInactive(draftRun)) return false;
-    draftRun.approvalReview = toApprovalReviewDisplay(record);
-    this.emitState(draftRun);
-    this.schedulePersist();
-    return true;
-  }
 
   /** Persist both identities before reviewing or launching the replacement. */
   public async replaceWithRestrictedPython(id: string, target: string, isAuthorized: () => boolean): Promise<DraftRun> {
@@ -702,11 +692,9 @@ export class DraftRunStore {
     authorizedExternalReferenceUris: ReadonlySet<string>,
     options: {
       autoContinue?: boolean;
-      delegatedApproval?: () => boolean;
       /** Invokes a memoized inspection after this phase's caller-owned checks. */
       verifyScope?: (inspectScope: () => Promise<CommandScope>) => Promise<void | VerifiedDraftRunLaunch>;
       selectedProjectUri?: string;
-      approvalRecord?: ApprovalRecordMatch;
       signal?: AbortSignal;
       /** Finite batch click authority, rechecked after every asynchronous boundary. */
       userApproval?: () => boolean;
@@ -716,8 +704,7 @@ export class DraftRunStore {
   ): Promise<DraftRun | undefined> {
     const draftRun = this.draftRuns.get(id);
     if (!draftRun || isHistoryInactive(draftRun) || draftRun.status !== 'pending' || !hasNeverDispatched(draftRun)
-      || draftRun.dependency || this.approving.has(id)
-      || (draftRun.approvalHold && (!options.delegatedApproval || !options.approvalRecord))) {
+      || draftRun.dependency || this.approving.has(id)) {
       return undefined;
     }
     this.approving.add(id);
@@ -727,8 +714,7 @@ export class DraftRunStore {
     try {
       draftRun.autoContinueRequested = options.autoContinue === true || undefined;
       const assertAuthorized = () => {
-        if (options.signal?.aborted || (options.delegatedApproval && !options.delegatedApproval())
-          || (options.userApproval && !options.userApproval())) {
+        if (options.signal?.aborted || (options.userApproval && !options.userApproval())) {
           throw new Error('DraftRun approval was cancelled or revoked.');
         }
         if (isHistoryInactive(draftRun) || this.draftRuns.get(id) !== draftRun || !['pending', 'approved', 'running'].includes(draftRun.status)) {
@@ -742,11 +728,11 @@ export class DraftRunStore {
         assertAuthorized();
         const restricted = draftRun.spec.restricted;
         const original = restricted && this.draftRuns.get(restricted.originalDraftRunId);
-        if (restricted && (!original || !options.delegatedApproval || options.approvalRecord?.expectedSource !== 'auto_approval_review'
-          || options.approvalRecord.scopeFingerprint !== restricted.boundaryFingerprint
-          || !options.verifyScope)) throw new Error('Restricted validation requires its own automatic approval.');
+        // The restricted Python AST parser is a safely reviewed replacement, so it
+        // runs only through the host approval path and never in a plain batch.
+        if (restricted) throw new Error('Restricted validation requires its own automatic approval.');
         let fingerprint: string | undefined;
-        const approvalMode = options.delegatedApproval ? 'delegate' : 'ask';
+        const approvalMode = 'ask' as const;
         const verifyScope = async () => {
           await this.assertDependencyFacts(draftRun, authorizedExternalReferenceUris, options.rootTaskRunIds, options.selectedProjectUri);
           let inspection: Promise<CommandScope> | undefined;
@@ -759,10 +745,7 @@ export class DraftRunStore {
           const verifiedRemoteLaunch = await options.verifyScope?.(inspectScope);
           const current = await inspectScope();
           await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris, current, approvalMode);
-          const approvalFingerprint = options.approvalRecord?.scopeFingerprint;
-          const boundFingerprint = verifiedRemoteLaunch?.gitRemote ? verifiedRemoteLaunch.fingerprint : current.fingerprint;
           if ((fingerprint !== undefined && fingerprint !== current.fingerprint)
-            || (options.delegatedApproval && (!approvalFingerprint || approvalFingerprint !== boundFingerprint))
             || !hasExactCommandScope(current, draftRun.spec.cwdUri, authorizedExternalReferenceUris)) {
             throw new Error('Exact external operation scope is missing or changed. / 缺少精确范围授权或范围已变化。');
           }
@@ -782,7 +765,7 @@ export class DraftRunStore {
           containerImage: profile?.kind === 'container' ? profile.image : undefined
         });
         draftRun.status = 'approved';
-        draftRun.authorizationSource = options.delegatedApproval ? 'delegated_approver' : 'user_click';
+        draftRun.authorizationSource = 'user_click';
         draftRun.approvedAt = new Date().toISOString();
         draftRun.updatedAt = draftRun.approvedAt;
         this.emitState(draftRun);
@@ -801,10 +784,7 @@ export class DraftRunStore {
 
         await verifyScope();
         assertAuthorized();
-        const permit = options.delegatedApproval
-          ? await this.authorization.createDelegatedPermit(draftRun, options.delegatedApproval, options.approvalRecord)
-          : this.authorization.createUserClickPermit(draftRun);
-        // Approval-record consumption is asynchronous: recheck scope after it too.
+        const permit = this.authorization.createUserClickPermit(draftRun);
         const { scope: verifiedScope, restrictedLaunch, verifiedRemoteLaunch } = await verifyScope();
         assertAuthorized();
         const abortController = new AbortController();
@@ -867,18 +847,18 @@ export class DraftRunStore {
           draftRun.error = error.message;
           draftRun.startedAt = undefined;
           this.releaseUnstartedReplacement(draftRun);
-        } else if (!executionStarted && (error instanceof DraftRunPersistenceError || error instanceof ApprovalAuditError
-          || draftRun.approvalHold || ((options.userApproval || options.delegatedApproval) && options.signal?.aborted))) {
+        } else if (!executionStarted && (error instanceof DraftRunPersistenceError
+          || draftRun.approvalHold || (options.userApproval && options.signal?.aborted))) {
           // Never dispatch or reuse the authorization after a storage failure,
-          // revoked batch click or failed revalidation of a held proposal.
-          pausedForPersistence = error instanceof DraftRunPersistenceError || error instanceof ApprovalAuditError;
+          // a revoked batch click or failed revalidation of a held proposal.
+          pausedForPersistence = error instanceof DraftRunPersistenceError;
           const reason = redactSensitiveReviewText(error instanceof Error ? error.message : String(error), 2_000);
           draftRun.status = 'pending';
           draftRun.authorizationSource = undefined;
           draftRun.approvedAt = undefined;
           draftRun.startedAt = undefined;
           draftRun.error = pausedForPersistence ? reason : undefined;
-          if (draftRun.approvalHold || (options.delegatedApproval && pausedForPersistence)) {
+          if (draftRun.approvalHold) {
             draftRun.approvalHold = {
               status: 'paused', updatedAt: new Date().toISOString(),
               failureCode: pausedForPersistence ? 'audit_persistence_failed' : 'approval_revalidation_failed', reason
@@ -934,60 +914,6 @@ export class DraftRunStore {
     return true;
   }
 
-  private canReproposeUndispatchedApproval(source: DraftRun): boolean {
-    return source.status === 'failed' && !isHistoryInactive(source) && hasNeverDispatched(source)
-      && !source.replan && !source.dependency && !source.capabilityDiagnostic?.blocking
-      && !source.spec.restricted && !source.spec.replacesDraftRun && !source.replacementDraftRunId
-      && hashDraftRunSpec(source.spec) === source.specHash
-      && this.authorization.hasHistoricalUnavailableReview(source)
-      && !Array.from(this.draftRuns.values()).some(run => run.sessionId === source.sessionId
-        && run.reproposedFromDraftRunId === source.id && !isHistoryInactive(run));
-  }
-
-  public async reproposeUndispatchedApproval(id: string, specHash: string, authorizedUris: ReadonlySet<string>, options: {
-    sessionId: string;
-    agentRunId: string;
-    rootTaskRunIds?: ReadonlySet<string>;
-    selectedProjectUri?: string;
-    isCurrent: () => boolean;
-  }): Promise<DraftRun | undefined> {
-    const source = this.draftRuns.get(id);
-    const eligible = () => source && options.isCurrent() && this.draftRuns.get(id) === source
-      && source.specHash === specHash && source.sessionId === options.sessionId && source.agentRunId === options.agentRunId
-      && this.canReproposeUndispatchedApproval(source);
-    if (!source || !eligible() || this.approving.has(id)) return undefined;
-    this.approving.add(id);
-    let use: { release(): Promise<void> } | undefined;
-    try {
-      use = await new SessionDeletionAuthority(this.globalStorageUri).acquireUse('associated-runs', source.sessionId);
-      const scope = await inspectDraftRunScope(source, false, undefined, false, options.selectedProjectUri);
-      await this.assertDependencyFacts(source, authorizedUris, options.rootTaskRunIds, options.selectedProjectUri);
-      await validateDraftRunBeforeApproval(source, authorizedUris, scope);
-      if (!hasExactCommandScope(scope, source.spec.cwdUri, authorizedUris) || !eligible()) return undefined;
-      const pending = this.createPendingCopy(source);
-      pending.reproposedFromDraftRunId = source.id;
-      pending.approvalHold = { status: 'paused', updatedAt: pending.updatedAt };
-      this.draftRuns.set(pending.id, pending);
-      this.knownDraftRunIds.add(pending.id);
-      try { await this.persistNow(); }
-      catch (error) {
-        this.draftRuns.delete(pending.id);
-        this.schedulePersist();
-        throw error;
-      }
-      if (!options.isCurrent()) {
-        this.draftRuns.delete(pending.id);
-        await this.persistNow();
-        return undefined;
-      }
-      this.emitState(source);
-      this.emitState(pending);
-      return cloneDraftRun(pending);
-    } finally {
-      this.approving.delete(id);
-      await use?.release();
-    }
-  }
 
   public cloneAsPending(id: string): DraftRun | undefined {
     const source = this.draftRuns.get(id);
@@ -998,7 +924,6 @@ export class DraftRunStore {
     }
     if (source.executionPhase === 'result_unknown'
       || (source.status === 'failed' && source.executionStarted === undefined)) return undefined;
-    if (this.authorization.hasHistoricalUnavailableReview(source)) return undefined;
     const clone = this.createPendingCopy(source);
     this.draftRuns.set(clone.id, clone);
     this.knownDraftRunIds.add(clone.id);
@@ -1250,7 +1175,7 @@ export class DraftRunStore {
 
   private emitState(draftRun: DraftRun): void {
     if (isHistoryInactive(draftRun)) return;
-    this.onEvent?.({ type: 'state', draftRun: toWebviewDraftRun(draftRun, this.canReproposeUndispatchedApproval(draftRun)) });
+    this.onEvent?.({ type: 'state', draftRun: toWebviewDraftRun(draftRun) });
   }
 
   private schedulePersist(): void {
@@ -1396,7 +1321,7 @@ function getDraftRunOutput(draftRun: DraftRun): string {
     : draftRun.outputHead;
 }
 
-function toWebviewDraftRun(draftRun: DraftRun, canReproposeUndispatchedApproval?: boolean): WebviewDraftRun {
+function toWebviewDraftRun(draftRun: DraftRun): WebviewDraftRun {
   const { outputHead: _head, outputTail: _tail, gitCommitPlan: _gitCommitPlan, gitPushAttempt: _gitPushAttempt,
     commandRecoveryResponse: _commandRecoveryResponse, ...rest } = cloneDraftRun(draftRun);
   void _head;
@@ -1408,7 +1333,7 @@ function toWebviewDraftRun(draftRun: DraftRun, canReproposeUndispatchedApproval?
     // Immutable specs and history stay fixed while pending presentation advice
     // is refreshed with the current parser.
     effectAssessment: draftRun.status === 'pending' && !draftRun.spec.restricted ? analyzeDraftRunEffects(draftRun.spec) : rest.effectAssessment,
-    output: getDraftRunOutput(draftRun), canReproposeUndispatchedApproval: canReproposeUndispatchedApproval ? true : undefined };
+    output: getDraftRunOutput(draftRun) };
 }
 
 function cloneProposal(proposal: DraftRunProposal): DraftRunProposal {
@@ -1433,7 +1358,6 @@ function cloneProposal(proposal: DraftRunProposal): DraftRunProposal {
 function cloneDraftRun(draftRun: DraftRun): DraftRun {
   return { ...draftRun, ...cloneProposal(draftRun),
     dispatch: normalizeDraftRunDispatch(draftRun.dispatch),
-    approvalReview: draftRun.approvalReview && structuredClone(draftRun.approvalReview),
     approvalHold: draftRun.approvalHold && { ...draftRun.approvalHold },
     commandRecoveryOutcome: normalizeCommandRecoveryOutcome(draftRun),
     replan: draftRun.replan ? { ...draftRun.replan, candidateArgs: draftRun.replan.candidateArgs?.slice() } : undefined,

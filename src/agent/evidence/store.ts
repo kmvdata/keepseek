@@ -99,7 +99,7 @@ export class ToolEvidenceStore {
   public async complete(
     record: ToolEvidence,
     content: string,
-    metadata: Pick<ToolEvidence, 'contentType' | 'source' | 'pluginSkillProgress' | 'approvalResult'> = {}
+    metadata: Pick<ToolEvidence, 'contentType' | 'source' | 'pluginSkillProgress'> = {}
   ): Promise<ToolEvidence> {
     if (record.executionStatus === 'completed') {
       const hash = hashText(content);
@@ -123,7 +123,7 @@ export class ToolEvidenceStore {
       totalTokensEstimate: estimateTokenCount(content),
       source: metadata.source,
       pluginSkillProgress: metadata.pluginSkillProgress,
-      approvalResult: metadata.approvalResult,
+  
       storageKind: 'blob',
       blobName
     });
@@ -604,10 +604,5 @@ function isToolEvidence(value: unknown): value is ToolEvidence {
     && typeof item.sessionId === 'string' && typeof item.taskId === 'string'
     && typeof item.toolCallId === 'string' && typeof item.toolName === 'string'
     && typeof item.argumentsHash === 'string' && typeof item.executionStatus === 'string'
-    && typeof item.deliveryStatus === 'string'
-    && (item.approvalResult === undefined || item.executionStatus === 'completed' && item.approvalResult
-      && ['succeeded', 'denied', 'failed'].includes(item.approvalResult.status)
-      && typeof item.approvalResult.authorized === 'boolean'
-      && (item.approvalResult.stopReason === undefined || typeof item.approvalResult.stopReason === 'string'
-        && item.approvalResult.stopReason.length <= 1200));
+    && typeof item.deliveryStatus === 'string';
 }

@@ -22,7 +22,7 @@ export function draftRunIdentity(run: DraftRun): OperationIdentity {
 export async function inspectAutomaticRunAuthorization(run: DraftRun, grants: ExactOperationGrants, mode?: ApprovalMode,
   remoteScope: CommandRemoteInspection = false, selectedProjectUri?: string) {
   checkDraftRunApprovalIdentity(run);
-  const scope = await inspectDraftRunScope(run, remoteScope, undefined, mode === 'delegate', selectedProjectUri, mode);
+  const scope = await inspectDraftRunScope(run, remoteScope, undefined, mode === 'ask', selectedProjectUri, mode);
   return evaluateAutomaticRunAuthorization(run, grants, mode, remoteScope, scope);
 }
 
@@ -45,12 +45,12 @@ export function evaluateAutomaticRunAuthorization(run: DraftRun, grants: ExactOp
   const semantics = scope.semantics ?? analyzeCommand(run.spec);
   const scopeUris = new Set(scope.externalUris);
   if (run.spec.externalCwd && scope.externalUris.length) scopeUris.add(run.spec.cwdUri);
-  const requiresNetworkGrant = mode === 'delegate' && needsExactNetworkGrant(run, semantics, remoteScope);
+  const requiresNetworkGrant = mode === 'ask' && needsExactNetworkGrant(run, semantics, remoteScope);
   const requiresExactGrant = scopeUris.size > 0 || requiresNetworkGrant;
   const grantMissing = requiresExactGrant && !grants.matches(draftRunIdentity(run), scope);
   const launchRefusal = getDraftRunLaunchRefusal(scope);
   const ineligible = launchRefusal ? { code: 'insufficient_launch_evidence' as const, reason: launchRefusal }
-    : mode === 'delegate' ? inspectDelegatedRunEligibility(run, scope, semantics, reason) : undefined;
+    : mode === 'ask' ? inspectProjectRunEligibility(run, scope, semantics, reason) : undefined;
   const refusal = ineligible ?? (grantMissing ? {
     code: 'external_authorization_required' as const,
     reason: reason || 'An exact external operation grant is required. / 此操作需要事先精确授权外部目标。'
@@ -73,7 +73,7 @@ function needsExactNetworkGrant(run: DraftRun, semantics: ReturnType<typeof anal
       || semantics.effects.includes('network') && !semantics.effects.includes('package_install')));
 }
 
-function inspectDelegatedRunEligibility(run: DraftRun, scope: CommandScope, semantics: ReturnType<typeof analyzeCommand>,
+function inspectProjectRunEligibility(run: DraftRun, scope: CommandScope, semantics: ReturnType<typeof analyzeCommand>,
   reason: string): RunAuthorizationRefusal | undefined {
   const git = semantics.program === 'git' && semantics.arguments.find(argument => argument.role === 'subcommand');
   if (git && ['push', 'ls-remote'].includes(git.value) && !semantics.gitRemote) {

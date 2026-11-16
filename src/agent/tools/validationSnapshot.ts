@@ -6,7 +6,7 @@ import { inspectInstalledNpmRuntime } from '../../approvals/authorization/packag
 import { installedLaunchPath } from '../../approvals/authorization/projectLaunchIdentity';
 import { isPathInside } from '../../approvals/authorization/pathScope';
 import { createBoundedReviewText, hashApprovalText, hashApprovalValue } from '../../approvals/approvalReviewHash';
-import { findSensitiveEvidence, redactSensitiveReviewText } from '../../approvals/approvalPolicy';
+import { findSensitiveEvidence, redactSensitiveReviewText } from '../../approvals/sensitiveText';
 import { createControlledEnvironment } from '../../runs/executionEnvironment';
 import { getProjectExecutionMode, inspectProjectExecution } from '../../runs/projectExecutionIsolation';
 import type { ApprovalMode, SafeNpmScript } from '../../shared/types';
@@ -66,7 +66,7 @@ export async function inspectValidationSnapshot(folder: vscode.WorkspaceFolder, 
   if (!selected?.trim()) throw new ValidationUnavailableError('script_missing');
   const names = ['pre' + script, script, 'post' + script];
   const entries = names.flatMap(name => typeof scripts?.[name] === 'string' ? [[name, scripts[name] as string] as const] : []);
-  const isolated = approvalMode === 'delegate' && getProjectExecutionMode() === 'isolated';
+  const isolated = approvalMode === 'ask' && getProjectExecutionMode() === 'isolated';
   if (entries.some(([, definition]) => findSensitiveEvidence(definition) || (!isolated && hasValidationBlockingRisk(definition)))) {
     throw new Error('A validation or lifecycle script has a prohibited effect or contains sensitive material. / 验证或生命周期脚本包含受禁止的操作或敏感内容。');
   }
@@ -76,7 +76,7 @@ export async function inspectValidationSnapshot(folder: vscode.WorkspaceFolder, 
     executable: 'npm', argv: ['--userconfig=/dev/null', '--globalconfig=/dev/.keepseek-empty-npmrc', '--workspaces=false', 'run', script],
     identity: { runtime: 'container-npm', cliIdentity: undefined }
   } : await resolveHostNpmLaunch(cwd, script, env);
-  const projectExecution = approvalMode === 'delegate'
+  const projectExecution = approvalMode === 'ask'
     ? await inspectProjectExecution(cwd, cwd, executable, useImageNpm ? { containerCommand: 'npm' } : undefined)
     : undefined;
   if (projectExecution && isolated !== (projectExecution.kind !== 'host')) {

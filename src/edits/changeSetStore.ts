@@ -27,8 +27,6 @@ import type { DraftDiffService } from './draftDiffService';
 import type { DelegatedEditApproval, SafeFileEditor } from './safeFileEditor';
 import { SafeFileEditError } from './safeFileEditor';
 import type { DraftEditPreflight } from './safeFileEditor';
-import type { ApprovalReviewRecord } from '../approvals/approvalReviewTypes';
-import { toApprovalReviewDisplay } from '../approvals/approvalReviewStore';
 import { createChangeSet } from './changeSet';
 import { ChangeArtifactStore } from './changeArtifactStore';
 import { getDraftEditBase, getDraftEditKind, getDraftEditResult } from './draftEdit';
@@ -73,8 +71,7 @@ export interface WebviewChangeSetFile {
   kind?: string;
   reason: string;
   status: ChangeSetFile['status'];
-  approvalReview?: ChangeSetFile['approvalReview'];
-  approvalSource?: ChangeSetFile['approvalSource'];
+
   error?: string;
   checkpointId?: string;
   patchSummary?: { hunkCount: number; baseSha256: string; resultSha256: string; changedBytes: number };
@@ -306,12 +303,6 @@ export class ChangeSetStore {
     );
   }
 
-  public getUnreviewedPendingEditIds(sessionId: string, segmentId: string): string[] {
-    return [...this.changeSets.values()]
-      .filter(set => set.sessionId === sessionId && set.runId === segmentId && hasActiveHistory(set))
-      .flatMap(set => set.files.filter(file => file.status === 'pending' && !file.checkpointId
-        && !file.approvalReview && !file.approvalSource && !this.activeEditOperations.has(file.id)).map(file => file.id));
-  }
 
   public async loadSession(sessionId: string): Promise<void> {
     if (!sessionId || await new SessionDeletionAuthority(this.globalStorageUri).isSessionIdDeleted(sessionId) || this.loadedSessionIds.has(sessionId)) return;
@@ -585,13 +576,6 @@ export class ChangeSetStore {
     await this.safeFileEditor.preflightDraftEditOutput(found.edit, scanSensitive);
   }
 
-  public attachApprovalReview(editId: string, record: ApprovalReviewRecord): boolean {
-    const found = this.findEdit(editId);
-    if (!found || !isApplicable(found.edit)) return false;
-    found.edit.approvalReview = toApprovalReviewDisplay(record);
-    this.schedulePersist();
-    return true;
-  }
 
   public getPendingDeleteTargetsForChangeSet(changeSetId: string): PendingDeleteTarget[] {
     const changeSet = this.changeSets.get(changeSetId);
@@ -864,7 +848,7 @@ export class ChangeSetStore {
             fileApproval = { authorizedUri: file.uri, isAuthorized: () => vscode.workspace.isTrusted,
               ...fileApproval, skillScaffold: true };
           }
-          file.approvalSource = fileApproval?.source ?? 'user_click';
+
           const checkpoint = await this.safeFileEditor.applyDraftEdit(file, changeSet.id, fileApproval, {
             persist: async (next) => {
               this.assertChangeSetArtifactQuota(changeSet, next);
@@ -1682,7 +1666,7 @@ function cloneChangeSet(changeSet: ChangeSet): ChangeSet {
 }
 
 function refreshStoredDraftEdit(target: ChangeSetFile, incoming: ChangeSetFile): boolean {
-  const runtimeKeys = new Set(['status', 'approvalReview', 'approvalSource', 'error', 'checkpointId']);
+  const runtimeKeys = new Set(['status', 'error', 'checkpointId']);
   const payload = (value: ChangeSetFile) => Object.fromEntries(
     Object.entries(value).filter(([key]) => !runtimeKeys.has(key))
   );
@@ -1739,8 +1723,6 @@ function cloneWebviewChangeSet(changeSet: WebviewChangeSet): WebviewChangeSet {
       kind: file.kind,
       reason: file.reason,
       status: file.status,
-      approvalReview: file.approvalReview ? { ...file.approvalReview } : undefined,
-      approvalSource: file.approvalSource,
       error: file.error,
       checkpointId: file.checkpointId,
       patchSummary: file.patchSummary ? { ...file.patchSummary } : undefined
@@ -1775,8 +1757,6 @@ function toWebviewChangeSetFile(file: ChangeSetFile): WebviewChangeSetFile {
     kind: getDraftEditKind(file),
     reason: file.reason,
     status: file.status,
-    approvalReview: file.approvalReview ? { ...file.approvalReview } : undefined,
-    approvalSource: file.approvalSource,
     error: file.error,
     checkpointId: file.checkpointId,
     patchSummary: file.kind === 'text_patch_v1' ? {

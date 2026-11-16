@@ -1042,7 +1042,7 @@ function manifestEntryToMetadata(entry: GlobalSessionWorkspaceManifestEntry | un
 }
 
 function normalizeApprovalMode(value: unknown): ApprovalMode {
-  return value === 'delegate' ? value : 'ask';
+  return value === 'approve-all' ? value : 'ask';
 }
 
 function nonEmptyString(value: unknown): string | undefined {

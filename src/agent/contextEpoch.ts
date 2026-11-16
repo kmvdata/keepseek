@@ -109,7 +109,7 @@ export interface ContextEpochCheckpointInput {
     totalCostByCurrency?: Record<string, number>;
     maxCost?: number;
   };
-  approvalResults?: readonly { toolCallId: string; toolName: string; status: string }[];
+
 }
 
 export interface ContextEpochSeedInput extends ContextEpochCheckpointInput {
@@ -212,7 +212,7 @@ function createEpochHostState(
     })),
     draftRuns: input.draftRuns.map((run) => ({ id: run.id, status: 'pending', specHash: run.specHash,
       target: run.spec.cwdLabel, effectVerdict: run.effectAssessment.verdict })),
-    approvalResults: input.approvalResults,
+
     repairLoop: input.repairLoop,
     validationState: input.validationState,
     evidence: input.evidenceRefs,

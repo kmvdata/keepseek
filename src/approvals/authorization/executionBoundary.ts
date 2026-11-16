@@ -57,7 +57,7 @@ export async function validateDraftRunBeforeApproval(
     const launchFailure = getDraftRunLaunchRefusal(scope);
     if (launchFailure) throw new Error(launchFailure);
   }
-  if (mode === 'delegate' && !draftRun.spec.restricted && !scope?.semantics?.gitRemote && !scope?.projectExecution) {
+  if (mode === 'ask' && !draftRun.spec.restricted && !scope?.semantics?.gitRemote && !scope?.projectExecution) {
     throw new Error(scope?.projectExecutionUnavailable
       ?? 'The project execution boundary is missing. / 缺少工程执行边界。');
   }

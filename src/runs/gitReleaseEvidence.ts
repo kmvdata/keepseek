@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import * as vscode from 'vscode';
 import { analyzeCommand, isGitReleaseRef } from '../approvals/authorization/commandSemantics';
-import { findSensitiveEvidence } from '../approvals/approvalPolicy';
+import { findSensitiveEvidence } from '../approvals/sensitiveText';
 import { inspectDraftRunScope, type CommandScope } from '../approvals/authorization/commandScope';
 import { checkDraftRunApprovalIdentity } from '../approvals/authorization/executionBoundary';
 import type { DraftRun } from '../shared/types';

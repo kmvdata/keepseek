@@ -6,7 +6,7 @@ import * as vscode from 'vscode';
 import { getConfiguredPatchSettings } from '../shared/config';
 import { formatBytes } from '../shared/format';
 import { decodeRollbackSafeUtf8Text } from '../shared/safeTextSnapshot';
-import { findSensitiveEvidence } from '../approvals/approvalPolicy';
+import { findSensitiveEvidence } from '../approvals/sensitiveText';
 import { assertOperationPath } from '../approvals/authorization/protectedTargets';
 import { assertCleanDraftEditTarget, findDraftEditTargetTabs, inspectDraftEditTarget } from '../approvals/authorization/editTargets';
 import { fileIdentity } from '../approvals/authorization/projectLaunchIdentity';

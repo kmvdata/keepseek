@@ -390,7 +390,7 @@ export class ChatSessionStore {
   }
 
   public async setApprovalMode(approvalMode: ApprovalMode): Promise<boolean> {
-    if (approvalMode !== 'ask' && approvalMode !== 'delegate') return false;
+    if (approvalMode !== 'ask' && approvalMode !== 'approve-all') return false;
     const session = this.getActiveSession();
     if (this.approvalModeValue === approvalMode && session.approvalMode === approvalMode) {
       return false;
@@ -1219,7 +1219,7 @@ export function createEmptySession(
 }
 
 function normalizeStoredApprovalMode(value: unknown): ApprovalMode {
-  return value === 'delegate' ? value : 'ask';
+  return value === 'approve-all' ? value : 'ask';
 }
 
 export function createSessionTitle(prompt: string, language: KeepseekLanguage = getConfiguredKeepseekLanguage()): string {

@@ -6,7 +6,7 @@ import * as path from 'node:path';
 import { promisify } from 'node:util';
 import { canonicalPath, isPathInside, joinUnresolvedPath } from './pathScope';
 import { isGitProjectSkillPath, isProtectedOperationPath } from './protectedTargets';
-import { redactSensitiveReviewText } from '../approvalPolicy';
+import { redactSensitiveReviewText } from '../sensitiveText';
 
 import { isGitRemoteAlias, type GitRemoteCommand } from './commandSemantics';
 import { inspectGitRemoteScope, type GitRemoteScope } from './gitRemoteScope';

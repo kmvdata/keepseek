@@ -3,7 +3,6 @@ import { ToolEvidenceStore } from '../agent/evidence/store';
 import { SubagentStore } from '../agent/subagents/store';
 import { UsageLedgerStore } from '../agent/usageLedgerStore';
 import { InteractionTraceCleanup } from '../agent/logging/interactionTrace';
-import { ApprovalReviewStore } from '../approvals/approvalReviewStore';
 import { ChangeSetStore, deleteStoredChangeSetsForSession, hasStoredChangeSetsForSession } from '../edits/changeSetStore';
 import { DraftRunStore } from '../runs/draftRunStore';
 import { SessionDeletionAuthority } from './sessionDeletionAuthority';
@@ -12,7 +11,6 @@ import { assertManagedStoragePath } from './sessionAssociatedPersistence';
 export interface SessionAssociatedCleanupStores {
   changeSets?: ChangeSetStore;
   draftRuns?: DraftRunStore;
-  approvalReviews?: ApprovalReviewStore;
   usageLedgerStore?: UsageLedgerStore;
 }
 export interface SessionAssociatedCleanupResult {
@@ -35,8 +33,7 @@ export class SessionAssociatedDataCleanup {
       () => this.traces.hasSessionHistory(sessionId),
       () => (this.live.usageLedgerStore ?? new UsageLedgerStore(this.root)).hasSessionHistory(sessionId),
       () => hasStoredChangeSetsForSession(this.root, sessionId),
-      () => (this.live.draftRuns ?? new DraftRunStore(this.root)).hasSessionHistory(sessionId),
-      () => (this.live.approvalReviews ?? new ApprovalReviewStore(this.root)).hasSessionHistory(sessionId)
+      () => (this.live.draftRuns ?? new DraftRunStore(this.root)).hasSessionHistory(sessionId)
     ];
     for (const has of stores) if (await has()) return true;
     return false;
@@ -48,7 +45,6 @@ export class SessionAssociatedDataCleanup {
     const result: SessionAssociatedCleanupResult = { pendingReasons: [], completedStores: [], unverifiedSources: 0 };
     const evidence = new ToolEvidenceStore(this.root), subagents = new SubagentStore(this.root, workspaceKey);
     const runs = this.live.draftRuns ?? new DraftRunStore(this.root);
-    const reviews = this.live.approvalReviews ?? new ApprovalReviewStore(this.root);
     const ledger = this.live.usageLedgerStore ?? new UsageLedgerStore(this.root);
     const stores: Array<[string, string[], () => Promise<unknown>]> = [
       ['evidence', ['chat-sessions'], () => evidence.deleteSessionEvidence(sessionId)],
@@ -57,7 +53,6 @@ export class SessionAssociatedDataCleanup {
       ['change-sets', ['change-sets', 'change-sets.json'], () => this.live.changeSets
         ? this.live.changeSets.deleteSession(sessionId) : deleteStoredChangeSetsForSession(this.root, sessionId)],
       ['draft-runs', ['draft-runs.json'], () => runs.deleteSession(sessionId)],
-      ['approval-reviews', ['approval-reviews.json'], () => reviews.deleteSession(sessionId)],
       ['interaction-traces', ['interaction-logs'], async () => {
         const traces = await this.traces.cleanup(sessionId);
         if (traces.unverifiedSources) {

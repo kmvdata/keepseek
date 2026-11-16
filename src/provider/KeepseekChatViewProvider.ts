@@ -18,14 +18,13 @@ import { hasConsumedTitleRound, buildSessionTitleRegenerationMaterial, getSessio
 import { captureSessionTitleSubmission, checkSessionTitleSubmission, type SessionTitleSubmission } from './sessionTitleCompletion';
 import { requestSessionTitle, requestInputSessionTitle, mergeSessionTitleTaskBudget, createManualSessionTitleBudget } from './sessionTitleRequest';
 import { prepareAgentTaskBudget, canStartInputTitleBeforeMain, type PreparedAgentTaskBudget } from '../agent/taskBudget';
-import { approvalDisposition } from '../approvals/approvalReviewTypes';
-import { getAutoApprovalReviewerSetting } from '../shared/config';
+
 import { ExecutionClock, ExecutionCostBudget, LogicalBudgetExceededError, LogicalRunBudget, SharedUpstreamTokenBudget } from '../agent/executionPolicy';
 import { PYTHON_SYNTAX_ERROR_EXIT, recognizePythonSyntaxIntent, verifyRestrictedPythonSyntax } from '../runs/restrictedPythonSyntax';
-import { redactSensitiveReviewText } from '../approvals/approvalPolicy';
+import { redactSensitiveReviewText } from '../approvals/sensitiveText';
 import { taskBudgetFromCheckpoint, type UserTaskBudget } from '../sessions/userTaskBudget';
 import { inspectDraftRunScope, ExactOperationGrants, draftRunIdentity, inspectAutomaticRunAuthorization, evaluateAutomaticRunAuthorization, assertAutomaticRunAuthorization, inspectAutomaticEditAuthorization, analyzeCommand, inspectGitCommandReplan, type GitCommandReplan } from '../approvals/authorization';
-import { createApprovalProcessing, invalidateApprovalStateForHistory, isCompletedApprovalBatch, type DraftRunReplanResult } from '../approvals/approvalProcessing';
+import type { DraftRunReplanResult } from '../approvals/approvalProcessing';
 import { createHistoryTruncationPlan, executeHistoryTruncation, recoverPendingHistoryTruncation, type HistoryTruncationScope, type PendingHistoryTruncation } from '../sessions/historyTruncation';
 import { reconcileTruncatedContext } from '../sessions/historyTruncationContext';
 import { executionSegmentId, taskForSegment, taskGoal, taskUserMessages, type UserTaskLink } from '../sessions/userTask';
@@ -104,7 +103,7 @@ import { checkGitRemotePrerequisite, gitBatchKind, gitReleasePrerequisite, missi
 import { authorizeGitRemote, snapshotProjectGitPushDestination, type GitReleaseGrant, type GitRemoteLaunch } from '../runs/gitReleaseAuthorization';
 import { prepareGitRelease, verifyBlockedGitTag, type GitReleaseEvidence, type ReleaseVerification } from '../runs/gitReleaseEvidence';
 import { assertLocalGitCommitSnapshot, checkVerifiedLocalCommit, reconcileLocalGitCommit, isExplicitLocalCommitGoal, isSingleLocalCommitGoal, isStageThenCommitGoal, prepareLocalGitCommit, readLocalGitStage, verifyLocalGitCommit, type LocalGitStageEvidence } from '../runs/localGitCommit';
-import { DELEGATED_APPROVAL_PROTOCOL_VERSION, DelegatedApprovalQueue, getApprovalModeUserTail, normalizeApprovalMode } from '../agent/approvalMode';
+import { getApprovalModeUserTail, normalizeApprovalMode } from '../agent/approvalMode';
 import {
   exitPendingPlan,
   getPlanWorkflowTail,
@@ -126,12 +125,7 @@ import { canIsolateDraftRunFailure, draftRunEditDependencyTargets, inspectDraftR
 import { commandCapabilityReplan, commandRecoveryKey, findCommandRecoveryObservation,
   mergeCommandRecoveryObservations, observeCommandRecovery, MAX_COMMAND_RECOVERY_KEYS } from '../runs/commandRecovery';
 import type { DraftRunBatchSnapshot, DraftRunBatchState } from '../shared/types';
-import { ApprovalAuditError, ApprovalReviewStore, toApprovalReviewDisplay } from '../approvals/approvalReviewStore';
-import { ApprovalReviewerService, type ApprovalReviewerModelContext } from '../approvals/approvalReviewer';
-import { ApprovalCircuitBreaker } from '../approvals/approvalCircuitBreaker';
-import { createDraftEditReviewRequest, createDraftRunReviewRequest } from '../approvals/approvalReviewSurface';
-import { APPROVAL_POLICY_VERSION, MANUAL_FALLBACK_STATES, type ApprovalAuthorizationSource, type ApprovalReviewOutcome, type ManualApprovalResolutionReason, type ManualToolApproval, type ApprovalReviewRecord, type ApprovalReviewRequest } from '../approvals/approvalReviewTypes';
-import { manualApprovalActionPreview, recordManualApproval, type ManualApprovalSnapshot } from '../approvals/manualApproval';
+
 import { hashDraftEditAction, hashDraftEditEffect, hashDraftRunEffect } from '../approvals/approvalReviewHash';
 import { createFullTextDraftEdit, getDraftEditBase } from '../edits/draftEdit';
 import { hashBytes } from '../edits/textPatch';
@@ -330,9 +324,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private readonly changeSets: ChangeSetStore;
   private readonly draftRuns: DraftRunStore;
   private readonly draftRunBatches: DraftRunBatchCoordinator;
-  private readonly approvalReviews: ApprovalReviewStore;
-  private readonly approvalReviewer: ApprovalReviewerService;
-  private readonly approvalCircuitBreaker = new ApprovalCircuitBreaker();
+
   private readonly draftDiffService: DraftDiffService;
   private readonly skillStore: SkillStore;
   private readonly pluginSkillPreviews = new Map<string, string>();
@@ -1028,7 +1020,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     } };
   }
 
-  private readonly approvalMainContexts = new Map<string, ApprovalReviewerModelContext>();
+
   private delegatedApprovalInFlight = false;
   private draftRunOutputPostTimer: ReturnType<typeof setTimeout> | undefined;
   private pendingDraftRunOutputEvent: DraftRunStoreEvent | undefined;
@@ -1128,28 +1120,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.skillStore = new SkillStore(skillState);
     this.sourceStore = new ModelSourceStore(this.globalStorageUri);
     this.defaultModelStore = new DefaultModelStore(skillState, () => this.sourceStore.listSources());
-    this.approvalReviews = new ApprovalReviewStore(this.globalStorageUri);
-    this.approvalReviewer = new ApprovalReviewerService({
-      globalStorageUri: this.globalStorageUri,
-      workspaceKey: this.sessionStore.workspaceKey,
-      sourceStore: this.sourceStore,
-      store: this.approvalReviews,
-      circuitBreaker: this.approvalCircuitBreaker,
-      onUsage: (event, sessionId) => {
-        const session = this.sessionStore.getSessionById(sessionId);
-        if (!session) return;
-        if (!event.ledgerRecorded) {
-          session.usageStats = addUsageEventToSessionStats(session.usageStats, event);
-        }
-        session.updatedAt = new Date().toISOString();
-        this.postState();
-      },
-      onUsageLedgerRecord: async (record, sessionId) => {
-        const session = this.sessionStore.getSessionById(sessionId);
-        if (!session) throw new Error(this.t('approvalIdentityMissing'));
-        await this.applyUsageLedgerRecord(session, record);
-      }
-    });
     this.modelSourceService = new ModelSourceService(this.sourceStore);
     this.subagentSettingsStore = new SubagentSettingsStore(
       this.globalStorageUri,
@@ -1184,9 +1154,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       undefined,
       undefined,
       this.globalStorageUri,
-      this.subagentRuntime,
-      this.approvalReviewer,
-      (approval, signal, verifyCurrent) => this.requestManualToolApproval(approval, signal, verifyCurrent)
+      this.subagentRuntime
     );
     this.draftDiffService = new DraftDiffService(this.globalStorageUri);
     this.changeSets = new ChangeSetStore(
@@ -1208,7 +1176,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.draftRuns = new DraftRunStore(
       this.globalStorageUri,
       undefined,
-      new DraftRunAuthorizationService(this.approvalReviews),
+      new DraftRunAuthorizationService(),
       (event) => this.handleDraftRunStoreEvent(event)
     );
     this.draftRunBatches = new DraftRunBatchCoordinator(this.draftRuns, () => this.postState());

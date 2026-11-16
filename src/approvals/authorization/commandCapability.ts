@@ -63,7 +63,7 @@ export function analyzeCommandCapability(spec: DraftRunSpec, semantics = analyze
   for (const reason of semantics.reasons) {
     if (!['unsupported_program', 'unsupported_option', 'missing_option_value', 'invalid_argv', 'git_commit_argv'].includes(reason.code)) continue;
     const invalid = ['missing_option_value', 'invalid_argv', 'git_commit_argv'].includes(reason.code);
-    const blocking = mode !== 'delegate' && reason.code !== 'unsupported_program'
+    const blocking = reason.code !== 'unsupported_program'
       && !(semantics.program === 'rg' && reason.detail === 'rg recursive search');
     diagnostics.push({
       code: `host_${reason.code}`,
@@ -81,7 +81,7 @@ export function analyzeCommandCapability(spec: DraftRunSpec, semantics = analyze
     diagnostics.push({ code: semantics.gitReplan.code, phase: 'capability', started: false,
       category: 'invalid_argv', reason: semantics.gitReplan.message,
       candidateArgs: semantics.gitReplan.candidateArgs?.slice(),
-      capabilityVersion: COMMAND_CAPABILITY_VERSION, blocking: mode !== 'delegate' });
+      capabilityVersion: COMMAND_CAPABILITY_VERSION, blocking: true });
   }
   const subcommand = semantics.arguments.find(item => item.role === 'subcommand');
   const equivalents = semantics.program === 'git' && subcommand?.value === 'log'
