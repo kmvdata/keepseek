@@ -253,6 +253,8 @@ const SESSION_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 const INITIAL_VISIBLE_MESSAGE_COUNT = 30;
 const MESSAGE_PAGE_SIZE = 50;
 const MAX_DELETE_CONFIRMATION_PATHS = 10;
+/** File states ChangeSetStore.applyAll still attempts, mirrored for drain decisions. */
+const APPROVE_ALL_APPLICABLE: ReadonlySet<string> = new Set(['pending', 'apply_failed', 'interrupted']);
 /** How long a manual approval may wait for the user before it settles itself. */
 /** Host-bound manual approval outcome; 'expired' only comes from the bounded wait. */
 type StartupLoadState = 'loading' | 'ready' | 'error';
@@ -559,6 +561,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private approveAllTimer: ReturnType<typeof setTimeout> | undefined;
   private approveAllInFlight = false;
   private readonly approveAllAttempted = new Set<string>();
+  /** Drafts already reported as blocked, so one reason is stated once per draft. */
+  private readonly approveAllBlocked = new Set<string>();
   /** A drain request arrived while an approval phase owned the slot; its release reschedules. */
   private draftRunAutoContinueDeferred = false;
   private deferredContinuationFallback: ReturnType<typeof setTimeout> | undefined;
@@ -1397,6 +1401,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           if (this.hasActiveBackgroundRun()) await this.stopBackgroundRun();
           if (message.mode === 'ask') this.abortPrompt();
           await this.sessionStore.setApprovalMode(message.mode);
+          // Switching to approve-all is itself a fresh decision about every draft
+          // still pending, so previous attempt/blocked records must not outlive it.
+          if (message.mode === 'approve-all') {
+            this.approveAllAttempted.clear();
+            this.approveAllBlocked.clear();
+            this.scheduleApproveAllExecution();
+          }
           this.postState();
         }
         return;
@@ -1965,9 +1976,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     return this.sessionStore.messages;
   }
 
-  private beginChangeAction(message: ChangeActionMessage): string | undefined {
+  private beginChangeAction(message: ChangeActionMessage, options: { unattended?: boolean } = {}): string | undefined {
     if (!this.interactionSnapshot(this.stateRevision).canSubmit) { this.postChangeActionFeedback(message, 'busy', this.t('changeActionBusy')); return undefined; }
-    if (['applyDraftEdit', 'applyChangeSet', 'applyAllDraftEdits'].includes(message.type)
+    // Webview applies exist only in ask mode; approve-all drains its own drafts
+    // internally (options.unattended) and must not hit this webview guard.
+    if (!options.unattended && ['applyDraftEdit', 'applyChangeSet', 'applyAllDraftEdits'].includes(message.type)
       && normalizeApprovalMode(this.sessionStore.getActiveSession().approvalMode) !== 'ask') return undefined;
     const key = `${message.type}:${message.id}`;
     if (this.isBusy || this.isStartingRun || this.runContextRefreshInFlight || this.activeChangeActions.size > 0) {
@@ -2109,8 +2122,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async handleApplyChangeSet(message: Extract<WebviewMessage, { type: 'applyChangeSet' }>): Promise<void> {
-    const key = this.beginChangeAction(message);
+  private async handleApplyChangeSet(message: Extract<WebviewMessage, { type: 'applyChangeSet' }>, options: { unattended?: boolean } = {}): Promise<void> {
+    const key = this.beginChangeAction(message, options);
     if (!key) return;
     const controller = this.changeActionAbortController = new AbortController();
     let work: ReturnType<UserTaskClock['enter']> | undefined;
@@ -2810,6 +2823,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       if (this.interactions.owns(operation)) {
         this.interactions.finish(operation);
         this.postState({ immediate: true, forceFull: true });
+        // A restored or replayed session can carry drafts whose original run never
+        // reached the checkpoint trigger; scan them instead of waiting for it.
+        this.scheduleApproveAllExecution();
       }
     }
   }
@@ -4625,20 +4641,51 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.approveAllTimer.unref?.();
   }
 
+  /**
+   * One drain step in approve-all mode. Every gate that stops a draft is either
+   * deferred (a running apply finishes first, then reschedules) or reported, so a
+   * draft never sits in "pending" without a stated reason.
+   */
   private async drainApproveAllExecution(): Promise<void> {
     if (this.approveAllInFlight) return;
     const session = this.sessionStore.getActiveSession();
     if (normalizeApprovalMode(session.approvalMode) !== 'approve-all') return;
     if (session.pendingHistoryTruncation || !vscode.workspace.isTrusted) return;
-    if (this.activeChangeActions.size || this.isStartingRun) return;
+    // A concurrent apply is transient ownership of the workspace: reschedule
+    // instead of dropping the request, so the remaining drafts still drain.
+    if (this.activeChangeActions.size || this.isStartingRun) {
+      this.scheduleApproveAllExecution();
+      return;
+    }
     if (this.changeSets.hasPendingForSession(session.id)) {
-      const set = this.changeSets.toWebviewState(session.id).find(item => !this.approveAllAttempted.has(item.id));
+      const pending = this.changeSets.toWebviewState(session.id)
+        .filter(item => item.files.some(file => APPROVE_ALL_APPLICABLE.has(file.status)));
+      const set = pending.find(item => !this.approveAllAttempted.has(item.id))
+        ?? pending.find(item => !this.approveAllBlocked.has(item.id));
       if (set) {
+        this.approveAllBlocked.delete(set.id);
         this.approveAllAttempted.add(set.id);
         try {
-          await this.handleApplyChangeSet({ type: 'applyChangeSet', id: set.id, requestId: 'approve-all' });
+          await this.handleApplyChangeSet({ type: 'applyChangeSet', id: set.id, requestId: 'approve-all' }, { unattended: true });
         } catch (error) {
           vscode.window.showWarningMessage(getErrorMessage(error));
+        }
+        // The latch only means "applied once": release it whenever the ChangeSet
+        // did not advance, so a later drain (or a mode switch) can retry instead
+        // of leaving the draft permanently pending.
+        const advanced = this.changeSets.toWebviewState(this.sessionStore.getActiveSession().id)
+          .some(item => item.id === set.id && !item.files.some(file => APPROVE_ALL_APPLICABLE.has(file.status)));
+        if (!advanced) {
+          this.approveAllAttempted.delete(set.id);
+          // Nothing else changes without a new trigger: state the blocking reason
+          // once instead of retrying the same draft on every drain pass.
+          if (!this.approveAllBlocked.has(set.id)) {
+            this.approveAllBlocked.add(set.id);
+            vscode.window.showWarningMessage(this.t('approveAllApplyBlocked', {
+              label: set.files.map(file => file.label).join(', ') || set.id,
+              reason: this.t('approveAllApplyBlockedReason')
+            }));
+          }
         }
         if (normalizeApprovalMode(this.sessionStore.getActiveSession().approvalMode) === 'approve-all') this.scheduleApproveAllExecution();
         return;
@@ -4649,14 +4696,28 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     if (!next) return;
     this.approveAllAttempted.add(next.id);
     this.approveAllInFlight = true;
+    let started = false;
     try {
       this.activeDraftRunId = next.id;
       this.activeDraftRunSessionId = next.sessionId;
       this.setAgentActivity({ base: 'executing', phase: 'running_draft_run', toolName: 'keepseek_run_draft', detail: next.spec?.reason });
       this.postState();
       await this.executeApprovedDraftRun(next.id, false);
+      // Only a run that actually left "pending" is spent. A run still pending was refused
+      // by a gate inside the execution funnel and keeps its stated reason.
+      started = this.draftRuns.get(next.id)?.status !== 'pending';
     } finally {
       this.approveAllInFlight = false;
+    }
+    if (!started) {
+      this.approveAllAttempted.delete(next.id);
+      if (!this.approveAllBlocked.has(next.id)) {
+        this.approveAllBlocked.add(next.id);
+        vscode.window.showWarningMessage(this.t('approveAllApplyBlocked', {
+          label: next.spec?.reason || next.id,
+          reason: this.t('approveAllApplyBlockedReason')
+        }));
+      }
     }
     if (normalizeApprovalMode(this.sessionStore.getActiveSession().approvalMode) === 'approve-all') this.scheduleApproveAllExecution();
   }

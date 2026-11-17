@@ -67,7 +67,7 @@ const LOW_RISK_TOOLS = new Map<string, AuthorizedToolScope>([
   [GIT_CURRENT_BRANCH_TOOL_NAME, 'git_read'],
   [GIT_CREATE_PATCH_TOOL_NAME, 'git_patch_create'],
   [GIT_SUGGEST_COMMIT_MESSAGE_TOOL_NAME, 'git_read'],
-  // 方案A：delete_workspace_file 只创建待确认的 delete DraftEdit，不会立即删除文件。真正的删除由用户在 Apply 时通过 confirmDeleteApply 确认，因此准备阶段不再弹授权窗，降为低风险。
+  // 方案A：delete_workspace_file 只创建待确认的 delete DraftEdit，不会立即删除文件。真正的删除由 Apply 时确认：ask 模式下经 confirmDeleteApply 逐次确认，approve-all 模式与其他副作用一样不再额外询问，因此准备阶段不弹授权窗，降为低风险。
   [DELETE_WORKSPACE_FILE_TOOL_NAME, 'workspace_write']
 ]);
 
