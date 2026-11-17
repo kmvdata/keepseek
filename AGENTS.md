@@ -125,6 +125,7 @@ test/                  按行为契约组织的回归测试
 - 改 evidence/epoch：验证分页与跨 scope 拒绝、envelope 恢复、context-too-long、无伪 user、工具不重跑、未知副作用不重试。
 - 改 edits/runs/approvals：验证两模式与非法审计拒绝、人工请求生命周期、hash 冲突、恢复、取消/超时/重复点击、删除/外部路径、依赖和跨平台 argv。
 - 改 Webview fragment：验证首次 ready、输入/拖拽/@、会话、设置、Apply/Discard 和键盘/焦点。
+- 改 Webview fragment/样式：验证 fragment 顺序、顶层标识符唯一、根级 DOM id 唯一、getStyles() 选择器相对顺序，且 new Function(getScript()) 可编译。
 - 测试应守行为契约，优先扩展最接近的现有 `test/*.test.ts`；不要只断言内部实现。
 
 ## 6. 按需阅读

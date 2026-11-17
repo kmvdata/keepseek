@@ -27,6 +27,8 @@ import './config.test';
 import './contextEntryPoints.test';
 import './markdownRendering.test';
 import './inputComposition.test';
+import './webviewRootComposition.test';
+import './webviewFragmentSlices.test';
 import './contextMaintenanceBenchmark.test';
 import './currentRunContext.test';
 import './draftEditRange.test';
