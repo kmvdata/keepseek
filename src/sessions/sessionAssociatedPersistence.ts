@@ -21,9 +21,12 @@ export async function readAssociatedJson(uri: vscode.Uri): Promise<Record<string
   }
 }
 
+/** The node FileSystemProvider rethrows raw node errors without `code`, so a
+ * vanished associated file is identified by its message as well as its code. */
 export function isMissingAssociatedFile(error: unknown): boolean {
-  const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined;
-  return code === 'ENOENT' || code === 'FileNotFound';
+  const record = error && typeof error === 'object' ? error as { code?: unknown; message?: unknown } : {};
+  return record.code === 'ENOENT' || record.code === 'FileNotFound'
+    || /^ENOENT: no such file or directory,/u.test(String(record.message ?? ''));
 }
 
 export async function deleteAssociatedUri(uri: vscode.Uri, recursive = false): Promise<void> {

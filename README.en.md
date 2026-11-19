@@ -168,6 +168,8 @@ To package, uninstall the previous build, and install the new VSIX locally in on
 bun run reinstall:vsix
 ```
 
+The packaging scripts resolve `vsce` and `tsc` themselves, so they do not depend on one particular shape of `node_modules/.bin`. On Windows, avoid building from a network share (a UNC path such as `\\server\share\repo`): `cmd.exe` cannot use a UNC path as its working directory and falls back to `C:\Windows`, where neither `package.json` nor `node_modules/.bin` can be found. If `node_modules` was installed by a tool from another platform, `.bin` holds only POSIX symlinks and no `*.cmd`/`*.exe` launchers; rerun `bun install` or `npm install` on this machine to create them.
+
 ### Maintainer Resources
 
 - [Agent runtime workflow](./doc/keepseek-agent-runtime-workflow.md)

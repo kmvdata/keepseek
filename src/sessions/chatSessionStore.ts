@@ -308,8 +308,44 @@ export class ChatSessionStore {
     private readonly projectQueue?: ProjectQueueService
   ) {}
 
+  /** Removed on disposal so a startup warm-up read cannot outlive the store. */
+  private readonly warmUpLifetime = new AbortController();
+  /** Incremented by every final load; a warm-up that lost this race stays passive. */
+  private loadGeneration = 0;
+  private warmUpSummaryProjection?: Promise<void>;
+
+  public dispose(): void {
+    this.warmUpLifetime.abort();
+  }
+
   public async initialize(options: { fresh?: boolean } = {}): Promise<void> {
     await this.load(options);
+  }
+
+  /** Warm the history list before the final session load resolves.
+   *
+   * Display-only: it publishes no active session, writes nothing and caches no
+   * session body, so the composer can show its previous conversations while the
+   * final load still runs. Every final load invalidates it: a warm-up that lost
+   * that race keeps its result private instead of overwriting the final store. */
+  public warmUpHistorySummaries(): Promise<void> {
+    if (this.warmUpSummaryProjection) return this.warmUpSummaryProjection;
+    const generation = this.loadGeneration;
+    const scope = this.workspaceScope;
+    const projection = (async () => {
+      const stored = await this.sessionStorage.loadWorkspace(scope, { fresh: true });
+      if (this.warmUpLifetime.signal.aborted || generation !== this.loadGeneration
+        || scope.key !== this.workspaceScope.key) return;
+      for (const summary of stored.sessionSummaries ?? []) {
+        if (summary.workspaceKey === scope.key && !this.sessionSummaries.has(summary.id)) {
+          this.sessionSummaries.set(summary.id, summary);
+        }
+      }
+    })().catch(() => undefined).finally(() => {
+      if (this.warmUpSummaryProjection === projection) this.warmUpSummaryProjection = undefined;
+    });
+    this.warmUpSummaryProjection = projection;
+    return projection;
   }
 
   public get activeSessionId(): string {
@@ -1054,6 +1090,8 @@ ormal while another session is ahead of it in the
   }
 
   private async load(options: { fresh?: boolean } = {}): Promise<void> {
+    // Any in-flight startup warm-up becomes passive before this read starts.
+    this.loadGeneration += 1;
     const stored = await this.sessionStorage.loadWorkspace(this.workspaceScope, options);
     // Production activation explicitly starts blank. Adapters may return bodies
     // for deliberate restore callers, but they cannot select them in fresh mode.

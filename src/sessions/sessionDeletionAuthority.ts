@@ -17,13 +17,23 @@ const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 export const missing = (error: unknown) => {
   const code = String((error as { code?: string })?.code ?? '');
   if (code === 'ENOENT') return true;
-  if (code !== 'FileNotFound') return false;
-  const detail = (error as { cause?: unknown; errno?: unknown })?.cause ?? error;
-  const errnoCode = String((detail as { code?: unknown })?.code ?? '');
-  const errno = String((detail as { errno?: unknown })?.errno ?? (error as { errno?: unknown })?.errno ?? '');
-  return /^-?2$|^ENOENT$/.test(errno) || errnoCode === 'ENOENT';
+  if (code === 'FileNotFound') {
+    const detail = (error as { cause?: unknown; errno?: unknown })?.cause ?? error;
+    const errnoCode = String((detail as { code?: unknown })?.code ?? '');
+    const errno = String((detail as { errno?: unknown })?.errno ?? (error as { errno?: unknown })?.errno ?? '');
+    return /^-?2$|^ENOENT$/.test(errno) || errnoCode === 'ENOENT';
+  }
+  // The node FileSystemProvider implementation, which backs `file:` storage on
+  // every desktop host, rethrows raw node errors without `code`: a missing path
+  // is then described only by its message. Startup probes a tombstone for every
+  // listed session, so an ordinary absent record must stay "not deleted".
+  return /^ENOENT: no such file or directory,/u.test(String((error as { message?: unknown })?.message ?? ''));
 };
 const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+/** A snapshot of the gate raced another participant's write. Retried, not fatal. */
+class GateObservationRace extends Error {}
+const GATE_OBSERVE_ATTEMPTS = 20;
+const GATE_OBSERVE_BACKOFF_MS = 5;
 
 /** Lock-wait observation. An injected hook keeps this storage module free of
  * the agent logging layer, which imports it back. */
@@ -205,34 +215,57 @@ export class SessionDeletionAuthority {
     await this.ensureLocalDirectory(directory);
     const token = randomUUID(), uri = vscode.Uri.joinPath(directory, `${token}.json`);
     const own: Participant = { version: 1, pid: process.pid, token, choosing: true, ticket: 0 };
+    // Other windows and processes enter and leave this same gate continuously.
+    // A snapshot can land between another owner's write and its rename, observe
+    // a half-written record, or lose a participant to a racing unlink. Those
+    // are transient observations of a racing *other* participant, never
+    // evidence that this gate is damaged, so they are retried briefly.
     const participants = async (): Promise<Participant[]> => {
       const result: Participant[] = [];
       for (const name of (await readdir(directory.fsPath)).filter(item => item.endsWith('.json'))) {
+        const file = path.join(directory.fsPath, name);
         let value: Participant;
         try {
-          const file = path.join(directory.fsPath, name);
           const stat = await lstat(file);
           if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Unsafe storage gate participant');
           value = JSON.parse(await readFile(file, 'utf8')) as Participant;
         }
-        catch (error) { if (missing(error)) continue; throw new Error('Storage gate ownership cannot be verified'); }
+        catch (error) {
+          if (missing(error)) continue;
+          throw new GateObservationRace(error instanceof Error ? error.message : 'Storage gate participant is unreadable');
+        }
         if (value?.version !== 1 || value.token !== name.slice(0, -5) || !Number.isSafeInteger(value.pid)
-          || !Number.isSafeInteger(value.ticket) || value.ticket < 0 || typeof value.choosing !== 'boolean') throw new Error('Storage gate ownership cannot be verified');
+          || !Number.isSafeInteger(value.ticket) || value.ticket < 0 || typeof value.choosing !== 'boolean') {
+          throw new GateObservationRace('Storage gate participant is not yet committed');
+        }
         if (this.alive(value.pid)) result.push(value);
-        else await unlink(path.join(directory.fsPath, name)).catch(error => { if (!missing(error)) throw error; });
+        else await unlink(file).catch(error => { if (!missing(error)) throw error; });
       }
       return result;
     };
+    const observe = async (): Promise<Participant[]> => {
+      let lastError: unknown;
+      for (let attempt = 0; attempt < GATE_OBSERVE_ATTEMPTS; attempt += 1) {
+        try { return await participants(); }
+        catch (error) {
+          if (!(error instanceof GateObservationRace)) throw error;
+          lastError = error;
+          if (attempt + 1 < GATE_OBSERVE_ATTEMPTS) await pause(GATE_OBSERVE_BACKOFF_MS * (attempt + 1));
+        }
+      }
+      throw new Error('Storage gate ownership cannot be verified: '
+        + String((lastError as { message?: unknown })?.message ?? lastError));
+    };
     await writeJsonAtomic(uri, own);
     try {
-      own.ticket = Math.max(0, ...(await participants()).map(item => item.ticket)) + 1;
+      own.ticket = Math.max(0, ...(await observe()).map(item => item.ticket)) + 1;
       own.choosing = false;
       await writeJsonAtomic(uri, own);
       const deadline = Date.now() + 30_000;
       // Back off instead of polling every 10 ms: each attempt costs a readdir
       // plus one lstat/readFile per participant, which is expensive on shares.
       let backoffMs = 10;
-      while ((await participants()).some(other => other.token !== token && (other.choosing
+      while ((await observe()).some(other => other.token !== token && (other.choosing
         || other.ticket < own.ticket || (other.ticket === own.ticket && other.token < token)))) {
         if (Date.now() > deadline) throw new Error('Storage gate is busy; retry cleanup later');
         await pause(backoffMs);

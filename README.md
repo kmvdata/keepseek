@@ -201,6 +201,8 @@ bun run package:market
 bun run reinstall:vsix
 ```
 
+打包脚本自动解析 `vsce` 与 `tsc`，不依赖 `node_modules/.bin` 的具体形式。Windows 上请避免在网络共享（UNC 路径，如 `\\server\share\repo`）里构建：`cmd.exe` 无法以 UNC 路径作为工作目录，会回退到 `C:\Windows` 执行，导致找不到 `package.json` 和 `node_modules/.bin`。若依赖目录是用其他平台的工具安装的（`.bin` 下只有 POSIX 符号链接、缺少 `*.cmd`/`*.exe` 启动器），请在本机重新执行 `bun install` 或 `npm ci` 以生成 Windows 启动器。
+
 ### 维护资料
 
 - [Agent 运行时工作流](./doc/keepseek-agent-runtime-workflow.md)

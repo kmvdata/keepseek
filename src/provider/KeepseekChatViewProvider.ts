@@ -252,6 +252,8 @@ const CHAT_VIEW_TYPE = 'keepseek.chat';
 const SESSION_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 const INITIAL_VISIBLE_MESSAGE_COUNT = 30;
 const MESSAGE_PAGE_SIZE = 50;
+/** The startup history read may delay the composer by at most this long. */
+const STARTUP_COMPOSER_PROJECTION_TIMEOUT_MS = 600;
 const MAX_DELETE_CONFIRMATION_PATHS = 10;
 /** File states ChangeSetStore.applyAll still attempts, mirrored for drain decisions. */
 const APPROVE_ALL_APPLICABLE: ReadonlySet<string> = new Set(['pending', 'apply_failed', 'interrupted']);
@@ -454,12 +456,20 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private interactionSnapshot(revision: number) {
-    const sessionId = this.sessionReady ? this.sessionStore.activeSessionId : '';
+    // Session loading only restores history; the brand-new conversation is local
+    // state. A store failure must therefore keep the draft editable and name the
+    // cause, instead of locking this identity-bound composer behind a banner.
+    const sessionStoreFailed = this.commandSettingsReadiness.executionMode === 'error';
+    // A blank current conversation exists as soon as the view opens; the
+    // composer accepts input while recovery stores verify in the background.
+    const interactive = this.sessionReady || this.bootstrapHistoryProjected;
+    const sessionId = interactive ? this.sessionStore.activeSessionId : '';
     return this.interactions.snapshot({ sessionId, revision, sessionReady: this.sessionReady,
+      composerReady: this.bootstrapHistoryProjected && !sessionStoreFailed,
       requestContextReady: this.requestContextReady, approvalDataReady: this.approvalDataReady,
       modelReady: this.commandSettingsReadiness?.mainModel === 'ready',
       contextReady: this.runContextReadiness === 'ready' || this.runContextReadiness === 'deferred',
-      sessionRecoveryReady: this.sessionRecoveryReady,
+      sessionRecoveryReady: this.sessionRecoveryReady && !sessionStoreFailed,
       // A run in another session is not this session's run: keep this composer idle.
       mainRunning: this.runBelongsToViewed(sessionId) && this.isBusy, contextRefreshing: this.runContextRefreshInFlight,
       // A foreign session's command run must not make this composer look busy.
@@ -486,7 +496,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const retry = this.language === 'en' ? 'Reload the window to retry.' : '请重新加载窗口重试。';
     const cause = this.sessionLoadFailure?.trim();
     const headline = this.language === 'en' ? 'Session loading failed' : '会话加载失败';
-    return cause ? headline + ': ' + cause + ' ' + retry : headline + '. ' + retry;
+    // History is unavailable, not the window: name the degraded part so a new task
+    // can still start here.
+    const consequence = this.language === 'en'
+      ? 'Previous conversations are unavailable; a new task can still start in this window.'
+      : '历史会话暂不可用，仍可在当前窗口新建任务并发送。';
+    return (cause ? headline + ': ' + cause + ' ' + retry : headline + '. ' + retry) + ' ' + consequence;
   }
 
   private setInteractionPhase(phase: InteractionPhase, operation?: InteractionOperation): void {
@@ -600,6 +615,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private readonly sessionCleanupTimer: ReturnType<typeof setInterval>;
   private readonly visibleMessageLimits = new Map<string, number>();
   private sessionReady = false;
+  /** The startup history projection finished: the composer may accept input now. */
+  private bootstrapHistoryProjected = false;
+  /** Removed on dispose; a startup projector must not publish after that. */
+  private readonly startupLifetime = new AbortController();
   private approvalDataReady = false;
   private sessionRecoveryReady = false;
   private requestContextReady = false;
@@ -739,6 +758,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   public dispose(): void {
     installWriteGateAuthority(undefined);
     this.titleLifecycleDisposed = true;
+    this.startupLifetime.abort();
+    this.sessionStore.dispose();
     this.cancelAllSessionTitleWork();
     this.sessionTitles?.dispose();
     this.sharedProjectSources?.dispose();
@@ -1317,10 +1338,16 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         for (const [sessionId, requestId] of this.manualSessionTitleRequests) {
           this.postToWebview({ type: 'sessionTitleRegeneration', sessionId, requestId, running: true, restored: true });
         }
-        this.postLightweightState();
+        // The brand-new conversation is what this window shows. Publish it with
+        // the history list as soon as the warm-up read lands, without waiting
+        // for session bodies or recovery stores.
+        void this.publishStartupComposer();
         if (this.approvalDataReady) {
+          this.postLightweightState();
           this.postState({ immediate: true, forceFull: true });
         } else {
+          // The sidebar is empty before the first input. Project the final load
+          // right behind it instead of waiting for a second Webview message.
           void this.initializeAfterWebviewReady();
         }
         return;
@@ -2779,6 +2806,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       // display work are deliberately outside this navigation barrier.
       if (!this.startupNavigationReadyPromise && !this.sessionReady) await this.sessionInitialization;
       await this.startupNavigationReadyPromise;
+      // Only failures that make the composer unusable block navigation. A session store
+      // failure keeps its own visible cause and a usable blank conversation, so it must
+      // not also fail every later navigation.
       if (!this.approvalDataReady) throw new Error(this.language === 'en'
         ? 'Safety recovery failed. Reload the window before changing sessions.'
         : '操作记录恢复失败，请重新加载窗口后再切换会话。');
@@ -7106,6 +7136,31 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     return true;
   }
 
+  /** Open the brand-new conversation for input without waiting for the rest of
+   * startup. The warm-up read only lists previous conversations; it never selects
+   * one, so this window keeps the single "every open starts fresh" contract. The
+   * final load (model, context, recovery stores) stays a separate, later state. */
+  private async publishStartupComposer(): Promise<void> {
+    if (this.sessionReady || this.bootstrapHistoryProjected) {
+      if (!this.sessionReady) this.postStartupSettingsPatch();
+      return;
+    }
+    const published = this.sessionStore.warmUpHistorySummaries()
+      .then(() => !this.startupLifetime.signal.aborted && !this.sessionReady)
+      .catch(() => false);
+    // The composer must not wait on a slow share; history fills in when it lands.
+    void published.then((current) => { if (current) this.projectStartupComposer(); });
+    await Promise.race([published, new Promise<boolean>((resolve) => setTimeout(() => resolve(false), STARTUP_COMPOSER_PROJECTION_TIMEOUT_MS))]);
+    if (!this.startupLifetime.signal.aborted && !this.sessionReady) this.projectStartupComposer();
+  }
+
+  private projectStartupComposer(): void {
+    if (this.startupLifetime.signal.aborted || this.bootstrapHistoryProjected || this.sessionReady) return;
+    this.bootstrapHistoryProjected = true;
+    this.startupTrace?.mark('startup-composer-projected', { entries: this.sessionStore.getSessionSummaries().length });
+    this.postStartupSettingsPatch();
+  }
+
   private initializeAfterWebviewReady(): Promise<void> {
     if (this.startupInitializationPromise) return this.startupInitializationPromise;
     let navigationReady!: () => void;
@@ -7593,7 +7648,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   private postStateNow(options: { forceFull?: boolean; omitMessages?: boolean } = {}): void {
     if (!this.sessionReady) {
-      this.postLightweightState();
+      this.projectStartupComposer();
       return;
     }
     const batch = this.draftRunBatches?.state;

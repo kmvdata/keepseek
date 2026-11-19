@@ -8,6 +8,12 @@
 // macOS and Linux: npm and the `code` CLI are ordinary executables (or
 // shebang scripts), so argv is passed through untouched and no shell is ever
 // involved.
+//
+// UNC workspaces: cmd.exe refuses a UNC working directory, warns "UNC paths are
+// not supported" and then runs from C:\Windows, where npm finds neither
+// package.json nor node_modules/.bin. Every command from a UNC cwd therefore
+// enters the share with pushd first, which maps it to a drive for the life of
+// that cmd instance.
 
 const path = require('node:path');
 const { spawnSync: defaultSpawnSync } = require('node:child_process');
@@ -20,6 +26,15 @@ function quoteForCmd(value) {
   const text = String(value);
   if (text === '') return '""';
   return CMD_SPECIAL.test(text) ? `"${text.replace(/"/gu, '""')}"` : text;
+}
+
+// Quotes for a line that `cmd /s /c` will not strip. Unlike quoteForCmd, a
+// literal `"` stays single: doubling is only needed when cmd removes the
+// outermost pair of a simple command.
+function quoteForPlainLine(value) {
+  const text = String(value);
+  if (text === '') return '""';
+  return CMD_SPECIAL.test(text) ? `"${text}"` : text;
 }
 
 function isUncPath(value) {
@@ -58,18 +73,25 @@ function createChildRunner(options = {}) {
 
   function spawn(command, args, spawnOptions = {}) {
     const target = plan(command, args);
-    if (target.viaCommandShell && isUncPath(spawnOptions.cwd)) {
-      // cmd.exe cannot start in a UNC directory, so enter it via pushd, which
-      // maps the share to a temporary drive for the life of the command.
-      const cwd = String(spawnOptions.cwd);
-      const { cwd: _ignored, ...rest } = spawnOptions;
-      // A compound line is never quote-stripped by `cmd /s /c`, so the shim text
-      // is rebuilt without the doubling a simple command needs. `pushd` also
-      // takes the UNC path unquoted, since a quoted share is rejected.
-      const line = `pushd ${cwd} && ${buildCommandLine(command, args)} && popd`;
-      return spawnSync(target.executable, ['/d', '/s', '/c', line], rest);
+    if (!isUncPath(spawnOptions.cwd)) {
+      return spawnSync(target.executable, target.argv, spawnOptions);
     }
-    return spawnSync(target.executable, target.argv, spawnOptions);
+    // cmd.exe cannot start in a UNC directory and would silently fall back to
+    // C:\Windows, where npm finds neither package.json nor node_modules/.bin.
+    // Enter the share with pushd and run the command on the drive cmd maps for
+    // it; pushd takes the share unquoted, and the mapping dies with this
+    // instance, so entering the share has to be the same line. A plain
+    // executable needs cmd.exe here only to hold that mapping.
+    // The line names the original command rather than the planned one: a .cmd
+    // target is already planned as `cmd.exe /d /s /c <line>`, and nesting that
+    // would pass the wrapper on as the program name.
+    const { cwd, ...rest } = spawnOptions;
+    const line = `pushd ${String(cwd)} && ${[command, ...args].map(quoteForPlainLine).join(' ')}`;
+    // Start cmd.exe outside the share: a UNC working directory makes it warn
+    // and fall back to C:\Windows before pushd runs, and a local start also
+    // keeps cmd from inheriting the share as its launch directory.
+    const localCwd = options.uncFallbackCwd ?? process.env.SystemRoot ?? process.env.windir ?? 'C:';
+    return spawnSync(commandShell, ['/d', '/s', '/c', line], { ...rest, cwd: localCwd });
   }
 
   function run(command, args, spawnOptions = {}) {

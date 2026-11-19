@@ -70,6 +70,9 @@ export interface InteractionFacts {
   /** The same revision as the containing Host state/statePatch. */
   revision: number;
   sessionReady: boolean;
+  /** The project view already opened its brand-new conversation for the
+   * composer; session bodies and recovery stores may still be loading. */
+  composerReady?: boolean;
   requestContextReady: boolean;
   approvalDataReady: boolean;
   /** Optional detailed readiness; old callers retain the aggregate readiness contract. */
@@ -296,7 +299,11 @@ export function deriveInteractionState(facts: InteractionFacts, operation?: {
   // Blocks that also stop navigation. A main model run, a running command and an
   const navBlocking = Boolean(facts.backgroundRunning || facts.navigationBlockingAction
     || (operation?.kind === 'navigation') || (!facts.sessionReady && operation));
-  const ready = facts.sessionReady && facts.requestContextReady && facts.approvalDataReady
+  // A project always opens a blank session with lazily deferred context, so the
+  // composer may accept input before the session bodies load. Recovery stores are
+  // still a hard gate: such an action is withheld until they are verified.
+  const sessionReady = facts.sessionReady || facts.composerReady === true;
+  const ready = sessionReady && facts.requestContextReady && facts.approvalDataReady
     && facts.modelReady !== false && facts.contextReady !== false && facts.sessionRecoveryReady !== false;
   let phase: InteractionPhase = owned?.phase ?? 'idle';
   if (!owned) {
@@ -304,7 +311,7 @@ export function deriveInteractionState(facts: InteractionFacts, operation?: {
     else if (facts.actionRunning || facts.backgroundRunning) phase = 'action';
     else if (facts.starting) phase = 'preparing_task';
     else if (facts.failure) phase = 'failed';
-    else if (!facts.sessionReady || operation) phase = 'loading_session';
+    else if (!sessionReady || operation) phase = 'loading_session';
     else if (facts.contextRefreshing || !ready) phase = 'preparing_context';
   } else if (facts.mainRunning && phase === 'preparing_task') phase = 'running';
   const cancelOperationId = owned?.operationId ?? facts.cancelOperationId;
@@ -332,7 +339,7 @@ export function deriveInteractionState(facts: InteractionFacts, operation?: {
     // another session and come back. The run itself is pinned to the session captured
     // at admission, so switching sessions cannot redirect its results or cancel it.
     // Background work and a still-loading session remain hard barriers.
-    canNavigate: facts.sessionReady && !navBlocking,
+    canNavigate: sessionReady && !navBlocking,
     canCancel,
     ...(canCancel ? { cancelOperationId } : {}),
     ...(waitingReason ? { waitingReason } : {}),

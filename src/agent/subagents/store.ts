@@ -497,8 +497,11 @@ function validActivity(value: unknown, parentSessionId: string, id: string): val
     && typeof value.status === 'string' && ['queued', 'running', 'completed', 'failed', 'stopped'].includes(value.status)
     && typeof value.updatedAt === 'string';
 }
+/** The node FileSystemProvider rethrows raw node errors without `code`, so a
+ * vanished child record is identified by its message exactly as by its code. */
 function isMissing(error: unknown): boolean {
-  return ['FileNotFound', 'ENOENT'].includes(String((error as { code?: string })?.code));
+  return ['FileNotFound', 'ENOENT'].includes(String((error as { code?: string })?.code))
+    || /^ENOENT: no such file or directory,/u.test(String((error as { message?: unknown })?.message ?? ''));
 }
 
 function normalizeMetadata(value: unknown): StoredSubagentMetadata | undefined {

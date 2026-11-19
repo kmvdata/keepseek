@@ -70,23 +70,53 @@ test('a UNC working directory enters the share through pushd', () => {
   const runner = createChildRunner({
     platform: 'win32',
     commandShell: 'cmd.exe',
+    uncFallbackCwd: 'C:\\Windows',
     spawnSync: (command, argv, options) => {
       calls.push({ command, argv, options });
       return { status: 0 };
     }
   });
 
-  // A quoted share is rejected by pushd, and a compound line is never
-  // quote-stripped, so the shim keeps the quoting its plan already produced.
+  // A quoted share is rejected by pushd, so the share is entered unquoted.
+  // The .cmd target stays a plain command in the line: plan() would already
+  // wrap it in cmd.exe, and nesting that would pass the wrapper as a name.
   runner.run('npm.cmd', ['run', 'compile', 'D:\\a b\\x.vsix'], { cwd: '\\\\server\\share\\repo' });
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].command, 'cmd.exe');
   assert.deepEqual(calls[0].argv, ['/d', '/s', '/c',
-    'pushd \\\\server\\share\\repo && npm.cmd run compile "D:\\a b\\x.vsix" && popd']);
-  // The UNC path cannot be a process working directory for cmd.exe.
-  assert.equal(calls[0].options.cwd, undefined);
+    'pushd \\\\server\\share\\repo && npm.cmd run compile "D:\\a b\\x.vsix"']);
+  // cmd.exe refuses a UNC working directory, so it starts outside the share
+  // and pushd maps it instead.
+  assert.equal(calls[0].options.cwd, 'C:\\Windows');
   assert.equal(calls[0].options.stdio, 'inherit');
+});
+
+test('a plain executable from a UNC working directory still enters the share', () => {
+  const calls = [];
+  const runner = createChildRunner({
+    platform: 'win32',
+    commandShell: 'cmd.exe',
+    uncFallbackCwd: 'C:\\Windows',
+    spawnSync: (command, argv, options) => {
+      calls.push({ command, argv, options });
+      return { status: 0 };
+    }
+  });
+
+  // cmd.exe falls back to C:\Windows for a UNC cwd, so even a program that
+  // would run without a shell must be started after pushd maps the share.
+  const result = runner.runCapture('C:\\Program Files\\nodejs\\node.exe', ['scripts/verify-vsix.js'], {
+    cwd: '\\\\server\\share\\repo'
+  });
+
+  assert.equal(result.status, 0);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, 'cmd.exe');
+  assert.deepEqual(calls[0].argv, ['/d', '/s', '/c',
+    'pushd \\\\server\\share\\repo && "C:\\Program Files\\nodejs\\node.exe" scripts/verify-vsix.js']);
+  assert.equal(calls[0].options.cwd, 'C:\\Windows');
+  assert.equal(calls[0].options.encoding, 'utf8');
 });
 
 test('a local working directory spawns the planned shim unchanged', () => {

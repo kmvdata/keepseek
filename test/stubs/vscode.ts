@@ -252,7 +252,11 @@ export const workspace = {
   isTrusted: true,
   fs: {
     async stat(uri: Uri) {
-      const stat = await fs.stat(uri.fsPath);
+      let stat;
+      try { stat = await fs.stat(uri.fsPath); }
+      // VS Code's real `file:` provider surfaces provider failures without a
+      // node `code`; only the message identifies a vanished path.
+      catch (error) { if ((error as { code?: string }).code === 'ENOENT') throw new Error((error as Error).message); throw error; }
       return {
         type: stat.isFile() ? FileType.File : stat.isDirectory() ? FileType.Directory : FileType.Unknown,
         size: stat.size,
@@ -268,7 +272,8 @@ export const workspace = {
       ]);
     },
     async readFile(uri: Uri): Promise<Uint8Array> {
-      return await fs.readFile(uri.fsPath);
+      try { return await fs.readFile(uri.fsPath); }
+      catch (error) { if ((error as { code?: string }).code === 'ENOENT') throw new Error((error as Error).message); throw error; }
     },
     async createDirectory(uri: Uri): Promise<void> {
       await fs.mkdir(uri.fsPath, { recursive: true });
@@ -281,10 +286,13 @@ export const workspace = {
       await fs.rename(source.fsPath, target.fsPath);
     },
     async delete(uri: Uri, options?: { recursive?: boolean }): Promise<void> {
-      await fs.rm(uri.fsPath, {
-        recursive: options?.recursive === true,
-        force: false
-      });
+      try {
+        await fs.rm(uri.fsPath, {
+          recursive: options?.recursive === true,
+          force: false
+        });
+      }
+      catch (error) { if ((error as { code?: string }).code === 'ENOENT') throw new Error((error as Error).message); throw error; }
     }
   },
   getConfiguration(_section?: string): { get<T>(key: string, fallback: T): T; inspect?(key: string): { globalValue?: unknown } | undefined; update(): Promise<void> } {

@@ -26,6 +26,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const workspaceScope = getCurrentWorkspaceSessionScope();
   const projectQueue = new ProjectQueueService((workspaceKey) => globalSessionStorage.getProjectQueueUri(workspaceKey));
   const sessionStore = new ChatSessionStore(globalSessionStorage, getConfiguredKeepseekLanguage(), workspaceScope, projectQueue);
+  // A project always opens a brand-new conversation: nothing is restored into
+  // the composer. The history list is warmed in parallel with the view so that
+  // sidebar can list previous conversations without delaying the first input.
+  void sessionStore.warmUpHistorySummaries();
   let startSessionInitialization: (() => void) | undefined;
   const sessionInitialization = new Promise<void>((resolve, reject) => {
     startSessionInitialization = () => {
