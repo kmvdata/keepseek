@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
 import { ChatSessionStore } from '../src/sessions/chatSessionStore';
 import { GlobalSessionStorage, getWorkspaceHash } from '../src/sessions/globalSessionStorage';
-import { missing } from '../src/sessions/sessionDeletionAuthority';
+import { missing, SessionDeletionAuthority } from '../src/sessions/sessionDeletionAuthority';
 import * as vscode from './stubs/vscode';
 
 const SCOPE_KEY = 'folders:file:///d%3A/Projects/case';
@@ -19,7 +19,7 @@ interface StartupHost {
   initializeAfterWebviewReady(): Promise<void>;
   commandSettingsReadiness: Record<string, string>;
   getStartupState(): { phase: string };
-  interactionSnapshot(revision: number): { sessionId?: string; canEdit?: boolean; canSubmit?: boolean; waitingReason?: string; failure?: string };
+  interactionSnapshot(revision: number): { sessionId?: string; canEdit?: boolean; canSubmit?: boolean; canNavigate?: boolean; waitingReason?: string; failure?: string; blockingReason?: string };
   sessionStore: ChatSessionStore;
   interactions: { begin(kind: 'recovery', sessionId: string, phase: 'preparing_context'): { readonly operationId: string } | undefined;
     finish(operation: { readonly operationId: string }): boolean };
@@ -143,6 +143,46 @@ test('a missing deletion record is ordinary history in the provider error shape'
   assert.equal(missing({ code: 'ENOENT' }), true);
 });
 
+/** The report shape: VS Code's own `stat` failure for a tombstone that was
+ * never written. No safety directory exists before the first deletion, so this
+ * probe describes ordinary live history, not a damaged or deleted session. */
+test('vscode FileSystemError shapes for an absent record stay ordinary history', () => {
+  const path = "cannot be found (Error: ENOENT: no such file or directory, stat 'C:\\Users\\k\\AppData\\Local\\com.kmvdata.keepseek\\session-deletions\\v1\\deleted\\f19cf1.json')";
+  assert.equal(missing(new Error(path)), true, 'the vscode stat message proves a vanished path');
+  assert.equal(missing(Object.assign(new Error(path), { code: 'Unknown', name: 'EntryNotFound (FileSystemError)' })), true,
+    'a named FileSystemError carrying ENOENT is still an absent record');
+  assert.equal(missing(Object.assign(new Error('cannot be found (Error: EPERM: operation not permitted, stat x.json)'),
+    { code: 'Unknown', name: 'NoPermissions (FileSystemError)' })), false,
+  'a FileSystemError that is not ENOENT stays an error');
+  assert.equal(missing(new Error('access denied while reading the record')), false);
+});
+
+/** Absent safety directories are the ordinary first-run state: reading them
+ * must report "nothing deleted" and must never fail session loading. */
+test('a never-initialized deletion layout reports no pending deletions', async t => {
+  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-deletions-absent-'));
+  t.after(async () => { await rm(root, { recursive: true, force: true }).catch(() => undefined); });
+  const authority = new SessionDeletionAuthority(vscode.Uri.file(root) as never);
+  assert.deepEqual(await authority.listPending(), [], 'an absent journal directory is an empty journal');
+  assert.equal(await authority.hasRecord('live-session'), false);
+  assert.equal(await authority.isSessionIdDeleted('live-session'), false);
+  assert.equal(await authority.readRecord('live-session'), undefined);
+  assert.equal(await authority.inspectUse(SCOPE_KEY, 'live-session'), false, 'absent use ownership is not a lock');
+});
+
+/** The first deletion creates the layout instead of failing on it. */
+test('the first committed deletion creates the journal layout', async t => {
+  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-deletions-create-'));
+  t.after(async () => { await rm(root, { recursive: true, force: true }).catch(() => undefined); });
+  const authority = new SessionDeletionAuthority(vscode.Uri.file(root) as never);
+  const record = { version: 1 as const, workspaceKey: SCOPE_KEY, sessionId: 'first-deletion',
+    operationId: 'operation-1', confirmedAt: new Date().toISOString(), phase: 'committed' as const };
+  await authority.commitDeletion(record);
+  assert.equal(await authority.hasRecord('first-deletion'), true);
+  assert.deepEqual((await authority.listPending()).map(item => item.sessionId), ['first-deletion']);
+  await assert.rejects(() => authority.assertSessionIdWritable('first-deletion'), /permanently deleted/);
+});
+
 /** A second project the same installation never opened in this window. */
 async function seedOtherProjectSession(): Promise<void> {
   const otherRoot = await mkdtemp(path.join(tmpdir(), 'keepseek-startup-other-'));
@@ -258,4 +298,92 @@ test('reading a workspace index never rewrites it', async () => {
     await new Promise(resolve => setTimeout(resolve, 10));
   });
   assert.equal(await readFile(indexUri, 'utf8'), before, 'listing history must not rewrite the index');
+});
+
+/** Other windows enter and leave the same gate continuously. A snapshot that
+ * lands between an owner's write and its rename, or loses a participant to a
+ * racing unlink, describes a racing *other* participant: it must be retried,
+ * never reported as a damaged gate that dead-ends startup. */
+test('a gate whose participant is not yet committed is retried instead of failing', async t => {
+  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-gate-race-'));
+  t.after(async () => { await rm(root, { recursive: true, force: true }).catch(() => undefined); });
+  const authority = new SessionDeletionAuthority(vscode.Uri.file(root) as never);
+  const sessionId = 'race-session';
+  const gateDirectory = path.join(root, 'session-deletions', 'v1', 'gates',
+    createHash('sha256').update(`session:${sessionId}`).digest('hex'));
+  await mkdir(gateDirectory, { recursive: true });
+  // Exactly what another process leaves between its writeFile and rename: a
+  // record that exists but is not yet a valid, fully committed participant.
+  const racingToken = '00000000-0000-4000-8000-000000000000';
+  const racingRecord = path.join(gateDirectory, `${racingToken}.json`);
+  await writeFile(racingRecord, '{"version":1,"pid":');
+  const settled = (async () => {
+    await new Promise(resolve => setTimeout(resolve, 30));
+    await writeFile(racingRecord, JSON.stringify({
+      version: 1, pid: 0x7ffffff, token: racingToken, choosing: false, ticket: 1
+    }));
+  })();
+  const result = await authority.withSessionIdGate(sessionId, async () => 'entered');
+  await settled;
+  assert.equal(result, 'entered', 'an in-flight participant write must not fail the gate');
+});
+
+/** Session loading selects history only. When it fails, the window must still
+ * offer a blank conversation the user can type into and see the real cause:
+ * an unusable composer is never an acceptable fallback. */
+test('a failed session load keeps the composer usable and names the cause', async t => {
+  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-startup-store-failure-'));
+  await seedActiveSession(root);
+  await withHost(async () => {
+    const uri = vscode.Uri.file(root);
+    const scope = { key: SCOPE_KEY, name: 'case', folderUris: [SCOPE_KEY] };
+    const storage = new GlobalSessionStorage(uri as never);
+    const sessionStore = new ChatSessionStore(storage, 'en', scope);
+    // The exact failure from the report: a startup read that could not be
+    // verified must not be mistaken for an empty history of a broken window.
+    const initialization = Promise.reject(new Error(
+      "ENOENT: no such file or directory, stat '" + path.join(root, 'session-deletions', 'v1', 'deleted', 'missing.json') + "'"));
+    await initialization.catch(() => undefined);
+    const provider = new KeepseekChatViewProvider(
+      uri as never, sessionStore, uri as never,
+      { keys: () => [], get: (_key: string, fallback: unknown) => fallback, update: async () => undefined } as never,
+      { displayName: 'KeepSeek', version: 'test', publisher: 'keepseek', author: 'keepseek', repositoryUrl: '', license: 'MIT' },
+      initialization
+    );
+    t.after(async () => {
+      (provider as unknown as { dispose(): void }).dispose();
+      await rm(root, { recursive: true, force: true }).catch(() => undefined);
+    });
+    const host = provider as unknown as StartupHost;
+    await host.initializeAfterWebviewReady().catch(() => undefined);
+    const started = host.getStartupState();
+    const interaction = host.interactionSnapshot(1);
+    assert.equal(interaction.canEdit, true, 'a draft stays editable when history cannot be read');
+    assert.equal(interaction.sessionId, sessionStore.getActiveSession().id,
+      'the blank conversation stays addressable so the user can type and keep a draft');
+    const reported = String(interaction.failure ?? interaction.blockingReason);
+    assert.match(reported, /ENOENT/, 'the real cause is reported, not a bare retry hint');
+    assert.match(reported, /new task|新建任务/, 'the message says a new task can still start');
+    assert.match(reported, /unavailable|不可用/, 'history, not the window, is named as unavailable');
+    // Navigation is not what the failure broke: the composer, not the window, decides.
+    assert.equal(host.commandSettingsReadiness.executionMode, 'error', 'the degraded part stays visible');
+    assert.notEqual(started.phase, 'ready');
+  });
+});
+
+/** A gate that stays unreadable is still reported, with the cause attached. */
+test('a permanently damaged gate reports the cause it observed', async t => {
+  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-gate-damaged-'));
+  t.after(async () => { await rm(root, { recursive: true, force: true }).catch(() => undefined); });
+  const authority = new SessionDeletionAuthority(vscode.Uri.file(root) as never);
+  const sessionId = 'damaged-session';
+  const gateDirectory = path.join(root, 'session-deletions', 'v1', 'gates',
+    createHash('sha256').update(`session:${sessionId}`).digest('hex'));
+  await mkdir(gateDirectory, { recursive: true });
+  await writeFile(path.join(gateDirectory, 'corrupt-token.json'), '{"version":1,"token":"other-token"}');
+  await assert.rejects(
+    () => authority.withSessionIdGate(sessionId, async () => 'entered'),
+    /Storage gate ownership cannot be verified/,
+    'a participant that never becomes valid must not be silently ignored'
+  );
 });

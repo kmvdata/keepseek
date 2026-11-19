@@ -463,7 +463,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     // A blank current conversation exists as soon as the view opens; the
     // composer accepts input while recovery stores verify in the background.
     const interactive = this.sessionReady || this.bootstrapHistoryProjected;
-    const sessionId = interactive ? this.sessionStore.activeSessionId : '';
+    // The blank conversation exists in memory before any store load: it is the
+    // identity the composer edits, so a failed history read must not erase it.
+    // After a startup failure this projection is the only thing the user sees,
+    // so it must still name the blank conversation and its cause.
+    const sessionId = interactive ? this.sessionStore.getActiveSession().id : '';
     return this.interactions.snapshot({ sessionId, revision, sessionReady: this.sessionReady,
       composerReady: this.bootstrapHistoryProjected && !sessionStoreFailed,
       requestContextReady: this.requestContextReady, approvalDataReady: this.approvalDataReady,
@@ -483,7 +487,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       cancellable: Boolean(this.currentRunAbortController && !this.currentRunAbortController.signal.aborted
         || this.changeActionAbortController && !this.changeActionAbortController.signal.aborted || this.activeDraftRunId),
       cancelOperationId: this.viewedOperationId(),
-      failure: this.interactionFailure && this.interactionFailure.sessionId === sessionId ? this.interactionFailure.message
+      // A cause is reported even before the composer is addressable; hiding it
+      // leaves the window on a loading state the user cannot act on.
+      failure: this.interactionFailure && (!sessionId || this.interactionFailure.sessionId === sessionId) ? this.interactionFailure.message
         : this.commandSettingsReadiness?.executionMode === 'error' ? this.sessionLoadFailureText()
         : this.runContextRefreshError ? this.t('runContextRefreshFailed', { message: getErrorMessage(this.runContextRefreshError) })
         : this.getStartupState().phase === 'startup-error' ? (this.language === 'en' ? 'Reload the window to retry initialization.' : '请重新加载窗口以重试初始化。') : undefined });
@@ -7178,6 +7184,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         // reported instead of a prompt that hides what actually failed.
         this.sessionLoadFailure = getErrorMessage(sessionResult[0].reason);
         this.commandSettingsReadiness.executionMode = 'error';
+        // Publish the blank conversation and the cause before aborting startup.
+        // History is the only thing that failed, so the composer must stay
+        // addressable (editable draft) and state what actually broke, instead
+        // of leaving the window on a loading state the user cannot clear.
+        this.projectStartupComposer();
+        this.postLightweightState();
         throw sessionResult[0].reason;
       }
       if (sessionResult[0]?.status === 'fulfilled' && this.usageLedgerStore && this.usageLedgerFlushes) {
@@ -7318,6 +7330,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
       navigationFailed(error);
       console.warn('[KeepSeek] startup_stage', { stage: 'initialization', event: 'failed' });
+      // The blank conversation this window shows is local state: publish it so the
+      // composer stays addressable even when history could not be loaded.
+      this.projectStartupComposer();
       this.postLightweightState();
     });
     return this.startupInitializationPromise;

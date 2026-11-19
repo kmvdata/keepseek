@@ -27,7 +27,15 @@ export const missing = (error: unknown) => {
   // every desktop host, rethrows raw node errors without `code`: a missing path
   // is then described only by its message. Startup probes a tombstone for every
   // listed session, so an ordinary absent record must stay "not deleted".
-  return /^ENOENT: no such file or directory,/u.test(String((error as { message?: unknown })?.message ?? ''));
+  if (/^ENOENT: no such file or directory,/u.test(String((error as { message?: unknown })?.message ?? ''))) return true;
+  // VS Code's own `vscode.workspace.fs.stat` describes a vanished path as a
+  // generic "cannot be found (Error: ENOENT ...)" FileSystemError. Startup
+  // probes a tombstone for every listed session before either safety directory
+  // exists, so that common shape must stay "not deleted" too: one absent probe
+  // must never block all history. Every other FileSystemError stays an error.
+  return /ENOENT: no such file or directory,/u.test(String((error as { message?: unknown })?.message ?? ''))
+    || (/FileSystemError/u.test(String((error as { name?: unknown })?.name ?? ''))
+      && /ENOENT: no such file or directory,/u.test(String((error as { cause?: unknown })?.cause ?? '')));
 };
 const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 /** A snapshot of the gate raced another participant's write. Retried, not fatal. */
@@ -110,6 +118,10 @@ export class SessionDeletionAuthority {
     this.validate(record.workspaceKey, record.sessionId);
     const old = await this.readRecord(record.sessionId);
     if (old && old.workspaceKey !== record.workspaceKey) throw new Error('Deleted session scope conflict');
+    // The safety layout is created on first use; until then its absence is the
+    // ordinary "nothing deleted yet" state for every reader.
+    await this.ensureLocalDirectory(this.root);
+    await this.ensureLocalDirectory(this.useDirectory(record.sessionId));
     await this.ensureLocalDirectory(vscode.Uri.joinPath(this.recordUri(record.sessionId), '..'));
     await this.verifyLocalPath(this.recordUri(record.sessionId));
     await writeJsonAtomic(this.recordUri(record.sessionId), old ?? record, { durable: true });
@@ -126,9 +138,14 @@ export class SessionDeletionAuthority {
       await writeJsonAtomic(this.recordUri(sessionId), { ...record, phase, pendingReasons }, { durable: true });
     });
   }
+  /** A read reports what is there: the absence of the journal directory means
+   * no deletion was ever recorded, never a damaged journal. */
   public async listPending(): Promise<SessionDeletionRecord[]> {
     const directory = vscode.Uri.joinPath(this.root, 'deleted');
-    await this.verifyLocalPath(directory);
+    // Symbolic-link and escape verification stay authoritative: an unreadable
+    // journal directory is a real fault and is still reported.
+    try { await this.verifyLocalPath(directory); }
+    catch (error) { if (missing(error)) return []; throw error; }
     let entries: [string, vscode.FileType][];
     try { entries = await vscode.workspace.fs.readDirectory(directory); }
     catch (error) { if (missing(error)) return []; throw error; }
