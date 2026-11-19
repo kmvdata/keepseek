@@ -148,19 +148,14 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     };
   }
 
+  /** The shard writer already holds the session gate, checks the tombstone
+   * under it and commits atomically. A save therefore needs no cross-process use
+   * record of its own: such a lease is neither a deletion proof nor a writer
+   * lock, it only makes every other writer of the session wait behind one apply
+   * and turns a slow share into "Storage gate is busy". */
   public async saveWorkspace(workspaceScope: WorkspaceSessionScope, state: StoredWorkspaceSessionState): Promise<void> {
-    const leases: Array<{ release(): Promise<void> }> = [];
-    try {
-      if (this.globalStorageUri.scheme === 'file') {
-        for (const session of state.sessions) {
-          if (session.messages.length && session.workspaceKey === workspaceScope.key && !await this.isSessionDeleted(session.workspaceKey, session.id)) {
-            leases.push(await this.acquireSessionUse(session.workspaceKey, session.id));
-          }
-        }
-      }
-      await withStorageCoordinator(this.rootUri, async () => this.saveWorkspaceCoordinated(workspaceScope, state));
-      await this.flush();
-    } finally { for (const lease of leases) await lease.release(); }
+    await withStorageCoordinator(this.rootUri, async () => this.saveWorkspaceCoordinated(workspaceScope, state));
+    await this.flush();
   }
 
   public async flush(): Promise<void> {
@@ -635,7 +630,12 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
   }
   private async filterDeleted<T extends { id: string }>(workspaceKey: string, items: T[]): Promise<T[]> {
     const result: T[] = [];
-    for (const item of items) if (!await this.isSessionDeleted(workspaceKey, item.id)) result.push(item);
+    for (const item of items) {
+      // A session that already lists in this index has no tombstone in the
+      // ordinary case. Only a tombstone that exists is read, so one unrelated
+      // unreadable record can neither strip nor rewrite the whole index.
+      if (!await this.deletionAuthority.hasRecord(item.id) || !await this.isSessionDeleted(workspaceKey, item.id)) result.push(item);
+    }
     return result;
   }
   private async hasDeletedWorkspace(workspaceKey: string): Promise<boolean> {
@@ -800,6 +800,10 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
         catch (error) { if (!isFileNotFoundError(error)) throw error; }
         if (!committed) await this.deletionAuthority.commitDeletion({ version: 1, workspaceKey: target.workspaceKey, sessionId: target.id,
           operationId, confirmedAt: new Date().toISOString(), phase: 'committed' });
+        // A committed journal must be readable before the shard it guards is
+        // removed: a write that cannot be re-read has proven nothing, so cleanup
+        // stops here instead of reporting a removal it cannot evidence.
+        if (!await this.deletionAuthority.hasRecord(target.id)) throw new Error('Deletion journal is not durable');
         committed = true;
         // Every canonical main writer shares this same session gate.
         await this.deleteFile(shard);

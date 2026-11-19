@@ -410,6 +410,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     return this.interactionCoordinator ??= new InteractionCoordinator({ onDiagnostic: event => console.info('[KeepSeek] interaction', event) });
   }
   private interactionFailure?: { sessionId: string; message: string };
+  /** Cause of a rejected session-store startup, surfaced with the retry hint. */
+  private sessionLoadFailure?: string;
   private historySessionLoadTimeoutMs = HISTORY_SESSION_LOAD_TIMEOUT_MS;
   private readonly usageDisplayReadiness = new Map<string, 'loading' | 'ready' | 'incomplete'>();
   private pendingSubmissionIds?: Set<string>;
@@ -472,9 +474,19 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         || this.changeActionAbortController && !this.changeActionAbortController.signal.aborted || this.activeDraftRunId),
       cancelOperationId: this.viewedOperationId(),
       failure: this.interactionFailure && this.interactionFailure.sessionId === sessionId ? this.interactionFailure.message
-        : this.commandSettingsReadiness?.executionMode === 'error' ? (this.language === 'en' ? 'Session loading failed. Reload the window to retry.' : '会话加载失败，请重新加载窗口重试。')
+        : this.commandSettingsReadiness?.executionMode === 'error' ? this.sessionLoadFailureText()
         : this.runContextRefreshError ? this.t('runContextRefreshFailed', { message: getErrorMessage(this.runContextRefreshError) })
         : this.getStartupState().phase === 'startup-error' ? (this.language === 'en' ? 'Reload the window to retry initialization.' : '请重新加载窗口以重试初始化。') : undefined });
+  }
+
+  /** Session loading failed: keep the reload action, but never drop the cause.
+   * A bare retry hint makes an actionable storage fault indistinguishable from a
+   * transient one, which is exactly the case that used to dead-end the composer. */
+  private sessionLoadFailureText(): string {
+    const retry = this.language === 'en' ? 'Reload the window to retry.' : '请重新加载窗口重试。';
+    const cause = this.sessionLoadFailure?.trim();
+    const headline = this.language === 'en' ? 'Session loading failed' : '会话加载失败';
+    return cause ? headline + ': ' + cause + ' ' + retry : headline + '. ' + retry;
   }
 
   private setInteractionPhase(phase: InteractionPhase, operation?: InteractionOperation): void {
@@ -7107,6 +7119,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.startupInitializationPromise = (async () => {
       const sessionResult = await Promise.allSettled([this.measureStartup('session-store-loaded', () => this.sessionInitialization)]);
       if (sessionResult[0]?.status === 'rejected') {
+        // The user only sees the status text; keep the real cause so it can be
+        // reported instead of a prompt that hides what actually failed.
+        this.sessionLoadFailure = getErrorMessage(sessionResult[0].reason);
         this.commandSettingsReadiness.executionMode = 'error';
         throw sessionResult[0].reason;
       }

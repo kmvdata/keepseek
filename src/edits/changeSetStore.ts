@@ -825,7 +825,6 @@ export class ChangeSetStore {
     approval?: DelegatedEditApproval,
     options: ChangeSetOperationOptions = {}
   ): Promise<ChangeSetApplyResult> {
-    let usage: { release(): Promise<void> } | undefined;
     const appliedEditIds: string[] = [];
     const failed: ChangeSetApplyFailure[] = [];
     const acquiredEditIds = new Set<string>();
@@ -835,14 +834,32 @@ export class ChangeSetStore {
         acquiredEditIds.add(file.id);
       }
     }
+    // The project write gate is synchronous by contract: settle admission before
+    // any await so a rejected batch never starts a single file operation.
+    if (changeSet.sessionId) assertWriteAuthorized(changeSet.sessionId, 'edit');
     try {
-      usage = changeSet.sessionId ? await new SessionDeletionAuthority(this.globalStorageUri).acquireUse('associated-edits', changeSet.sessionId) : undefined;
+      // Deletion admission is a read, not a lease. Holding a cross-process use
+      // record across the whole batch charged every other writer of this session
+      // (message saves, usage ledger, evidence, traces) a file-lock round trip
+      // per write, and a competing caller that waited on the session gate for
+      // 30 s reported "Storage gate is busy" on an unrelated ChangeSet file.
+      // Per-edit state is journaled instead: a deletion that lands after this
+      // point is what reclaim walks over. Requiring the tombstone to stay absent
+      // for the whole batch would not make that safer, only later: every recycled
+      // store (evidence, subagent results, traces, usage, command runs) has its
+      // own last writer, so a lease on any one of them cannot close this window.
+      // The recycler therefore settles this store's own shards by their recorded
+      // status before removing anything.
+      const assertAdmission = async (): Promise<void> => {
+        if (changeSet.sessionId) await new SessionDeletionAuthority(this.globalStorageUri).assertSessionIdWritable(changeSet.sessionId);
+      };
       for (const file of files) {
         if (!acquiredEditIds.has(file.id)) {
           failed.push({ editId: file.id, label: file.label, error: 'This DraftEdit is already being applied.' });
           continue;
         }
         try {
+          await assertAdmission();
           let fileApproval = approval ?? options.approvalForEdit?.(file);
           if (this.isUserSkillScaffold(changeSet, file)) {
             fileApproval = { authorizedUri: file.uri, isAuthorized: () => vscode.workspace.isTrusted,
@@ -905,7 +922,6 @@ export class ChangeSetStore {
       return result;
     } finally {
       for (const id of acquiredEditIds) this.activeEditOperations.delete(id);
-      await usage?.release();
     }
   }
 
@@ -914,7 +930,6 @@ export class ChangeSetStore {
     files: ChangeSetFile[],
     options: ChangeSetOperationOptions = {}
   ): Promise<ChangeSetRevertResult> {
-    let usage: { release(): Promise<void> } | undefined;
     const revertedEditIds: string[] = [];
     const failed: ChangeSetApplyFailure[] = [];
     const acquiredEditIds = new Set<string>();
@@ -924,8 +939,12 @@ export class ChangeSetStore {
         acquiredEditIds.add(file.id);
       }
     }
+    if (changeSet.sessionId) assertWriteAuthorized(changeSet.sessionId, 'edit');
     try {
-      usage = changeSet.sessionId ? await new SessionDeletionAuthority(this.globalStorageUri).acquireUse('associated-edits', changeSet.sessionId) : undefined;
+      // Same rule as apply: the project write gate admits the batch, and the
+      // session tombstone is checked here instead of holding a cross-process
+      // use lease that blocks every other writer of this session.
+      if (changeSet.sessionId) await new SessionDeletionAuthority(this.globalStorageUri).assertSessionIdWritable(changeSet.sessionId);
       for (const file of files) {
         if (!acquiredEditIds.has(file.id)) {
           failed.push({ editId: file.id, label: file.label, error: 'This DraftEdit is already being changed.' });
@@ -998,7 +1017,6 @@ export class ChangeSetStore {
       return result;
     } finally {
       for (const id of acquiredEditIds) this.activeEditOperations.delete(id);
-      await usage?.release();
     }
   }
 
@@ -1815,28 +1833,24 @@ export async function deleteStoredChangeSetsForSession(root: vscode.Uri, session
     const indexUri = vscode.Uri.joinPath(directory, 'index.json');
     await assertManagedStoragePath(root, indexUri);
     await assertManagedStoragePath(root, vscode.Uri.joinPath(directory, 'checkpoints'));
-    const value = await readAssociatedJson(indexUri);
+    let value = await readAssociatedJson(indexUri);
     if (value && (value.version !== 4 || !Array.isArray(value.entries))) throw new Error('ChangeSet index is damaged.');
-    const rawEntries = value?.entries as unknown[] ?? [];
-    const entries = rawEntries.map(normalizeIndexEntry).filter((entry): entry is ChangeSetIndexEntry => !!entry);
+    let rawEntries = value?.entries as unknown[] ?? [];
+    let entries = rawEntries.map(normalizeIndexEntry).filter((entry): entry is ChangeSetIndexEntry => !!entry);
     if (entries.length !== rawEntries.length) throw new Error('ChangeSet index ownership is damaged.');
-    const owned = new Map(entries.filter(entry => entry.sessionId === sessionId).map(entry => [entry.id, entry]));
-    // An interrupted save may leave a shard absent from the index. Verify the
-    // embedded owner before removing that exact generated filename.
-    for (const kind of ['runtime', 'history'] as const) {
-      await assertManagedStoragePath(root, vscode.Uri.joinPath(directory, kind));
-      for (const name of await listCleanupJsonFiles(vscode.Uri.joinPath(directory, kind))) {
-        const uri = vscode.Uri.joinPath(directory, kind, name);
-        const stored = await readAssociatedJson(uri);
-        const record = stored?.changeSet;
-        if (!record || typeof record !== 'object') continue;
-        const changeSet = record as ChangeSet;
-        if (changeSet.sessionId !== sessionId || typeof changeSet.id !== 'string' || name !== fileNameForId(changeSet.id)) continue;
-        owned.set(changeSet.id, { id: changeSet.id, sessionId, kind,
-          storageFile: `${kind}/${name}`, updatedAt: changeSet.updatedAt,
-          checkpointIds: Array.isArray(changeSet.files) ? changeSet.files.flatMap(file => file.checkpointId ? [file.checkpointId] : []) : [] });
-      }
+    // Recycling may begin while an approved batch is still applying its last
+    // edits: that batch runs without a long-held use lease, so the tombstone is
+    // the boundary it checks before every edit. Once the tombstone exists this
+    // settle step is the last writer of these shards and waits for the batch to
+    // stop before anything is removed.
+    if (await settleOwnedChangeSetsForDeletion(directory, sessionId)) {
+      value = await readAssociatedJson(indexUri);
+      if (value && (value.version !== 4 || !Array.isArray(value.entries))) throw new Error('ChangeSet index is damaged.');
+      rawEntries = value?.entries as unknown[] ?? [];
+      entries = rawEntries.map(normalizeIndexEntry).filter((entry): entry is ChangeSetIndexEntry => !!entry);
+      if (entries.length !== rawEntries.length) throw new Error('ChangeSet index ownership is damaged.');
     }
+    const owned = await collectOwnedChangeSets(root, directory, sessionId, entries);
     const retained = entries.filter(entry => entry.sessionId !== sessionId);
     const retainedCheckpoints = new Set(retained.flatMap(entry => entry.checkpointIds));
     // An index link alone cannot prove that a corrupt collision names the
@@ -1866,6 +1880,68 @@ export async function deleteStoredChangeSetsForSession(root: vscode.Uri, session
 
 export async function hasStoredChangeSetsForSession(root: vscode.Uri, sessionId: string): Promise<boolean> {
   return hasAssociatedRecordOwner(vscode.Uri.joinPath(root, 'change-sets', 'v4', 'index.json'), sessionId, ['entries'], [4]);
+}
+
+/** Owned shards: verified index links plus unlinked shards left by an
+ * interrupted save, which carry their owner inside the generated file. */
+async function collectOwnedChangeSets(root: vscode.Uri, directory: vscode.Uri, sessionId: string,
+  entries: readonly ChangeSetIndexEntry[]): Promise<Map<string, ChangeSetIndexEntry>> {
+  const owned = new Map(entries.filter(entry => entry.sessionId === sessionId).map(entry => [entry.id, entry]));
+  for (const kind of ['runtime', 'history'] as const) {
+    await assertManagedStoragePath(root, vscode.Uri.joinPath(directory, kind));
+    for (const name of await listCleanupJsonFiles(vscode.Uri.joinPath(directory, kind))) {
+      const stored = await readAssociatedJson(vscode.Uri.joinPath(directory, kind, name));
+      const record = stored?.changeSet;
+      if (!record || typeof record !== 'object') continue;
+      const changeSet = record as ChangeSet;
+      if (changeSet.sessionId !== sessionId || typeof changeSet.id !== 'string' || name !== fileNameForId(changeSet.id)) continue;
+      owned.set(changeSet.id, { id: changeSet.id, sessionId, kind,
+        storageFile: `${kind}/${name}`, updatedAt: changeSet.updatedAt,
+        checkpointIds: Array.isArray(changeSet.files) ? changeSet.files.flatMap(file => file.checkpointId ? [file.checkpointId] : []) : [] });
+    }
+  }
+  return owned;
+}
+
+const SETTLE_WINDOW_MS = 30_000;
+const SETTLE_PASS_MS = 100;
+function isUnsettledFile(file: unknown): boolean {
+  return !!file && typeof file === 'object'
+    && ['prepared', 'applying'].includes(String((file as { status?: unknown }).status));
+}
+
+/** Waits until no runtime shard of this session is mid-apply, then discards
+ * whatever is still pending so the tombstone and the stored records agree.
+ * Completed work keeps its audit status. A writer that vanished leaves a file
+ * in 'applying'; that is settled here instead of keeping the session forever. */
+async function settleOwnedChangeSetsForDeletion(directory: vscode.Uri, sessionId: string): Promise<boolean> {
+  const deadline = Date.now() + SETTLE_WINDOW_MS;
+  let changed = false;
+  for (;;) {
+    let writable = false;
+    const pending: Array<[vscode.Uri, ChangeSet]> = [];
+    for (const name of await listCleanupJsonFiles(vscode.Uri.joinPath(directory, 'runtime'))) {
+      const uri = vscode.Uri.joinPath(directory, 'runtime', name);
+      const stored = await readAssociatedJson(uri);
+      const record = stored?.changeSet;
+      if (!record || typeof record !== 'object') continue;
+      const changeSet = record as ChangeSet;
+      if (changeSet.sessionId !== sessionId || !Array.isArray(changeSet.files)) continue;
+      if (changeSet.files.some(isUnsettledFile)) writable = true;
+      else if (changeSet.files.some(file => !!file && typeof file === 'object' && (file as ChangeSetFile).status === 'pending')) pending.push([uri, changeSet]);
+    }
+    if (writable && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, SETTLE_PASS_MS));
+      continue;
+    }
+    for (const [uri, changeSet] of pending) {
+      const files = changeSet.files.map(file => isUnsettledFile(file) || (file as ChangeSetFile).status === 'pending'
+        ? { ...file, status: 'discarded' as const, error: undefined } : file);
+      await writeJsonAtomic(uri, { version: 4, changeSet: { ...changeSet, files, lastApplyResult: undefined, updatedAt: new Date().toISOString() } });
+      changed = true;
+    }
+    return changed;
+  }
 }
 
 async function listCleanupJsonFiles(uri: vscode.Uri): Promise<string[]> {

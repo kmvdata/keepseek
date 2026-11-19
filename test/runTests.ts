@@ -1,4 +1,6 @@
 import './approveAllExecution.test';
+import './changeSetBatchAdmission.test';
+import './sessionStartupStorageContracts.test';
 import { after } from 'node:test';
 
 // The provider's startup schedules interval timers; a completed run must not

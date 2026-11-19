@@ -11,7 +11,18 @@ export interface SessionDeletionRecord {
 interface Participant { version: 1; pid: number; token: string; choosing: boolean; ticket: number }
 interface UseRecord { version: 1; pid: number; token: string; workspaceKey: string; sessionId: string }
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
-const missing = (error: unknown) => ['ENOENT', 'FileNotFound'].includes(String((error as { code?: string })?.code));
+/** Only a vanished path is missing. VS Code's FileNotFound also wraps
+ * permission, sharing and network failures, so treating it as absent would make
+ * an unreadable tombstone or use record look like clean history. */
+export const missing = (error: unknown) => {
+  const code = String((error as { code?: string })?.code ?? '');
+  if (code === 'ENOENT') return true;
+  if (code !== 'FileNotFound') return false;
+  const detail = (error as { cause?: unknown; errno?: unknown })?.cause ?? error;
+  const errnoCode = String((detail as { code?: unknown })?.code ?? '');
+  const errno = String((detail as { errno?: unknown })?.errno ?? (error as { errno?: unknown })?.errno ?? '');
+  return /^-?2$|^ENOENT$/.test(errno) || errnoCode === 'ENOENT';
+};
 const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
 /** Lock-wait observation. An injected hook keeps this storage module free of
@@ -71,6 +82,12 @@ export class SessionDeletionAuthority {
     return !!record;
   }
   public async isSessionIdDeleted(sessionId: string): Promise<boolean> { return !!await this.readRecord(sessionId); }
+  /** Presence only. A missing tombstone is the ordinary case for live history,
+   * so readers must not turn an unrelated I/O failure into a damaged record. */
+  public async hasRecord(sessionId: string): Promise<boolean> {
+    try { await this.verifyLocalPath(this.recordUri(sessionId)); await vscode.workspace.fs.stat(this.recordUri(sessionId)); return true; }
+    catch (error) { if (missing(error)) return false; throw error; }
+  }
   public async assertWritable(workspaceKey: string, sessionId: string): Promise<void> {
     this.validate(workspaceKey, sessionId);
     if (await this.isDeleted(workspaceKey, sessionId)) throw new Error('This session has been permanently deleted');

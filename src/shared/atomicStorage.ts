@@ -54,6 +54,10 @@ export async function writeBytesAtomic(uri: vscode.Uri, bytes: Uint8Array, optio
           // replacement already committed. Verify bytes before accepting it.
           if (targetMatches && !temporaryExists) return;
           if (!temporaryExists || attempt + 1 >= MAX_RENAME_ATTEMPTS) throw error;
+          const code = errorCode(error);
+          if (code === 'EPERM' || code === 'EACCES' || code === 'EBUSY') {
+            await new Promise<void>((resolve) => setTimeout(resolve, 2 * (attempt + 1)));
+          }
         }
       }
       throw lastError;
@@ -78,9 +82,15 @@ export async function deleteStorageUri(uri: vscode.Uri, options: { recursive?: b
   });
 }
 
+/** Another process replacing or removing a different file in the same
+ * directory can make the rename briefly fail with EPERM/EACCES/EBUSY on Windows,
+ * although this record is untouched. Owner-named records are never shared, so a
+ * retry is safe: the loop re-checks the payload before it accepts a rename that
+ * may already have committed. Anything else stays a real error. */
 function isRecoverableRenameRace(error: unknown): boolean {
   const code = errorCode(error);
-  return code === 'FileNotFound' || code === 'ENOENT' || code === 'FileExists' || code === 'EEXIST';
+  return code === 'FileNotFound' || code === 'ENOENT' || code === 'FileExists' || code === 'EEXIST'
+    || code === 'EPERM' || code === 'EACCES' || code === 'EBUSY';
 }
 
 function isFileNotFoundError(error: unknown): boolean {
