@@ -27,7 +27,13 @@ test('every vanished-path shape is classified as an absent record', () => {
     Object.assign(new Error(vscodeGeneric), { code: 'Unknown', name: 'EntryNotFound (FileSystemError)' }),
     // VS Code's current wrapper names the entry and carries the node error as cause.
     Object.assign(new Error(`EntryNotFound (FileSystemError): ${TOMBSTONE}`), { cause: new Error(bare) }),
-    Object.assign(new Error('EntryNotFound (FileSystemError)'), { name: 'EntryNotFound (FileSystemError)', cause: { code: 'ENOENT', message: bare } })
+    Object.assign(new Error('EntryNotFound (FileSystemError)'), { name: 'EntryNotFound (FileSystemError)', cause: { code: 'ENOENT', message: bare } }),
+    // The shape that actually shipped the bug: code FileNotFound, the node ENOENT
+    // text only in `message`, and no `cause`/`errno`. The early return in the
+    // FileNotFound branch classified it as an unreadable record, so one absent
+    // tombstone aborted startup recovery with "ENOENT: no such file or
+    // directory, stat '...deleted/<hash>.json'".
+    Object.assign(new Error(bare), { code: 'FileNotFound', name: 'FileSystemError' })
   ];
   for (const shape of shapes) assert.equal(missing(shape), true, `absent must stay absent: ${String((shape as Error).message)}`);
 });
@@ -40,6 +46,9 @@ test('unreadable records are never classified as absent', () => {
     Object.assign(new Error(`cannot open (Error: EPERM: operation not permitted, stat '${TOMBSTONE}')`),
       { code: 'Unknown', name: 'NoPermissions (FileSystemError)' }),
     Object.assign(new Error(`EntryNotFound (FileSystemError): ${TOMBSTONE}`), { cause: new Error('EIO: i/o error') }),
+    // FileNotFound is not a licence to assume absence: without the ENOENT marker
+    // it stays an unreadable record.
+    Object.assign(new Error(`cannot stat (FileSystemError): sharing violation`), { code: 'FileNotFound', name: 'FileSystemError' }),
     new Error('access denied while reading the record')
   ];
   for (const shape of shapes) assert.equal(missing(shape), false, `unreadable must stay an error: ${String((shape as Error).message)}`);

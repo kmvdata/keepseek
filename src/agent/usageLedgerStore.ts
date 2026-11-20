@@ -164,8 +164,14 @@ export class UsageLedgerStore {
   public async current(sessionId: string) {
     const empty = () => ({ ledger: { version: 1 as const, records: [] as ProviderUsageLedgerRecord[], incomplete: false },
       stats: undefined as ChatSession['usageStats'], damagedBucketCount: 0 });
-    if (this.deletedSessions.has(sessionId) || (this.globalStorageUri && await new SessionDeletionAuthority(this.globalStorageUri).isSessionIdDeleted(sessionId))) return empty();
+    if (this.deletedSessions.has(sessionId)) return empty();
+    // A session id this process never wrote has no ledger of its own, so the
+    // tombstone probe would only add startup I/O for a brand-new conversation.
+    // Rebuild reads the local index first; the death check still runs for any
+    // session that actually has stored records.
     if (!this.indexes.has(sessionId)) await this.rebuild(sessionId);
+    if (!this.indexes.get(sessionId)?.records.size) return empty();
+    if (this.globalStorageUri && await new SessionDeletionAuthority(this.globalStorageUri).isSessionIdDeleted(sessionId)) return empty();
     return this.enqueue(sessionId, async () => {
       if (this.deletedSessions.has(sessionId)) return empty();
       const index = this.indexes.get(sessionId)!;
@@ -228,13 +234,19 @@ export class UsageLedgerStore {
     damagedBucketCount: number;
   }> {
     const records: ProviderUsageLedgerRecord[] = [];
-    if (this.deletedSessions.has(sessionId) || (this.globalStorageUri && await new SessionDeletionAuthority(this.globalStorageUri).isSessionIdDeleted(sessionId))) return { records, damagedBucketCount: 0 };
     let damagedBucketCount = 0;
     for (let bucket = 0; bucket < USAGE_LEDGER_STORE_BUCKET_COUNT; bucket += 1) {
       const stored = await this.readBucket(sessionId, bucket);
       if (stored.damaged) damagedBucketCount += 1;
       records.push(...stored.records.filter((record) => !taskId
         || record.cacheObservation?.taskId === taskId));
+    }
+    // Bucket reads already answered "is anything stored here". Asking the shared
+    // tombstone journal for a session with no stored records only adds startup
+    // I/O for the blank conversation every launch opens.
+    if (records.length && (this.deletedSessions.has(sessionId)
+      || (this.globalStorageUri && await new SessionDeletionAuthority(this.globalStorageUri).isSessionIdDeleted(sessionId)))) {
+      return { records: [], damagedBucketCount: 0 };
     }
     records.sort(compareRecords);
     return { records, damagedBucketCount };

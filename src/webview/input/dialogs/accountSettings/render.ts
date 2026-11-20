@@ -403,7 +403,7 @@ export const accountSettingsRenderFragment: WebviewFragment = {
       function renderAccountSettings() {
         var account = getSettingsActiveAccount();
         var operationBusy = Boolean(settingsDialogBusyAction);
-        var runBusy = !canChangeContext() || isModelSelectionLocked();
+        var runBusy = !accountSettingsWritable();
         var controlsDisabled = operationBusy || runBusy;
         if (settingsDialog) {
           settingsDialog.setAttribute('aria-busy', operationBusy ? 'true' : 'false');

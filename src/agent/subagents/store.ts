@@ -113,10 +113,17 @@ export class SubagentStore {
   public async readSummaries(parentSessionId: string): Promise<{ activities: SubagentActivity[];
     summaries: import('../../shared/types').SubagentRunUsageSummary[]; incomplete: boolean }> {
     const result = { activities: [] as SubagentActivity[], summaries: [] as import('../../shared/types').SubagentRunUsageSummary[], incomplete: false };
-    if (await this.isDeleted(parentSessionId)) return result;
+    if (!isSafeId(parentSessionId)) return result;
+    // The parent directory is the cheap, local answer to "is there anything to
+    // recover at all". A freshly opened conversation has no child directory, so
+    // startup must not reach for its tombstone before finding that out: probing
+    // `session-deletions/.../deleted/<hash>.json` for a session id generated in
+    // memory this launch is pointless I/O, and one misread of that absent record
+    // used to abort the whole safety-recovery stage.
     let files: [string, vscode.FileType][];
     try { files = await vscode.workspace.fs.readDirectory(this.getParentDirectory(parentSessionId)); }
     catch (error) { result.incomplete = !isMissing(error); return result; }
+    if (await this.isDeleted(parentSessionId)) return result;
     const ids = new Set(files.flatMap(([name, type]) => type === vscode.FileType.File
       && /\.(state|activity)\.json$/u.test(name) ? [name.replace(/\.(state|activity)\.json$/u, '')] : []));
     for (const id of ids) {

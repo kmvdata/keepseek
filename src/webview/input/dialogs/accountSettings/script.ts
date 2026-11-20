@@ -309,8 +309,19 @@ export const accountSettingsHelpersFragment: WebviewFragment = {
         settingsDialogStatus.classList.toggle('hidden', !message);
       }
 
+      /** Editing a locally stored model source is host-side bookkeeping: it sends
+       * no Provider request and starts no task, so it must not inherit the
+       * conversation readiness gate. Keeping it behind canChangeContext() made a
+       * failed startup recovery a permanent deadlock: add-account was disabled
+       * *because* no account existed, and no account could be added until the
+       * gate cleared. Only real concurrency (a running task, a pending submit or
+       * an in-flight set-default transaction) may block it. */
+      function accountSettingsWritable() {
+        return !pendingSubmission && !state.isBusy && !isBackgroundActive() && !isModelSelectionLocked();
+      }
+
       function blockAccountSettingsWhileRunBusy() {
-        if (canChangeContext() && !isModelSelectionLocked()) { return false; }
+        if (accountSettingsWritable()) { return false; }
         settingsRunBusyStatusVisible = true;
         setSettingsDialogStatus(t(isModelSelectionLocked()
           ? 'modelSelectionLockedByBackground'

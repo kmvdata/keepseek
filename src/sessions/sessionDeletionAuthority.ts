@@ -17,22 +17,24 @@ const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 export const missing = (error: unknown) => {
   const code = String((error as { code?: string })?.code ?? '');
   if (code === 'ENOENT') return true;
-  if (code === 'FileNotFound') {
-    const detail = (error as { cause?: unknown; errno?: unknown })?.cause ?? error;
-    const errnoCode = String((detail as { code?: unknown })?.code ?? '');
-    const errno = String((detail as { errno?: unknown })?.errno ?? (error as { errno?: unknown })?.errno ?? '');
-    return /^-?2$|^ENOENT$/.test(errno) || errnoCode === 'ENOENT';
-  }
+  // VS Code's FileNotFound wraps several distinct conditions, so its code alone
+  // proves nothing either way: only the ENOENT marker does. Returning early here
+  // was the reported bug — a FileNotFound whose message carried
+  // "ENOENT: no such file or directory, stat '<tombstone>'" with no `cause` and
+  // no `errno` (the common shape) fell through to `false`, so one absent
+  // tombstone aborted whole-history recovery and disabled the composer.
+  const detail = (error as { cause?: unknown; errno?: unknown })?.cause ?? error;
+  const errnoCode = String((detail as { code?: unknown })?.code ?? '');
+  const errno = String((detail as { errno?: unknown })?.errno ?? (error as { errno?: unknown })?.errno ?? '');
+  if (code === 'FileNotFound' && (/^-?2$|^ENOENT$/u.test(errno) || errnoCode === 'ENOENT')) return true;
   // The node FileSystemProvider implementation, which backs `file:` storage on
   // every desktop host, rethrows raw node errors without `code`: a missing path
   // is then described only by its message. Startup probes a tombstone for every
   // listed session, so an ordinary absent record must stay "not deleted".
   // The ENOENT marker is matched anywhere in the message or its cause chain:
   // VS Code wraps it as "cannot be found (Error: ENOENT: ...)" or as
-  // "EntryNotFound (FileSystemError): ENOENT: ...", and any wrapper that was not
-  // enumerated here turned one absent tombstone into a fatal whole-history load
-  // failure that locked the composer. Only a vanished path is absent; a
-  // permission or sharing failure without the marker stays an error.
+  // "EntryNotFound (FileSystemError): ENOENT: ...". Only a vanished path is
+  // absent; a permission or sharing failure without the marker stays an error.
   return /ENOENT: no such file or directory,/u.test(describeErrorChain(error));
 };
 /** Message plus cause chain of an I/O failure, as VS Code and node report it. */

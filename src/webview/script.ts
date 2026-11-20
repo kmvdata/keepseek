@@ -166,6 +166,15 @@ export function getScript(): string {
         : state.startup?.interactiveReady === true && !state.isBusy);
     }
 
+    /** The catalog finished loading and is simply empty. This is the expected
+     * first-run state, not a fault: it is fixed by adding an account, so the
+     * status must say that instead of waiting forever on "Preparing model…".
+     * Display-only — it never gates submission. */
+    function hasNoModelSource() {
+      return state.commandSettingsReadiness?.mainModel === 'ready'
+        && Array.isArray(state.models) && state.models.length === 0;
+    }
+
     function canNavigateSessions() {
       var interaction = currentInteraction();
       return !pendingSubmission && (interaction ? interaction.canNavigate === true : !state.isBusy && !isBackgroundActive());
@@ -1905,7 +1914,7 @@ ${conversationsSessionListFragment.source}
       if (interactionRetry) interactionRetry.classList.toggle('hidden', phase !== 'failed');
       if (interaction && phase !== 'running') {
         stopAgentStatusRotation(); agentStatusRotationKey = ''; reconnectStatusActive = false;
-        var waitingKey = interaction.waitingReason === 'model' ? 'startupLoadingModel'
+        var waitingKey = interaction.waitingReason === 'model' ? (hasNoModelSource() ? 'noModelSourceConfigured' : 'startupLoadingModel')
           : interaction.waitingReason === 'session' ? 'startupLoadingSessions'
           : interaction.waitingReason === 'recovery' ? 'startupRecoveringSession'
           : interaction.waitingReason === 'context' ? 'startupLoadingRequestContext'

@@ -305,8 +305,15 @@ export class ChangeSetStore {
 
 
   public async loadSession(sessionId: string): Promise<void> {
-    if (!sessionId || await new SessionDeletionAuthority(this.globalStorageUri).isSessionIdDeleted(sessionId) || this.loadedSessionIds.has(sessionId)) return;
+    if (!sessionId || this.loadedSessionIds.has(sessionId)) return;
     const entries = this.storageIndex.entries.filter((entry) => entry.sessionId === sessionId);
+    // Startup opens a brand-new conversation, which has no stored ChangeSet and
+    // therefore cannot have been deleted. Probing its tombstone first meant every
+    // launch read `session-deletions/.../deleted/<hash>.json` for a session id
+    // generated in memory this launch: pointless I/O, and one misread of that
+    // absent record aborted all history recovery. Only a session that actually
+    // references stored state is worth a tombstone check.
+    if (entries.length && await new SessionDeletionAuthority(this.globalStorageUri).isSessionIdDeleted(sessionId)) return;
     for (const entry of entries) {
       const value = await readJsonFile(entry.kind === 'runtime'
         ? vscode.Uri.joinPath(this.runtimeUri, fileNameForId(entry.id))

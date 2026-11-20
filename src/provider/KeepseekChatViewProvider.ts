@@ -417,6 +417,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private sessionLoadFailure?: string;
   /** Cause of a failed project-context (Skills/instructions) load at startup. */
   private runContextFailure?: string;
+  /** Cause of a failed safety-recovery store load. Without it a startup-error
+   * banner can only say "reload the window", which is not actionable. */
+  private safetyRecoveryFailure?: string;
   private historySessionLoadTimeoutMs = HISTORY_SESSION_LOAD_TIMEOUT_MS;
   private readonly usageDisplayReadiness = new Map<string, 'loading' | 'ready' | 'incomplete'>();
   private pendingSubmissionIds?: Set<string>;
@@ -503,6 +506,16 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
    * whenever a stage recorded one, instead of a bare reload prompt. */
   private startupFailureText(): string {
     const retry = this.language === 'en' ? 'Reload the window to retry.' : '请重新加载窗口重试。';
+    // Safety recovery now runs alongside history/project context, so name
+    // whichever stage recorded a cause instead of always blaming project context.
+    const safety = this.safetyRecoveryFailure?.trim();
+    if (safety) {
+      const headline = this.language === 'en' ? 'Safety recovery failed' : '操作记录恢复失败';
+      const consequence = this.language === 'en'
+        ? 'Model source editing stays available; file changes and commands are disabled until recovery succeeds.'
+        : '模型来源仍可编辑；在恢复成功前，文件修改与命令执行保持禁用。';
+      return headline + ': ' + safety + ' ' + retry + ' ' + consequence;
+    }
     const cause = this.runContextFailure?.trim();
     const headline = this.language === 'en' ? 'Project context failed to load' : '项目上下文加载失败';
     return cause ? headline + ': ' + cause + ' ' + retry : retry;
@@ -7222,16 +7235,27 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       const safetyTask = (async () => {
         const results = await Promise.allSettled([changeSetTask, draftRunTask]);
         let ready = results.every((result) => result.status === 'fulfilled');
+        // Name what actually failed: a bare reload prompt leaves a storage fault
+        // indistinguishable from a transient one, and it was the only thing the
+        // window showed while the account editor was gated behind this flag.
+        const firstRejection = results.find((result) => result.status === 'rejected');
+        this.safetyRecoveryFailure = firstRejection && firstRejection.status === 'rejected'
+          ? getErrorMessage(firstRejection.reason) : undefined;
         if (ready) {
           const sessionResults = await Promise.allSettled([
             this.changeSets.loadSession?.(this.sessionStore.activeSessionId),
             this.draftRuns.loadSession?.(this.sessionStore.activeSessionId)
           ]);
           ready = sessionResults.every((result) => result.status === 'fulfilled');
+          const sessionRejection = sessionResults.find((result) => result.status === 'rejected');
+          if (sessionRejection && sessionRejection.status === 'rejected') {
+            this.safetyRecoveryFailure = getErrorMessage(sessionRejection.reason);
+          }
           if (ready) {
             try { await this.recoverHistoryTruncation(this.sessionStore.getActiveSession()); }
             catch (error) {
               ready = false;
+              this.safetyRecoveryFailure = getErrorMessage(error);
               vscode.window.showErrorMessage(this.t('runStorageFailed') + ': ' + getErrorMessage(error));
             }
           }
