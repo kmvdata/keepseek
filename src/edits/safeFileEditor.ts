@@ -676,12 +676,20 @@ function configuredTextPatchLimits() {
   };
 }
 
+/** Only a vanished path is "missing". A FileNotFound code also wraps
+ * permission and sharing failures, so the ENOENT marker is matched as well as
+ * the code. Local reads hash through node (`ENOENT: ... open`), whose error
+ * carries no `code` once the FileSystemProvider rethrows it, so the marker is
+ * what makes a deleted-or-never-created target classify as absent instead of
+ * aborting every apply of that draft. */
 function isFileNotFoundError(error: unknown): boolean {
   if (error instanceof vscode.FileSystemError) return error.code === 'FileNotFound';
   const code = error && typeof error === 'object' && 'code' in error
     ? String((error as { code?: unknown }).code ?? '')
     : '';
-  return code === 'ENOENT' || code === 'FileNotFound';
+  if (code === 'ENOENT' || code === 'FileNotFound') return true;
+  const message = String((error as { message?: unknown })?.message ?? '');
+  return /ENOENT: no such file or directory,/u.test(message);
 }
 
 function validCheckpointIdentity(hash: string | undefined, sizeBytes: number | undefined): boolean {

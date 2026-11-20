@@ -2,11 +2,11 @@
 
 KeepSeek 是 VS Code 侧边栏编程 Agent，支持多模型/协议、项目上下文、只读工具、隔离子代理及经审批的文件修改和命令执行。
 
-本文件是仓库内 AI/维护者的高优先级约定，须低于默认 4000-token 项目指令预算。定位从 `doc/README.md` → `doc/keepseek-code-architecture.md`；源码冲突先核实，不凭旧文档猜测。
+本文件是仓库内 AI/维护者的高优先级约定，须低于默认 4000-token 项目指令预算。仓库当前不含 `doc/` 目录；架构问题以源码、相邻模块和测试为准，不凭旧文档猜测。
 
 ## 1. 开始工作
 
-1. 先读本文件，再按任务阅读目标源码、相邻模块和测试；架构问题查 `doc/keepseek-code-architecture.md`。
+1. 先读本文件，再按任务阅读目标源码、相邻模块和测试。
 2. 修改前用 `rg` 找全类型、消息、工具名和持久化字段引用；按“改动路由”确认影响面。
 3. 保留用户改动，不重写无关文件，不用破坏性 Git 命令。实现最小完整变更，补齐当前协议 normalize/recovery 和测试。
 4. 涉及请求字节、副作用、审批或恢复时，先明确不变式，再动代码。
@@ -28,7 +28,7 @@ bun run package:market
 
 ## 存储初始基线
 
-0.5.2 视为初始版本。扩展身份为 `keepseek.keepseek`（发布者 `keepseek`），磁盘根为宿主原生应用数据目录下的 `com.kmvdata.keepseek`，所有 Store 必须共用同一 `file:` URI。不读取、不迁移旧扩展、旧账号、旧配置或旧协议数据；不要新增 fallback、双写或迁移桥。只支持当前格式，保留当前原子提交、跨进程锁、损坏校验、删除墓碑和中断恢复。格式版本号与发布版本独立，详见 `doc/keepseek-storage-baseline.md`。
+0.5.2 视为初始版本。扩展身份为 `keepseek.keepseek`（发布者 `keepseek`），磁盘根为宿主原生应用数据目录下的 `com.kmvdata.keepseek`，所有 Store 必须共用同一 `file:` URI。不读取、不迁移旧扩展、旧账号、旧配置或旧协议数据；不要新增 fallback、双写或迁移桥。只支持当前格式，保留当前原子提交、跨进程锁、损坏校验、删除墓碑和中断恢复。格式版本号与发布版本独立。加载失败一律降级：历史不可用时直接以空会话启动，不阻塞输入。损坏数据只隔离、不删除——无法解码的 Store 文件移入 `session-quarantine/v1/`，加载时跳过并记录原因；仅隔离批次创建超过 7 天时由后台清理删除。I/O 失败（EACCES/EBUSY/ENOENT/超时等）绝不视为损坏。
 
 ## 2. 当前代码分层
 
@@ -98,7 +98,7 @@ test/                  按行为契约组织的回归测试
 - 优先级：KeepSeek 核心安全 > 当前用户请求 > 全局与任务 root→cwd 指令 > Skills。Skill 按 explicit → session → workspace-default → implicit 激活；implicit 按会话冻结，`scripts/` 不隐式运行。
 - 外部文件/目录以精确 `uri.toString()` 授权；不可读内容不得绕过守卫。旧项目配置不扫描、不迁移；保留历史会话审计和恢复。
 - Webview → Host 消息只在 `provider/webviewMessages.ts` 定义；Host 主动消息不加入该联合类型。保持 DOM id、type 和当前引用语法稳定。
-- 交互能力只由 `provider/interactionState.ts` 派生；异步拥有者须在首个 await 前取得带会话身份的预占，只有持有者可完成/交接。持续提示随操作终态同次清除；提交接受须有正文持久化屏障。后台功能须声明能力、预算、durability 与失败/恢复依赖，详见 [交互生命周期](doc/keepseek-interaction-lifecycle.md)。
+- 交互能力只由 `provider/interactionState.ts` 派生；异步拥有者须在首个 await 前取得带会话身份的预占，只有持有者可完成/交接。持续提示随操作终态同次清除；提交接受须有正文持久化屏障。后台功能须声明能力、预算、durability 与失败/恢复依赖。
 - `webview/input/composition.ts` 的 fragment 顺序是运行时契约；样式、模板、行为放各自 fragment。共享编辑器快捷键只放 `richTextShortcuts.ts`。
 - 共享文件只读：`.agents/skills`、`~/.agents/skills`、`CODEX_HOME` 配置/指令；任务作用域冻结，变更仅在受控刷新边界生效。标准策略不扩大权限，版本差异见共享配置文档。
 - 新持久化字段必须有当前协议校验与恢复；优先 `writeJsonAtomic()`，业务层不拼 globalStorage 版本路径。
@@ -130,11 +130,4 @@ test/                  按行为契约组织的回归测试
 
 ## 6. 按需阅读
 
-- `doc/README.md`：当前专题、分维度版本权威、历史证据边界
-
-- `doc/keepseek-code-architecture.md`：目录、依赖、调用链、持久化与改动定位
-- `doc/keepseek-agent-runtime-workflow.md`：Agent 运行时、长任务与恢复
-- `doc/cache_keepseek.md`：缓存前缀、投影、压缩与观测
-- `doc/keepseek-api-payload-reference.md`：三协议真实 payload
-- `doc/keepseek-file-reference-spec.md`：引用语法
 - `SUBAGENTS.md`：子代理架构、安全、恢复与用量

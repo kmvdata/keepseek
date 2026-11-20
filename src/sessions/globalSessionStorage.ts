@@ -17,6 +17,7 @@ import { ToolEvidenceStore } from '../agent/evidence/store';
 import { SessionObjectStore } from './sessionObjectStore';
 import { normalizeSessionTitle } from './sessionTitle';
 import { SessionDeletionAuthority } from './sessionDeletionAuthority';
+import { SessionQuarantine } from './sessionQuarantine';
 import { assertManagedStoragePath } from './sessionAssociatedPersistence';
 import type { HistoryCleanupCatalogEntry, HistoryCleanupTargetResult } from './sessionHistoryCleanup';
 import { HistoryCleanupFailure, type HistoryCleanupIssueCode, type HistoryCleanupPhase } from './historyCleanupErrors';
@@ -109,6 +110,8 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
   private readonly workspacesUri: vscode.Uri;
   private readonly evidenceStore: ToolEvidenceStore;
   public readonly deletionAuthority: SessionDeletionAuthority;
+  /** Corrupted store files are moved here, never deleted on the load path. */
+  public readonly quarantine: SessionQuarantine;
   private readonly objectStores = new Map<string, SessionObjectStore>();
 
   private objects(uri: vscode.Uri): SessionObjectStore {
@@ -123,6 +126,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     private readonly startupTrace?: StartupPerformanceTrace
   ) {
     this.deletionAuthority = new SessionDeletionAuthority(globalStorageUri);
+    this.quarantine = new SessionQuarantine(globalStorageUri);
     this.rootUri = vscode.Uri.joinPath(globalStorageUri, SESSION_STORAGE_ROOT_DIR, SESSION_STORAGE_VERSION_DIR);
     this.manifestUri = vscode.Uri.joinPath(this.rootUri, SESSION_STORAGE_MANIFEST_FILE);
     this.workspacesUri = vscode.Uri.joinPath(this.rootUri, SESSION_STORAGE_WORKSPACES_DIR);
@@ -452,7 +456,17 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     const value = await this.readJsonFile(uri, 'session shard');
     if (!isRecord(value) || value.version !== 4 || typeof value.sessionId !== 'string') return undefined;
     if (await this.isSessionDeleted(index.workspaceKey, value.sessionId)) return undefined;
-    const stored = await this.objects(uri).load(value);
+    let stored: unknown;
+    try {
+      stored = await this.objects(uri).load(value);
+    } catch (error) {
+      // An integrity mismatch is never transient: the manifest and its object
+      // graph disagree, so this shard cannot be decoded by retrying. Keep the
+      // bytes aside and let every other conversation load normally.
+      console.warn('KeepSeek: session shard failed its integrity check; quarantining it.', error);
+      await this.quarantine.quarantine(uri, 'corrupt_session_shard');
+      return undefined;
+    }
     if (!isRecord(stored)) return undefined;
     const scope = { key: index.workspaceKey, name: index.workspaceName, folderUris: index.workspaceFolders };
     // The shard is written before the index; attest a completed title against
@@ -855,13 +869,28 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     } catch (error) { if (isFileNotFoundError(error)) return []; throw error; }
   }
 
+  /** A store file that cannot be used is left unread and the caller continues.
+   *
+   * Only a *decode* failure (bytes present but not valid JSON) is corruption,
+   * and even that is quarantined rather than deleted: the bytes are moved aside
+   * and the window loads without them. An I/O failure is never treated as
+   * corruption, because a dropped share, a writer mid-rename or a scanner lock
+   * all fail the same way while the file on disk is intact. */
   private async readJsonFile(uri: vscode.Uri, description: string): Promise<unknown | undefined> {
+    let bytes: Uint8Array;
     try {
-      const bytes = await vscode.workspace.fs.readFile(uri);
-      this.startupTrace?.mark('storage-read', { bytesRead: bytes.byteLength, entries: 1 });
-      return JSON.parse(new TextDecoder().decode(bytes));
+      bytes = await vscode.workspace.fs.readFile(uri);
     } catch (error) {
+      // Unreadable is not corrupt: keep the file and keep loading the rest.
       if (!isFileNotFoundError(error)) console.warn(`KeepSeek: failed to read ${description}; ignoring it.`, error);
+      return undefined;
+    }
+    this.startupTrace?.mark('storage-read', { bytesRead: bytes.byteLength, entries: 1 });
+    try {
+      return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    } catch (error) {
+      console.warn(`KeepSeek: ${description} is not readable JSON; quarantining it.`, error);
+      await this.quarantine.quarantine(uri, `corrupt_${description.replace(/[^a-z0-9]+/giu, '_')}`);
       return undefined;
     }
   }
@@ -1070,6 +1099,13 @@ function getIsoTimestamp(value: string): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+/** An absent path, in every shape the host reports it. The `file:` provider
+ * rethrows raw node errors without `code`, so the stat of a lock or shard that
+ * has never existed ("ENOENT: no such file or directory") must be recognized
+ * by its message too. Cleanup relies on that: an unreadable path is a real
+ * fault, but a never-created one is the ordinary state and must not abort the
+ * removal before its tombstone is committed. */
 function isFileNotFoundError(error: unknown): boolean {
-  return isRecord(error) && (error.code === 'FileNotFound' || error.code === 'ENOENT');
+  if (isRecord(error) && (error.code === 'FileNotFound' || error.code === 'ENOENT')) return true;
+  return /ENOENT: no such file or directory,/u.test(String((error as { message?: unknown })?.message ?? ''));
 }

@@ -4,6 +4,7 @@ import type { AgentRequest, AgentTaskBudgetAuthority } from '../shared/types';
 import { createHistoryCleanupController } from './historyCleanupController';
 import { SessionUseLifetime } from './sessionUseLifetime';
 import { SessionAssociatedDataCleanup } from '../sessions/sessionAssociatedDataCleanup';
+import { SessionQuarantine } from '../sessions/sessionQuarantine';
 import type { SessionHistoryCleanupService, HistoryCleanupTarget, HistoryCleanupPreview, HistoryCleanupState } from '../sessions/sessionHistoryCleanup';
 import { classifyHistoryCleanupError, localizeHistoryCleanupIssue, HistoryCleanupFailure,
   type HistoryCleanupIssue, type HistoryCleanupPhase } from '../sessions/historyCleanupErrors';
@@ -414,6 +415,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private interactionFailure?: { sessionId: string; message: string };
   /** Cause of a rejected session-store startup, surfaced with the retry hint. */
   private sessionLoadFailure?: string;
+  /** Cause of a failed project-context (Skills/instructions) load at startup. */
+  private runContextFailure?: string;
   private historySessionLoadTimeoutMs = HISTORY_SESSION_LOAD_TIMEOUT_MS;
   private readonly usageDisplayReadiness = new Map<string, 'loading' | 'ready' | 'incomplete'>();
   private pendingSubmissionIds?: Set<string>;
@@ -492,7 +495,17 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       failure: this.interactionFailure && (!sessionId || this.interactionFailure.sessionId === sessionId) ? this.interactionFailure.message
         : this.commandSettingsReadiness?.executionMode === 'error' ? this.sessionLoadFailureText()
         : this.runContextRefreshError ? this.t('runContextRefreshFailed', { message: getErrorMessage(this.runContextRefreshError) })
-        : this.getStartupState().phase === 'startup-error' ? (this.language === 'en' ? 'Reload the window to retry initialization.' : '请重新加载窗口以重试初始化。') : undefined });
+        : this.getStartupState().phase === 'startup-error' ? this.startupFailureText() : undefined });
+  }
+
+  /** A startup stage failed. History and the composer may both still work, so
+   * name the part that broke and keep the retry action. The cause is included
+   * whenever a stage recorded one, instead of a bare reload prompt. */
+  private startupFailureText(): string {
+    const retry = this.language === 'en' ? 'Reload the window to retry.' : '请重新加载窗口重试。';
+    const cause = this.runContextFailure?.trim();
+    const headline = this.language === 'en' ? 'Project context failed to load' : '项目上下文加载失败';
+    return cause ? headline + ': ' + cause + ' ' + retry : retry;
   }
 
   /** Session loading failed: keep the reload action, but never drop the cause.
@@ -7286,10 +7299,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
             () => this.refreshSessionSkills(startupSession)
           );
           if (ownsStartupContext()) this.runContextReadiness = 'ready';
-        } catch {
+        } catch (error) {
           if (ownsStartupContext()) {
             this.runContextReadiness = 'error';
-            console.warn('[KeepSeek] startup_stage', { stage: 'project-context', event: 'failed' });
+            // A failed project-context load is not a broken window, but its cause used
+            // to be discarded: keep it so the reported failure is actionable.
+            this.runContextFailure = getErrorMessage(error);
+            console.warn('[KeepSeek] startup_stage', { stage: 'project-context', event: 'failed', message: this.runContextFailure });
           }
         } finally {
           if (ownsStartupContext()) {
@@ -7320,6 +7336,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       // Cleanup is deliberately after first full state and fail-closed store
       // recovery so it cannot remove sessions referenced by pending work.
       if (this.approvalDataReady) void this.cleanupExpiredSessions().catch(() => undefined);
+      // Quarantined corruption is kept for a week so it can be reported, then removed.
+      // This runs off the startup path and never gates the composer.
+      if (this.approvalDataReady) void this.sweepQuarantinedStorage();
       void this.refreshBalance();
       void Promise.all([subagentTask, validationTask]);
     })().catch((error: unknown) => {
@@ -7360,6 +7379,18 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.runContextReadiness = 'deferred';
     this.updateRequestContextReadiness();
     return true;
+  }
+
+  /** Aged-out quarantine batches are removed in the background. Nothing here
+   * touches a live store; a failure only leaves the batch in place. */
+  private async sweepQuarantinedStorage(): Promise<void> {
+    try {
+      const removed = await new SessionQuarantine(this.globalStorageUri).sweepExpired();
+      if (removed) console.info('[KeepSeek] storage_quarantine_swept', { batches: removed });
+    } catch (error) {
+      console.warn('[KeepSeek] storage_quarantine_sweep_failed', {
+        message: String((error as { message?: unknown })?.message ?? error) });
+    }
   }
 
   private getStartupState(): {

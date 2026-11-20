@@ -2,6 +2,8 @@ import './approveAllExecution.test';
 import './changeSetBatchAdmission.test';
 import './sessionStartupStorageContracts.test';
 import './sessionMissingRecordShapes.test';
+import './startupContextFailure.test';
+import './sessionQuarantine.test';
 import { after } from 'node:test';
 
 // The provider's startup schedules interval timers; a completed run must not
