@@ -995,16 +995,6 @@ ormal while another session is ahead of it in the
     }
     return buildQueueView({ queue, titles });
   }
-  public async moveSessionInQueue(sessionId: string, targetIndex: number): Promise<ProjectSessionQueue | undefined> {
-    if (!this.projectQueue) return undefined;
-    return this.projectQueue.mutate(
-      this.workspaceScope.key,
-      this.queueSeeds(),
-      (queue) => moveToIndex(queue, sessionId, targetIndex),
-      new Date().toISOString()
-    );
-  }
-
   /**
    * Move a session to the tail so the next queued session becomes the head.
    * Used when the user switches a normal session back to plan.

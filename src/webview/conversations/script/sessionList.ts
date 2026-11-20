@@ -75,7 +75,6 @@ export const conversationsSessionListFragment: WebviewFragment = {
       // not changed, including full Host snapshots after Webview ready.
       var renderKey = getSessionMenuRenderKey(sessions);
       if (renderKey === sessionMenuRenderKey) {
-        syncSessionTitleRefreshButtons();
         return;
       }
       sessionMenuRenderKey = renderKey;
@@ -240,48 +239,10 @@ export const conversationsSessionListFragment: WebviewFragment = {
           var queueBadge = renderQueueBadge(session.id);
           if (queueBadge) {
             meta.append(document.createTextNode(' '), queueBadge);
-            var queueEntry = queueEntryFor(session.id);
-            var moveUp = document.createElement('button');
-            moveUp.type = 'button';
-            moveUp.className = 'session-queue-move';
-            moveUp.dataset.sessionAction = 'queueMove';
-            moveUp.dataset.sessionId = session.id;
-            moveUp.dataset.queueDirection = 'up';
-            moveUp.disabled = !queueEntry || !queueEntry.canMoveUp;
-            moveUp.setAttribute('aria-label', t('queueMoveUp'));
-            moveUp.title = t('queueMoveUp');
-            moveUp.textContent = '↑';
-            var moveDown = moveUp.cloneNode(false);
-            moveDown.dataset.queueDirection = 'down';
-            moveDown.disabled = !queueEntry || !queueEntry.canMoveDown;
-            moveDown.setAttribute('aria-label', t('queueMoveDown'));
-            moveDown.title = t('queueMoveDown');
-            moveDown.textContent = '↓';
-            meta.append(moveUp, moveDown);
-            [moveUp, moveDown].forEach(function(moveButton) {
-              moveButton.addEventListener('click', function(event) {
-                event.preventDefault();
-                event.stopPropagation();
-                var target = event.currentTarget;
-                if (!target || target.disabled) return;
-                vscode.postMessage({
-                  type: 'moveSessionInQueue',
-                  sessionId: target.dataset.sessionId || '',
-                  direction: target.dataset.queueDirection === 'down' ? 'down' : 'up'
-                });
-              });
-            });
           }
         }
 
         main.append(itemTitle, meta);
-        if (currentTab) {
-          var titleResult = document.createElement('span');
-          titleResult.className = 'session-menu-item-meta session-menu-title-result hidden';
-          titleResult.setAttribute('role', 'status');
-          titleResult.setAttribute('aria-live', 'polite');
-          main.append(titleResult);
-        }
         if (sessionMultiSelectMode) {
           var checkbox = document.createElement('input');
           checkbox.type = 'checkbox';
@@ -315,14 +276,6 @@ export const conversationsSessionListFragment: WebviewFragment = {
         }
         item.append(main);
         if (currentTab) {
-          var refreshButton = document.createElement('button');
-          refreshButton.type = 'button';
-          refreshButton.className = 'session-menu-refresh';
-          refreshButton.dataset.sessionAction = 'regenerateTitle';
-          refreshButton.dataset.sessionId = session.id;
-          refreshButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5"/><path d="M4 17v-5h5"/><path d="M6.1 7a7 7 0 0 1 11.6-2.2L20 7M4 17l2.3 2.2A7 7 0 0 0 17.9 17"/></svg>';
-          item.append(refreshButton);
-          syncSessionTitleRefreshButton(refreshButton);
           var renameButton = document.createElement('button');
           renameButton.type = 'button';
           renameButton.className = 'session-menu-rename';
@@ -498,10 +451,6 @@ export const conversationsSessionListFragment: WebviewFragment = {
     function handleSessionMenuAction(button) {
       if (button.disabled) return;
       var action = button.dataset.sessionAction || '';
-      if (action === 'regenerateTitle') {
-        requestSessionTitleRegeneration(button.dataset.sessionId || '');
-        return;
-      }
       if (action === 'switchWorkspaceTab') {
         switchSessionWorkspace(button.dataset.workspaceTab || 'current');
         return;
@@ -616,13 +565,6 @@ export const conversationsSessionListFragment: WebviewFragment = {
         return;
       }
       input.dataset.originalTitle = title;
-      var pendingTitleRequest = state.sessionTitleRegenerations?.[sessionId];
-      if (pendingTitleRequest) {
-        if (!state.retiredSessionTitleRegenerations) state.retiredSessionTitleRegenerations = {};
-        state.retiredSessionTitleRegenerations[sessionId + ':' + pendingTitleRequest] = true;
-        delete state.sessionTitleRegenerations[sessionId];
-      }
-      delete state.sessionTitleRegenerationResults?.[sessionId];
       updateLocalSessionTitle(sessionId, title);
       renderCurrentSessionTitle();
       vscode.postMessage({ type: 'renameSession', sessionId: sessionId, title: title });

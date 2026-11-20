@@ -169,7 +169,6 @@ const TASK_APPROVAL_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> =
 
 const SESSION_TITLE_REFRESH_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> = {
   'zh-CN': {
-    titleRefreshEditing: '请先结束标题编辑。',
     titleRefreshUnavailable: '暂时无法刷新标题。',
     titleRefreshReason_loading_sessions: '会话尚未加载完成。',
     titleRefreshReason_recovering: '正在恢复会话记录，请稍候。',
@@ -197,7 +196,6 @@ const SESSION_TITLE_REFRESH_TRANSLATIONS: Record<KeepseekLanguage, TranslationCa
     titleRefreshOutcome_model_unavailable: '标题模型不可用，请检查来源和凭据。',
   },
   en: {
-    titleRefreshEditing: 'Finish editing this title first.',
     titleRefreshUnavailable: 'Title refresh is unavailable.',
     titleRefreshReason_loading_sessions: 'Conversations are still loading.',
     titleRefreshReason_recovering: 'Restoring session records. Please wait.',
@@ -239,8 +237,6 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
     executionModePendingPlan: '计划等待你的确认；切换为常规将退出计划且不会执行。',
     queueHeadHint: '项目队列首位：只有该会话可以修改文件或执行命令。',
     queuePositionHint: '队列第 {position} 位；获得写权限后可与首位交接。',
-    queueMoveUp: '在队列中上移',
-    queueMoveDown: '在队列中下移',
     planConfirmationTitle: '实施计划待确认',
     planPendingConfirmation: '只有你的操作能让此计划进入实施阶段。',
     planStartExecution: '开始执行',
@@ -1247,8 +1243,6 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
     favoriteSession: '关注会话',
     unfavoriteSession: '取消关注',
     renameSessionTitle: '重命名会话',
-    regenerateSessionTitle: '重新生成会话标题',
-    regeneratingSessionTitle: '正在重建会话标题…',
     openSession: '打开会话',
     emptySession: '空会话',
     messageCount: '{count} 条消息',
@@ -1323,8 +1317,6 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
     executionModePendingPlan: 'This plan awaits your confirmation. Switching to Normal exits without executing it.',
     queueHeadHint: 'Queue head: only this session may modify files or run commands.',
     queuePositionHint: 'Queue position {position}; it can take over once the head hands off.',
-    queueMoveUp: 'Move up in queue',
-    queueMoveDown: 'Move down in queue',
     planConfirmationTitle: 'Implementation plan awaiting confirmation',
     planPendingConfirmation: 'Only your action can move this plan into implementation.',
     planStartExecution: 'Start execution',
@@ -2331,8 +2323,6 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
     favoriteSession: 'Favorite session',
     unfavoriteSession: 'Remove favorite',
     renameSessionTitle: 'Rename session',
-    regenerateSessionTitle: 'Regenerate session title',
-    regeneratingSessionTitle: 'Regenerating the session title…',
     openSession: 'Open session',
     emptySession: 'Empty session',
     messageCount: '{count} messages',

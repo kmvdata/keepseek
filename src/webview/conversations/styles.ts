@@ -123,7 +123,7 @@ export const conversationsStylesFragment: WebviewFragment = {
 
     .session-menu-item {
       display: grid;
-      grid-template-columns: 24px minmax(0, 1fr) 26px 28px;
+      grid-template-columns: 24px minmax(0, 1fr) 28px;
       align-items: center;
       gap: 6px;
       width: 100%;
@@ -138,7 +138,7 @@ export const conversationsStylesFragment: WebviewFragment = {
     }
 
     .session-menu.is-multi-select .session-menu-item {
-      grid-template-columns: 18px 24px minmax(0, 1fr) 26px 28px;
+      grid-template-columns: 18px 24px minmax(0, 1fr) 28px;
     }
 
     .session-menu-item.is-other-workspace {
@@ -226,8 +226,7 @@ export const conversationsStylesFragment: WebviewFragment = {
       color: var(--vscode-textLink-foreground);
     }
 
-    .session-menu-rename,
-    .session-menu-refresh {
+    .session-menu-rename {
       display: grid;
       place-items: center;
       width: 26px;
@@ -243,29 +242,17 @@ export const conversationsStylesFragment: WebviewFragment = {
     }
 
     .session-menu-item:hover .session-menu-rename,
-    .session-menu-item:focus-within .session-menu-rename,
-    .session-menu-item:hover .session-menu-refresh,
-    .session-menu-item:focus-within .session-menu-refresh,
-    .session-menu-refresh.is-regenerating {
+    .session-menu-item:focus-within .session-menu-rename {
       opacity: 1;
       transform: translateX(0);
     }
 
     .session-menu-rename:hover,
-    .session-menu-rename:focus-visible,
-    .session-menu-refresh:hover,
-    .session-menu-refresh:focus-visible {
+    .session-menu-rename:focus-visible {
       color: var(--vscode-textLink-foreground);
       background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
       outline: none;
     }
-
-    .session-menu-refresh:disabled { cursor: default; }
-    .session-menu-refresh.is-regenerating svg {
-      animation: session-title-refresh-spin 900ms linear infinite;
-      transform-origin: center;
-    }
-    @keyframes session-title-refresh-spin { to { transform: rotate(360deg); } }
 
     .session-menu-item-main {
       display: grid;

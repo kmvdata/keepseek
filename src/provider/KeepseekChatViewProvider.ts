@@ -1494,20 +1494,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       case 'selectSession':
         await this.selectSession(message.sessionId);
         return;
-      case 'moveSessionInQueue': {
-        // Reordering the project queue is a user action on the write position,
-        // so it must go through the store's serialized CAS path.
-        if (message.direction !== 'up' && message.direction !== 'down') return;
-        const queue = this.sessionStore.getProjectQueue?.();
-        if (!queue) return;
-        const index = queue.entries.findIndex(entry => entry.sessionId === message.sessionId);
-        if (index < 0) return;
-        const target = message.direction === 'up' ? index - 1 : index + 1;
-        if (target < 0 || target >= queue.entries.length) return;
-        await this.sessionStore.moveSessionInQueue(message.sessionId, target);
-        this.postState({ immediate: true, forceFull: true });
-        return;
-      }
       case 'toggleSessionFavorite':
         if (await this.sessionStore.toggleSessionFavorite(message.sessionId)) {
           this.postState();

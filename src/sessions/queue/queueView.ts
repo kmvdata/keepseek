@@ -15,9 +15,6 @@ export interface QueueEntryView {
   mode: SessionExecutionMode;
   isHead: boolean;
   holdingLease: boolean;
-  /** Can be moved toward the head by the user. */
-  canMoveUp: boolean;
-  canMoveDown: boolean;
   /** Session currently blocking a handoff to this entry, when any. */
   waitingFor?: string;
 }
@@ -51,8 +48,6 @@ export function buildQueueView(input: QueueViewInput): QueueView {
       mode,
       isHead: index === 0,
       holdingLease: entry.sessionId === holder,
-      canMoveUp: index > 0,
-      canMoveDown: index < queue.entries.length - 1,
       ...(holder && holder !== entry.sessionId && mode === 'normal' ? { waitingFor: holder } : {})
     };
   });

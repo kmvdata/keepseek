@@ -113,9 +113,6 @@ export function getScript(): string {
       },
       authorizedExternalReferenceUris: [],
       isBusy: false,
-      sessionTitleRegenerations: {},
-      sessionTitleRegenerationResults: {},
-      titleRegenerationCapability: { available: false, reason: 'loading_sessions' },
       agentActivity: {
         base: 'idle',
         phase: 'idle',
@@ -1305,8 +1302,6 @@ ${conversationsMenuDismissFragment.source}
             historyCleanupDeletedSessionIds.add(summary.id);
             sessionPromptDrafts.delete(summary.id);
             selectedSessionIds.delete(summary.id);
-            delete state.sessionTitleRegenerations?.[summary.id];
-            delete state.sessionTitleRegenerationResults?.[summary.id];
             if (editingSessionTitleId === summary.id) editingSessionTitleId = '';
           }
         });
@@ -1321,11 +1316,6 @@ ${conversationsMenuDismissFragment.source}
       }
       if (message.type === 'submissionResult') {
         applySubmissionResult(message);
-        return;
-      }
-      if (message.type === 'sessionTitleRegeneration') {
-        if (historyCleanupDeletedSessionIds.has(message.sessionId)) return;
-        applySessionTitleRegeneration(message);
         return;
       }
       if (message.type === 'sessionTitleUpdated') {
@@ -1382,7 +1372,6 @@ ${conversationsMenuDismissFragment.source}
             window.keepseekInputControls.render();
           }
           syncSendButtonAvailability();
-          syncSessionTitleRefreshButtons();
           return;
         }
         pendingDraftRunApprovals.clear();
