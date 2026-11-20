@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { SessionDeletionAuthority } from './sessionDeletionAuthority';
+import { describeErrorChain, SessionDeletionAuthority } from './sessionDeletionAuthority';
 import { withStorageCoordinator } from '../shared/atomicStorage';
 
 /** Shared file writers and targeted recyclers take the same short cross-process
@@ -24,9 +24,12 @@ export async function readAssociatedJson(uri: vscode.Uri): Promise<Record<string
 /** The node FileSystemProvider rethrows raw node errors without `code`, so a
  * vanished associated file is identified by its message as well as its code. */
 export function isMissingAssociatedFile(error: unknown): boolean {
-  const record = error && typeof error === 'object' ? error as { code?: unknown; message?: unknown } : {};
-  return record.code === 'ENOENT' || record.code === 'FileNotFound'
-    || /^ENOENT: no such file or directory,/u.test(String(record.message ?? ''));
+  const record = error && typeof error === 'object' ? error as { code?: unknown; message?: unknown; cause?: unknown } : {};
+  // FileNotFound also wraps permission and sharing failures, so only the ENOENT
+  // marker itself (inside the message or a nested cause) proves a vanished path.
+  // Startup probes associated stores before their layout exists, so every VS Code
+  // wrapping shape must resolve to "nothing there" instead of failing the load.
+  return record.code === 'ENOENT' || /ENOENT: no such file or directory,/u.test(describeErrorChain(error));
 }
 
 export async function deleteAssociatedUri(uri: vscode.Uri, recursive = false): Promise<void> {

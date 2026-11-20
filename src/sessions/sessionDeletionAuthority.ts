@@ -27,16 +27,24 @@ export const missing = (error: unknown) => {
   // every desktop host, rethrows raw node errors without `code`: a missing path
   // is then described only by its message. Startup probes a tombstone for every
   // listed session, so an ordinary absent record must stay "not deleted".
-  if (/^ENOENT: no such file or directory,/u.test(String((error as { message?: unknown })?.message ?? ''))) return true;
-  // VS Code's own `vscode.workspace.fs.stat` describes a vanished path as a
-  // generic "cannot be found (Error: ENOENT ...)" FileSystemError. Startup
-  // probes a tombstone for every listed session before either safety directory
-  // exists, so that common shape must stay "not deleted" too: one absent probe
-  // must never block all history. Every other FileSystemError stays an error.
-  return /ENOENT: no such file or directory,/u.test(String((error as { message?: unknown })?.message ?? ''))
-    || (/FileSystemError/u.test(String((error as { name?: unknown })?.name ?? ''))
-      && /ENOENT: no such file or directory,/u.test(String((error as { cause?: unknown })?.cause ?? '')));
+  // The ENOENT marker is matched anywhere in the message or its cause chain:
+  // VS Code wraps it as "cannot be found (Error: ENOENT: ...)" or as
+  // "EntryNotFound (FileSystemError): ENOENT: ...", and any wrapper that was not
+  // enumerated here turned one absent tombstone into a fatal whole-history load
+  // failure that locked the composer. Only a vanished path is absent; a
+  // permission or sharing failure without the marker stays an error.
+  return /ENOENT: no such file or directory,/u.test(describeErrorChain(error));
 };
+/** Message plus cause chain of an I/O failure, as VS Code and node report it. */
+export function describeErrorChain(error: unknown): string {
+  const parts: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current !== undefined && current !== null; depth += 1) {
+    parts.push(String((current as { message?: unknown })?.message ?? current));
+    current = (current as { cause?: unknown })?.cause;
+  }
+  return parts.join(' ');
+}
 const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 /** A snapshot of the gate raced another participant's write. Retried, not fatal. */
 class GateObservationRace extends Error {}
