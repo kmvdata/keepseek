@@ -29,9 +29,13 @@ function main() {
   step('Compiling TypeScript sources');
   runCompile();
 
+  // vsce's CLI always runs vscode:prepublish through npm, which cannot spawn
+  // on a UNC checkout; it exits non-zero and leaves the previous VSIX in place,
+  // so the success message below would describe stale code. pack-vsix.cjs drives
+  // vsce's programmatic pack() instead: no npm, and it fails if the package is
+  // missing its entry point or its runtime dependencies.
   step(`Packaging ${vsixName} with runtime dependencies (never --no-dependencies)`);
-  const vsce = vsceCommand();
-  run(vsce.executable, [...vsce.args, 'package', '--dependencies', '--out', vsixName]);
+  run(nodeCommand(), [path.join(root, 'scripts', 'pack-vsix.cjs')]);
 
   step(`Verifying ${vsixName} contents`);
   run(nodeCommand(), [path.join(root, 'scripts', 'verify-vsix.js'), vsixName]);
@@ -71,19 +75,6 @@ function assertDependencyInstalled(dependencyName) {
   if (!fs.existsSync(dependencyPackageJson)) {
     fail(`Runtime dependency "${dependencyName}" is not installed. Run "npm install" (or "bun install") first.`);
   }
-}
-
-// vsce is started through its entry script rather than a node_modules/.bin
-// shim: bun writes .exe launchers and npm writes .cmd ones, but a checkout
-// installed by a non-Windows tool only has POSIX symlinks, and .cmd/.bat files
-// cannot be spawned directly on Windows (CVE-2024-27980). Running the entry
-// script with the Node binary works for every installer.
-function vsceCommand() {
-  const entry = path.join(root, 'node_modules', 'vsce', 'out', 'main.js');
-  if (!fs.existsSync(entry)) {
-    fail('vsce is not installed. Run "npm install" (or "bun install") first.');
-  }
-  return { executable: nodeCommand(), args: [entry] };
 }
 
 function npmCommand() {

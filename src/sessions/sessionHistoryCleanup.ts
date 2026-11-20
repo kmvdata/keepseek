@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { deleteStorageUri, writeJsonAtomic } from '../shared/atomicStorage';
-import { assertManagedStoragePath, withAssociatedStoreGate } from './sessionAssociatedPersistence';
+import { assertManagedStoragePath, isMissingAssociatedFile, withAssociatedStoreGate } from './sessionAssociatedPersistence';
 import type { HistoryCleanupIssueCode, HistoryCleanupPhase } from './historyCleanupErrors';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -666,8 +666,11 @@ function minimalJournalRecord(record: HistoryCleanupJournalRecord): HistoryClean
     result: result ? sanitizeTargetResult(result) : undefined
   })) };
 }
+/** The `file:` provider rethrows raw node errors without `code`, so a journal
+ * file that has never been written is only identifiable by its message. The
+ * shared classifier is the single authority for that distinction. */
 function isMissingJournalFile(error: unknown): boolean {
-  return !!error && typeof error === 'object' && 'code' in error && (error.code === 'ENOENT' || error.code === 'FileNotFound');
+  return isMissingAssociatedFile(error);
 }
 function isValidTargetResult(value: unknown): value is HistoryCleanupTargetResult {
   return isRecord(value) && ['fullyDeleted', 'protected', 'skippedChanged', 'unknown', 'unavailable', 'failedBeforeCommit', 'removedPendingCleanup'].includes(String(value.status))
