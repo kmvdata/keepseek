@@ -15,15 +15,15 @@ export function getApprovalModeUserTail(mode: ApprovalMode): string {
     'Pass -a and -m separately when needed and give every -m exactly one complete message argument.'
   ].join(' ');
   return mode === 'approve-all'
-    ? '<keepseek-approval-mode>approve-all: The user selected Approve all. Propose exact immutable DraftEdits and DraftRuns. ' + validation + ' ' + git + ' The host approves and executes every required side effect immediately after the draft is created; there is no reviewer and no confirmation prompt. Because nothing checks your proposal afterwards, verify the exact target, executable, literal arguments and working directory yourself before proposing, describe each command honestly, and continue the task from the actual recorded results. Never repeat an effect whose result is already recorded, and never claim a command ran before its verified result arrives.</keepseek-approval-mode>'
-    : '<keepseek-approval-mode>ask: The user selected project-wide Ask for approval. File writes and arbitrary commands require individual user approval. ' + validation + ' Prepare pending drafts and wait for their results.</keepseek-approval-mode>';
+    ? '<keepseek-approval-mode>approve-all: The user selected Approve all. Propose exact immutable DraftEdits and DraftRuns. ' + validation + ' ' + git + ' The host applies pending drafts to the workspace after the checkpoint or run boundary and reports their real terminal state; it has no reviewer and asks no confirmation. Because nothing reviews your proposal, verify the exact target, executable, literal arguments and working directory yourself before proposing, describe each command honestly, and continue the task only from the actual recorded results. Validation runs on the on-disk workspace: while a draft of this task is still pending the host reports waiting_for_apply and starts the follow-up run after it applies the change, so never retry validation in the same run and never assume a change is applied or validated before its result arrives. Never repeat an effect whose result is already recorded, and never claim a command ran before its verified result arrives.</keepseek-approval-mode>'
+    : '<keepseek-approval-mode>ask: The user selected project-wide Ask for approval. File writes and arbitrary commands require individual user approval, and each validation run needs its own confirmation. ' + validation + ' Prepare pending drafts and wait for their results. Validation runs on the on-disk workspace: while a draft of this task is still pending the host reports waiting_for_apply and continues only after the user applies the change, so never retry validation in the same run and never assume a change is applied or validated before its result arrives.</keepseek-approval-mode>';
 }
 
 export function draftRunPreparedMessage(mode: ApprovalMode | undefined, language: 'zh-CN' | 'en'): string {
   const approval = normalizeApprovalMode(mode);
   if (language === 'en') return 'DraftRun prepared only; no process was started. ' + (approval === 'ask'
     ? 'Wait for the user to approve this execution in KeepSeek.'
-    : 'The host approves and starts this execution immediately, then reports the actual result.');
+    : 'The host starts this execution at the next run boundary without a confirmation prompt, then reports the actual result.');
   return '仅准备了 DraftRun 草稿，尚未执行。' + (approval === 'ask' ? '等待用户在 KeepSeek 中批准本次执行。'
-    : '宿主将立即批准并启动本次执行，随后如实回报实际结果。');
+    : '宿主会在下一个运行边界无确认地启动本次执行，随后如实回报实际结果。');
 }

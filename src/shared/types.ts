@@ -1491,10 +1491,42 @@ export interface ToolAuthorizationDecision {
   toolName: string;
   riskLevel: ToolRiskLevel;
   scope: AuthorizedToolScope;
-  source: 'low_risk' | 'user_denied';
+  /**
+   * `low_risk` is the in-loop read-only class. `host_signed` / `user_confirmed`
+   * are issued only by the host for the fixed validation scripts, after the
+   * workspace snapshot is frozen; `user_denied` never executes anything.
+   */
+  source: 'low_risk' | 'user_denied' | 'host_signed' | 'user_confirmed';
   requiresExplicitConfirmation: boolean;
   reason?: string;
   executionSnapshot?: string;
+  /** Opaque one-shot token for host-issued validation authority. Never persisted. */
+  decisionId?: string;
+  /** Structured denial reason for host-issued validation authority. */
+  denialReason?: 'host_authorization_unavailable' | 'no_response' | 'user_denied'
+    | 'untrusted_workspace' | 'snapshot_changed' | 'scope_mismatch';
+}
+
+/**
+ * A host-issued, fingerprint-bound authorization request for one fixed
+ * validation script. The runner sends it after the on-disk snapshot is frozen,
+ * so the host can decide without re-reading the workspace.
+ */
+export interface ValidationAuthorizationRequest {
+  sessionId: string;
+  rootTaskId: string;
+  segmentId: string;
+  script: SafeNpmScript;
+  workspaceFolder?: string;
+  fingerprint: string;
+  approvalMode: ApprovalMode;
+}
+
+export interface ValidationAuthorizationResult {
+  decision: ToolAuthorizationDecision;
+  /** Machine-readable reason for a denial; never a model-authored string. */
+  denialReason?: 'host_authorization_unavailable' | 'no_response' | 'user_denied'
+    | 'untrusted_workspace' | 'snapshot_changed' | 'scope_mismatch';
 }
 
 export type SafeNpmScript = 'compile' | 'lint' | 'test';
@@ -1526,6 +1558,8 @@ export interface WorkspaceDiagnosticSummary {
 export interface ValidationToolResult {
   ok: boolean;
   errorType?: string;
+  /** Structured denial reason for authorization/precondition failures. */
+  failureCode?: string;
   kind: 'npm_script';
   script: SafeNpmScript;
   workspaceFolder?: string;
@@ -1814,6 +1848,13 @@ export interface AgentRunCallbacks {
   onTraceLog?: (traceLog: AgentTraceLogInfo) => void;
   onTaskPlan?: (taskPlan: TaskPlan) => void;
   onRunDetails?: (runDetails: RunDetailsSummary) => void;
+  /**
+   * Host-issued authorization for one fixed validation script. Omitted callbacks
+   * fail closed: the runner never executes validation on its own authority.
+   */
+  onValidationAuthorizationRequest?: (
+    request: ValidationAuthorizationRequest
+  ) => Promise<ValidationAuthorizationResult>;
 }
 
 export type BackgroundRunStatus =

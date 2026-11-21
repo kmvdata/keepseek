@@ -125,6 +125,48 @@ export class AgentInterruptedError extends Error {
 }
 
 export const MAX_CHECKPOINT_BYTES = 32 * 1024 * 1024;
+
+/** Hard bounds for a restored pending set: a corrupt file cannot pin memory. */
+const MAX_PENDING_VALIDATION_IDS = 256;
+const MAX_RECORDED_VALIDATIONS = 64;
+
+/**
+ * Normalize a persisted run validation state.
+ *
+ * The field is optional and historically unvalidated, so it must never be the
+ * reason a session fails to load. Malformed ids, duplicates over the cap and
+ * unknown outcomes are dropped; if nothing usable remains the whole state is
+ * downgraded to `undefined`, which the runner treats as "no pending drafts".
+ */
+export function normalizeRunValidationState(value: unknown): import('./repairLoop').RunValidationState | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const input = value as { pendingDraftEditIds?: unknown; validations?: unknown };
+  const pendingDraftEditIds: string[] = [];
+  if (Array.isArray(input.pendingDraftEditIds)) {
+    const seen = new Set<string>();
+    for (const id of input.pendingDraftEditIds) {
+      if (typeof id !== 'string') continue;
+      const trimmed = id.trim();
+      if (!trimmed || trimmed.length > 200 || seen.has(trimmed)) continue;
+      seen.add(trimmed);
+      pendingDraftEditIds.push(trimmed);
+      if (pendingDraftEditIds.length >= MAX_PENDING_VALIDATION_IDS) break;
+    }
+  }
+  const validations: import('./repairLoop').RunValidationState['validations'] = [];
+  if (Array.isArray(input.validations)) {
+    for (const entry of input.validations) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+      const record = entry as { scope?: unknown; outcome?: unknown };
+      if (record.scope !== 'workspace_baseline' && record.scope !== 'post_apply') continue;
+      if (record.outcome !== 'passed' && record.outcome !== 'failed') continue;
+      validations.push({ scope: record.scope, outcome: record.outcome });
+      if (validations.length >= MAX_RECORDED_VALIDATIONS) break;
+    }
+  }
+  if (!pendingDraftEditIds.length && !validations.length) return undefined;
+  return { pendingDraftEditIds, validations };
+}
 export function endpointHash(value: string): string { return createHash('sha256').update(value).digest('hex'); }
 export function createRunCheckpoint(
   request: AgentRequest,
@@ -245,6 +287,13 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
         || ![m.oldOutputTokens, m.newOutputTokens].every((n) => Number.isSafeInteger(n) && n > 0)))) return undefined;
     if (cp.state?.epoch && !validEpochProgressState(cp.state.epoch)) return undefined;
     const copy = checkpointCopy(cp);
+    // An optional, historically unvalidated field: degrade a bad value to
+    // "no pending drafts" instead of refusing the whole session.
+    if (copy.state && copy.state.validationState !== undefined) {
+      const normalizedValidationState = normalizeRunValidationState(copy.state.validationState);
+      if (normalizedValidationState) copy.state.validationState = normalizedValidationState;
+      else delete copy.state.validationState;
+    }
     if (recoveryContinuation) copy.request.commandRecoveryContinuation = recoveryContinuation;
     if (observations) copy.commandRecoveryObservations = observations;
     if (copy.state?.pending && recoveryResponse) copy.state.pending.commandRecoveryResponse = recoveryResponse;

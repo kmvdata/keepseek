@@ -138,6 +138,82 @@ export function createAuthorizationDeniedToolResult(decision: ToolAuthorizationD
   });
 }
 
+/**
+ * One-shot registry for host-issued validation authority. A decision id may
+ * authorize exactly one execution: replaying it (a retried tool call, a stale
+ * checkpoint, a second script) fails closed. The registry is process-local and
+ * never persisted; `reset()` runs whenever the host's authorization epoch moves
+ * (Stop, mode switch, session change).
+ */
+export class ValidationAuthorizationRegistry {
+  private readonly issued = new Set<string>();
+  private readonly consumed = new Set<string>();
+
+  public issue(decisionId: string): void {
+    if (!decisionId) return;
+    // A consumed id is spent for the lifetime of the epoch. Re-issuing it would
+    // let a second execution redeem authority that was already used, so the
+    // registry refuses to revive it even if a caller asks.
+    if (this.consumed.has(decisionId)) return;
+    this.issued.add(decisionId);
+  }
+
+  /** Consume exactly once. Returns false for unknown, replayed or empty ids. */
+  public consume(decisionId: string | undefined): boolean {
+    if (!decisionId || !this.issued.has(decisionId) || this.consumed.has(decisionId)) return false;
+    this.consumed.add(decisionId);
+    return true;
+  }
+
+  public isAvailable(decisionId: string | undefined): boolean {
+    return Boolean(decisionId) && this.issued.has(decisionId!) && !this.consumed.has(decisionId!);
+  }
+
+  public reset(): void {
+    this.issued.clear();
+    this.consumed.clear();
+  }
+}
+
+/** One registry per extension host: validation authority never outlives the
+ * epoch that issued it, and no decision id is reusable across sessions. */
+export const validationAuthorizationRegistry = new ValidationAuthorizationRegistry();
+
+export interface ExpectedValidationAuthorization {
+  script: 'compile' | 'lint' | 'test';
+  scope: AuthorizedToolScope;
+  fingerprint: string;
+  /** Test hook: consume the decision id as part of the check. */
+  consume?: boolean;
+}
+
+/**
+ * Validate a host-issued validation decision against the exact request it is
+ * meant to authorize. Every field is compared; anything unknown fails closed.
+ *
+ * This is the structural check. Single-use consumption is a separate step
+ * (`ValidationAuthorizationRegistry.consume`) performed by the runner exactly
+ * once, immediately before it persists the executing intent. Callers that run
+ * *after* that consumption must therefore use this function with
+ * `consume: false` — re-checking availability there would deny every legitimate
+ * execution, which is the defect this fix exists to remove.
+ */
+export function isValidationAuthorizationValid(
+  decision: ToolAuthorizationDecision | undefined,
+  expected: ExpectedValidationAuthorization
+): decision is ToolAuthorizationDecision {
+  if (!decision) return false;
+  if (!decision.allowed) return false;
+  if (decision.riskLevel !== 'medium') return false;
+  if (decision.toolName !== RUN_VALIDATION_TOOL_NAME) return false;
+  if (decision.scope !== expected.scope) return false;
+  if (decision.source !== 'host_signed' && decision.source !== 'user_confirmed') return false;
+  if (!decision.executionSnapshot || decision.executionSnapshot !== expected.fingerprint) return false;
+  if (!decision.decisionId) return false;
+  if (!expected.consume) return true;
+  return validationAuthorizationRegistry.consume(decision.decisionId);
+}
+
 function formatHighRiskArgument(value: unknown, fallback: string): string {
   if (typeof value !== 'string') {
     return fallback;

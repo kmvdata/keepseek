@@ -12,10 +12,42 @@ export interface RunValidationState {
   }>;
 }
 
+/** Host-side state of one draft that still blocks validation. */
+export interface HostPendingDraftEdit {
+  changeSetId: string;
+  status: 'pending' | 'apply_failed' | 'interrupted' | 'unknown';
+  reason?: string;
+}
+
+/**
+ * Draft-level description available inside a run. The runner knows the
+ * DraftEdit ids the model just produced, but the ChangeSet id is minted by the
+ * host when the checkpoint is committed, so it cannot appear here.
+ */
+export interface RunPendingDraftEdit {
+  draftEditId: string;
+  label: string;
+  action: string;
+}
+
+export interface BlockedValidationContext {
+  /** ChangeSet-level detail; filled by the host, absent inside the runner. */
+  hostPending?: readonly HostPendingDraftEdit[];
+  /** Draft-level detail the runner can state without guessing a ChangeSet id. */
+  pendingDrafts?: readonly RunPendingDraftEdit[];
+  unknownIds?: readonly string[];
+  nextTrigger?: 'run_end_host_apply' | 'manual_apply' | 'none';
+}
+
 /**
  * Run-local hard guard for the on-disk validation boundary. RepairLoopTracker
  * owns automatic repair iterations; this tracker covers every successful
  * DraftEdit, including ordinary changes that are not part of a repair loop.
+ *
+ * The pending set must mirror what is really still unwritten on disk. Ids are
+ * removed by the host when a ChangeSet is applied, discarded or reverted, and a
+ * restored run seeds only from that reconciled set instead of replaying every
+ * historical DraftEdit.
  */
 export class RunValidationStateTracker {
   private readonly pendingDraftEditIds = new Set<string>();
@@ -40,22 +72,65 @@ export class RunValidationStateTracker {
     }
   }
 
+  /** Drop ids the host has written or abandoned. Unknown ids are ignored. */
+  public remove(editIds: readonly string[]): void {
+    for (const id of editIds) this.pendingDraftEditIds.delete(id);
+  }
+
+  /** Drop every pending id without touching recorded validation outcomes. */
+  public clear(): void {
+    this.pendingDraftEditIds.clear();
+  }
+
+  /**
+   * Replace the pending set with the host's authoritative list. Called when the
+   * host reconciles a ChangeSet, so the tracker cannot keep believing in a draft
+   * that the disk no longer contains (or forget one it does).
+   */
+  public reconcile(hostPendingIds: readonly string[]): void {
+    const next = new Set(hostPendingIds.filter((id) => Boolean(id)));
+    if (next.size === this.pendingDraftEditIds.size
+      && [...next].every((id) => this.pendingDraftEditIds.has(id))) return;
+    this.pendingDraftEditIds.clear();
+    for (const id of next) this.pendingDraftEditIds.add(id);
+  }
+
+  public getPendingDraftEditIds(): string[] {
+    return [...this.pendingDraftEditIds];
+  }
+
   public hasPendingDraftEdit(): boolean {
     return this.pendingDraftEditIds.size > 0;
   }
 
-  public createBlockedValidationResult(language: KeepseekLanguage): string {
+  /**
+   * Structured barrier result. It is a waiting state, not a failure: no
+   * preflight ran, no validation budget was spent and no executing intent was
+   * persisted. `nextTrigger` tells the model exactly what unblocks it.
+   */
+  public createBlockedValidationResult(
+    language: KeepseekLanguage,
+    context: BlockedValidationContext = {}
+  ): string {
+    const hostPending = context.hostPending ?? [];
+    const pendingDrafts = context.pendingDrafts ?? [];
     return JSON.stringify({
       ok: false,
       errorType: 'pending_changes_require_apply',
+      waitingForApply: true,
       summary: language === 'en'
-        ? 'Validation is blocked until pending changes are applied.'
-        : '待确认修改应用前，验证已被阻止。',
+        ? 'Validation is waiting for the pending changes to be applied.'
+        : '验证正在等待待确认修改被应用。',
       pendingDraftEditIds: [...this.pendingDraftEditIds],
-      suggestedAction: 'apply_pending_changes',
+      pendingDrafts: pendingDrafts.map((item) => ({ ...item })),
+      hostPending: hostPending.map((item) => ({ ...item })),
+      unknownIds: [...(context.unknownIds ?? [])],
+      nextTrigger: context.nextTrigger ?? 'manual_apply',
+      suggestedAction: 'continue_after_apply',
+      executed: false,
       error: language === 'en'
-        ? 'Validation checks only the current on-disk workspace. Apply the pending ChangeSet before validating the updated files.'
-        : '验证只能检查当前已落盘的工作区。请先应用待确认 ChangeSet，再验证更新后的文件。'
+        ? 'Validation checks only the current on-disk workspace. The host applies the pending ChangeSet after this run ends, then continues the task; do not retry validation in this run.'
+        : '验证只能检查当前已落盘的工作区。宿主会在本轮结束后应用待确认 ChangeSet，然后继续任务；不要在本轮内重试验证。'
     });
   }
 
@@ -93,8 +168,8 @@ export class RunValidationStateTracker {
     if (this.pendingDraftEditIds.size > 0) {
       if (!lastValidation) {
         return language === 'en'
-          ? 'Change status: pending DraftEdits were prepared; they are not written or validated. Apply the ChangeSet before validating the updated workspace.'
-          : '修改状态：已准备待确认 DraftEdit，但尚未写盘或验证。请先应用 ChangeSet，再验证更新后的工作区。';
+          ? 'Change status: pending DraftEdits were prepared; they are not written or validated. The host applies the ChangeSet after this run ends, then validation continues on the updated workspace.'
+          : '修改状态：已准备待确认 DraftEdit，但尚未写盘或验证。宿主会在本轮结束后应用 ChangeSet，随后在更新后的工作区继续验证。';
       }
       if (lastValidation.scope === 'post_apply') {
         return language === 'en'

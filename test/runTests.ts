@@ -1,4 +1,7 @@
 import './approveAllExecution.test';
+import './validationAuthorization.test';
+import './validationBarrier.test';
+import './runValidationReconciliation.test';
 import './changeSetBatchAdmission.test';
 import './sessionStartupStorageContracts.test';
 import './sessionMissingRecordShapes.test';

@@ -37,6 +37,7 @@ import {
   ContextUsageEstimate,
   DraftEdit,
   DraftRunEnvironmentEntry,
+  ValidationAuthorizationResult,
   DraftRunProposal,
   PromptCacheDiagnostics,
   RunDetailsSummary,
@@ -123,7 +124,12 @@ import { WorkspaceToolAdapter, WorkspaceToolService } from './tools/workspaceToo
 import { preflightSafeValidation, ValidationToolAdapter, ValidationToolService } from './tools/validationTools';
 import { SemanticToolAdapter, SemanticToolService } from './tools/semanticTools';
 import { GitToolAdapter, GitToolService } from './tools/gitTools';
-import { createAuthorizationDeniedToolResult, getToolAuthorizationMetadata } from './tools/toolAuthorization';
+import {
+  createAuthorizationDeniedToolResult,
+  getToolAuthorizationMetadata,
+  isValidationAuthorizationValid,
+  validationAuthorizationRegistry
+} from './tools/toolAuthorization';
 import type { KeepseekLanguage } from '../shared/i18n';
 import { isReadableTextContent, shouldSkipTextUri } from '../shared/textFileGuards';
 import {
@@ -191,7 +197,7 @@ import { TaskPlanTracker } from './taskPlan';
 import { taskGoal } from '../sessions/userTask';
 import { DelegationTracker } from './delegation';
 import { createChangeSet } from '../edits/changeSet';
-import { RepairLoopTracker, RunValidationStateTracker } from './repairLoop';
+import { RepairLoopTracker, RunValidationStateTracker, type RunPendingDraftEdit } from './repairLoop';
 import { RunDetailsBuilder } from './logging/runDetails';
 import { commandCapabilityReplan, commandRecoveryKey, findCommandRecoveryObservation, MAX_COMMAND_RECOVERY_KEYS, mergeCommandRecoveryObservations,
   observeCommandRecovery, recordCommandRecoveryDelivery, type CommandRecoveryResponse } from '../runs/commandRecovery';
@@ -953,6 +959,17 @@ export class AgentLoop {
     checkpoint.runBudget = logicalBudget.state;
     checkpoint.modelRequests = logicalBudget.state.modelRequests;
     request = { ...request, taskRunBudget: logicalBudget };
+    /**
+     * A host wait the user did not spend working (a modal confirmation) must not
+     * shrink the validation timeout. The execution clock already excludes it, so
+     * the tool receives a deadline offset by exactly the measured wait. The
+     * shared task deadline itself is never extended here.
+     */
+    let hostWaitOffsetMs = 0;
+    const effectiveRunDeadlineAt = (): number | undefined => {
+      const deadline = logicalBudget.deadlineAt;
+      return deadline === undefined ? undefined : deadline + hostWaitOffsetMs;
+    };
     taskPlan.beginExecution();
     const buildCurrentProviderProjection = (boundaryIds?: Set<string>): ReturnType<typeof buildProviderRequestProjection> => buildProviderRequestProjection({
       model: request.model,
@@ -1073,7 +1090,12 @@ export class AgentLoop {
       exposedToolNames: tools.map((tool) => tool.function.name),
       projectionMetadata: projection.metadata
     });
-    draftEdits.forEach((edit) => validationState.recordDraftEdit(edit.id));
+    // Pending drafts are seeded from the checkpoint's reconciled
+    // `validationState` (see the RunValidationStateTracker constructor). The
+    // restored `draftEdits` list is a historical record that still contains
+    // already-applied drafts, so re-registering it here would resurrect ghosts
+    // and block validation forever. `restored.draftEdits` is still used for
+    // display, ChangeSet construction and recovery.
     const calibrationStore = new ContextWindowCalibrationStore(this.globalStorageUri);
     const calibrationKey = {
       sourceId: runtimeConfig.sourceId,
@@ -1973,12 +1995,22 @@ export class AgentLoop {
             skills: request.currentRunContext?.skills
           });
           const isValidation = toolCall.function.name === RUN_VALIDATION_TOOL_NAME;
+          const validationScript = isValidation ? this.readSafeNpmScript(toolArgs, 'script') : undefined;
+          const validationWorkspaceFolder = isValidation ? this.readOptionalString(toolArgs, 'workspaceFolder') : undefined;
+          // Barrier first: while a DraftEdit of this segment is still pending, the
+          // on-disk workspace does not contain the change under test. Validation
+          // must not run, and must not spend its budget or persist an executing
+          // intent. The host applies the ChangeSet after this run ends and starts
+          // a fresh run, so nothing here waits on the host.
           const pendingValidationChanges = isValidation && validationState.hasPendingDraftEdit();
           const validationLimitReached = isValidation && validationRunCount >= runtimeConfig.maxValidationRuns;
+          const hostPending = pendingValidationChanges
+            ? describeRunPendingDraftEdits(draftEdits, validationState.getPendingDraftEditIds())
+            : undefined;
           const validationPreflight = isValidation && !planPhaseBlockReason && !pendingValidationChanges && !validationLimitReached
             ? await preflightSafeValidation({
-                script: this.readSafeNpmScript(toolArgs, 'script'),
-                workspaceFolder: this.readOptionalString(toolArgs, 'workspaceFolder'),
+                script: validationScript!,
+                workspaceFolder: validationWorkspaceFolder,
                 language: request.language,
                 approvalMode: request.approvalMode
               })
@@ -1986,7 +2018,10 @@ export class AgentLoop {
           if (planPhaseBlockReason) {
             rawToolResult = createPlanPhaseBlockedToolResult(toolCall.function.name, planPhaseBlockReason);
           } else if (pendingValidationChanges) {
-            rawToolResult = validationState.createBlockedValidationResult(request.language);
+            rawToolResult = validationState.createBlockedValidationResult(request.language, {
+              pendingDrafts: hostPending,
+              nextTrigger: 'run_end_host_apply'
+            });
           } else if (validationLimitReached) {
             rawToolResult = JSON.stringify({
               ok: false,
@@ -2034,15 +2069,35 @@ export class AgentLoop {
                 detail: authorizationMetadata.scope
               });
             }
-            // In-loop reads are low risk. Workspace side effects never execute
-            // here: they are only prepared as DraftEdit/DraftRun proposals for
-            // the host approval flow, so an unreviewed effect cannot run.
-            authorizationDecision = createReadOnlyToolAuthorizationDecision(
-              toolCall.function.name,
-              toolArgs
-            );
-            if (validationPreflight && authorizationDecision.allowed && !authorizationDecision.executionSnapshot) {
-              authorizationDecision = { ...authorizationDecision, executionSnapshot: validationPreflight.snapshot.fingerprint };
+            if (isValidation) {
+              // Validation is medium risk and can never be self-authorized by the
+              // read-only path. The host issues a one-shot decision bound to the
+              // exact frozen snapshot; a missing or failing host callback is a
+              // hard refusal, never a silent downgrade to `allowed`.
+              const authorized = await this.requestValidationAuthorization({
+                request,
+                callbacks,
+                toolCallId: toolCall.id,
+                script: validationScript!,
+                workspaceFolder: validationWorkspaceFolder,
+                scope: authorizationMetadata.scope,
+                fingerprint: validationPreflight?.status === 'ready' ? validationPreflight.snapshot.fingerprint : undefined,
+                approvalMode: normalizeApprovalMode(runApprovalMode),
+                emitStatus
+              });
+              authorizationDecision = authorized.decision;
+              // Time spent waiting for the user's modal must not shorten the
+              // validation timeout, so this one tool call sees a deadline that
+              // excludes the measured wait. Nothing shared is extended.
+              hostWaitOffsetMs += authorized.authorizationWaitMs;
+            } else {
+              // In-loop reads are low risk. Workspace side effects never execute
+              // here: they are only prepared as DraftEdit/DraftRun proposals for
+              // the host approval flow, so an unreviewed effect cannot run.
+              authorizationDecision = createReadOnlyToolAuthorizationDecision(
+                toolCall.function.name,
+                toolArgs
+              );
             }
             this.throwIfAborted(request.signal, request.language);
             emitStatus({ base: 'executing', phase: this.getToolActivityPhase(toolCall.function.name), toolName: toolCall.function.name });
@@ -2076,7 +2131,7 @@ export class AgentLoop {
               if (getSubagentHandoffKind(toolCall.function.name)) emitStatus({ base: 'waiting', phase: 'waiting_for_subagent', toolName: toolCall.function.name });
               const execution = this.handleToolCall(toolCall, draftEdits, draftRuns, request.language, {
                 signal: request.signal,
-                runDeadlineAt: logicalBudget.deadlineAt,
+                runDeadlineAt: effectiveRunDeadlineAt(),
                 authorization: authorizationDecision,
                 historyArchive: request.historyArchive,
                 parentRequest: request,
@@ -3529,6 +3584,120 @@ export class AgentLoop {
       lastStatusKey = nextStatusKey;
       callbacks.onStatus?.(status);
     };
+  }
+
+  /**
+   * Obtain the host's one-shot authorization for one fixed validation script.
+   * The runner deliberately owns no validation authority: without a host
+   * callback, or with any host failure, the result is a denial that never
+   * executes, never counts toward the validation budget and never persists an
+   * executing intent.
+   */
+  private async requestValidationAuthorization(input: {
+    request: AgentRequest;
+    callbacks: AgentRunCallbacks;
+    toolCallId: string;
+    script: SafeNpmScript;
+    workspaceFolder?: string;
+    scope: ToolAuthorizationDecision['scope'];
+    fingerprint?: string;
+    approvalMode: 'ask' | 'approve-all';
+    emitStatus: (status: AgentActivityInput) => void;
+  }): Promise<{ decision: ToolAuthorizationDecision; authorizationWaitMs: number }> {
+    const deny = (reason: string, denialReason: ValidationAuthorizationResult['denialReason']): ToolAuthorizationDecision => ({
+      allowed: false,
+      failureCode: 'approval_review_required',
+      reason,
+      requiresExplicitConfirmation: false,
+      riskLevel: 'medium',
+      scope: input.scope,
+      source: 'user_denied',
+      toolName: RUN_VALIDATION_TOOL_NAME,
+      denialReason
+    } as ToolAuthorizationDecision);
+    const host = input.callbacks.onValidationAuthorizationRequest;
+    if (!host) {
+      return { decision: deny('The host cannot authorize validation in this run. Nothing executed.',
+        'host_authorization_unavailable'), authorizationWaitMs: 0 };
+    }
+    if (!input.fingerprint) {
+      // Preflight did not produce a frozen snapshot: either the fix is missing
+      // or the workspace is unavailable. Never authorize an unfrozen target.
+      return { decision: deny('Validation has no frozen workspace snapshot to authorize. Nothing executed.',
+        'snapshot_changed'), authorizationWaitMs: 0 };
+    }
+    const unavailable = (reason: string, denialReason: ValidationAuthorizationResult['denialReason']) =>
+      deny(reason, denialReason);
+    // Only an ask-mode decision waits for a human. The emit is what suspends the
+    // execution clock through onStatus, and the measured wait below moves the
+    // wall-clock deadline forward by exactly this much.
+    if (input.approvalMode === 'ask') {
+      input.emitStatus({
+        base: 'waiting',
+        phase: 'awaiting_authorization',
+        toolName: RUN_VALIDATION_TOOL_NAME,
+        detail: input.scope
+      });
+    }
+    const waitStartedAt = Date.now();
+    let result: ValidationAuthorizationResult;
+    try {
+      result = await host({
+        sessionId: input.request.sessionId ?? '',
+        rootTaskId: input.request.approvalRootTaskId ?? input.request.checkpoint?.taskId ?? '',
+        segmentId: input.request.checkpoint?.taskId ?? '',
+        script: input.script,
+        workspaceFolder: input.workspaceFolder,
+        fingerprint: input.fingerprint,
+        approvalMode: input.approvalMode
+      });
+    } catch {
+      return { decision: unavailable('The host authorization request failed. Nothing executed.',
+        'host_authorization_unavailable'), authorizationWaitMs: Date.now() - waitStartedAt };
+    }
+    const authorizationWaitMs = Math.max(0, Date.now() - waitStartedAt);
+    this.throwIfAborted(input.request.signal, input.request.language);
+    const decision = result?.decision;
+    if (!decision) {
+      return { decision: unavailable('The host returned no authorization decision. Nothing executed.',
+        'host_authorization_unavailable'), authorizationWaitMs };
+    }
+    if (!decision.allowed) {
+      // A denial must always carry a readable cause. The host normally supplies
+      // one; when it does not, the structured reason code stands in for it so
+      // the model never sees an empty explanation.
+      const denialReason = result.denialReason ?? 'user_denied';
+      return {
+        authorizationWaitMs,
+        decision: {
+          ...decision,
+          allowed: false,
+          failureCode: decision.failureCode ?? 'approval_review_required',
+          riskLevel: 'medium',
+          scope: input.scope,
+          toolName: RUN_VALIDATION_TOOL_NAME,
+          reason: decision.reason?.trim() || `Validation was not authorized (${denialReason}). Nothing executed.`,
+          denialReason
+        } as ToolAuthorizationDecision
+      };
+    }
+    // The host must sign the exact snapshot the runner is about to freeze.
+    if (!isValidationAuthorizationValid(decision, {
+      script: input.script,
+      scope: input.scope,
+      fingerprint: input.fingerprint,
+      consume: false
+    })) {
+      return { decision: deny('The host authorization does not match this exact validation target. Nothing executed.',
+        'scope_mismatch'), authorizationWaitMs };
+    }
+    // Consume here, before the durable intent: a replayed decision id cannot
+    // reach a second execution even if this run is retried from a checkpoint.
+    if (!validationAuthorizationRegistry.consume(decision.decisionId)) {
+      return { decision: deny('The host authorization was already used. Nothing executed.',
+        'scope_mismatch'), authorizationWaitMs };
+    }
+    return { decision, authorizationWaitMs };
   }
 
   private getToolActivityPhase(toolName: string): AgentActivityPhase {
@@ -5230,6 +5399,21 @@ export class AgentLoop {
     }
   }
 
+}
+
+/**
+ * Stating the barrier from inside the runner: only the draft identity and its
+ * label are known here, never a host ChangeSet id.
+ */
+function describeRunPendingDraftEdits(
+  draftEdits: readonly DraftEdit[],
+  pendingDraftEditIds: readonly string[]
+): RunPendingDraftEdit[] {
+  const byId = new Map(draftEdits.map((edit) => [edit.id, edit]));
+  return pendingDraftEditIds.map((id) => {
+    const edit = byId.get(id);
+    return { draftEditId: id, label: edit?.label ?? id, action: edit?.action ?? 'unknown' };
+  });
 }
 
 export function getToolExposureError(toolName: string, exposedToolNames: ReadonlySet<string>): string | undefined {

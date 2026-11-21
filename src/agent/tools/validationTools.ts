@@ -10,6 +10,7 @@ import {
 import type { KeepseekLanguage } from '../../shared/i18n';
 import type {
   ApprovalMode,
+  AuthorizedToolScope,
   SafeNpmScript,
   ToolAuthorizationDecision,
   ValidationToolResult,
@@ -18,6 +19,7 @@ import type {
 } from '../../shared/types';
 import { RUN_VALIDATION_TOOL_NAME } from '../protocol';
 import { hasValidationBlockingRisk } from './validationRisk';
+import { isValidationAuthorizationValid } from './toolAuthorization';
 
 const MAX_DIAGNOSTIC_ITEMS = 200;
 const SAFE_NPM_SCRIPT_ORDER: SafeNpmScript[] = ['compile', 'lint', 'test'];
@@ -93,14 +95,13 @@ export class ValidationToolService implements ValidationToolAdapter {
 
     const expectedScope = input.script === 'test' ? 'validation_test' : 'validation_compile_lint';
     const approvalMode = input.approvalMode;
-    if (!input.authorization.allowed
-      || input.authorization.toolName !== RUN_VALIDATION_TOOL_NAME
-      || input.authorization.riskLevel !== 'medium'
-      || input.authorization.scope !== expectedScope) {
+    const authorizationError = inspectValidationAuthorization(input.authorization, input.script, expectedScope);
+    if (authorizationError) {
       return JSON.stringify(createResult({
         workspaceFolder: workspaceFolder.name,
         authorization: input.authorization,
         errorType: 'authorization_denied',
+        failureCode: authorizationError,
         error: localizeValidation(input.language, 'notAuthorized')
       }));
     }
@@ -261,6 +262,56 @@ export async function preflightSafeValidation(input: {
 
 function unavailableValidationMessage(language: KeepseekLanguage, script: SafeNpmScript, error: ValidationUnavailableError): string {
   return localizeValidation(language, error.reason === 'manifest_missing' ? 'manifestMissing' : 'scriptMissing', script);
+}
+
+/**
+ * Exported for the runner's contract tests: the exact gate `runSafeNpmScript`
+ * applies before it starts a process. Returns a reason code, or undefined when
+ * the decision may execute.
+ */
+export function validateToolDecisionBeforeExecution(
+  authorization: ToolAuthorizationDecision,
+  script: SafeNpmScript
+): string | undefined {
+  return inspectValidationAuthorization(
+    authorization,
+    script,
+    script === 'test' ? 'validation_test' : 'validation_compile_lint'
+  );
+}
+
+/**
+ * The execution-side half of the validation gate. The runner already validated
+ * the host-issued decision and consumed its decision id exactly once before
+ * persisting a durable intent; this re-check runs immediately before the process
+ * starts so a decision cannot be widened between those two points.
+ *
+ * It deliberately does NOT require the id to be still available: consumption
+ * happened one step earlier and is what authorizes this execution. Requiring
+ * availability here would reject every legitimate run.
+ */
+function inspectValidationAuthorization(
+  authorization: ToolAuthorizationDecision,
+  script: SafeNpmScript,
+  expectedScope: AuthorizedToolScope
+): string | undefined {
+  if (!authorization.allowed) return 'authorization_not_allowed';
+  if (authorization.toolName !== RUN_VALIDATION_TOOL_NAME) return 'authorization_tool_mismatch';
+  if (authorization.riskLevel !== 'medium') return 'authorization_risk_mismatch';
+  if (authorization.scope !== expectedScope) return 'authorization_scope_mismatch';
+  if (authorization.source !== 'host_signed' && authorization.source !== 'user_confirmed') {
+    return 'authorization_source_untrusted';
+  }
+  if (!authorization.decisionId) return 'authorization_decision_missing';
+  if (!authorization.executionSnapshot) return 'authorization_snapshot_missing';
+  if (!isValidationAuthorizationValid(authorization, {
+    script,
+    scope: expectedScope,
+    fingerprint: authorization.executionSnapshot,
+    consume: false
+  })) return 'authorization_decision_invalid';
+  // The snapshot must still be the one the executor is about to verify.
+  return undefined;
 }
 
 function createWorkspaceDiagnosticSummary(): WorkspaceDiagnosticSummary {
