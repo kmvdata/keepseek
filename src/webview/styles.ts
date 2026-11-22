@@ -1849,6 +1849,116 @@ ${conversationsStylesFragment.source}
       gap: 6px;
     }
 
+    /* Derived activity steps: flat list rows, not cards, so a long run still
+       fits on one screen. Every color comes from an existing VS Code variable. */
+    .activity-list {
+      display: grid;
+      gap: 2px;
+      font-size: 12px;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+      white-space: normal;
+    }
+
+    .activity-say {
+      padding: 2px 0 4px;
+    }
+
+    .activity-say:first-child {
+      padding-top: 0;
+    }
+
+    .activity-say p {
+      margin: 0 0 6px;
+    }
+
+    .activity-say > :last-child {
+      margin-bottom: 0;
+    }
+
+    .activity-tool {
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+      padding: 1px 0;
+      color: var(--vscode-descriptionForeground);
+      min-width: 0;
+    }
+
+    .activity-tool-text {
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .activity-tool-target {
+      color: var(--vscode-descriptionForeground);
+    }
+
+    .activity-tool-duration {
+      flex: 0 0 auto;
+      color: var(--vscode-descriptionForeground);
+      opacity: 0.75;
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* A square glyph, drawn with CSS only: no emoji and no extra asset. */
+    .activity-icon {
+      flex: 0 0 auto;
+      width: 7px;
+      height: 7px;
+      margin-top: 0.45em;
+      border: 1px solid currentColor;
+      border-radius: 1px;
+      opacity: 0.7;
+    }
+
+    .activity-tool.status-succeeded .activity-icon {
+      background: currentColor;
+    }
+
+    .activity-tool.status-failed {
+      color: var(--vscode-errorForeground);
+    }
+
+    .activity-tool.status-failed .activity-icon {
+      border-color: var(--vscode-errorForeground);
+    }
+
+    .activity-tool.status-denied {
+      color: var(--vscode-descriptionForeground);
+    }
+
+    .activity-tool.status-denied .activity-icon {
+      border-style: dashed;
+    }
+
+    /* Running is a static dashed outline: streaming must not animate. */
+    .activity-tool.is-running .activity-icon {
+      border-style: dashed;
+      background: transparent;
+    }
+
+    .activity-toggle {
+      justify-self: start;
+      margin: 2px 0;
+      padding: 1px 6px;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 4px;
+      color: var(--vscode-textLink-foreground);
+      background: transparent;
+      font: inherit;
+      font-size: 11px;
+      cursor: pointer;
+    }
+
+    .activity-toggle:hover,
+    .activity-toggle:focus-visible {
+      background: var(--vscode-list-hoverBackground);
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: 1px;
+    }
+
     .command-model-status {
       display: flex;
       align-items: flex-start;

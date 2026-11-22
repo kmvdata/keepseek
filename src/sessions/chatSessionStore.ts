@@ -8,6 +8,7 @@ import { normalizeUserTask } from './userTask';
 import { reconcileExecutionTime } from './executionTimeStats';
 import { normalizeRequestBudget } from '../agent/requestBudget';
 import { normalizeRunDetailsDelegation } from '../agent/logging/subagentDetails';
+import { buildActivityNodes, type ActivityNode } from '../agent/logging/activityNodes';
 import { isResumableToolBudgetCheckpoint, normalizeRunCheckpoint, recoveryBlocker } from '../agent/runCheckpoint';
 import { normalizeHistoryWorkFacts } from '../agent/historyProtection';
 import { snapshotSession } from './persistenceSnapshot';
@@ -1550,6 +1551,7 @@ function copyMessage(message: ChatMessage): ChatMessage {
 }
 
 export function getVisibleMessages(messages: ChatMessage[], models: readonly import('../shared/types').KeepseekModel[] = []): ChatMessage[] {
+  const language = getConfiguredKeepseekLanguage();
   return messages.map(({
     runCheckpoint,
     runCheckpointArchive,
@@ -1558,40 +1560,125 @@ export function getVisibleMessages(messages: ChatMessage[], models: readonly imp
     providerReplay: _providerReplay,
     toolRounds: _toolRounds,
     ...message
-  }) => ({
-    ...message,
-    runState: runCheckpoint ? (() => {
-      const resumableBudgetPause = isResumableToolBudgetCheckpoint(runCheckpoint);
-      return {
-      taskId: runCheckpoint.taskId,
-      status: resumableBudgetPause ? 'interrupted' : runCheckpoint.status,
-      stopReason: resumableBudgetPause ? 'budget_pause' : runCheckpoint.stopReason,
-      usedMs: runCheckpoint.usedMs, maxExecutionMs: runCheckpoint.maxExecutionMs, limitSource: runCheckpoint.limitSource,
-      attempt: runCheckpoint.attempt, modelRequests: runCheckpoint.modelRequests, retries: runCheckpoint.retries,
-      lastNetworkAt: runCheckpoint.lastNetworkAt, lastEventAt: runCheckpoint.lastEventAt, lastContentAt: runCheckpoint.lastContentAt,
-      requestStartedAt: runCheckpoint.requestStartedAt, lastStepAt: runCheckpoint.lastStepAt, steps: (runCheckpoint.state?.toolRounds.reduce((count, round) => count + round.toolResults.length, 0) ?? 0) + Object.keys(runCheckpoint.state?.pending?.results ?? {}).length,
-      outputBudget: runCheckpoint.lastRequestBudget,
-      outputFailure: runCheckpoint.outputFailure ? { finishReason: runCheckpoint.outputFailure.finishReason,
-        requestId: runCheckpoint.outputFailure.requestId, toolsExecuted: 0 as const } : undefined,
-      outputBudgetMigrations: runCheckpoint.outputBudgetMigrations,
-      canResume: runCheckpoint.status !== 'running' && !recoveryBlocker(runCheckpoint, models.find((model) => model.sourceId === runCheckpoint.source.sourceId && model.id === runCheckpoint.source.modelId)),
-      blocker: recoveryBlocker(runCheckpoint, models.find((model) => model.sourceId === runCheckpoint.source.sourceId && model.id === runCheckpoint.source.modelId)), error: runCheckpoint.error
-      };
-    })() : runCheckpointArchive?.summary,
-    ...(message.runDetails ? { runDetails: {
-      ...message.runDetails,
-      toolCalls: message.runDetails.toolCalls.map((tool) => {
-        if (!['keepseek_delegate_task', 'keepseek_delegate_parallel', 'keepseek_read_subagent_result'].includes(tool.name)) {
-          return tool;
-        }
+  }) => {
+    // Tool durations come from the recorded run details exactly once, then feed
+    // both the duration projection below and the derived activity nodes.
+    const toolDurations = projectToolDurations(message.runDetails);
+    return {
+      ...message,
+      ...buildVisibleActivityNodes({
+        message,
+        toolRounds: _toolRounds,
+        runCheckpoint,
+        toolDurations,
+        language
+      }),
+      runState: runCheckpoint ? (() => {
+        const resumableBudgetPause = isResumableToolBudgetCheckpoint(runCheckpoint);
         return {
-          id: tool.id, name: tool.name, status: tool.status,
-          startedAt: tool.startedAt, endedAt: tool.endedAt, durationMs: tool.durationMs,
-          riskLevel: tool.riskLevel, scope: tool.scope, truncated: tool.truncated
+          taskId: runCheckpoint.taskId,
+          status: resumableBudgetPause ? 'interrupted' : runCheckpoint.status,
+          stopReason: resumableBudgetPause ? 'budget_pause' : runCheckpoint.stopReason,
+          usedMs: runCheckpoint.usedMs, maxExecutionMs: runCheckpoint.maxExecutionMs, limitSource: runCheckpoint.limitSource,
+          attempt: runCheckpoint.attempt, modelRequests: runCheckpoint.modelRequests, retries: runCheckpoint.retries,
+          lastNetworkAt: runCheckpoint.lastNetworkAt, lastEventAt: runCheckpoint.lastEventAt, lastContentAt: runCheckpoint.lastContentAt,
+          requestStartedAt: runCheckpoint.requestStartedAt, lastStepAt: runCheckpoint.lastStepAt, steps: (runCheckpoint.state?.toolRounds.reduce((count, round) => count + round.toolResults.length, 0) ?? 0) + Object.keys(runCheckpoint.state?.pending?.results ?? {}).length,
+          outputBudget: runCheckpoint.lastRequestBudget,
+          outputFailure: runCheckpoint.outputFailure ? { finishReason: runCheckpoint.outputFailure.finishReason,
+            requestId: runCheckpoint.outputFailure.requestId, toolsExecuted: 0 as const } : undefined,
+          outputBudgetMigrations: runCheckpoint.outputBudgetMigrations,
+          canResume: runCheckpoint.status !== 'running' && !recoveryBlocker(runCheckpoint, models.find((model) => model.sourceId === runCheckpoint.source.sourceId && model.id === runCheckpoint.source.modelId)),
+          blocker: recoveryBlocker(runCheckpoint, models.find((model) => model.sourceId === runCheckpoint.source.sourceId && model.id === runCheckpoint.source.modelId)), error: runCheckpoint.error
         };
-      })
-    } } : {})
-  }));
+      })() : runCheckpointArchive?.summary,
+      ...(message.runDetails ? { runDetails: {
+        ...message.runDetails,
+        toolCalls: message.runDetails.toolCalls.map((tool) => {
+          if (!['keepseek_delegate_task', 'keepseek_delegate_parallel', 'keepseek_read_subagent_result'].includes(tool.name)) {
+            return tool;
+          }
+          return {
+            id: tool.id, name: tool.name, status: tool.status,
+            startedAt: tool.startedAt, endedAt: tool.endedAt, durationMs: tool.durationMs,
+            riskLevel: tool.riskLevel, scope: tool.scope, truncated: tool.truncated
+          };
+        })
+      } } : {})
+    };
+  });
+}
+
+/**
+ * Duration lookup for one message: `runDetails.toolCalls` is the only recorded
+ * source, so an id that is missing simply has no duration.
+ */
+function projectToolDurations(runDetails: ChatMessage['runDetails']): Record<string, number> {
+  const durations: Record<string, number> = {};
+  for (const tool of runDetails?.toolCalls ?? []) {
+    if (typeof tool.durationMs === 'number') durations[tool.id] = tool.durationMs;
+  }
+  return durations;
+}
+
+/**
+ * Derived nodes are recomputed only when their inputs change. `postState()`
+ * projects every visible message on each checkpoint, and a completed message
+ * has immutable rounds, so caching by input identity keeps tool-result parsing
+ * off that hot path without ever serving a stale list.
+ */
+const activityNodeCache = new WeakMap<object, {
+  content: string;
+  language: KeepseekLanguage;
+  runDetails: unknown;
+  nodes: ActivityNode[];
+}>();
+
+/**
+ * Derived, render-only step list for one assistant message.
+ *
+ * A finished message derives its nodes from the recorded rounds; a streaming
+ * message additionally shows the tool that is executing right now, which the
+ * checkpoint already carries. Messages with nothing derived (DSML fallback,
+ * historical transcripts) contribute no field at all, so the Webview keeps its
+ * original whole-message rendering.
+ */
+function buildVisibleActivityNodes(input: {
+  message: Omit<ChatMessage, 'runCheckpoint' | 'runCheckpointArchive' | 'toolRounds'>;
+  toolRounds: ChatMessage['toolRounds'];
+  runCheckpoint: ChatMessage['runCheckpoint'];
+  toolDurations: Record<string, number>;
+  language: KeepseekLanguage;
+}): { activityNodes?: ActivityNode[] } {
+  const { message, toolRounds, runCheckpoint, toolDurations, language } = input;
+  if (message.role !== 'assistant') return {};
+  if (!toolRounds?.length && !message.isStreaming) return {};
+  // Only id and name are durable in `pending.executing`; the arguments are not
+  // recorded, so the live row never claims a target it cannot prove.
+  const pendingExecuting = message.isStreaming ? runCheckpoint?.state?.pending?.executing : undefined;
+  // A streaming message changes on every delta and owns a live row; only a
+  // settled message can be reused from the cache, keyed by its immutable rounds.
+  const cacheable = !message.isStreaming && message.content !== undefined;
+  if (cacheable) {
+    const cached = activityNodeCache.get(toolRounds);
+    // runDetails supplies the durations, so it is part of the cache key too.
+    if (cached && cached.content === message.content && cached.language === language
+      && cached.runDetails === message.runDetails) {
+      return { activityNodes: cached.nodes };
+    }
+  }
+  const nodes = buildActivityNodes({
+    content: message.content,
+    toolRounds,
+    toolDurations,
+    language,
+    ...(pendingExecuting ? { liveTool: { id: pendingExecuting.id, name: pendingExecuting.name } } : {})
+  });
+  if (nodes?.length && cacheable) {
+    activityNodeCache.set(toolRounds, {
+      content: message.content, language, runDetails: message.runDetails, nodes
+    });
+  }
+  return nodes?.length ? { activityNodes: nodes } : {};
 }
 
 export function getCurrentWorkspaceSessionScope(): WorkspaceSessionScope {

@@ -777,6 +777,12 @@ export interface ChatMessage {
    * 只对 native 工具协议收集；DSML 兑底路径不收集。
    */
   toolRounds?: AgentToolRound[];
+  /**
+   * 派生视图：assistant 消息的可视步骤序列（旁白 + 工具节点）。
+   * 仅用于渲染，不持久化、不进入 Provider 请求，也不改变 content 字节。
+   * 由 getVisibleMessages() 生成；缺少 toolRounds 时为 undefined。
+   */
+  activityNodes?: import('../agent/logging/activityNodes').ActivityNode[];
   /** Provider-native replay, valid only inside the recorded protocol/source/endpoint lane. */
   providerReplay?: ProviderReplayState;
 }

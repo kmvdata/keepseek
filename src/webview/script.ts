@@ -155,6 +155,9 @@ export function getScript(): string {
     // remembered across full transcript re-renders, so a streaming delta never
     // expands a panel the user collapsed; the summary dots carry the live signal.
     var reasoningExpandedKeys = new Set();
+    // Activity step lists keep their expanded state across transcript re-renders
+    // for the same reason reasoning panels do: render() rebuilds every node.
+    var activityExpandedKeys = new Map();
     var pendingSubmission = null;
     var submissionSequence = 0;
     var sessionPromptDrafts = new Map();
@@ -659,7 +662,16 @@ ${conversationsStateFragment.source}
     const STATUS_MESSAGE_DURATION_MS = 8000;
     const STATUS_MESSAGE_FADE_MS = 120;
     const STATUS_TOOLTIP_MIN_BYTES = 24;
+    // The sidebar status line is one row; the tooltip carries the full text.
+    const STATUS_MAX_BYTES = 160;
     const AGENT_STATUS_ROTATION_MS = 2600;
+    // Phases whose activity detail is a tool target, not a sentence.
+    const AGENT_TOOL_TARGET_PHASES = [
+      'executing_tool', 'reading_file', 'reading_file_range', 'searching_workspace',
+      'listing_files', 'listing_directory', 'creating_draft_edit', 'creating_draft_run',
+      'reading_diagnostics', 'reading_semantic_context', 'reading_git_state',
+      'running_validation', 'delegating'
+    ];
     const agentStatusPools = {
       preparing: ['agentStatusPreparingContext', 'agentStatusPreparingRequest'],
       expanding_references: ['agentStatusExpandingReferences', 'agentStatusPreparingRequest'],
@@ -1437,9 +1449,15 @@ ${conversationsMenuDismissFragment.source}
           var content = row.querySelector('.message-content');
           if (!content) { content = document.createElement('div'); content.className = 'message-content'; body.append(content); }
           if (content.classList.contains('is-placeholder')) { content.textContent = ''; content.classList.remove('is-placeholder'); }
-          // Stream as text nodes; render Markdown once the complete state arrives.
-          content.classList.add('is-stream-text');
-          content.append(document.createTextNode(contentTail));
+          if (applyActivityStreamDelta(row, contentTail, targetMessage)) {
+            // The step list owns the text; nothing else is appended here.
+          } else {
+            // Stream as text nodes; render Markdown once the complete state arrives.
+            content.classList.add('is-stream-text');
+            content.append(document.createTextNode(contentTail));
+          }
+        } else if (row.querySelector('.activity-list')) {
+          syncActivityToolRows(row.querySelector('.activity-list'), targetMessage);
         }
         var oldPanel = row.querySelector('.run-state-panel');
         if (targetMessage.runState) {
@@ -2103,10 +2121,32 @@ ${conversationsSessionListFragment.source}
         return '';
       }
       var key = keys[agentStatusRotationIndex % keys.length];
-      if (key === 'agentStatusDeepSeekReasoning') {
-        return t(key, { modelId: state.selectedModelId || 'DeepSeek' });
-      }
-      return t(key);
+      var text = key === 'agentStatusDeepSeekReasoning'
+        ? t(key, { modelId: state.selectedModelId || 'DeepSeek' })
+        : t(key);
+      // Only the tool-execution phases carry a target. A waiting/thinking detail is a
+      // sentence, and running_draft_run carries a proposal reason, so appending
+      // either would read as a malformed status line.
+      return activity.base === 'executing' && AGENT_TOOL_TARGET_PHASES.indexOf(activity.phase) >= 0
+        ? appendAgentActivityDetail(text, activity.detail)
+        : text;
+    }
+
+    // The detail names the concrete object of the current step. It is data, not
+    // copy, so it is appended verbatim after the localized phase text and only
+    // trimmed to stay inside the status bar.
+    function appendAgentActivityDetail(text, detail) {
+      var suffix = String(detail || '').replace(/\\s+/g, ' ').trim();
+      if (!suffix) return String(text || '');
+      // The phase copy ends with a trailing ellipsis to say "still working".
+      // Once the concrete target is shown, that marker is redundant noise.
+      var base = String(text || '').replace(/[.\\u2026]+$/u, '').trim();
+      var combined = base ? base + ' · ' + suffix : suffix;
+      if (getUtf8ByteLength(combined) <= STATUS_MAX_BYTES) return combined;
+      // Trim by code point so a multi-byte character is never split.
+      var chars = Array.from(combined);
+      while (chars.length && getUtf8ByteLength(chars.join('')) > STATUS_MAX_BYTES) chars.pop();
+      return chars.join('').trimEnd() + '…';
     }
 
     function getAgentActivityStatusKeys(activity) {
@@ -4197,8 +4237,18 @@ ${conversationsSessionListFragment.source}
             if (shouldShowStreamingPlaceholder) {
               content.textContent = t('processing');
             } else if (message.isStreaming) {
-              content.classList.add('is-stream-text');
-              content.textContent = message.content;
+              if (Array.isArray(message.activityNodes) && message.activityNodes.length) {
+                // While streaming, deltas keep appending into the last say node;
+                // tool rows are replaced whenever the checkpoint posts a state.
+                renderActivityNodes(content, message, true);
+              } else {
+                content.classList.add('is-stream-text');
+                content.textContent = message.content;
+              }
+            } else if (Array.isArray(message.activityNodes) && message.activityNodes.length) {
+              // Step rows replace the fused narration. The whole-message branch
+              // below stays intact as the fallback for every other message.
+              renderActivityNodes(content, message);
             } else {
               renderMarkdownContent(content, message.content, message.role !== 'assistant', {
                 compactReferenceLinks: message.role === 'user'
@@ -4247,6 +4297,193 @@ ${conversationsSessionListFragment.source}
 
     function getReasoningKey(message) {
       return String(state.activeSessionId || '') + '|' + String(message?.id || '');
+    }
+
+    // ---------------------------------------------------------------- activity
+    // Derived step rows: narration stays readable Markdown, each tool call is one
+    // compact line. Nothing here changes the message bytes; it only chooses how
+    // an already-derived activityNodes list is drawn.
+    var ACTIVITY_COLLAPSED_TOOL_LIMIT = 10;
+
+    function getActivityKey(message) {
+      return String(state.activeSessionId || '') + '|' + String(message?.id || '');
+    }
+
+    function isActivityExpanded(message) {
+      return activityExpandedKeys.get(getActivityKey(message)) === true;
+    }
+
+    function toggleActivityExpanded(message) {
+      var key = getActivityKey(message);
+      activityExpandedKeys.set(key, !isActivityExpanded(message));
+      render();
+    }
+
+    function createActivityIcon(status) {
+      var icon = document.createElement('span');
+      icon.className = 'activity-icon';
+      icon.setAttribute('aria-hidden', 'true');
+      return icon;
+    }
+
+    function getActivityToolLabel(node) {
+      var key = 'activityTool_' + String(node.name || '');
+      var label = t(key);
+      // t() returns the key itself when a tool has no dedicated label. A raw
+      // keepseek_* identifier is never shown; the generic word is used instead.
+      return label === key || !label ? t('activityToolFallback') : label;
+    }
+
+    function createActivityToolRow(node) {
+      var row = document.createElement('div');
+      row.className = 'activity-tool status-' + String(node.status || 'succeeded');
+      row.dataset.toolNodeId = String(node.id || '');
+      if (node.status === 'running') row.classList.add('is-running');
+      var label = getActivityToolLabel(node);
+      var detail = node.target ? label + ' · ' + node.target : label;
+      row.title = node.target ? String(node.name || '') + ' · ' + String(node.target) : String(node.name || '');
+      row.setAttribute('aria-label', detail + ' · ' + t('activityStatus_' + String(node.status || 'succeeded')));
+      row.append(createActivityIcon(node.status));
+      var text = document.createElement('span');
+      text.className = 'activity-tool-text';
+      text.textContent = label;
+      if (node.target) {
+        var target = document.createElement('span');
+        target.className = 'activity-tool-target';
+        target.textContent = ' · ' + String(node.target);
+        text.append(target);
+      }
+      row.append(text);
+      if (typeof node.durationMs === 'number') {
+        var duration = document.createElement('span');
+        duration.className = 'activity-tool-duration';
+        duration.textContent = formatDuration(node.durationMs);
+        row.append(duration);
+      } else if (node.status === 'running') {
+        var running = document.createElement('span');
+        running.className = 'activity-tool-duration';
+        running.textContent = t('activityStatus_running');
+        row.append(running);
+      }
+      return row;
+    }
+
+    function createActivitySay(text) {
+      var say = document.createElement('div');
+      say.className = 'activity-say';
+      renderMarkdownContent(say, text, false, {});
+      return say;
+    }
+
+    /**
+     * Streaming updates must never re-render the transcript: that would break
+     * scrolling and steal the caret. Deltas are appended into the last say node;
+     * tool rows are added or flipped to a finished state in place.
+     */
+    function applyActivityStreamDelta(row, contentTail, targetMessage) {
+      var list = row.querySelector('.activity-list');
+      if (!list) return false;
+      if (contentTail) {
+        // Text belongs to the newest narration, which is only open while no tool
+        // row follows it. Once a tool starts, a new round's text opens a new say.
+        var say = list.lastElementChild && list.lastElementChild.classList.contains('activity-say')
+          ? list.lastElementChild : null;
+        if (!say) {
+          say = document.createElement('div');
+          say.className = 'activity-say';
+          // Streaming text for the current round precedes the tool that is
+          // already running for it, so it is inserted before that live row.
+          var live = list.lastElementChild;
+          if (live && live.classList.contains('activity-tool') && live.classList.contains('is-running')) {
+            list.insertBefore(say, live);
+          } else {
+            list.append(say);
+          }
+        }
+        say.append(document.createTextNode(contentTail));
+      }
+      syncActivityToolRows(list, targetMessage);
+      return true;
+    }
+
+    /** Reconcile the rendered tool rows with the authoritative node list. */
+    function syncActivityToolRows(list, message) {
+      var nodes = Array.isArray(message?.activityNodes) ? message.activityNodes : [];
+      var toolNodes = nodes.filter(function(node) { return node.kind === 'tool'; });
+      // Key rows by tool call id: a state render reuses the same ids, and a stale
+      // row (for example the live placeholder) is dropped by the next full render
+      // rather than by this append-only delta path.
+      var rowsById = new Map();
+      Array.prototype.forEach.call(list.querySelectorAll('.activity-tool'), function(row) {
+        rowsById.set(row.dataset.toolNodeId, row);
+      });
+      toolNodes.forEach(function(node) {
+        var row = rowsById.get(node.id);
+        if (!row) {
+          list.append(createActivityToolRow(node));
+          return;
+        }
+        row.className = 'activity-tool status-' + String(node.status || 'succeeded');
+        if (node.status === 'running') row.classList.add('is-running');
+        var duration = row.querySelector('.activity-tool-duration');
+        var text = typeof node.durationMs === 'number' ? formatDuration(node.durationMs)
+          : node.status === 'running' ? t('activityStatus_running') : '';
+        if (!text) {
+          if (duration) duration.remove();
+          return;
+        }
+        if (!duration) {
+          duration = document.createElement('span');
+          duration.className = 'activity-tool-duration';
+          row.append(duration);
+        }
+        duration.textContent = text;
+      });
+    }
+
+    function renderActivityNodes(container, message, streaming) {
+      container.classList.add('activity-list');
+      var nodes = Array.isArray(message.activityNodes) ? message.activityNodes : [];
+      // A streaming list must not collapse: the newest step is the point.
+      var tools = nodes.filter(function(node) { return node.kind === 'tool'; });
+      var expanded = streaming || isActivityExpanded(message);
+      var hidden = expanded || tools.length <= ACTIVITY_COLLAPSED_TOOL_LIMIT
+        ? 0
+        : tools.length - ACTIVITY_COLLAPSED_TOOL_LIMIT;
+      var shownTools = 0;
+      var buttonInserted = false;
+
+      nodes.forEach(function(node) {
+        if (node.kind === 'say') {
+          if (String(node.text || '').trim()) {
+            var say = createActivitySay(node.text);
+            // The last say node is where streamed text lands.
+            say.classList.add('activity-say');
+            container.append(say);
+          }
+          return;
+        }
+        shownTools += 1;
+        if (hidden > 0 && shownTools > ACTIVITY_COLLAPSED_TOOL_LIMIT && !buttonInserted) {
+          container.append(createActivityToggle(message, hidden, false));
+          buttonInserted = true;
+        }
+        if (hidden > 0 && shownTools > ACTIVITY_COLLAPSED_TOOL_LIMIT) return;
+        container.append(createActivityToolRow(node));
+      });
+
+      if (hidden > 0 && !buttonInserted) container.append(createActivityToggle(message, hidden, false));
+      else if (expanded && tools.length > ACTIVITY_COLLAPSED_TOOL_LIMIT) container.append(createActivityToggle(message, 0, true));
+    }
+
+    function createActivityToggle(message, hiddenCount, expanded) {
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'activity-toggle';
+      button.textContent = expanded ? t('activityShowLess') : t('activityShowMore', { count: hiddenCount });
+      button.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+      button.addEventListener('click', function() { toggleActivityExpanded(message); });
+      return button;
     }
 
     function createReasoningBlock(message, seed) {

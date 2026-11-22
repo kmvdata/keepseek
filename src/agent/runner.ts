@@ -109,6 +109,7 @@ import type {
   SubagentToolAdapter
 } from './subagents/types';
 import { searchHistoryArchive } from './historyArchive';
+import { describeToolTarget } from './toolTarget';
 import { allocateSharedMessageTokens, createAcceptedRootSubagentHandoffEstimate, getSubagentHandoffKind } from './subagentUsageStats';
 import { isPromptInspectionTool, promptIntentMatches, validPromptCheckpoint } from './promptGeneration';
 import { renderGeneratedHandoffPrompt, handoffPromptError } from './handoffPrompt';
@@ -2122,7 +2123,13 @@ export class AgentLoop {
               );
             }
             this.throwIfAborted(request.signal, request.language);
-            emitStatus({ base: 'executing', phase: this.getToolActivityPhase(toolCall.function.name), toolName: toolCall.function.name });
+            emitStatus({
+              base: 'executing',
+              phase: this.getToolActivityPhase(toolCall.function.name),
+              toolName: toolCall.function.name,
+              // Display only: the concrete object of this step, never request bytes.
+              detail: describeToolTarget(toolCall.function.name, toolArgs, request.language)
+            });
             trace.record({
               type: 'tool_authorization_decision',
               toolCallId: toolCall.id,

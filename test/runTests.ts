@@ -7,6 +7,7 @@ import './approveAllExecution.test';
 import './approveAllBoundary.test';
 import './validationAuthorization.test';
 import './validationBarrier.test';
+import './activityNodes.test';
 import './commandCapabilityGrammar.test';
 import './runValidationReconciliation.test';
 import './changeSetBatchAdmission.test';
