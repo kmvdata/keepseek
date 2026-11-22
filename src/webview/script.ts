@@ -4229,23 +4229,28 @@ ${conversationsSessionListFragment.source}
         if (isEditing) {
           body.append(createInlineMessageEditor(message));
         } else {
-          var shouldShowStreamingPlaceholder = message.role === 'assistant' && message.isStreaming && !message.content && !message.reasoningContent;
-          var shouldRenderContent = message.role !== 'assistant' || message.content || shouldShowStreamingPlaceholder || !message.isStreaming;
+          var hasActivityNodes = Array.isArray(message.activityNodes) && message.activityNodes.length > 0;
+          // A run that has only invoked tools so far has no content yet; the step rows
+          // are still the right thing to show instead of a placeholder.
+          var shouldShowStreamingPlaceholder = message.role === 'assistant' && message.isStreaming
+            && !message.content && !message.reasoningContent && !hasActivityNodes;
+          var shouldRenderContent = message.role !== 'assistant' || message.content || hasActivityNodes
+            || shouldShowStreamingPlaceholder || !message.isStreaming;
           if (shouldRenderContent) {
             var content = document.createElement('div');
             content.className = 'message-content' + (shouldShowStreamingPlaceholder ? ' is-placeholder' : '');
             if (shouldShowStreamingPlaceholder) {
               content.textContent = t('processing');
             } else if (message.isStreaming) {
-              if (Array.isArray(message.activityNodes) && message.activityNodes.length) {
-                // While streaming, deltas keep appending into the last say node;
-                // tool rows are replaced whenever the checkpoint posts a state.
+              if (hasActivityNodes) {
+                // While streaming, deltas keep appending into the current say node;
+                // tool rows are reconciled in place whenever a checkpoint posts.
                 renderActivityNodes(content, message, true);
               } else {
                 content.classList.add('is-stream-text');
                 content.textContent = message.content;
               }
-            } else if (Array.isArray(message.activityNodes) && message.activityNodes.length) {
+            } else if (hasActivityNodes) {
               // Step rows replace the fused narration. The whole-message branch
               // below stays intact as the fallback for every other message.
               renderActivityNodes(content, message);
@@ -4368,9 +4373,19 @@ ${conversationsSessionListFragment.source}
       return row;
     }
 
-    function createActivitySay(text) {
+    function createActivitySay(text, streaming) {
       var say = document.createElement('div');
       say.className = 'activity-say';
+      if (streaming) {
+        // A live delta is not valid Markdown yet. It stays plain pre-wrap text in
+        // the same span the next delta appends to, so nothing is re-parsed and no
+        // text is ever inserted beside a half-rendered block.
+        var stream = document.createElement('span');
+        stream.className = 'is-stream-text';
+        stream.textContent = text;
+        say.append(stream);
+        return say;
+      }
       renderMarkdownContent(say, text, false, {});
       return say;
     }
@@ -4384,23 +4399,27 @@ ${conversationsSessionListFragment.source}
       var list = row.querySelector('.activity-list');
       if (!list) return false;
       if (contentTail) {
-        // Text belongs to the newest narration, which is only open while no tool
-        // row follows it. Once a tool starts, a new round's text opens a new say.
-        var say = list.lastElementChild && list.lastElementChild.classList.contains('activity-say')
-          ? list.lastElementChild : null;
+        // A delta always belongs to the newest narration. During a run that node
+        // may be followed by the tool row it is about to invoke, so the search
+        // walks back to the last say instead of only inspecting the tail.
+        var say = null;
+        for (var index = list.children.length - 1; index >= 0; index -= 1) {
+          if (list.children[index].classList.contains('activity-say')) { say = list.children[index]; break; }
+        }
         if (!say) {
           say = document.createElement('div');
           say.className = 'activity-say';
-          // Streaming text for the current round precedes the tool that is
-          // already running for it, so it is inserted before that live row.
-          var live = list.lastElementChild;
-          if (live && live.classList.contains('activity-tool') && live.classList.contains('is-running')) {
-            list.insertBefore(say, live);
-          } else {
-            list.append(say);
-          }
+          list.append(say);
         }
-        say.append(document.createTextNode(contentTail));
+        // Markdown renders once the message settles; until then the raw delta
+        // keeps its own newlines, so it lives in a pre-wrap span.
+        var stream = say.querySelector('.is-stream-text');
+        if (!stream) {
+          stream = document.createElement('span');
+          stream.className = 'is-stream-text';
+          say.append(stream);
+        }
+        stream.append(document.createTextNode(contentTail));
       }
       syncActivityToolRows(list, targetMessage);
       return true;
@@ -4457,7 +4476,12 @@ ${conversationsSessionListFragment.source}
       // reader sees the run collapse exactly at that point.
       nodes.forEach(function(node) {
         if (node.kind === 'say') {
-          if (String(node.text || '').trim()) container.append(createActivitySay(node.text));
+          if (String(node.text || '').trim()) {
+            // While streaming the final say is still growing, so it is drawn as
+            // raw pre-wrap text; settled narration goes through Markdown.
+            var isLiveTail = streaming && node === nodes[nodes.length - 1];
+            container.append(createActivitySay(node.text, isLiveTail));
+          }
           return;
         }
         renderedTools += 1;

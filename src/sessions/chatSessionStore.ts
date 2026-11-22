@@ -1663,7 +1663,7 @@ function buildVisibleActivityNodes(input: {
   const pendingExecuting = message.isStreaming ? runCheckpoint?.state?.pending?.executing : undefined;
   // A streaming message changes on every delta and owns a live row; only a
   // settled message can be reused from the cache, keyed by its immutable rounds.
-  const cacheable = !message.isStreaming && message.content !== undefined;
+  const cacheable = !message.isStreaming;
   // The early return above already proves that a settled message has rounds, but
   // the type still admits `undefined`; `cacheRounds` turns that runtime invariant
   // into a compiler-visible object key without widening the WeakMap key type.

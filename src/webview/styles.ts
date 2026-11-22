@@ -1864,6 +1864,12 @@ ${conversationsStylesFragment.source}
       padding: 2px 0 4px;
     }
 
+    /* Streaming narration is raw text, so its newlines must survive. */
+    .activity-say .is-stream-text {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
     .activity-say:first-child {
       padding-top: 0;
     }
