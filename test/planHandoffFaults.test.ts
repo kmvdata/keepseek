@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { test, type TestContext } from 'node:test';
-import { registerPendingPlan, resolvePlanDecision } from '../src/agent/executionMode';
+import { getPlanWorkflowViews, registerPendingPlan, resolvePlanDecision } from '../src/agent/executionMode';
 import { createLogicalRunBudgetState } from '../src/agent/executionPolicy';
 import { buildPlanHandoffPrompt, renderGeneratedHandoffPrompt, verifyHandoffProjection } from '../src/agent/handoffPrompt';
 import { buildProviderRequestProjection } from '../src/agent/providerRequestProjection';
@@ -388,6 +388,39 @@ for (const lane of lanes) {
     assert.equal(final?.userTaskBudgets?.[taskId], undefined);
   });
 }
+
+test('project paths in Chinese punctuation and command options remain portable at the plan card', async t => {
+  const w = await seed(t);
+  const user = w.source.messages.find(message => message.id === userId)!;
+  user.content = '核对（' + w.project.fsPath + '/src/retry.ts），并在 --cwd=' + w.project.fsPath + ' 运行测试。';
+  const view = getPlanWorkflowViews(w.source, { language: 'zh-CN' })[0];
+  assert.ok(view.promptPreview?.ok);
+  assert.ok(view.promptPreview.body.includes('核对（./src/retry.ts），并在 --cwd=. 运行测试。'));
+  assert.equal(view.newSessionBlockedReason, undefined);
+  for (const outside of [w.project.fsPath + '-other/private.ts', w.project.fsPath + '/../private.ts']) {
+    user.content = '核对（' + outside + '）';
+    assert.deepEqual(buildPlanHandoffPrompt(w.source, planId, 'zh-CN'), { ok: false, reason: 'disclosure' });
+  }
+});
+
+test('a historical plan without its task identity keeps the copy preview and cannot start a handoff', async t => {
+  const w = await seed(t);
+  delete w.source.messages.find(message => message.id === userId)!.userTask;
+  await w.store.persist();
+  const { host, warnings } = await providerAt(w, 'openai-compatible');
+  const artifact = confirmation(w);
+  for (const language of ['en', 'zh-CN'] as const) {
+    const view = getPlanWorkflowViews(w.store.getActiveSession(), { language })[0];
+    assert.ok(view.promptPreview?.ok && view.newSessionBlockedReason);
+  }
+  const send = t.mock.method(globalThis, 'fetch', async () => streamReply('openai-compatible', 'Unexpected request.'));
+  await host.handleMessage({ type: 'executePlanInNewSession', sessionId: w.source.id, planId,
+    planHash: artifact.planHash, bodyHash: artifact.bodyHash });
+  assert.match(warnings.at(-1) ?? '', /task budget/u);
+  assert.equal(send.mock.callCount(), 0);
+  assert.deepEqual((await diskQueue(w)).entries.map(entry => entry.sessionId), w.order);
+  assert.equal(w.store.getActiveSession().planWorkflows?.[0].status, 'pending');
+});
 
 test('the actual submission refuses a complete preview when the host tail exceeds the first-message limit', async t => {
   const initial = longPlan(300);

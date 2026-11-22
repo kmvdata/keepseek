@@ -1367,6 +1367,7 @@ ${conversationsMenuDismissFragment.source}
         if (incomingRevision && incomingRevision <= lastStateRevision) return;
         if (incomingRevision) lastStateRevision = incomingRevision;
         var previousActiveSessionId = state.activeSessionId || '';
+        var hadPlanCards = Boolean(state.planWorkflows?.length);
         if (message.state?.activeSessionId && previousActiveSessionId !== message.state.activeSessionId) {
           // Missing fields in an old or partial message cannot carry another
           // session's interaction lease into the newly selected session.
@@ -1386,6 +1387,11 @@ ${conversationsMenuDismissFragment.source}
         changeVisibleSession(previousActiveSessionId, state.activeSessionId);
         if (message.type === 'statePatch' && message.scope === 'startupSettings') {
           rememberTerminalAgentActivity(state.agentActivity);
+          // Model and recovery readiness can change the actions on an existing card.
+          if (hadPlanCards || state.planWorkflows?.length) {
+            render();
+            return;
+          }
           renderStatus();
           if (window.keepseekInputControls) {
             window.keepseekInputControls.render();
@@ -4325,10 +4331,11 @@ ${conversationsSessionListFragment.source}
         var actions = document.createElement('div');
         actions.className = 'plan-decision-actions';
         var openTarget = recovery && (recovery.phase === 'completed' || recovery.phase === 'dispatch_unknown');
-        var blockedReason = openTarget
+        var canSubmit = canSubmitPrompt();
+        var canStartNewSession = !recovery && preview && preview.ok && canSubmit && !plan.newSessionBlockedReason;
+        var recoveryBlock = recovery && (openTarget
           ? (canNavigateSessions() ? '' : t('planActionUnavailable'))
-          : plan.newSessionBlockedReason || (!canSubmitPrompt() ? t('planActionUnavailable') : '');
-        var canHandoff = Boolean(recovery || (preview && preview.ok));
+          : plan.newSessionBlockedReason || (!canSubmit ? t('planActionUnavailable') : ''));
         function addPlanAction(action, labelKey, disabled, primary, activate) {
           var button = document.createElement('button');
           button.type = 'button';
@@ -4344,17 +4351,19 @@ ${conversationsSessionListFragment.source}
           actions.append(button);
           return button;
         }
-        var newButton = addPlanAction('execute_new', recovery ? (openTarget ? 'planHandoffOpen' : 'planHandoffResume') : 'planStartNewSession',
-          !canHandoff || Boolean(blockedReason), canHandoff && !blockedReason, function(button) {
+        if (canStartNewSession || recovery) {
+          var label = recovery ? (openTarget ? 'planHandoffOpen' : 'planHandoffResume') : 'planStartNewSession';
+          var handoffButton = addPlanAction('execute_new', label, Boolean(recoveryBlock), !recoveryBlock, function(button) {
             button.disabled = true;
             var shown = recovery || preview;
             vscode.postMessage({ type: 'executePlanInNewSession', sessionId: plan.sessionId,
               planId: plan.id, planHash: shown.planHash, bodyHash: shown.bodyHash });
           });
-        if (blockedReason) newButton.title = blockedReason;
-        if (preview) {
-          addPlanAction('copy_prompt', 'planCopyPrompt', !preview || !preview.ok, false, function() {
-            copyTextToClipboard(preview.body).then(function() { setTransientStatus(t('copied')); },
+          if (recoveryBlock) handoffButton.title = recoveryBlock;
+        }
+        if (preview && preview.ok) {
+          addPlanAction('copy_prompt', 'planCopyPrompt', false, false, function() {
+            window.keepseekRichTextShortcuts.writeClipboardText(preview.body).then(function() { setTransientStatus(t('copied')); },
               function() { setTransientStatus(t('copyFailed')); });
           });
         }
@@ -4364,7 +4373,7 @@ ${conversationsSessionListFragment.source}
             { action: 'revise_plan', labelKey: 'planRevise' },
             { action: 'exit_plan', labelKey: 'planExit' }
           ].forEach(function(item) {
-            addPlanAction(item.action, item.labelKey, !canSubmitPrompt(), item.action === 'start_execution' && !canHandoff,
+            addPlanAction(item.action, item.labelKey, !canSubmit, item.action === 'start_execution' && !canStartNewSession,
               function(button) {
                 button.disabled = true;
                 vscode.postMessage({ type: 'resolvePlanDecision', planId: plan.id, action: item.action });
@@ -4372,10 +4381,10 @@ ${conversationsSessionListFragment.source}
           });
         }
         card.append(actions);
-        if (blockedReason) {
+        if (recoveryBlock) {
           var reason = document.createElement('div');
           reason.className = 'plan-decision-description';
-          reason.textContent = blockedReason;
+          reason.textContent = recoveryBlock;
           card.append(reason);
         }
       }

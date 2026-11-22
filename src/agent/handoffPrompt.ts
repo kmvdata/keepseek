@@ -90,7 +90,7 @@ function projectRelativeText(value: string, folders: readonly string[]): string 
     for (const prefix of roots) {
       const escaped = prefix.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
       // Leave unrelated or parent-traversing paths visible to the disclosure guard.
-      text = text.replace(new RegExp('(^|[\\u3000-\\u9fff\\s`"\'(：:<【\\[])(?:' + escaped + ')(?=[/\\\\]|[\\s`"\')，。>\\]]|$)', 'gu'), '$1.');
+      text = text.replace(new RegExp('(^|[\\u3000-\\u9fff\\s`"\'(：:=<（，；、【「『“‘\\[])(?:' + escaped + ')(?=[/\\\\]|[\\s`"\')，。；、）】」』”’>\\]]|$)', 'gu'), '$1.');
     }
   }
   return text;
@@ -127,7 +127,7 @@ function inspectFileReads(rounds: ChatMessage['toolRounds'], folders: readonly s
 function renderPrompt(requirement: string, steps: string, language: KeepseekLanguage, anchors: Map<string, string>): GeneratedHandoffPrompt {
   if (!requirement || !steps) return { ok: false, reason: 'missing_context' };
   const text = requirement + '\n' + steps;
-  const privatePath = /(?:\b(?:file|vscode-remote):\/|(?:^|[\s(`"'=<：])(?:\/(?!\/)[\p{L}\p{N}._-]|~[\\/]|(?:\.[\\/])*\.\.[\\/]|[a-z]:[\\/]|\\\\[^\\]))/imu;
+  const privatePath = /(?:\b(?:file|vscode-remote):\/|(?:^|[\s(`"'=<：（，；、【「『“‘])(?:\/(?!\/)[\p{L}\p{N}._-]|~[\\/]|(?:\.[\\/])*\.\.[\\/]|[a-z]:[\\/]|\\\\[^\\]))/imu;
   // Paths can immediately follow Chinese prose, punctuation, an option or a JSON key.
   const absolutePrivateRoot = /(?:\/(?:Users|home|private|var\/folders)\/|\b[A-Za-z]:[\\/]|\\\\[^\s\\]+\\)/u;
   const decoded = text.replace(/%(?:2f|5c|3a)/giu, escape => String.fromCharCode(parseInt(escape.slice(1), 16)));

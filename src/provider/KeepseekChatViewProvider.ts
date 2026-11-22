@@ -6810,7 +6810,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       if (!prior) {
         const plan = source.planWorkflows?.find(item => item.id === message.planId);
         const root = source.messages.find(item => item.id === plan?.userMessageId)?.userTask;
-        if (!root || !await this.loadTaskBudget(source, root)) throw new Error(this.t('approvalIdentityMissing'));
+        if (!root || !await this.loadTaskBudget(source, root)) throw new Error(this.t('planHandoffTaskUnavailable'));
         guardSource();
         // commitPlanHandoff reloads the source and transfers the settled budget under the project lock.
       }

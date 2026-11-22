@@ -22,7 +22,7 @@ import { isPlanWritableTool, planWriteRefusal } from '../sessions/queue/planGate
 import { resolveSubagentProfile } from './subagents/profiles';
 
 import { buildPlanHandoffPrompt, getLatestPendingPlan, handoffPromptError, hashPlanContent, isPlanRecordContentValid } from './handoffPrompt';
-import type { KeepseekLanguage } from '../shared/i18n';
+import { localize, type KeepseekLanguage } from '../shared/i18n';
 export { getLatestPendingPlan, hashPlanContent, isPlanRecordContentValid } from './handoffPrompt';
 
 export type PlanDecisionAction = 'start_execution' | 'revise_plan' | 'exit_plan';
@@ -258,8 +258,10 @@ export function getPlanWorkflowViews(session: ChatSession, options?: { language:
       const preview = buildPlanHandoffPrompt(session, record.id, language);
       view.promptPreview = preview;
       const tail = getApprovalModeUserTail(normalizeApprovalMode(session.approvalMode));
+      const sourceTask = session.messages.find(message => message.id === record.userMessageId && message.role === 'user')?.userTask;
       view.newSessionBlockedReason = !preview.ok ? handoffPromptError(language, preview.reason)
         : preview.body.length + 2 + tail.length > 32_000 ? handoffPromptError(language, 'oversize')
+        : !sourceTask ? localize(language, 'planHandoffTaskUnavailable')
         : options?.newSessionBlockedReason;
     } else if (record.status === 'superseded') {
       const transfer = session.planHandoffs?.find(entry => entry.sourceSessionId === session.id

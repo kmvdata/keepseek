@@ -4,9 +4,11 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { test } from 'node:test';
+import { runInNewContext } from 'node:vm';
 import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
 import { ChatSessionStore } from '../src/sessions/chatSessionStore';
 import { GlobalSessionStorage } from '../src/sessions/globalSessionStorage';
+import { getScript } from '../src/webview/script';
 import * as vscode from './stubs/vscode';
 
 const SCOPE_KEY = 'folders:file:///d%3A/Projects/context-failure';
@@ -86,4 +88,38 @@ test('a startup project-context failure keeps its cause instead of a bare reload
     assert.match(reported, /AGENTS\.md/u, 'the failing path is named');
     assert.equal(snapshot.canEdit, true, 'only project context is degraded; the draft stays editable');
   });
+});
+
+test('startup settings refresh existing plan actions and keep the empty composer lightweight', () => {
+  const script = getScript();
+  const start = script.indexOf('function handleKeepseekHostMessage(');
+  const end = script.indexOf('function applyAgentRunStreamPatch(', start);
+  assert.ok(start > 0 && end > start);
+  const sessionId = 'session';
+  const plan = { id: 'plan', sessionId, assistantMessageId: 'reply', status: 'pending' };
+  const state = { activeSessionId: sessionId, planWorkflows: [] as typeof plan[], interaction: { sessionId, canSubmit: false } };
+  const redraws: Array<{ plans: string[]; canSubmit: boolean }> = [];
+  let composerRefreshes = 0;
+  const handle = runInNewContext(script.slice(start, end) + ';handleKeepseekHostMessage', {
+    state, lastStateRevision: 0, window: {}, changeVisibleSession() {}, rememberTerminalAgentActivity() {},
+    renderStatus() {}, syncSendButtonAvailability() { composerRefreshes++; },
+    render() { redraws.push({ plans: state.planWorkflows.map(p => p.id), canSubmit: state.interaction.canSubmit }); }
+  }) as (event: { data: unknown }) => void;
+  const send = (revision: number, plans: typeof plan[], canSubmit: boolean) => handle({ data: {
+    type: 'statePatch', scope: 'startupSettings', revision,
+    state: { activeSessionId: sessionId, planWorkflows: plans, interaction: { sessionId, canSubmit } }
+  } });
+
+  send(1, [], false);
+  assert.equal(composerRefreshes, 1);
+  assert.deepEqual(redraws, []);
+  send(2, [plan], false);
+  send(3, [plan], true);
+  send(2, [plan], false); // late update cannot hide an action that has just become available
+  send(4, [], true);
+  send(5, [], true);
+  assert.deepEqual(redraws, [
+    { plans: ['plan'], canSubmit: false }, { plans: ['plan'], canSubmit: true }, { plans: [], canSubmit: true }
+  ]);
+  assert.equal(composerRefreshes, 2);
 });
