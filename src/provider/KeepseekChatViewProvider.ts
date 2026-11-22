@@ -263,20 +263,65 @@ const MAX_DELETE_CONFIRMATION_PATHS = 10;
 const APPROVE_ALL_APPLICABLE: ReadonlySet<string> = new Set(['pending', 'apply_failed', 'interrupted']);
 /** Structured reasons a drain pass can stop before a draft reaches the disk. */
 type ApproveAllGate = 'non_approve_all' | 'pending_truncation' | 'untrusted' | 'busy'
+  | 'slot_unavailable' | 'preflight_failed' | 'identity_mismatch' | 'untrusted_target'
+  | 'deferred_to_boundary' | 'plan_discarded' | 'manually_applied'
   | 'latched' | 'not_applicable' | 'applied' | 'apply_blocked' | 'none_pending';
 type ApproveAllTrigger = 'mode_switch' | 'run_end' | 'checkpoint' | 'change_action'
-  | 'session_navigation' | 'continuation' | 'manual';
+  | 'session_navigation' | 'continuation' | 'slot_released' | 'manual';
+/** Gates that no manual action may override: the precondition must be fixed first. */
+const APPROVE_ALL_HARD_GATES: ReadonlySet<ApproveAllGate> = new Set<ApproveAllGate>([
+  'non_approve_all', 'pending_truncation', 'untrusted', 'identity_mismatch', 'untrusted_target'
+]);
+/** A wait, not a refusal: the host has not tried yet and will try at a boundary. */
+const APPROVE_ALL_WAIT_GATES: ReadonlySet<ApproveAllGate> = new Set<ApproveAllGate>([
+  'deferred_to_boundary', 'slot_unavailable'
+]);
+/** Boundaries that release the "already attempted" window: a genuinely new
+ * chance for a blocked draft. Continuations, nudges and our own change-action
+ * completions keep the window so one boundary never retries the same draft. */
+const APPROVE_ALL_WINDOW_TRIGGERS: ReadonlySet<ApproveAllTrigger> = new Set<ApproveAllTrigger>([
+  'run_end', 'mode_switch', 'session_navigation', 'manual'
+]);
 interface ApproveAllLedgerEntry {
   gate: ApproveAllGate;
   trigger: ApproveAllTrigger;
   draftId?: string;
   reason?: string;
+  /** Hard gates are unmet preconditions, never an offer to force the write. */
+  hard?: boolean;
   at: string;
+}
+interface ApproveAllBlockedDraft {
+  id: string;
+  kind: 'changeSet' | 'draftRun';
+  label: string;
+  gate: ApproveAllGate;
+  reason?: string;
+  /** True only for file drafts whose stop was not a hard safety precondition. */
+  manual: boolean;
 }
 interface ApproveAllViewModel {
   pending: number;
-  blocked: Array<{ id: string; label: string; gate: ApproveAllGate; reason?: string }>;
+  blocked: ApproveAllBlockedDraft[];
   nextTrigger: ApproveAllTrigger | 'drain';
+  /** True while a pass is running or a follow-up pass is already scheduled. */
+  scheduled: boolean;
+}
+/** Why a change action never started; the drain maps it to an exact gate. */
+type ChangeActionRejectionPhase = 'slot_unavailable' | 'busy' | 'untrusted'
+  | 'pending_truncation' | 'mode_denied' | 'not_pending';
+type BeginChangeActionResult =
+  | { ok: true; key: string }
+  | { ok: false; phase: ChangeActionRejectionPhase; reason: string };
+/** What actually happened, so a caller never has to infer success from state. */
+interface ChangeApplyOutcome {
+  /** False when the host refused to start the action at all. */
+  started: boolean;
+  rejection?: Extract<BeginChangeActionResult, { ok: false }>;
+  /** True only when at least one file left the pending state on disk. */
+  applied: boolean;
+  /** Why nothing was written. */
+  reason?: string;
 }
 /** How long a manual approval may wait for the user before it settles itself. */
 /** Host-bound manual approval outcome; 'expired' only comes from the bounded wait. */
@@ -430,7 +475,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     return viewed ? this.interactionCoordinator?.currentFor(viewed)?.operationId : undefined;
   }
   private get interactions(): InteractionCoordinator {
-    return this.interactionCoordinator ??= new InteractionCoordinator({ onDiagnostic: event => console.info('[KeepSeek] interaction', event) });
+    return this.interactionCoordinator ??= new InteractionCoordinator({
+      onDiagnostic: event => console.info('[KeepSeek] interaction', event),
+      // Release is the only boundary that covers inherited operations: the plan
+      // decision and batch continuations keep this slot through run finalization,
+      // so `run_end` alone reports a slot that is still held.
+      onRelease: event => this.onInteractionReleased(event)
+    });
   }
   private interactionFailure?: { sessionId: string; message: string };
   /** Cause of a rejected session-store startup, surfaced with the retry hint. */
@@ -639,6 +690,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private draftRunAutoContinueInFlight = false;
   private approveAllTimer: ReturnType<typeof setTimeout> | undefined;
   private approveAllInFlight = false;
+  /** Set when a trigger arrives mid-pass: one queued pass, never a timer storm. */
+  private approveAllRerun: ApproveAllTrigger | undefined;
   private readonly approveAllAttempted = new Set<string>();
   /** Drafts already reported as blocked, so one reason is stated once per draft. */
   private readonly approveAllBlocked = new Set<string>();
@@ -655,6 +708,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private approveAllTrigger: ApproveAllTrigger = 'manual';
   /** A drain request arrived while an approval phase owned the slot; its release reschedules. */
   private draftRunAutoContinueDeferred = false;
+  /** Drafts whose deferral/rejection was already recorded, keyed by (id, gate). */
+  private readonly approveAllDeferredNoted = new Set<string>();
+  /**
+   * Latest recorded stop per draft id. Survives a pass and a state rebuild, so a
+   * blocked draft still explains itself after the ledger rotates past its entry.
+   */
+  private readonly approveAllStops = new Map<string, { gate: ApproveAllGate; reason?: string; trigger: ApproveAllTrigger }>();
   private deferredContinuationFallback: ReturnType<typeof setTimeout> | undefined;
   private liveContextUsage: ContextUsageEstimate | undefined;
   private liveTurnUsage: TurnUsageStats | undefined;
@@ -846,6 +906,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     if (this.postStateTimer) {
       clearTimeout(this.postStateTimer);
     }
+    // A pending approve-all pass must not fire after the provider is disposed: it
+    // would apply drafts and post state into a dead view.
+    if (this.approveAllTimer) {
+      clearTimeout(this.approveAllTimer);
+      this.approveAllTimer = undefined;
+    }
+    this.approveAllRerun = undefined;
     this.draftRuns.dispose();
     this.draftDiffService.dispose();
     this.backgroundRunStatusBar.dispose();
@@ -1939,7 +2006,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         this.draftRuns.showTerminal(message.id);
         return;
       case 'applyDraftEdit':
-        await this.handleApplyDraftEdit(message);
+        await this.handleApplyDraftEdit(message, { manual: this.allowsManualApproveAllFallback(message.id) });
         return;
       case 'discardDraftEdit':
         await this.handleDiscardDraftEdit(message);
@@ -1959,7 +2026,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         }
         return;
       case 'applyChangeSet':
-        await this.handleApplyChangeSet(message);
+        await this.handleApplyChangeSet(message, { manual: this.allowsManualApproveAllFallback(message.id) });
         return;
       case 'discardChangeSet':
         await this.handleDiscardChangeSet(message);
@@ -2065,23 +2132,48 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     return this.sessionStore.messages;
   }
 
-  private beginChangeAction(message: ChangeActionMessage, options: { unattended?: boolean } = {}): string | undefined {
-    if (!this.interactionSnapshot(this.stateRevision).canSubmit) { this.postChangeActionFeedback(message, 'busy', this.t('changeActionBusy')); return undefined; }
-    // Webview applies exist only in ask mode; approve-all drains its own drafts
-    // internally (options.unattended) and must not hit this webview guard.
-    if (!options.unattended && ['applyDraftEdit', 'applyChangeSet', 'applyAllDraftEdits'].includes(message.type)
-      && normalizeApprovalMode(this.sessionStore.getActiveSession().approvalMode) !== 'ask') return undefined;
+  /**
+   * Reserve the workspace for one file action. The result is structured on
+   * purpose: a refused start used to be indistinguishable from "the store had
+   * nothing to do", which is exactly how a blocked draft became silent.
+   */
+  private beginChangeAction(message: ChangeActionMessage,
+    options: { unattended?: boolean; manual?: boolean } = {}): BeginChangeActionResult {
+    const session = this.sessionStore.getActiveSession();
+    const approvalMode = normalizeApprovalMode(session.approvalMode);
+    // Manual file applies are a fallback for approve-all drafts the host recorded
+    // as blocked. Ask keeps its own buttons; an unattended pass is host-internal.
+    if (!options.unattended && !options.manual && ['applyDraftEdit', 'applyChangeSet', 'applyAllDraftEdits'].includes(message.type)
+      && approvalMode !== 'ask') {
+      return { ok: false, phase: 'mode_denied', reason: 'webview_apply_requires_ask' };
+    }
+    if (session.pendingHistoryTruncation) {
+      this.postChangeActionFeedback(message, 'busy', this.t('changeActionBusy'));
+      return { ok: false, phase: 'pending_truncation', reason: 'pending_history_truncation' };
+    }
+    if (!vscode.workspace.isTrusted) {
+      this.postChangeActionFeedback(message, 'busy', this.t('changeActionBusy'));
+      return { ok: false, phase: 'untrusted', reason: 'untrusted_workspace' };
+    }
+    if (!this.interactionSnapshot(this.stateRevision).canSubmit) {
+      this.postChangeActionFeedback(message, 'busy', this.t('changeActionBusy'));
+      return { ok: false, phase: 'slot_unavailable', reason: 'interaction_slot_unavailable' };
+    }
     const key = `${message.type}:${message.id}`;
     if (this.isBusy || this.isStartingRun || this.runContextRefreshInFlight || this.activeChangeActions.size > 0) {
       this.postChangeActionFeedback(message, 'busy', this.t('changeActionBusy'));
-      return undefined;
+      return { ok: false, phase: 'busy',
+        reason: this.activeChangeActions.size ? `active_change_actions:${this.activeChangeActions.size}` : 'host_busy' };
     }
     const operation = this.interactions.begin('continuation', this.sessionStore.activeSessionId, 'action');
-    if (!operation) return undefined;
+    if (!operation) {
+      this.postChangeActionFeedback(message, 'busy', this.t('changeActionBusy'));
+      return { ok: false, phase: 'slot_unavailable', reason: 'interaction_slot_reserved' };
+    }
     (this.changeInteractionOperations ??= new Map()).set(key, operation);
     this.activeChangeActions.add(key);
     this.postChangeActionFeedback(message, 'checking');
-    return key;
+    return { ok: true, key };
   }
 
   private finishChangeAction(message: ChangeActionMessage, key: string, phase: ChangeActionFeedbackPhase, detail?: string): void {
@@ -2123,7 +2215,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
    * latches are kept: repeating the same warning on every drain is noise.
    */
   private forgetApproveAllBlockedForChangedDrafts(): void {
-    if (!this.approveAllBlocked.size) return;
+    if (!this.approveAllBlocked.size && !this.approveAllStops.size) return;
     const pendingIds = new Set([
       ...this.changeSets.toWebviewState(this.sessionStore.activeSessionId)
         .flatMap(set => set.files.map(file => file.id)),
@@ -2131,6 +2223,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     ]);
     for (const id of [...this.approveAllBlocked]) {
       if (!pendingIds.has(id)) this.approveAllBlocked.delete(id);
+    }
+    for (const id of [...this.approveAllStops.keys()]) {
+      if (!pendingIds.has(id)) this.approveAllStops.delete(id);
     }
   }
 
@@ -2200,17 +2295,21 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     };
   }
 
-  private async handleApplyDraftEdit(message: Extract<WebviewMessage, { type: 'applyDraftEdit' }>): Promise<void> {
-    const key = this.beginChangeAction(message);
-    if (!key) return;
+  private async handleApplyDraftEdit(message: Extract<WebviewMessage, { type: 'applyDraftEdit' }>,
+    options: { manual?: boolean } = {}): Promise<ChangeApplyOutcome> {
+    const started = this.beginChangeAction(message, options);
+    if (!started.ok) return { started: false, rejection: started, applied: false, reason: started.reason };
+    const key = started.key;
     const controller = this.changeActionAbortController = new AbortController();
     let work: ReturnType<UserTaskClock['enter']> | undefined;
+    let applied = false;
+    let reason: string | undefined;
     try {
       const targetUris = this.changeSets.getEditUris([message.id]);
       const deleteTargets = this.changeSets.getPendingDeleteTargetsForEdit(message.id);
       const session = this.sessionStore.getActiveSession();
       const approvalForEdit = await this.prepareManualApply([message.id], controller, deleteTargets);
-      if (!approvalForEdit) { this.finishChangeAction(message, key, 'cancelled'); return; }
+      if (!approvalForEdit) { this.finishChangeAction(message, key, 'cancelled'); reason = 'cancelled'; return { started: true, applied: false, reason }; }
       const segment = this.changeSets.getPendingEdit(message.id)?.runId;
       work = this.enterTaskWork(session, segment ? taskForSegment(session, segment) : undefined);
       const result = await this.changeSets.applyEdit(message.id, undefined, {
@@ -2219,8 +2318,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       });
       if (!result) {
         this.finishChangeAction(message, key, 'not_found', this.t('changeActionNotFound'));
-        return;
+        return { started: true, applied: false, reason: this.t('changeActionNotFound') };
       }
+      applied = result.appliedEditIds.length > 0;
       this.postState({ immediate: true, omitMessages: true });
       if (result.appliedEditIds.length) {
         this.scheduleRunContextRefresh(targetUris);
@@ -2228,30 +2328,38 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
       this.showChangeSetFailures(result.failed);
       const failed = result.failed.length > 0 && result.appliedEditIds.length === 0;
-      this.finishChangeAction(message, key, failed ? 'failed' : 'complete', failed ? result.failed[0]?.error : undefined);
+      reason = failed ? result.failed[0]?.error : undefined;
+      this.finishChangeAction(message, key, failed ? 'failed' : 'complete', reason);
+      return { started: true, applied, reason };
     } catch (error) {
       const detail = getErrorMessage(error);
       vscode.window.showErrorMessage(detail);
       this.finishChangeAction(message, key, 'failed', detail);
+      return { started: true, applied, reason: detail };
     } finally {
       if (this.changeActionAbortController === controller) this.changeActionAbortController = undefined;
       work?.finish();
       await this.completeChangeInteraction(key);
+      if (options.manual) this.recordManualApplyOutcome(message.id, applied, reason);
     }
   }
 
-  private async handleApplyChangeSet(message: Extract<WebviewMessage, { type: 'applyChangeSet' }>, options: { unattended?: boolean } = {}): Promise<void> {
-    const key = this.beginChangeAction(message, options);
-    if (!key) return;
+  private async handleApplyChangeSet(message: Extract<WebviewMessage, { type: 'applyChangeSet' }>,
+    options: { unattended?: boolean; manual?: boolean } = {}): Promise<ChangeApplyOutcome> {
+    const started = this.beginChangeAction(message, options);
+    if (!started.ok) return { started: false, rejection: started, applied: false, reason: started.reason };
+    const key = started.key;
     const controller = this.changeActionAbortController = new AbortController();
     let work: ReturnType<UserTaskClock['enter']> | undefined;
+    let applied = false;
+    let reason: string | undefined;
     try {
       const targetUris = this.changeSets.getChangeSetEditUris(message.id);
       const deleteTargets = this.changeSets.getPendingDeleteTargetsForChangeSet(message.id);
       const session = this.sessionStore.getActiveSession();
       const set = this.changeSets.toWebviewState(session.id).find(value => value.id === message.id);
       const approvalForEdit = await this.prepareManualApply(set?.files.map(file => file.id) ?? [], controller, deleteTargets);
-      if (!approvalForEdit) { this.finishChangeAction(message, key, 'cancelled'); return; }
+      if (!approvalForEdit) { this.finishChangeAction(message, key, 'cancelled'); reason = 'cancelled'; return { started: true, applied: false, reason }; }
       const segment = this.changeSets.toWebviewState(this.sessionStore.activeSessionId).find(set => set.id === message.id)?.runId;
       work = this.enterTaskWork(session, segment ? taskForSegment(session, segment) : undefined);
       const result = await this.changeSets.applyAll(message.id, {
@@ -2260,8 +2368,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       });
       if (!result) {
         this.finishChangeAction(message, key, 'not_found', this.t('changeActionNotFound'));
-        return;
+        return { started: true, applied: false, reason: this.t('changeActionNotFound') };
       }
+      applied = result.appliedEditIds.length > 0;
       this.postState({ immediate: true, omitMessages: true });
       if (result.appliedEditIds.length) {
         this.scheduleRunContextRefresh(targetUris);
@@ -2269,21 +2378,128 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
       this.showChangeSetFailures(result.failed);
       const failed = result.failed.length > 0 && result.appliedEditIds.length === 0;
-      this.finishChangeAction(message, key, failed ? 'failed' : 'complete', failed ? result.failed[0]?.error : undefined);
+      reason = failed ? result.failed[0]?.error : undefined;
+      this.finishChangeAction(message, key, failed ? 'failed' : 'complete', reason);
+      return { started: true, applied, reason };
     } catch (error) {
       const detail = getErrorMessage(error);
       vscode.window.showErrorMessage(detail);
       this.finishChangeAction(message, key, 'failed', detail);
+      return { started: true, applied, reason: detail };
     } finally {
       if (this.changeActionAbortController === controller) this.changeActionAbortController = undefined;
       work?.finish();
       await this.completeChangeInteraction(key);
+      if (options.manual) this.recordManualApplyOutcome(message.id, applied, reason);
     }
   }
 
+  /**
+   * Approve-all used to refuse every webview apply, so a draft the host could not
+   * write had no way out at all. The fallback is deliberately narrow: ask mode
+   * keeps its own flow, and in approve-all only a draft the host itself recorded
+   * as non-automatic (a blocked latch with a non-hard gate) may be applied by the
+   * user. The host still re-runs the same preflight, identity and scope checks.
+   *
+   * The decision is shared with the view model so a visible button can never be
+   * refused here, and a refused click can never be advertised in the first place.
+   */
+  private allowsManualApproveAllFallback(draftId: string): boolean {
+    if (normalizeApprovalMode(this.sessionStore.getActiveSession().approvalMode) === 'ask') return false;
+    // The user is clicking now, so any scheduled pass has already lost the race:
+    // treat this as the idle case and let the shared guard decide.
+    // The message may name a ChangeSet or a single edit inside one.
+    const pendingSets = this.changeSetIdsPendingApproveAll();
+    if (pendingSets.has(draftId)) return this.manualFallbackFor(draftId, 'changeSet', false);
+    const changeSetId = this.changeSetIdForEdit(draftId);
+    return changeSetId ? this.manualFallbackFor(changeSetId, 'changeSet', false) : false;
+  }
+
+  /**
+   * One decision for both the host guard and the rendered card.
+   *
+   * `waiting` says whether something is still scheduled to act on the draft.
+   * While it is true a deferral is a live wait (the button would only report
+   * busy); with nothing scheduled the same record is the dead end the fallback
+   * exists for, so the button must appear.
+   */
+  private manualFallbackFor(id: string, kind: 'changeSet' | 'draftRun', waiting: boolean): boolean {
+    // Command execution has no fallback at all: its gates are the authority.
+    if (kind !== 'changeSet') return false;
+    const recorded = this.approveAllStops.get(id)?.gate ?? this.latestApproveAllGate(id);
+    if (!recorded) {
+      // After a restart the in-memory stop is gone while the draft is still
+      // pending. Nothing is scheduled in that state, so a manual apply is the
+      // only remaining action; beginChangeAction still re-checks trust,
+      // truncation and the interaction slot before anything writes.
+      return this.changeSetIdsPendingApproveAll().has(id);
+    }
+    if (APPROVE_ALL_HARD_GATES.has(recorded)) return false;
+    if (APPROVE_ALL_WAIT_GATES.has(recorded)) return !waiting;
+    return true;
+  }
+
+  private latestApproveAllGate(draftId: string): ApproveAllGate | undefined {
+    for (let index = this.approveAllLedger.length - 1; index >= 0; index -= 1) {
+      const entry = this.approveAllLedger[index];
+      if (entry.draftId === draftId) return entry.gate;
+    }
+    return undefined;
+  }
+
+  private changeSetIdsPendingApproveAll(): Set<string> {
+    return new Set(this.changeSets.toWebviewState(this.sessionStore.activeSessionId)
+      .filter(set => set.files.some(file => APPROVE_ALL_APPLICABLE.has(file.status)))
+      .map(set => set.id));
+  }
+
+  /** The ChangeSet that currently owns a pending edit, if any. */
+  private changeSetIdForEdit(editId: string): string | undefined {
+    return this.changeSets.toWebviewState(this.sessionStore.activeSessionId)
+      .find(set => set.files.some(file => file.id === editId))?.id;
+  }
+
+  /** A host-internal apply that reports what reached the disk, not what was tried. */
+  private async applyChangeSetUnattended(changeSetId: string, trigger: ApproveAllTrigger): Promise<ChangeApplyOutcome> {
+    const outcome = await this.handleApplyChangeSet(
+      { type: 'applyChangeSet', id: changeSetId, requestId: 'approve-all' }, { unattended: true });
+    if (outcome.started && outcome.applied) {
+      // The draft did reach the disk, so its blocked latch is stale by definition.
+      this.approveAllBlocked.delete(changeSetId);
+      this.approveAllStops.delete(changeSetId);
+    } else if (outcome.started) {
+      // The write was attempted and produced nothing: record the store's own
+      // reason (already-rejected edits carry their error text) rather than a
+      // generic phrase, so the card can explain what was refused.
+      const rejected = this.changeSets.toWebviewState(this.sessionStore.activeSessionId)
+        .find(item => item.id === changeSetId)?.files.find(file => file.error)?.error;
+      if (rejected) outcome.reason ??= rejected;
+    } else if (outcome.rejection?.phase === 'slot_unavailable') {
+      // Not attempted at all: this is the deferred case, not a failed write.
+      return outcome;
+    }
+    void trigger;
+    return outcome;
+  }
+
+  /** Manual fallback acted on a recorded draft: clear the latch either way. */
+  private recordManualApplyOutcome(draftId: string, applied: boolean, reason?: string): void {
+    if (normalizeApprovalMode(this.sessionStore.getActiveSession().approvalMode) !== 'approve-all') return;
+    if (applied) {
+      this.approveAllBlocked.delete(draftId);
+      this.approveAllAttempted.delete(draftId);
+      this.recordApproveAllGate('manually_applied', 'manual', { draftId });
+      this.warnedApproveAllReasons.clear();
+      return;
+    }
+    this.recordApproveAllGate('preflight_failed', 'manual', { draftId, reason: reason ?? 'not_applied' });
+    this.warnApproveAllBlocked(draftId, 'preflight_failed', draftId);
+  }
+
   private async handleDiscardDraftEdit(message: Extract<WebviewMessage, { type: 'discardDraftEdit' }>): Promise<void> {
-    const key = this.beginChangeAction(message);
-    if (!key) return;
+    const started = this.beginChangeAction(message);
+    if (!started.ok) return;
+    const key = started.key;
     try {
       if (!this.changeSets.discardEdit(message.id)) {
         this.finishChangeAction(message, key, 'not_found', this.t('changeActionNotFound'));
@@ -2300,8 +2516,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleDiscardChangeSet(message: Extract<WebviewMessage, { type: 'discardChangeSet' }>): Promise<void> {
-    const key = this.beginChangeAction(message);
-    if (!key) return;
+    const started = this.beginChangeAction(message);
+    if (!started.ok) return;
+    const key = started.key;
     try {
       const discardedIds = this.changeSets.toWebviewState(this.sessionStore.activeSessionId)
         .find(set => set.id === message.id)?.files.map(file => file.id) ?? [];
@@ -2320,8 +2537,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleRevertDraftEdit(message: Extract<WebviewMessage, { type: 'revertDraftEdit' }>): Promise<void> {
-    const key = this.beginChangeAction(message);
-    if (!key) return;
+    const started = this.beginChangeAction(message);
+    if (!started.ok) return;
+    const key = started.key;
     try {
       const targetUris = this.changeSets.getEditUris([message.id]);
       const result = await this.changeSets.revertEdit(message.id, {
@@ -2345,8 +2563,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleRevertChangeSet(message: Extract<WebviewMessage, { type: 'revertChangeSet' }>): Promise<void> {
-    const key = this.beginChangeAction(message);
-    if (!key) return;
+    const started = this.beginChangeAction(message);
+    if (!started.ok) return;
+    const key = started.key;
     try {
       const targetUris = this.changeSets.getChangeSetEditUris(message.id);
       const result = await this.changeSets.revertAll(message.id, {
@@ -4854,7 +5073,20 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
    * is what clears a latch: the same draft may be retried from a new boundary.
    */
   private scheduleApproveAllExecution(trigger: ApproveAllTrigger = 'manual'): void {
-    if (this.approveAllTimer || this.approveAllInFlight) return;
+    // A pass is already running: queue exactly one follow-up instead of dropping
+    // the request. The old boolean guard silently discarded the very continuation
+    // that was supposed to rescue a draft the pass could not apply.
+    if (this.approveAllInFlight) { this.queueApproveAllRerun(trigger); return; }
+    if (this.approveAllTimer) {
+      // One timer is enough. A window trigger still upgrades the pending pass so
+      // its fresh-attempt semantics are not lost by a later weak trigger.
+      if (APPROVE_ALL_WINDOW_TRIGGERS.has(trigger)) this.approveAllTrigger = trigger;
+      return;
+    }
+    this.startApproveAllTimer(trigger);
+  }
+
+  private startApproveAllTimer(trigger: ApproveAllTrigger): void {
     this.approveAllTrigger = trigger;
     this.approveAllTimer = setTimeout(() => {
       this.approveAllTimer = undefined;
@@ -4863,13 +5095,57 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.approveAllTimer.unref?.();
   }
 
+  private queueApproveAllRerun(trigger: ApproveAllTrigger): void {
+    const queued = this.approveAllRerun;
+    // A window trigger is the stronger boundary: it grants a fresh attempt.
+    this.approveAllRerun = APPROVE_ALL_WINDOW_TRIGGERS.has(trigger) ? trigger
+      : queued && APPROVE_ALL_WINDOW_TRIGGERS.has(queued) ? queued : trigger;
+  }
+
+  /** A released interaction slot is a real boundary: deferred applies may run now. */
+  private onInteractionReleased(event: { sessionId: string; taskSlotFree: boolean }): void {
+    if (!event.taskSlotFree) return;
+    // Startup/navigation release happens before the approval stores are readable.
+    if (!this.sessionReady || !this.approvalDataReady) return;
+    if (normalizeApprovalMode(this.sessionStore.getSessionById(event.sessionId)?.approvalMode
+      ?? this.sessionStore.getActiveSession().approvalMode) !== 'approve-all') return;
+    // Only schedule when there is something a pass could actually do; otherwise a
+    // release per finished run would fill the ledger with "nothing to do" noise.
+    const hasSet = this.changeSets?.hasPendingForSession(event.sessionId) === true;
+    const hasRun = this.draftRuns?.toWebviewState(event.sessionId).some(run => run.status === 'pending') === true;
+    if (!hasSet && !hasRun) return;
+    this.scheduleApproveAllExecution('slot_released');
+  }
+
   private recordApproveAllGate(gate: ApproveAllGate, trigger: ApproveAllTrigger,
     detail: { draftId?: string; reason?: string } = {}): void {
     const entry: ApproveAllLedgerEntry = { gate, trigger, draftId: detail.draftId, reason: detail.reason,
-      at: new Date().toISOString() };
+      hard: APPROVE_ALL_HARD_GATES.has(gate) || undefined, at: new Date().toISOString() };
     this.approveAllLedger.push(entry);
     if (this.approveAllLedger.length > 64) this.approveAllLedger.splice(0, this.approveAllLedger.length - 64);
     this.traceApproveAllGate(entry);
+  }
+
+  /** Record a per-draft stop at most once per draft, so repeated checkpoints or
+   * passes keep one explanation instead of flooding the 64-entry ledger. */
+  private noteApproveAllDraftOnce(draftId: string, gate: ApproveAllGate, trigger: ApproveAllTrigger, reason: string): void {
+    const key = `${draftId}\u0000${gate}`;
+    if (this.approveAllDeferredNoted.has(key)) return;
+    this.approveAllDeferredNoted.add(key);
+    this.recordApproveAllGate(gate, trigger, { draftId, reason });
+  }
+
+  /**
+   * Record why one draft did not reach the disk, in one place: the ledger entry,
+   * the latch used by the view model, and the per-draft stop that outlives
+   * ledger rotation. `deferred_to_boundary` is a wait, not a block.
+   */
+  private noteApproveAllStop(draftId: string, gate: ApproveAllGate, trigger: ApproveAllTrigger, reason?: string): void {
+    this.approveAllStops.set(draftId, { gate, reason, trigger });
+    // A wait is not a block: `deferred_to_boundary` and `slot_unavailable` describe
+    // a host that has not tried yet, so they must not latch the draft as failed.
+    if (!APPROVE_ALL_WAIT_GATES.has(gate)) this.approveAllBlocked.add(draftId);
+    this.recordApproveAllGate(gate, trigger, { draftId, reason });
   }
 
   private traceApproveAllGate(entry: ApproveAllLedgerEntry): void {
@@ -4901,7 +5177,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
    * by construction and is not attempted here.
    */
   private async drainApproveAllExecution(trigger: ApproveAllTrigger): Promise<void> {
-    if (this.approveAllInFlight) return;
+    if (this.approveAllInFlight) { this.queueApproveAllRerun(trigger); return; }
     // The pass itself is the in-flight unit. Completing a change action
     // re-schedules a drain from its own finally block, and without holding the
     // flag across the whole pass that request would re-enter here and apply the
@@ -4911,6 +5187,16 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       await this.drainApproveAllStep(trigger);
     } finally {
       this.approveAllInFlight = false;
+      // A trigger that arrived mid-pass is one queued pass, not a dropped request.
+      // The throttle (one ChangeSet per pass) is preserved because each queued
+      // pass advances at most one draft and the same draft is never attempted
+      // twice in the same window.
+      const queued = this.approveAllRerun;
+      this.approveAllRerun = undefined;
+      if (queued && !this.approveAllTimer
+        && normalizeApprovalMode(this.sessionStore.getActiveSession().approvalMode) === 'approve-all') {
+        this.startApproveAllTimer(queued);
+      }
     }
   }
 
@@ -4928,55 +5214,81 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.recordApproveAllGate('untrusted', trigger);
       return;
     }
-    // A concurrent apply is transient ownership of the workspace: reschedule
-    // instead of dropping the request, so the remaining drafts still drain.
-    if (this.activeChangeActions.size || this.isStartingRun) {
-      // A concurrent action owns the workspace right now. Its own completion is
-      // the next trigger ('change_action'), so rescheduling here would spin a
-      // zero-delay timer without making progress.
-      this.recordApproveAllGate('busy', trigger, {
-        reason: this.activeChangeActions.size ? `active_change_actions:${this.activeChangeActions.size}` : 'starting_run'
-      });
+    // A concurrent apply owns the workspace right now. Its own completion is the
+    // next trigger ('change_action'), so this pass stops without spinning a
+    // zero-delay timer.
+    if (this.activeChangeActions.size) {
+      this.recordApproveAllGate('busy', trigger, { reason: `active_change_actions:${this.activeChangeActions.size}` });
       return;
+    }
+    // The interaction slot is still held — most often by the very operation that
+    // reported this boundary (a plan decision or a batch continuation that keeps
+    // the slot through run finalization). Nothing may start here, but this is a
+    // wait, not a block: the release callback schedules the attempt that writes.
+    if (this.isStartingRun) {
+      const pending = this.changeSets.hasPendingForSession(session.id)
+        ? this.changeSets.toWebviewState(session.id)
+          .filter(item => item.files.some(file => APPROVE_ALL_APPLICABLE.has(file.status)))
+        : [];
+      const pendingRuns = this.draftRuns.toWebviewState(session.id).filter(run => run.status === 'pending');
+      for (const draft of [...pending, ...pendingRuns]) {
+        this.noteApproveAllDraftOnce(draft.id, 'deferred_to_boundary', trigger, 'interaction_slot_held');
+      }
+      if (!pending.length && !pendingRuns.length) this.recordApproveAllGate('none_pending', trigger);
+      return;
+    }
+    // A window trigger opens a fresh attempt for every draft that is still
+    // pending. Continuation/change-action triggers do not: that is what keeps
+    // "one boundary, one attempt" true while still allowing a later boundary
+    // (run end, mode switch, user navigation) to try again.
+    if (APPROVE_ALL_WINDOW_TRIGGERS.has(trigger)) {
+      this.approveAllAttempted.clear();
+      this.approveAllDeferredNoted.clear();
     }
     const pending = this.changeSets.hasPendingForSession(session.id)
       ? this.changeSets.toWebviewState(session.id)
         .filter(item => item.files.some(file => APPROVE_ALL_APPLICABLE.has(file.status)))
       : [];
-    const set = pending.find(item => !this.approveAllAttempted.has(item.id))
-      ?? pending.find(item => !this.approveAllBlocked.has(item.id));
+    const set = pending.find(item => !this.approveAllAttempted.has(item.id));
     if (set) {
       this.approveAllBlocked.delete(set.id);
       this.approveAllAttempted.add(set.id);
-      try {
-        await this.handleApplyChangeSet({ type: 'applyChangeSet', id: set.id, requestId: 'approve-all' }, { unattended: true });
-      } catch (error) {
-        this.recordApproveAllGate('apply_blocked', trigger, { draftId: set.id, reason: getErrorMessage(error) });
-        vscode.window.showWarningMessage(getErrorMessage(error));
-      }
-      // The latch only means "applied once": release it whenever the ChangeSet
-      // did not advance, so a later drain (or a mode switch) can retry instead
-      // of leaving the draft permanently pending.
-      const advanced = this.changeSets.toWebviewState(this.sessionStore.getActiveSession().id)
-        .some(item => item.id === set.id && !item.files.some(file => APPROVE_ALL_APPLICABLE.has(file.status)));
-      if (!advanced) {
-        this.approveAllAttempted.delete(set.id);
-        this.approveAllBlocked.add(set.id);
-        this.recordApproveAllGate('latched', trigger, { draftId: set.id, reason: 'not_applied' });
-        this.warnApproveAllBlocked(set.id, 'latched', set.files.map(file => file.label).join(', ') || set.id);
-      } else {
+      const outcome = await this.applyChangeSetUnattended(set.id, trigger);
+      if (outcome.applied) {
+        this.approveAllStops.delete(set.id);
         this.recordApproveAllGate('applied', trigger, { draftId: set.id });
+        // A successful write is the only thing that satisfies the validation
+        // barrier; advance it here instead of waiting for a lucky empty pass.
+        await this.continueValidationAfterApply();
+      } else if (outcome.rejection?.phase === 'slot_unavailable') {
+        // Never attempted: the interaction slot (or context readiness) is still
+        // busy, so nothing was written and nothing was refused. This must not
+        // spend the boundary's single attempt, otherwise the retry that actually
+        // writes the draft would find its budget already consumed.
+        this.approveAllAttempted.delete(set.id);
+        this.noteApproveAllStop(set.id, 'slot_unavailable', trigger, outcome.rejection.reason);
+        // A wait is not a warning: the user must not be told a write was refused
+        // when the host has not tried yet, and the next boundary is already
+        // scheduled by whichever operation still owns the slot.
+      } else {
+        const gate = outcome.rejection ? this.gateForChangeActionRejection(outcome.rejection.phase) : 'preflight_failed';
+        const reason = outcome.reason ?? outcome.rejection?.reason ?? 'not_applied';
+        this.noteApproveAllStop(set.id, gate, trigger, reason);
+        // One boundary, one attempt: no retry inside this pass, no back-off storm.
+        this.warnApproveAllBlocked(set.id, gate, set.files.map(file => file.label).join(', ') || set.id);
       }
-      if (normalizeApprovalMode(this.sessionStore.getActiveSession().approvalMode) === 'approve-all') {
-        this.scheduleApproveAllExecution('continuation');
-      }
+      return;
+    }
+    if (pending.length) {
+      // Pending, but every draft already spent its attempt in this window. State
+      // that instead of claiming there was nothing to do.
+      this.noteApproveAllDraftOnce(pending[0].id, 'deferred_to_boundary', trigger, 'attempted_in_this_window');
       return;
     }
     const next = this.draftRuns.toWebviewState(session.id).find(run => run.status === 'pending'
       && run.sessionId === session.id && !this.approveAllAttempted.has(run.id));
     if (next) {
       this.approveAllAttempted.add(next.id);
-      let started = false;
       // The enclosing pass already holds `approveAllInFlight`; toggling it here
       // would release the guard mid-pass and allow a re-entrant apply.
       this.activeDraftRunId = next.id;
@@ -4986,17 +5298,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       await this.executeApprovedDraftRun(next.id, false);
       // Only a run that actually left "pending" is spent. A run still pending was refused
       // by a gate inside the execution funnel and keeps its stated reason.
-      started = this.draftRuns.get(next.id)?.status !== 'pending';
+      const started = this.draftRuns.get(next.id)?.status !== 'pending';
       if (!started) {
-        this.approveAllAttempted.delete(next.id);
         this.approveAllBlocked.add(next.id);
         this.recordApproveAllGate('latched', trigger, { draftId: next.id, reason: 'not_started' });
         this.warnApproveAllBlocked(next.id, 'latched', next.spec?.reason || next.id);
       } else {
         this.recordApproveAllGate('applied', trigger, { draftId: next.id });
-      }
-      if (normalizeApprovalMode(this.sessionStore.getActiveSession().approvalMode) === 'approve-all') {
-        this.scheduleApproveAllExecution('continuation');
       }
       return;
     }
@@ -5004,8 +5312,19 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     // The workspace now matches the applied ChangeSets. If validation was waiting
     // for exactly this, the new run starts here — never inside the run that
     // reported the wait, which could only produce a stale-snapshot check.
-    if (trigger === 'run_end' || trigger === 'change_action' || trigger === 'continuation') {
-      await this.continueValidationAfterApply();
+    await this.continueValidationAfterApply();
+  }
+
+  private gateForChangeActionRejection(phase: ChangeActionRejectionPhase): ApproveAllGate {
+    switch (phase) {
+      case 'slot_unavailable': return 'slot_unavailable';
+      case 'untrusted': return 'untrusted';
+      case 'pending_truncation': return 'pending_truncation';
+      // A busy host or a refused mode is transient; "preflight_failed" is the
+      // existing bucket for "the write did not happen for a stated reason".
+      case 'busy':
+      case 'mode_denied':
+      case 'not_pending': return 'preflight_failed';
     }
   }
 
@@ -5471,8 +5790,20 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
    * Public, structured view of approve-all progress. A draft that is still
    * pending always appears with the gate that stopped it, so the reason is
    * inspectable from state instead of only from a transient warning.
+   *
+   * Blocked state is derived from the durable ChangeSet/DraftRun status plus the
+   * recorded stop, not only from an in-memory Set: after a restart the drafts are
+   * still pending on disk, and their recorded reason is rebuilt from the ledger
+   * when the same failure is re-observed. A pending draft with no recorded reason
+   * still reports `deferred_to_boundary`, so the card never claims the host is
+   * about to act when no attempt is scheduled.
    */
   private approveAllViewModel(sessionId: string): ApproveAllViewModel {
+    // ask keeps its own buttons: there is no automatic drain to explain.
+    if (normalizeApprovalMode(this.sessionStore.getSessionById(sessionId)?.approvalMode
+      ?? this.sessionStore.getActiveSession().approvalMode) !== 'approve-all') {
+      return { pending: 0, blocked: [], nextTrigger: this.approveAllTrigger, scheduled: false };
+    }
     const pendingSets = this.changeSets.toWebviewState(sessionId)
       .filter(item => item.files.some(file => APPROVE_ALL_APPLICABLE.has(file.status)));
     const pendingRuns = this.draftRuns.toWebviewState(sessionId).filter(run => run.status === 'pending');
@@ -5481,26 +5812,65 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       if (entry.draftId) latestGateById.set(entry.draftId, entry);
     }
     const blocked: ApproveAllViewModel['blocked'] = [];
+    const scheduled = this.approveAllInFlight || Boolean(this.approveAllTimer) || Boolean(this.approveAllRerun);
+    // A pending draft is only "waiting" while something can still act on it: a
+    // live run owns the slot and its own boundary is the next attempt.
+    const waitingForBoundary = scheduled || this.isStartingRun || this.isBusy;
+    // Workspace/session preconditions are derived from live facts, not from a
+    // per-draft latch: they apply to every pending draft and survive a restart
+    // without any in-memory record.
+    const session = this.sessionStore.getSessionById(sessionId) ?? this.sessionStore.getActiveSession();
+    const workspaceGate: ApproveAllGate | undefined = !vscode.workspace.isTrusted ? 'untrusted'
+      : session.pendingHistoryTruncation ? 'pending_truncation' : undefined;
     for (const set of pendingSets) {
+      const stop = this.approveAllStops.get(set.id);
       const entry = latestGateById.get(set.id);
-      const gate = entry?.gate === 'latched' || entry?.gate === 'apply_blocked' ? entry.gate : undefined;
+      const recorded = stop?.gate ?? entry?.gate;
+      // A deferral is only a "stop" once nothing is scheduled any more: while a
+      // run or a pass is live the host is expected to act, and advertising a
+      // manual fallback then would be noise (and a guaranteed busy refusal).
+      const recordedGate = recorded && recorded !== 'applied' && recorded !== 'none_pending'
+        && recorded !== 'not_applicable' && recorded !== 'non_approve_all'
+        && !(APPROVE_ALL_WAIT_GATES.has(recorded) && waitingForBoundary)
+        ? recorded
+        : undefined;
+      const gate = workspaceGate ?? recordedGate ?? (waitingForBoundary ? undefined : 'deferred_to_boundary');
+      // Only a real stop is reported. `applied`/`none_pending` entries describe
+      // the pass, not this draft. A hard gate is a workspace/session
+      // precondition: it is reported with its reason but never offers a manual
+      // fallback, because no click may satisfy a missing precondition.
       if (!gate) continue;
       blocked.push({
         id: set.id,
+        kind: 'changeSet',
         label: set.files.map(file => file.label).join(', ') || set.id,
         gate,
-        reason: entry?.reason
+        reason: stop?.reason ?? entry?.reason ?? (gate === 'deferred_to_boundary' ? 'no_attempt_scheduled' : undefined),
+        // The displayed gate decides too: a workspace precondition (untrusted,
+        // pending truncation) or a *live* scheduled wait overrides an older,
+        // weaker per-draft record, because the button must match what a click
+        // would do. A wait with nothing scheduled is not a wait: it is the dead
+        // end this fallback exists for, so it keeps the button.
+        manual: !APPROVE_ALL_HARD_GATES.has(gate)
+          && !(APPROVE_ALL_WAIT_GATES.has(gate) && waitingForBoundary)
+          && this.manualFallbackFor(set.id, 'changeSet', waitingForBoundary)
       });
     }
     for (const run of pendingRuns) {
+      const stop = this.approveAllStops.get(run.id);
       const entry = latestGateById.get(run.id);
-      if (entry?.gate !== 'latched') continue;
-      blocked.push({ id: run.id, label: run.spec?.reason || run.id, gate: 'latched', reason: entry.reason });
+      const gate = stop?.gate ?? entry?.gate;
+      if (!gate || gate === 'applied' || gate === 'none_pending' || gate === 'not_applicable') continue;
+      // Command execution never gets a manual fallback: its own gates are the
+      // authority, and "forcing" it would bypass scope and identity checks.
+      blocked.push({ id: run.id, kind: 'draftRun', label: run.spec?.reason || run.id, gate,
+        reason: stop?.reason ?? entry?.reason, manual: false });
     }
     return {
       pending: pendingSets.length + pendingRuns.length,
       blocked,
-      nextTrigger: pendingSets.length || pendingRuns.length ? 'drain' : this.approveAllTrigger
+      nextTrigger: pendingSets.length || pendingRuns.length ? 'drain' : this.approveAllTrigger,
+      scheduled
     };
   }
 
@@ -5940,8 +6310,18 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
       session.updatedAt = checkpoint.updatedAt;
       const planningOnly = normalizeExecutionMode(checkpoint.request.executionMode) === 'plan';
-      const draftEdits = planningOnly ? [] : checkpoint.finalResponse?.draftEdits ?? checkpoint.state?.draftEdits ?? [];
-      const draftRuns = planningOnly ? [] : checkpoint.finalResponse?.draftRuns ?? checkpoint.state?.draftRuns ?? [];
+      const producedEdits = checkpoint.finalResponse?.draftEdits ?? checkpoint.state?.draftEdits ?? [];
+      const producedRuns = checkpoint.finalResponse?.draftRuns ?? checkpoint.state?.draftRuns ?? [];
+      const draftEdits = planningOnly ? [] : producedEdits;
+      const draftRuns = planningOnly ? [] : producedRuns;
+      // R7: a plan-stage draft is still dropped (plan mode must not prepare file
+      // writes), but it is never dropped silently: the ledger says which drafts
+      // and why, so "where did my plan's edits go" has an answer.
+      if (planningOnly) {
+        for (const draft of [...producedEdits, ...producedRuns]) {
+          this.noteApproveAllDraftOnce(draft.id, 'plan_discarded', 'checkpoint', 'plan_mode_produces_no_writes');
+        }
+      }
       if (draftEdits.length) this.changeSets.addDraftEdits({
         edits: draftEdits, runId: checkpoint.taskId, sessionId: session.id, messageId: message.id
       });
@@ -5962,7 +6342,14 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         await this.markAskDraftRunCorrections(session, checkpoint.taskId, message.userTask.id, draftRuns.map(run => run.id));
       }
       if (draftEdits.length) await this.changeSets.flush();
-      if (draftEdits.length || draftRuns.length) this.scheduleApproveAllExecution('checkpoint');
+      // Registration only. A checkpoint is a running boundary: the interaction
+      // slot is held by the run, so an apply here could only be refused. Record
+      // the deferral and let the slot-release/run-end boundary do the write.
+      if (draftEdits.length || draftRuns.length) {
+        for (const draft of [...draftEdits, ...draftRuns]) {
+          this.noteApproveAllDraftOnce(draft.id, 'deferred_to_boundary', 'checkpoint', 'run_in_progress');
+        }
+      }
       if (draftRuns.length) await this.draftRuns.flush();
       // Proposals are durable before the task can be marked completed.
       await this.sessionStore.persist('agent_checkpoint');

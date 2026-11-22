@@ -1,4 +1,5 @@
 import './approveAllExecution.test';
+import './approveAllBoundary.test';
 import './validationAuthorization.test';
 import './validationBarrier.test';
 import './runValidationReconciliation.test';

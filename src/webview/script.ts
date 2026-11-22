@@ -96,6 +96,12 @@ export function getScript(): string {
       },
       taskPlan: null,
       repairLoop: null,
+      approveAll: {
+        pending: 0,
+        blocked: [],
+        nextTrigger: 'manual',
+        scheduled: false
+      },
       changeSets: [],
       draftRuns: [],
       draftRunBatchSnapshots: [],
@@ -3161,7 +3167,10 @@ ${conversationsSessionListFragment.source}
         && !['manual_required', 'denied', 'review_unavailable', 'needs_authorization'].includes(target?.status)) {
         // Approve all hands the draft to the host automatically; until it starts the
         // card reports that it is awaiting submission rather than under review.
-        displayStatus = 'awaiting_submission';
+        // A draft the host already recorded as blocked must not keep implying that
+        // an automatic execution is imminent: that is the "wait forever" state the
+        // user reported. It reports the recorded stop instead.
+        displayStatus = getApproveAllBlockedEntry(draftRun.id) ? 'awaiting_manual' : 'awaiting_submission';
       }
       var card = document.createElement('section');
       card.className = 'draft-run-card draft-run-' + statusValue;
@@ -3322,6 +3331,12 @@ ${conversationsSessionListFragment.source}
       }
 
       card.append(header, fields, risk);
+      // Approve all records why a command draft did not start. Command execution
+      // has no manual fallback, so the card states the reason and stops there.
+      var approveAllStop = getApproveAllBlockedEntry(draftRun.id);
+      if (approveAllStop && displayStatus === 'awaiting_manual') {
+        appendApprovalStateNote(card, t('approveAllBlockedTitle') + ': ' + formatApproveAllBlockedReason(approveAllStop));
+      }
       if (draftRun.approvalReview) {
         card.append(createApprovalReviewSummary(draftRun.approvalReview));
       }
@@ -3538,6 +3553,7 @@ ${conversationsSessionListFragment.source}
         case 'superseded': return t('draftRunTitleSuperseded');
         case 'blocked': return t('draftRunTitleBlocked');
         case 'awaiting_submission': return t('draftRunTitleAwaitingSubmission');
+        case 'awaiting_manual': return t('approveAllBlockedTitle');
         case 'no_changes': return t('draftRunTitleNoChanges');
         case 'approved':
         case 'running': return t('draftRunTitleRunning');
@@ -3621,6 +3637,7 @@ ${conversationsSessionListFragment.source}
         case 'waiting_prerequisite':
         case 'waiting_approval': return t('draftRunStatusNotExecuted');
         case 'awaiting_submission':
+        case 'awaiting_manual':
         case 'not_dispatched': return t('draftRunStatusNotExecuted');
         case 'spawn_failed': return t('draftRunStatusSpawnFailed');
         case 'result_unknown': return t('draftRunStatusResultUnknown');
@@ -3648,6 +3665,57 @@ ${conversationsSessionListFragment.source}
           || file.status === 'applied'
           || file.status === 'revert_failed';
       });
+    }
+
+    /**
+     * The host records why a draft under "approve all" did not reach the disk.
+     * Only those drafts get a manual fallback, and only when the recorded reason
+     * is not a hard safety precondition; a hard block is shown as text only.
+     */
+    function getApproveAllBlockedEntry(id) {
+      var blocked = state.approveAll && Array.isArray(state.approveAll.blocked) ? state.approveAll.blocked : [];
+      for (var index = 0; index < blocked.length; index += 1) {
+        if (String(blocked[index]?.id || '') === String(id || '')) return blocked[index];
+      }
+      return undefined;
+    }
+
+    function getApproveAllGateLabel(gate) {
+      switch (String(gate || '')) {
+        case 'slot_unavailable': return t('approveAllGateSlotUnavailable');
+        case 'busy': return t('approveAllGateBusy');
+        case 'untrusted': return t('approveAllGateUntrusted');
+        case 'pending_truncation': return t('approveAllGatePendingTruncation');
+        case 'preflight_failed': return t('approveAllGatePreflightFailed');
+        case 'identity_mismatch': return t('approveAllGateIdentityMismatch');
+        case 'untrusted_target': return t('approveAllGateUntrustedTarget');
+        case 'deferred_to_boundary': return t('approveAllGateDeferred');
+        case 'plan_discarded': return t('approveAllGatePlanDiscarded');
+        case 'manually_applied': return t('approveAllGateManuallyApplied');
+        case 'latched': return t('approveAllGateLatched');
+        default: return t('approveAllGateBlocked');
+      }
+    }
+
+    /** One explanation line: the structured gate plus the recorded detail. */
+    function formatApproveAllBlockedReason(entry) {
+      if (!entry) return '';
+      var reason = String(entry.reason || '');
+      var label = getApproveAllGateLabel(entry.gate);
+      return reason && reason !== label ? label + ' · ' + reason : label;
+    }
+
+    /** True when the host recorded this draft as blocked and refused to force it. */
+    function isApproveAllManualBlocked(id) {
+      if (state.approvalMode === 'ask') return false;
+      var entry = getApproveAllBlockedEntry(id);
+      if (!entry || entry.manual === false) return false;
+      // A live wait is not a block: while a pass or a run is still expected to
+      // act, the button could only report "busy". With nothing scheduled the very
+      // same record is a dead end, and the manual apply is the only way out.
+      var waiting = state.approveAll && state.approveAll.scheduled === true;
+      if (entry.gate === 'deferred_to_boundary' || entry.gate === 'slot_unavailable') return !waiting;
+      return true;
     }
 
     function createChangeSetCard(changeSet) {
@@ -3679,6 +3747,7 @@ ${conversationsSessionListFragment.source}
 
       var setActions = document.createElement('div');
       setActions.className = 'change-set-actions';
+      var approveAllBlocked = getApproveAllBlockedEntry(changeSet.id);
       if (!historical) {
         if (applicableFiles.length >= 2 && state.approvalMode === 'ask') {
           if (!applicableFiles.some(function(file) { return isApprovalSafetyDenied(file.approvalReview) || isHeldDraftRunApproval(getApprovalTarget(file.id)); })) {
@@ -3686,23 +3755,40 @@ ${conversationsSessionListFragment.source}
           }
           setActions.append(createChangeSetActionButton(t('changeSetDiscardAll'), 'discardChangeSet', changeSet.id, true));
         }
+        // Approve all: the manual fallback appears only for a draft the host
+        // recorded as blocked, never as a normal affordance on the card.
+        if (isApproveAllManualBlocked(changeSet.id)) {
+          setActions.append(createChangeSetActionButton(t('approveAllManualApplyAll', { count: applicableFiles.length }),
+            'applyChangeSet', changeSet.id, false));
+        }
         if (revertibleFiles.length >= 2) {
           setActions.append(createChangeSetActionButton(t('revertAgentChange'), 'revertChangeSet', changeSet.id, true));
         }
       }
       header.append(heading);
       if (setActions.childElementCount) header.append(setActions);
+      if (approveAllBlocked) {
+        var blockedNote = document.createElement('div');
+        blockedNote.className = 'approve-all-blocked-note' + (approveAllBlocked.manual === false ? ' is-hard' : '');
+        blockedNote.textContent = t('approveAllBlockedTitle') + ': ' + formatApproveAllBlockedReason(approveAllBlocked);
+        if (approveAllBlocked.manual === false) {
+          blockedNote.textContent += ' · ' + t('approveAllBlockedHardHint');
+        } else {
+          blockedNote.textContent += ' · ' + t('approveAllManualApplyHint');
+        }
+        header.append(blockedNote);
+      }
 
       var fileList = document.createElement('div');
       fileList.className = 'change-set-files';
       files.forEach(function(edit) {
-        fileList.append(createChangeSetFileRow(edit, !historical));
+        fileList.append(createChangeSetFileRow(edit, !historical, changeSet.id));
       });
       card.append(header, fileList);
       return card;
     }
 
-    function createChangeSetFileRow(edit, allowActions) {
+    function createChangeSetFileRow(edit, allowActions, changeSetId) {
       var chip = document.createElement('div');
       chip.className = 'draft-chip draft-chip-' + String(edit.status || 'pending');
       var content = document.createElement('div');
@@ -3748,6 +3834,9 @@ ${conversationsSessionListFragment.source}
         if (state.approvalMode === 'ask' && !isApprovalSafetyDenied(edit.approvalReview)
           && !isHeldDraftRunApproval(getApprovalTarget(edit.id))) {
           actions.append(createEditActionButton(t('apply'), 'applyDraftEdit', edit.id, false));
+        } else if (isApproveAllManualBlocked(changeSetId)) {
+          // Approve all fallback: same message, same store path, same checks.
+          actions.append(createEditActionButton(t('approveAllManualApply'), 'applyDraftEdit', edit.id, false));
         }
         actions.append(createEditActionButton(t('discard'), 'discardDraftEdit', edit.id, true));
       } else if (allowActions && (edit.status === 'applied' || edit.status === 'revert_failed')) {

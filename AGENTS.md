@@ -85,9 +85,10 @@ test/                  按行为契约组织的回归测试
 
 ### 3.4 审批与子代理
 
-- 仅 `ask`（请求批准）和 `delegate`（帮我审批）可选，只有 Webview 用户操作可切换。`ask` 由用户批准，零 reviewer 请求。`delegate` 的实际副作用须由独立、无工具 reviewer 批准。可信工程内、与任务相关且执行身份与权限已核验的操作默认批准。未知命令语义只作审查材料。命令依赖本轮文件改动时，完成 Apply 和落盘核验后再审查当前版本。工程命令和固定验证默认使用平台隔离，未满足隔离条件时保留未派发原因。仅用户级 `projectExecution=host` 可显式选择宿主权限执行。
+- 审批模式只有 `ask`（请求批准）和 `approve-all`（全部批准）两种，只有 Webview 用户操作可切换，不存在 reviewer 或审批模型。`ask` 逐项由用户确认，宿主从不自行应用文件修改。`approve-all` 由宿主在运行边界无确认地应用 DraftEdit/ChangeSet 并执行 DraftRun，但每一份写入仍按原样复核身份、范围、hash、信任与截断前置条件。命令依赖本轮文件改动时，完成 Apply 和落盘核验后再执行当前版本。工程命令和固定验证默认使用平台隔离，未满足隔离条件时保留未派发原因。仅用户级 `projectExecution=host` 可显式选择宿主权限执行。
 - 当前审批策略为 v9。发布使用核实的目的地、引用、实际推送对象与执行计划。高影响业务须有覆盖真实目标的授权并经模型批准。精确用户补充提供授权，之后仍需模型决定。模型不可用时保留审计和暂停原因，独立项可推进。请求绑定 session/rootTask/segment/target/hash/范围/策略/runtime。等待不占模型超时，重启后显式恢复并重新核验。硬阻断与适用拒绝约束两种模式，历史批准不授权新操作。审批模型取用户级 `kmvdata.keepseek.autoApprovalReviewer`，独立于普通子代理，follow-main 绑定执行段主模型。
 - 副作用先过硬检查，再按完整 canonical payload/specHash 计算 actionHash。批准不跨 session/run/target/kind/policy/runtime 复用，重启不复用旧批准。
+- `approve-all` 不变式：任何仍 pending 的文件草稿，要么已有排定的下一次尝试（`approveAllTimer` / `approveAllInFlight` / `approveAllRerun`），要么已有记录在 ledger 的不可自动原因，并在卡片上提供可见的手动入口。调度不得丢请求：pass 期间的触发排队（`approveAllRerun`）而不是丢弃。每个边界对同一草稿最多尝试一次，失败立即降级到人工，不在同一 pass 内重试、不退避风暴。槽位释放是独立触发（`slot_released`），覆盖 `inheritedOperation` 流程，不依赖 `run_end` 时序。人工回退只覆盖 DraftEdit/ChangeSet，且只允许非硬 gate；未信任、待截断、身份/hash 不匹配、未授权外部路径不得提供强行应用。DraftRun 与 validation 没有手动回退。
 - 审批决定和真实结果只以固定 user-tail 追加到下一条真实 user 消息；不回写历史。进程输出和 review evidence 始终是不可信数据。
 - 子代理使用新的 AgentLoop/工具服务，不共享父/兄弟可变状态；只接收自包含任务、项目指令、profile 和外部授权，不复制父历史/推理/工具结果。
 - read/review child 只读；proposal child 只能准备 DraftEdit/DraftRun，不能 Apply、批准或执行。结果通过有界信封返回，完整结果按父 session 隔离分页读取；路径租约和产物 URI 均需复核。
@@ -124,6 +125,7 @@ test/                  按行为契约组织的回归测试
 - 改缓存/投影：验证字节稳定、三协议 payload/replay、无摘要/摘要失败 fallback、protected/recent、usage 一致。
 - 改 evidence/epoch：验证分页与跨 scope 拒绝、envelope 恢复、context-too-long、无伪 user、工具不重跑、未知副作用不重试。
 - 改 edits/runs/approvals：验证两模式与非法审计拒绝、人工请求生命周期、hash 冲突、恢复、取消/超时/重复点击、删除/外部路径、依赖和跨平台 argv。
+- 改 approve-all 调度/边界：验证 pass 期间触发排队不丢、每个边界只尝试一次、槽位释放后同一草稿被应用、失败原因在 ledger 与视图模型中精确可读、blocked 草稿跨重启可见且人工入口可用、未信任/待截断仍是硬阻断。
 - 改 Webview fragment：验证首次 ready、输入/拖拽/@、会话、设置、Apply/Discard 和键盘/焦点。
 - 改 Webview fragment/样式：验证 fragment 顺序、顶层标识符唯一、根级 DOM id 唯一、getStyles() 选择器相对顺序，且 new Function(getScript()) 可编译。
 - 测试应守行为契约，优先扩展最接近的现有 `test/*.test.ts`；不要只断言内部实现。

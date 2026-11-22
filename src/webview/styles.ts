@@ -1190,6 +1190,21 @@ ${conversationsStylesFragment.source}
       color: var(--vscode-descriptionForeground);
     }
 
+    /* Approve all: a blocked draft explains itself; the hard variant only states
+       the unmet precondition, so it must not read like an actionable warning. */
+    .approve-all-blocked-note {
+      min-width: 0;
+      max-width: 100%;
+      color: var(--vscode-editorWarning-foreground, var(--vscode-descriptionForeground));
+      font-size: 10px;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+
+    .approve-all-blocked-note.is-hard {
+      color: var(--vscode-errorForeground);
+    }
+
     .draft-chip-actions {
       display: flex;
       min-width: 0;

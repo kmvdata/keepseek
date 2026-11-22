@@ -13,9 +13,11 @@ import type { ChangeSetFile, ChatSession, DraftEdit } from '../src/shared/types'
 import * as vscode from './stubs/vscode';
 
 type ApproveAllGate = 'non_approve_all' | 'pending_truncation' | 'untrusted' | 'busy'
+  | 'slot_unavailable' | 'preflight_failed' | 'identity_mismatch' | 'untrusted_target'
+  | 'deferred_to_boundary' | 'plan_discarded' | 'manually_applied'
   | 'latched' | 'not_applicable' | 'applied' | 'apply_blocked' | 'none_pending';
 type ApproveAllTrigger = 'mode_switch' | 'run_end' | 'checkpoint' | 'change_action'
-  | 'session_navigation' | 'continuation' | 'manual';
+  | 'session_navigation' | 'continuation' | 'slot_released' | 'manual';
 interface ApproveAllLedgerEntry {
   gate: ApproveAllGate;
   trigger: ApproveAllTrigger;
@@ -157,7 +159,7 @@ test('approve-all advances a pending draft to applied through the real store', a
   assert.notEqual(after[0]?.status, 'pending', 'a pending draft must leave the pending state under approve-all');
 });
 
-test('a draft the apply path never acted on stays retryable instead of being latched out', async t => {
+test('a draft the apply path never acted on is retried at the next boundary, not inside the same one', async t => {
   const h = await createHarness({ approvalMode: 'approve-all', applyBehavior: 'never-attempt' });
   t.after(() => h.dispose());
   const session = h.store.activeSession;
@@ -167,8 +169,17 @@ test('a draft the apply path never acted on stays retryable instead of being lat
   })!;
   await h.host.drainApproveAllExecution('manual');
   assert.equal(h.host.changeSets.hasPendingForSession(session.id), true, 'the draft is still pending');
-  assert.equal(h.host.approveAllAttempted.has(set.id), false,
-    'a ChangeSet that was not applied must not stay registered as permanently attempted');
+  // Decision 2: one boundary makes one attempt. The spent attempt stays recorded
+  // while the draft is blocked, so this pass cannot apply it twice and no back-off
+  // storm starts. The next window boundary re-opens the attempt.
+  assert.equal(h.host.approveAllAttempted.has(set.id), true,
+    'the spent attempt is remembered until a new boundary opens a fresh one');
+  assert.equal(h.host.approveAllBlocked.has(set.id), true, 'the draft is latched as blocked');
+
+  await h.host.drainApproveAllExecution('run_end');
+  assert.equal(h.host.changeSets.hasPendingForSession(session.id), true,
+    'the run-end boundary tries again, and the write still fails');
+  assert.equal(h.host.approveAllBlocked.has(set.id), true, 'it stays latched while the apply fails');
 });async function waitForStatus(
   host: ApproveAllHost, sessionId: string, expected: ChangeSetFile['status'], timeoutMs = 30000
 ): Promise<Array<{ id: string; status: ChangeSetFile['status'] }>> {
@@ -230,7 +241,7 @@ test('an empty queue records none_pending, not silence', async t => {
   assert.equal(h.host.approveAllLedger.at(-1)?.gate, 'none_pending');
 });
 
-test('a latched draft is retried after a new trigger', async t => {
+test('a latched draft is retried once per new boundary, with a recorded reason each time', async t => {
   const h = await createHarness({ approvalMode: 'approve-all', applyBehavior: 'never-attempt' });
   t.after(() => h.dispose());
   const session = h.store.activeSession;
@@ -244,13 +255,15 @@ test('a latched draft is retried after a new trigger', async t => {
   assert.equal(h.host.approveAllBlocked.has(set.id), true,
     'a draft that did not advance is latched: ' + JSON.stringify({ activeChangeActions: [...probe.activeChangeActions],
       starting: probe.isStartingRun, ledger: h.host.approveAllLedger.slice(0, 4) }));
+  // The gate now names the real cause instead of a generic latch.
+  assert.equal(h.host.approveAllLedger.at(-1)?.gate, 'preflight_failed');
 
-  // A new boundary releases the latch: the same draft is attempted again.
+  // A new boundary releases the latch: the same draft is attempted once more.
   await h.host.drainApproveAllExecution('run_end');
   assert.equal(h.host.approveAllBlocked.has(set.id), true, 'it is latched again while the apply still fails');
-  const latched = h.host.approveAllLedger.filter(entry => entry.gate === 'latched' && entry.draftId === set.id);
-  assert.equal(latched.length >= 2, true,
-    'each trigger makes a fresh, recorded attempt: ' + JSON.stringify(h.host.approveAllLedger));
+  const attempts = h.host.approveAllLedger.filter(entry => entry.gate === 'preflight_failed' && entry.draftId === set.id);
+  assert.equal(attempts.length, 2,
+    'each window boundary makes one fresh, recorded attempt: ' + JSON.stringify(h.host.approveAllLedger));
 });
 
 test('a repeated failure warns once per draft and gate', async t => {

@@ -125,6 +125,16 @@ export interface InteractionDiagnostic {
   elapsedMs: number;
 }
 
+/** Emitted after the slot is really free, so deferred host work can start. */
+export interface InteractionReleaseEvent {
+  kind: InteractionOperationKind;
+  operationId: string;
+  sessionId: string;
+  phase: InteractionPhase;
+  /** True when no task owner remains for that session after this release. */
+  taskSlotFree: boolean;
+}
+
 interface OwnedOperation {
   token: InteractionOperation;
   sessionId: string;
@@ -148,15 +158,20 @@ export class InteractionCoordinator {
   private readonly now: () => number;
   private readonly id: () => string;
   private readonly onDiagnostic?: (event: InteractionDiagnostic) => void;
+  private readonly onRelease?: (event: InteractionReleaseEvent) => void;
 
   public constructor(options: {
     now?: () => number;
     id?: () => string;
     onDiagnostic?: (event: InteractionDiagnostic) => void;
+    /** Synchronous notification that a task/navigation slot became free. The
+     * callback must only schedule work: release must never await or throw. */
+    onRelease?: (event: InteractionReleaseEvent) => void;
   } = {}) {
     this.now = options.now ?? (() => performance.now());
     this.id = options.id ?? randomUUID;
     this.onDiagnostic = options.onDiagnostic;
+    this.onRelease = options.onRelease;
   }
 
   /** Task owners currently held, by session. */
@@ -241,7 +256,23 @@ export class InteractionCoordinator {
     }
     active.resolveSettled();
     this.diagnose('finish', active);
+    // Owner-agnostic release boundary. Approve-all defers file applies until the
+    // interaction slot is free; observing that here covers every inherited
+    // operation (plan execution, batch continuation) instead of relying on the
+    // run-finalization ordering of one call path.
+    this.notifyRelease(active);
     return true;
+  }
+
+  private notifyRelease(active: OwnedOperation): void {
+    if (!this.onRelease) return;
+    // Observability must never be able to interrupt ownership release: a throwing
+    // callback would leave the caller's finally block without its own cleanup.
+    try {
+      this.onRelease({ kind: active.token.kind, operationId: active.token.operationId,
+        sessionId: active.sessionId, phase: active.phase,
+        taskSlotFree: !this.actives.has(active.sessionId) });
+    } catch { /* the release itself already happened */ }
   }
 
   public snapshot(facts: InteractionFacts): InteractionSnapshot {
