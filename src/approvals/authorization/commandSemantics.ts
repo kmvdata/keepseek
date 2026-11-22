@@ -40,6 +40,11 @@ export interface GitLocalQuery {
 
 const revParseVerifyOptions = ['--verify', '--quiet', '--end-of-options'];
 
+/** Valued-less, read-only `git ls-files` options. `--eol` only adds end-of-line
+ * columns to the listing; nothing here writes the index or the worktree, and
+ * any option outside this finite list stays unsupported. */
+const listFilesOptions = ['-s', '--stage', '-z', '--error-unmatch', '--eol'];
+
 /** Local refs, bounded ancestry suffixes and explicit object peeling; no reflog,
  * path lookup (revision:path), command substitution or revision-set shortcuts. */
 export function isLocalGitRevision(value: string): boolean {
@@ -411,7 +416,7 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
         }
       } else if (staging || status || listFiles) {
         const knownOption = staging ? ['-A', '--all', '-u', '--update', '--ignore-removal', '--no-all', '-v', '--verbose'].includes(token)
-          : listFiles ? ['-s', '--stage', '-z', '--error-unmatch'].includes(token)
+          : listFiles ? listFilesOptions.includes(token)
             : /^(?:-s|-b|-sb|-bs|-z|--short|--branch|--porcelain(?:=v[12])?|--long|--no-renames|--untracked-files(?:=(?:no|normal|all))?|-u(?:no|normal|all)?)$/u.test(token);
         if (!paths && knownOption) {
           arg(i, 'option');

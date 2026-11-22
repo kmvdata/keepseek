@@ -67,6 +67,9 @@ export class TaskPlanTracker {
   private readonly language: KeepseekLanguage;
   private readonly onChange?: TaskPlanListener;
   private readonly recordTrace?: TaskPlanTraceRecorder;
+  /** True once this round hit the pending-apply validation barrier. The round
+   * then ends by waiting for the host to apply the ChangeSet, never by failing. */
+  private awaitingApply = false;
 
   public beginExecution(): void {
     this.setStepStatus('understand', 'completed');
@@ -89,7 +92,17 @@ export class TaskPlanTracker {
     }
     const step = this.ensureToolStep(kind);
     const failure = readToolError(rawResult);
-    if (kind === 'validate' && failure?.type === 'validation_unavailable') {
+    if (kind === 'validate' && failure?.waitingForApply) {
+      // The pending-apply barrier is a waiting state, not a failure: nothing was
+      // dispatched, no budget was spent and no side effect was authorized. It
+      // must never become a blocker, and a later successful tool call in the
+      // same round must still finish the plan normally. Only validation can
+      // produce this shape; any other tool keeps the normal failure path.
+      this.awaitingApply = true;
+      const previousBlocker = this.blockerByStep.get(step.id);
+      this.setStepStatus(step.id, previousBlocker ? 'blocked' : 'pending',
+        previousBlocker ?? failure.message);
+    } else if (kind === 'validate' && failure?.type === 'validation_unavailable') {
       const blocker = this.blockerByStep.get(step.id);
       this.setStepStatus(step.id, blocker ? 'blocked' : 'skipped', blocker ?? failure.message);
     } else if (failure) {
@@ -112,6 +125,8 @@ export class TaskPlanTracker {
       }
       this.setStepStatus(step.id, 'completed');
       this.plan.status = 'running';
+      // A validation that really ran supersedes an earlier waiting barrier.
+      if (kind === 'validate') this.awaitingApply = false;
     }
     this.activateStep('respond');
   }
@@ -228,6 +243,12 @@ export class TaskPlanTracker {
       blockers: [...this.plan.blockers],
       ...(this.plan.delegation ? { delegation: structuredClone(this.plan.delegation) } : {})
     };
+  }
+
+  /** True when this round ended at the pending-apply barrier rather than failing.
+   * Run details use it to report "waiting", never "blocked". */
+  public isAwaitingApply(): boolean {
+    return this.awaitingApply;
   }
 
   public updateDelegation(state: DelegationStateV1): void {
@@ -437,7 +458,7 @@ function getToolDetail(toolName: string, language: KeepseekLanguage): string {
   return label ? label[language === 'en' ? 0 : 1] : toolName;
 }
 
-function readToolError(rawResult: string): { message: string; type?: string } | undefined {
+function readToolError(rawResult: string): { message: string; type?: string; waitingForApply: boolean } | undefined {
   try {
     const result: unknown = JSON.parse(rawResult);
     if (!result || typeof result !== 'object' || Array.isArray(result)) {
@@ -447,8 +468,16 @@ function readToolError(rawResult: string): { message: string; type?: string } | 
     if (record.ok !== false) {
       return undefined;
     }
-    const message = compactText(typeof record.error === 'string' ? record.error : 'Tool execution failed.', 240);
-    return message ? { message, type: typeof record.errorType === 'string' ? record.errorType : undefined } : undefined;
+    const type = typeof record.errorType === 'string' ? record.errorType : undefined;
+    // The pending-apply barrier reports `ok: false` so the model does not retry,
+    // but it is a waiting state: it never ran, never spent budget and needs the
+    // host to apply a ChangeSet first. Its short `summary` is the readable detail.
+    const waitingForApply = record.waitingForApply === true || type === 'pending_changes_require_apply';
+    const raw = waitingForApply && typeof record.summary === 'string'
+      ? record.summary
+      : typeof record.error === 'string' ? record.error : 'Tool execution failed.';
+    const message = compactText(raw, 240);
+    return message ? { message, type, waitingForApply } : undefined;
   } catch {
     return undefined;
   }

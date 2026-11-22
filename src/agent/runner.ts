@@ -851,7 +851,10 @@ export class AgentLoop {
         changeSet,
         finishReason,
         stopped: details.stopped === true,
-        budgetPause
+        budgetPause,
+        // The pending-apply barrier only waits for the host to write the
+        // ChangeSet after this run ends; the round never failed.
+        awaitingApply: taskPlan.isAwaitingApply()
       }) ?? createFallbackRunDetails(trace.runId, request, completedPlan, traceLog?.uri);
       callbacks.onRunDetails?.(runDetails);
       return traceLog

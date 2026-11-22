@@ -97,7 +97,7 @@ export function analyzeCommandCapability(spec: DraftRunSpec, semantics = analyze
       // It is a separate query, not an argv rewrite or an exact equivalent.
       'git --no-pager log -p --oneline -- <path>'
     ],
-    'git/ls-files': ['git ls-files [-s|--stage] [-- paths...]'],
+    'git/ls-files': ['git ls-files [-s|--stage] [-z] [--error-unmatch] [--eol] [-- paths...]'],
     'git/tag': ['git tag --list [pattern]', 'git tag --list --sort=version:refname [pattern]'],
     'git/merge-base': ['git merge-base --is-ancestor commit commit'],
     'git/rev-parse': [

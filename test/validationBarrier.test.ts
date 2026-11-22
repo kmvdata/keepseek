@@ -4,7 +4,9 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { test } from 'node:test';
-import { RunValidationStateTracker } from '../src/agent/repairLoop';
+import { RunValidationStateTracker, RepairLoopTracker } from '../src/agent/repairLoop';
+import { TaskPlanTracker } from '../src/agent/taskPlan';
+import { RunDetailsBuilder } from '../src/agent/logging/runDetails';
 import { preflightSafeValidation } from '../src/agent/tools/validationTools';
 import { createFullTextDraftEdit } from '../src/edits/draftEdit';
 import * as vscode from './stubs/vscode';
@@ -203,4 +205,146 @@ test('an authorization source that is not host-issued is refused by the executio
   assert.equal(isValidationAuthorizationValid({ ...base, source: 'low_risk' }, expected), false);
   assert.equal(isValidationAuthorizationValid({ ...base, source: 'user_denied' }, expected), false);
   assert.equal(isValidationAuthorizationValid({ ...base, source: 'host_signed' }, expected), true);
+});
+
+/**
+ * Plan/status contract. The pending-apply barrier reports `ok: false` so the
+ * model does not retry in the same round, but it is a waiting state: the round
+ * must not be classified as blocked, and a later successful tool call in the
+ * same round must be able to finish it normally.
+ */
+function createPlan(draftEditIds: readonly string[] = []) {
+  const tracker = new TaskPlanTracker({
+    runId: 'run-1', sessionId: 'session-1', prompt: 'Fix the bug', language: 'en'
+  });
+  tracker.beginExecution();
+  for (const id of draftEditIds) {
+    tracker.startTool('keepseek_create_draft_edit');
+    tracker.finishTool('keepseek_create_draft_edit', JSON.stringify({ ok: true, draftEditId: id }));
+  }
+  return tracker;
+}
+
+function barrierResult(): string {
+  return new RunValidationStateTracker('workspace_baseline', ['edit-1'])
+    .createBlockedValidationResult('en', { nextTrigger: 'run_end_host_apply' });
+}
+
+function runDetailsStatus(plan: TaskPlanTracker, options: { awaitingApply: boolean }): string {
+  return new RunDetailsBuilder({ runId: 'run-1', modelId: 'model-1', thinkingEnabled: false }).finish({
+    taskPlan: plan.getPlan(),
+    repairLoop: { status: 'idle', iteration: 0, maxIterations: 3, pendingDraftEditIds: [] },
+    awaitingApply: options.awaitingApply
+  }).status;
+}
+
+test('a pending-apply barrier never blocks the plan or records a blocker', () => {
+  const tracker = createPlan(['edit-1', 'edit-2', 'edit-3']);
+  tracker.startTool('keepseek_run_validation');
+  tracker.finishTool('keepseek_run_validation', barrierResult());
+
+  const plan = tracker.getPlan();
+  assert.notEqual(plan.status, 'blocked', 'waiting for apply is not a failure');
+  assert.deepEqual(plan.blockers, [], 'the barrier text must not become a blocker');
+  const validate = plan.steps.find(step => step.id === 'validate');
+  assert.equal(validate?.status, 'pending', 'the validation step stays to be done after apply');
+  assert.match(validate?.detail ?? '', /waiting|appl/iu, 'the step keeps a readable waiting detail');
+  assert.equal(tracker.isAwaitingApply(), true);
+});
+
+test('the barrier is idempotent and a later success still completes the round', () => {
+  const tracker = createPlan(['edit-1']);
+  tracker.startTool('keepseek_run_validation');
+  tracker.finishTool('keepseek_run_validation', barrierResult());
+  tracker.startTool('keepseek_run_validation');
+  tracker.finishTool('keepseek_run_validation', barrierResult());
+  assert.deepEqual(tracker.getPlan().blockers, [], 'repeating the barrier never accumulates blockers');
+
+  tracker.startTool('keepseek_read_workspace_file');
+  tracker.finishTool('keepseek_read_workspace_file', JSON.stringify({ ok: true, content: 'x' }));
+  const completed = tracker.complete('Prepared the change; the host applies it after this run.');
+  assert.equal(completed.status, 'completed', 'a successful tool call and completion are not blocked');
+  assert.deepEqual(completed.blockers, []);
+});
+
+test('run details report waiting, not blocked, for a round that ends at the barrier', () => {
+  const tracker = createPlan(['edit-1']);
+  tracker.startTool('keepseek_run_validation');
+  tracker.finishTool('keepseek_run_validation', barrierResult());
+  tracker.complete('Prepared the change; the host applies it after this run.');
+
+  assert.equal(runDetailsStatus(tracker, { awaitingApply: true }), 'waiting');
+  // Control: without the barrier fact the same plan is an ordinary success, so
+  // the assertion above is really about the waiting state, not about plan.status.
+  assert.equal(runDetailsStatus(tracker, { awaitingApply: false }), 'succeeded');
+});
+
+test('a real validation failure still blocks the plan and the run', () => {
+  const tracker = createPlan(['edit-1']);
+  tracker.startTool('keepseek_run_validation');
+  const failure = JSON.stringify({ ok: false, authorized: true, exitCode: 1, error: 'Compile failed.' });
+  tracker.finishTool('keepseek_run_validation', failure);
+  const repairLoop = new RepairLoopTracker(3);
+  const outcome = repairLoop.recordValidationResult(failure);
+  assert.equal(outcome.failed, true);
+  tracker.beginRepair(1, 3, outcome.summary);
+
+  const plan = tracker.complete('Validation failed.');
+  assert.equal(plan.status, 'blocked', 'a failing script keeps the round blocked');
+  assert.ok(plan.blockers.length > 0, 'a real failure keeps its blocker');
+  assert.equal(tracker.getPlan().steps.find(step => step.id === 'validate')?.status, 'blocked');
+  assert.equal(tracker.isAwaitingApply(), false, 'a failure is not a waiting state');
+  assert.equal(new RunDetailsBuilder({ runId: 'run-1', modelId: 'model-1', thinkingEnabled: false }).finish({
+    taskPlan: plan,
+    repairLoop: repairLoop.getState(),
+    awaitingApply: tracker.isAwaitingApply()
+  }).status, 'blocked');
+});
+
+test('sandbox and authorization denials keep their blocked semantics', () => {
+  const tracker = createPlan(['edit-1']);
+  tracker.startTool('keepseek_run_validation');
+  tracker.finishTool('keepseek_run_validation', JSON.stringify({
+    ok: false, errorType: 'authorization_denied', error: 'Denied.'
+  }));
+  assert.equal(tracker.complete('Denied.').status, 'blocked');
+  assert.equal(tracker.isAwaitingApply(), false);
+  // The repair loop must treat a denial as blocked, not as a consumed attempt.
+  const repairLoop = new RepairLoopTracker(3);
+  const outcome = repairLoop.recordValidationResult(JSON.stringify({ ok: false, errorType: 'authorization_denied' }));
+  assert.equal(outcome.failed, false);
+  assert.equal(repairLoop.getState().status, 'blocked');
+  assert.equal(repairLoop.getState().iteration, 0, 'a denial consumes no repair iteration');
+});
+
+test('validation_unavailable keeps its skipped semantics and is not a waiting state', () => {
+  const tracker = createPlan(['edit-1']);
+  tracker.startTool('keepseek_run_validation');
+  tracker.finishTool('keepseek_run_validation', JSON.stringify({
+    ok: false, errorType: 'validation_unavailable', executed: false, error: 'No fixed script.'
+  }));
+  const validate = tracker.getPlan().steps.find(step => step.id === 'validate');
+  assert.equal(validate?.status, 'skipped', 'a missing script stays unavailable, not waiting');
+  assert.equal(tracker.isAwaitingApply(), false);
+});
+
+test('a real failure after a barrier is still blocked, not masked as waiting', () => {
+  const tracker = createPlan(['edit-1']);
+  tracker.startTool('keepseek_run_validation');
+  tracker.finishTool('keepseek_run_validation', barrierResult());
+  // The host applied the ChangeSet, validation really ran, and it failed.
+  tracker.startTool('keepseek_run_validation');
+  tracker.finishTool('keepseek_run_validation', JSON.stringify({
+    ok: false, authorized: true, exitCode: 2, error: 'Compile failed.'
+  }));
+
+  const plan = tracker.complete('Validation failed.');
+  assert.equal(plan.status, 'blocked');
+  assert.ok(plan.blockers.length > 0, 'the real failure keeps its blocker');
+  const status = new RunDetailsBuilder({ runId: 'run-1', modelId: 'model-1', thinkingEnabled: false }).finish({
+    taskPlan: plan,
+    repairLoop: { status: 'idle', iteration: 0, maxIterations: 3, pendingDraftEditIds: [] },
+    awaitingApply: tracker.isAwaitingApply()
+  }).status;
+  assert.equal(status, 'blocked', 'a blocked plan is never overridden by the waiting fact');
 });

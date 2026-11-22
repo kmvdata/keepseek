@@ -166,6 +166,7 @@ export class RunDetailsBuilder {
     failureReason?: string;
     stopped?: boolean;
     budgetPause?: RunDetailsSummary['budgetPause'];
+    awaitingApply?: boolean;
   }): RunDetailsSummary {
     this.taskPlan = cloneTaskPlan(input.taskPlan);
     this.failureReason = input.failureReason ?? this.failureReason;
@@ -600,12 +601,18 @@ function resolveStatus(input: {
   failureReason?: string;
   stopped?: boolean;
   budgetPause?: RunDetailsSummary['budgetPause'];
+  /** This round ended at the pending-apply validation barrier. */
+  awaitingApply?: boolean;
 }): RunDetailsStatus {
   if (input.budgetPause?.resumable) return 'waiting';
   if (input.stopped || input.taskPlan.status === 'stopped') return 'stopped';
   if (input.failureReason || input.taskPlan.status === 'failed') return 'failed';
   if (input.repairLoop.status === 'waiting_for_apply' || input.repairLoop.status === 'ready_for_validation') return 'waiting';
   if (input.taskPlan.status === 'blocked') return 'blocked';
+  // An ordinary DraftEdit round can end in the pending-apply barrier without any
+  // repair loop: the host applies the ChangeSet after this run ends and then
+  // continues the task, so the run waited instead of failing.
+  if (input.awaitingApply) return 'waiting';
   return 'succeeded';
 }
 
