@@ -1625,6 +1625,12 @@ function projectToolDurations(runDetails: ChatMessage['runDetails']): Record<str
  * projects every visible message on each checkpoint, and a completed message
  * has immutable rounds, so caching by input identity keeps tool-result parsing
  * off that hot path without ever serving a stale list.
+ *
+ * The key is the message's rounds array itself. `getVisibleMessages()` creates a
+ * new message object on every projection, so the rounds array it destructures is
+ * the only identity that survives between projections (keying on the message
+ * would miss every time); a rounds array is also a proper object key for the
+ * WeakMap.
  */
 const activityNodeCache = new WeakMap<object, {
   content: string;
@@ -1658,8 +1664,12 @@ function buildVisibleActivityNodes(input: {
   // A streaming message changes on every delta and owns a live row; only a
   // settled message can be reused from the cache, keyed by its immutable rounds.
   const cacheable = !message.isStreaming && message.content !== undefined;
-  if (cacheable) {
-    const cached = activityNodeCache.get(toolRounds);
+  // The early return above already proves that a settled message has rounds, but
+  // the type still admits `undefined`; `cacheRounds` turns that runtime invariant
+  // into a compiler-visible object key without widening the WeakMap key type.
+  const cacheRounds = cacheable ? toolRounds : undefined;
+  if (cacheRounds) {
+    const cached = activityNodeCache.get(cacheRounds);
     // runDetails supplies the durations, so it is part of the cache key too.
     if (cached && cached.content === message.content && cached.language === language
       && cached.runDetails === message.runDetails) {
@@ -1673,8 +1683,8 @@ function buildVisibleActivityNodes(input: {
     language,
     ...(pendingExecuting ? { liveTool: { id: pendingExecuting.id, name: pendingExecuting.name } } : {})
   });
-  if (nodes?.length && cacheable) {
-    activityNodeCache.set(toolRounds, {
+  if (nodes?.length && cacheRounds) {
+    activityNodeCache.set(cacheRounds, {
       content: message.content, language, runDetails: message.runDetails, nodes
     });
   }

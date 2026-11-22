@@ -4319,7 +4319,7 @@ ${conversationsSessionListFragment.source}
       render();
     }
 
-    function createActivityIcon(status) {
+    function createActivityIcon() {
       var icon = document.createElement('span');
       icon.className = 'activity-icon';
       icon.setAttribute('aria-hidden', 'true');
@@ -4343,7 +4343,7 @@ ${conversationsSessionListFragment.source}
       var detail = node.target ? label + ' · ' + node.target : label;
       row.title = node.target ? String(node.name || '') + ' · ' + String(node.target) : String(node.name || '');
       row.setAttribute('aria-label', detail + ' · ' + t('activityStatus_' + String(node.status || 'succeeded')));
-      row.append(createActivityIcon(node.status));
+      row.append(createActivityIcon());
       var text = document.createElement('span');
       text.className = 'activity-tool-text';
       text.textContent = label;
@@ -4444,36 +4444,37 @@ ${conversationsSessionListFragment.source}
     function renderActivityNodes(container, message, streaming) {
       container.classList.add('activity-list');
       var nodes = Array.isArray(message.activityNodes) ? message.activityNodes : [];
-      // A streaming list must not collapse: the newest step is the point.
       var tools = nodes.filter(function(node) { return node.kind === 'tool'; });
+      // A streaming list must not collapse: the newest step is the point.
       var expanded = streaming || isActivityExpanded(message);
-      var hidden = expanded || tools.length <= ACTIVITY_COLLAPSED_TOOL_LIMIT
-        ? 0
-        : tools.length - ACTIVITY_COLLAPSED_TOOL_LIMIT;
-      var shownTools = 0;
-      var buttonInserted = false;
+      var collapsed = !expanded && tools.length > ACTIVITY_COLLAPSED_TOOL_LIMIT;
+      var hidden = collapsed ? tools.length - ACTIVITY_COLLAPSED_TOOL_LIMIT : 0;
+      var renderedTools = 0;
+      var toggleInserted = false;
 
+      // Every narration stays visible; only tool rows beyond the limit fold away.
+      // The toggle sits where the first hidden step would have been, so the
+      // reader sees the run collapse exactly at that point.
       nodes.forEach(function(node) {
         if (node.kind === 'say') {
-          if (String(node.text || '').trim()) {
-            var say = createActivitySay(node.text);
-            // The last say node is where streamed text lands.
-            say.classList.add('activity-say');
-            container.append(say);
-          }
+          if (String(node.text || '').trim()) container.append(createActivitySay(node.text));
           return;
         }
-        shownTools += 1;
-        if (hidden > 0 && shownTools > ACTIVITY_COLLAPSED_TOOL_LIMIT && !buttonInserted) {
-          container.append(createActivityToggle(message, hidden, false));
-          buttonInserted = true;
+        renderedTools += 1;
+        if (!collapsed || renderedTools <= ACTIVITY_COLLAPSED_TOOL_LIMIT) {
+          container.append(createActivityToolRow(node));
+          return;
         }
-        if (hidden > 0 && shownTools > ACTIVITY_COLLAPSED_TOOL_LIMIT) return;
-        container.append(createActivityToolRow(node));
+        if (!toggleInserted) {
+          container.append(createActivityToggle(message, hidden, false));
+          toggleInserted = true;
+        }
       });
 
-      if (hidden > 0 && !buttonInserted) container.append(createActivityToggle(message, hidden, false));
-      else if (expanded && tools.length > ACTIVITY_COLLAPSED_TOOL_LIMIT) container.append(createActivityToggle(message, 0, true));
+      if (hidden > 0 && !toggleInserted) container.append(createActivityToggle(message, hidden, false));
+      else if (expanded && tools.length > ACTIVITY_COLLAPSED_TOOL_LIMIT) {
+        container.append(createActivityToggle(message, 0, true));
+      }
     }
 
     function createActivityToggle(message, hiddenCount, expanded) {

@@ -241,6 +241,20 @@ function assistantMessage(overrides: Partial<ChatMessage>): ChatMessage {
   };
 }
 
+/** Recorded run details with one timed tool call, so duration staleness is observable. */
+function runDetailsWith(durationMs: number): NonNullable<ChatMessage['runDetails']> {
+  const startedAt = new Date().toISOString();
+  return {
+    runId: 'r1', modelId: 'm', status: 'succeeded', startedAt,
+    modelRequests: { requestCount: 1, providerAttemptCount: 1, usageResponseCount: 1, messageCount: 1, exposedToolCount: 1, thinkingEnabled: false },
+    toolCallCount: 1,
+    toolCalls: [{ id: 'c1', name: 'keepseek_read_workspace_file', startedAt, status: 'succeeded', durationMs }],
+    authorizations: [], changeSets: [], validations: [], contextSources: [], contextDiscarded: [], truncated: false
+  };
+}
+
+const project = (message: ChatMessage): ChatMessage => getVisibleMessages([message])[0];
+
 test('visible messages expose nodes but still strip toolRounds', () => {
   const [visible] = getVisibleMessages([assistantMessage({
     content: '最终回答',
@@ -271,4 +285,34 @@ test('user messages never produce activity nodes', () => {
     toolRounds: [round(null, [{ id: 'c1', name: 'keepseek_read_workspace_file', args: { path: 'a.ts' } }], [])]
   } as ChatMessage]);
   assert.equal(visible.activityNodes, undefined);
+});
+test('a settled message reuses the cached nodes for the same rounds array', () => {
+  // getVisibleMessages() builds a fresh message object on every projection, so the
+  // rounds reference is the only identity the derived-view cache can key on.
+  const toolRounds = [round(null, [{ id: 'c1', name: 'keepseek_read_workspace_file', args: { path: 'a.ts' } }],
+    [{ toolCallId: 'c1', content: JSON.stringify({ ok: true }) }])];
+  const runDetails = runDetailsWith(120);
+  const first = project(assistantMessage({ content: '最终回答', toolRounds, runDetails }));
+  const second = project(assistantMessage({ content: '最终回答', toolRounds, runDetails }));
+  assert.deepEqual(second.activityNodes, first.activityNodes);
+  assert.equal(second.activityNodes, first.activityNodes, 'the same rounds array reuses the cached nodes');
+});
+
+test('new run details invalidate the cached durations', () => {
+  const toolRounds = [round(null, [{ id: 'c1', name: 'keepseek_read_workspace_file', args: { path: 'a.ts' } }],
+    [{ toolCallId: 'c1', content: JSON.stringify({ ok: true }) }])];
+  const first = project(assistantMessage({ content: '', toolRounds, runDetails: runDetailsWith(120) }));
+  assert.equal(toolNodes(first.activityNodes)[0].durationMs, 120);
+  const second = project(assistantMessage({ content: '', toolRounds, runDetails: runDetailsWith(999) }));
+  assert.equal(toolNodes(second.activityNodes)[0].durationMs, 999, 'run details supply the durations, so they decide cache validity');
+});
+
+test('new content invalidates the cached final answer', () => {
+  const toolRounds = [round('先看计划。', [{ id: 'c1', name: 'keepseek_read_workspace_file', args: { path: 'a.ts' } }],
+    [{ toolCallId: 'c1', content: JSON.stringify({ ok: true }) }])];
+  const runDetails = runDetailsWith(120);
+  const first = project(assistantMessage({ content: '先看计划。最终回答。', toolRounds, runDetails }));
+  assert.deepEqual(sayNodes(first.activityNodes), ['先看计划。', '最终回答。']);
+  const second = project(assistantMessage({ content: '先看计划。另一段最终回答。', toolRounds, runDetails }));
+  assert.deepEqual(sayNodes(second.activityNodes), ['先看计划。', '另一段最终回答。']);
 });
