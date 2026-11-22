@@ -1,3 +1,4 @@
+import { explicitPromptSkill, isPromptInspectionTool } from './promptGeneration';
 import type { KeepseekLanguage } from '../shared/i18n';
 import type { ProviderClientRequest } from './providers/types';
 import type { ModelSourceProvider } from '../accounts/types';
@@ -222,14 +223,19 @@ export function buildProviderRequestProjection(
   // Tool exposure is an execution capability, not a model capability or a
   // budget sentinel. Callers that need a no-tools lane must say so explicitly.
   const includeTools = input.includeTools ?? true;
-  const toolNames = includeTools
+  const requestedNames = includeTools
     ? [...(input.slimToolNames ?? getAgentToolNamesForPrompt(
         input.prompt,
         getConfiguredSlimToolModeEnabled(),
         requestProtocolVersion
       ))]
     : [];
-  const tools = includeTools ? getAgentTools({ toolNames, requestProtocolVersion }) : [];
+  const promptOnly = Boolean(explicitPromptSkill(input.currentRunContext?.skills));
+  // getAgentTools historically treats an empty list as "all". Narrow the
+  // canonical list itself so even stale and empty frozen schemas fail closed.
+  const schema = includeTools ? getAgentTools({ toolNames: requestedNames, requestProtocolVersion }) : [];
+  const tools = promptOnly ? schema.filter(tool => isPromptInspectionTool(tool.function.name)) : schema;
+  const toolNames = promptOnly ? tools.map(tool => tool.function.name) : requestedNames;
   const responses = provider === 'openai-responses'
     ? buildOpenAiResponsesRequestProjection({
         messages,

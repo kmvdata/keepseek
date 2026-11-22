@@ -1757,6 +1757,18 @@ ${conversationsStylesFragment.source}
       line-height: 1.45;
     }
 
+    .plan-prompt-preview {
+      margin: 0;
+      max-height: 12em;
+      overflow: auto;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      user-select: text;
+      background: var(--vscode-textCodeBlock-background);
+      padding: 6px 8px;
+      font: inherit;
+    }
+
     .plan-decision-actions {
       display: flex;
       flex-wrap: wrap;

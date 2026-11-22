@@ -1,6 +1,9 @@
 import { normalizeProviderReplay } from './providerReplayNormalization';
 import { normalizePendingHistoryTruncation } from './historyTruncation';
 import { normalizeUserTaskBudgets } from './userTaskBudget';
+import { assertHandoffInput, assertHandoffTarget, normalizePlanHandoffs, reservePlanHandoff, type PlanHandoffInput, type PlanHandoffRecord } from './planHandoff';
+import { getLatestPendingPlan, isPlanRecordContentValid } from '../agent/handoffPrompt';
+import { getApprovalModeUserTail } from '../agent/approvalMode';
 import { normalizeUserTask } from './userTask';
 import { reconcileExecutionTime } from './executionTimeStats';
 import { normalizeRequestBudget } from '../agent/requestBudget';
@@ -70,7 +73,10 @@ export interface ChatSessionStorageAdapter {
   /** Cleanup and every execution admission share the persistent deletion authority. */
   isSessionDeleted?(workspaceKey: string, sessionId: string): Promise<boolean>;
   assertSessionWritable?(workspaceKey: string, sessionId: string): Promise<void>;
-  acquireSessionUse?(workspaceKey: string, sessionId: string): Promise<{ release(): Promise<void> }>;
+  assertNewHandoffTarget?(workspaceKey: string, id: string): Promise<void>;
+  withPlanHandoffGate?<T>(workspaceKey: string, work: () => Promise<T>): Promise<T>;
+  isSessionInUse?(workspaceKey: string, sessionId: string, onlyExclusive?: boolean): Promise<boolean>;
+  acquireSessionUse?(workspaceKey: string, sessionId: string, exclusive?: boolean): Promise<{ release(): Promise<void> }>;
   loadMessageCheckpoint?(workspaceKey: string, sessionId: string, messageId: string): Promise<unknown>;
   loadWorkspace(workspaceScope: WorkspaceSessionScope, options?: { fresh?: boolean }): Promise<StoredWorkspaceSessionState>;
   saveWorkspace(workspaceScope: WorkspaceSessionScope, state: StoredWorkspaceSessionState): Promise<void>;
@@ -143,7 +149,8 @@ export class ChatSessionStore {
     const workspaceKey = this.workspaceScope.key;
     if (this.deletedSessionKeys.has(this.sessionIdentity(sessionId))) throw new Error('session_deleted');
     if (this.sessionStorage.acquireSessionUse) {
-      const use = await this.sessionStorage.acquireSessionUse(workspaceKey, sessionId);
+      const acquire = () => this.sessionStorage.acquireSessionUse!(workspaceKey, sessionId);
+      const use = this.projectQueue ? await this.projectQueue.acquireSessionUse(workspaceKey, this.queueSeeds(), acquire) : await acquire();
       if (workspaceKey !== this.workspaceScope.key) {
         await use.release();
         throw new Error('session_workspace_changed');
@@ -306,7 +313,12 @@ export class ChatSessionStore {
     private workspaceScope: WorkspaceSessionScope = getCurrentWorkspaceSessionScope(),
     /** Project queue authority for ordering and derived normal/plan mode. */
     private readonly projectQueue?: ProjectQueueService
-  ) {}
+  ) {
+    if (sessionStorage.listWorkspaceSessionSummaries) {
+      projectQueue?.setSessionCatalog(key => sessionStorage.listWorkspaceSessionSummaries!(key),
+        sessionStorage.isSessionInUse ? (key, id) => sessionStorage.isSessionInUse!(key, id, true) : undefined);
+    }
+  }
 
   /** Removed on disposal so a startup warm-up read cannot outlive the store. */
   private readonly warmUpLifetime = new AbortController();
@@ -403,6 +415,263 @@ export class ChatSessionStore {
 
   public getActiveSession(): ChatSession {
     return this.ensureActiveSession();
+  }
+
+  /** Caller holds ordinary source use. A late Plan decision in another window
+   * cannot promote its stale source before discovering a committed handoff. */
+  public async assertPlanDecisionCurrent(sessionId: string, planId: string): Promise<void> {
+    const storage = this.sessionStorage;
+    if (!storage.withPlanHandoffGate || !storage.loadSession) return;
+    const key = this.workspaceKey;
+    await storage.withPlanHandoffGate(key, async () => {
+      const live = this.getSessionById(sessionId);
+      const stored = await storage.loadSession!(key, sessionId, { readOnly: true });
+      if (stored?.planHandoffs?.length) this.adoptHandoffSource(stored);
+      const localPlan = live && getLatestPendingPlan(live);
+      const durable = stored && getLatestPendingPlan(stored);
+      if (this.workspaceKey !== key || this.activeSessionId !== sessionId || !localPlan || !durable
+        || durable.id !== planId || localPlan.id !== planId || durable.contentHash !== localPlan.contentHash
+        || durable.userMessageId !== localPlan.userMessageId || durable.assistantMessageId !== localPlan.assistantMessageId
+        || stored.planHandoffs?.some(r => r.planId === planId) || !isPlanRecordContentValid(stored, durable)
+        || !isPlanRecordContentValid(live!, localPlan)) throw new Error('Plan changed. Refresh its confirmation card / 计划已变化，请重新查看确认卡');
+    });
+  }
+
+  public async commitPlanHandoff(input: PlanHandoffInput, guard: () => void): Promise<{ record: PlanHandoffRecord; target: ChatSession }> {
+    const scope = this.workspaceScope;
+    const storage = this.sessionStorage;
+    const queue = this.projectQueue;
+    if (!queue || !storage.withPlanHandoffGate || !storage.loadSession || !storage.isSessionInUse
+      || !storage.acquireSessionUse || !storage.assertSessionWritable || !storage.assertNewHandoffTarget) throw new Error('Handoff storage unavailable / 交接存储不可用');
+    const verify = () => {
+      guard();
+      if (this.workspaceKey !== scope.key || this.activeSessionId !== input.sourceSessionId) {
+        throw new Error('Plan source changed / 计划源会话已变化');
+      }
+    };
+    verify();
+    await this.persistenceDrain;
+    return storage.withPlanHandoffGate(scope.key, async () => {
+      verify();
+      const source = await storage.loadSession!(scope.key, input.sourceSessionId);
+      if (!source || source.pendingHistoryTruncation) throw new Error('Plan source unavailable / 计划源会话不可用');
+      const previous = source.planHandoffs?.find(r => r.planId === input.planId);
+      if (!previous) {
+        const committedQueue = await queue.readHandoffSource(scope.key, source.id);
+        for (const id of new Set([source.id, committedQueue.entries[0].sessionId])) {
+          if (await storage.isSessionInUse?.(scope.key, id)) throw new Error('Plan or current writer in use / 计划或当前写会话正在执行');
+        }
+        verify();
+        const live = this.getSessionById(source.id);
+        const plan = source.planWorkflows?.find(r => r.id === input.planId);
+        const root = source.messages.find(m => m.id === plan?.userMessageId)?.userTask?.id;
+        // Completed planning normally has a current budget. Older current-format
+        // records may only have the archived checkpoint; the caller has loaded
+        // its settled ledger after joining auxiliary work.
+        if (root && !source.userTaskBudgets?.[root] && live?.userTaskBudgets?.[root]) {
+          source.userTaskBudgets ??= {};
+          source.userTaskBudgets[root] = structuredClone(live.userTaskBudgets[root]);
+        }
+      }
+      const record = reservePlanHandoff(source, input);
+      if (!previous) {
+        verify();
+        try {
+          await this.saveHandoffSession(source);
+        } catch (error) {
+          // The shard can commit before an index/flush error. Reconcile by
+          // identity before exposing the plan for another decision.
+          const durable = await storage.loadSession!(scope.key, source.id);
+          if (durable) this.adoptHandoffSource(durable);
+          throw error;
+        }
+      }
+      this.adoptHandoffSource(source);
+      verify();
+      let target = await storage.loadSession!(scope.key, record.targetSessionId);
+      if (!target) {
+        if (record.phase !== 'committed') throw new Error('Handoff target unavailable / 交接目标不可用');
+        await storage.assertNewHandoffTarget!(scope.key, record.targetSessionId);
+        await storage.assertSessionWritable!(scope.key, record.targetSessionId);
+        verify();
+        target = createEmptySession(this.language, scope, record.approvalMode);
+        target.id = record.targetSessionId;
+        target.projectScopeUri = record.projectScopeUri;
+        target.planHandoffId = record.id;
+        target.planHandoffSourceId = record.sourceSessionId;
+        target.createdAt = target.updatedAt = record.confirmedAt;
+        target.title = createSessionTitle(record.body, this.language);
+        const providerContent = record.body + '\n\n' + getApprovalModeUserTail(record.approvalMode);
+        target.messages.push({ id: record.targetMessageId, role: 'user', content: record.body, providerContent,
+          contextMeta: { isProtected: true, protectedReason: 'first_user_request' },
+          createdAt: record.confirmedAt, modelId: record.modelId, userTask: { version: 1, id: record.targetMessageId,
+            originMessageId: record.targetMessageId, reason: 'plan' } });
+        target.userTaskBudgets = { [record.targetMessageId]: structuredClone(record.budget) };
+        await this.saveHandoffSession(target);
+      }
+      assertHandoffTarget(target, record);
+      if (target.planHandoffCompleted && record.phase === 'dispatch_unknown') {
+        // The target receipt committed before its source completion index.
+        record.phase = 'completed';
+        await this.saveHandoffSession(source);
+        this.adoptHandoffSource(source);
+      }
+      this.sessionSummaries.set(target.id, toSessionSummary(target, this.language));
+      const cachedIndex = this.sessions.findIndex(s => s.id === target!.id && s.workspaceKey === scope.key);
+      if (cachedIndex < 0) this.sessions.push(target);
+      else this.sessions[cachedIndex] = target;
+      if (record.phase === 'committed' || record.phase === 'queued') {
+        if (target.messages.length !== 1) throw new Error('Handoff target has additional work / 交接目标已有其他工作');
+        await queue.promoteHandoff(scope.key, source.id, target.id, async current => {
+          verify();
+          const head = current.entries[0]?.sessionId;
+          if (head && head !== target!.id && await storage.isSessionInUse?.(scope.key, head)) {
+            throw new Error('The current writer is in use / 当前写会话正在执行');
+          }
+          await storage.assertSessionWritable?.(scope.key, target!.id);
+          verify();
+        });
+        if (record.phase === 'committed') {
+          record.phase = 'queued';
+          await this.saveHandoffSession(source);
+          this.adoptHandoffSource(source);
+        }
+      }
+      return { record: structuredClone(record), target };
+    });
+  }
+
+  private async saveHandoffSession(session: ChatSession): Promise<void> {
+    // Index CAS merges by updatedAt. Give every irreversible phase a newer
+    // stamp so a concurrently saved, stale summary cannot clear retention.
+    session.updatedAt = new Date(Math.max(Date.now(), Date.parse(session.updatedAt) + 1)).toISOString();
+    if (this.workspaceKey !== session.workspaceKey) throw new Error('Project changed / 项目已变化');
+    await this.sessionStorage.assertSessionWritable?.(this.workspaceKey, session.id);
+    await this.sessionStorage.saveWorkspace(this.workspaceScope, { activeSessionId: this.activeSessionId,
+      approvalMode: this.approvalModeValue, sessions: [snapshotSession(session)] });
+  }
+
+  private adoptHandoffSource(source: ChatSession): void {
+    const live = this.getSessionById(source.id);
+    if (!live) return;
+    live.planHandoffs = structuredClone(source.planHandoffs);
+    for (const r of source.planHandoffs ?? []) {
+      const plan = live.planWorkflows?.find(item => item.id === r.planId);
+      if (plan) { plan.status = 'superseded'; plan.decidedAt = r.confirmedAt; }
+      if (live.userTaskBudgets) delete live.userTaskBudgets[r.sourceTaskId];
+    }
+  }
+
+  public activatePlanHandoffTarget(record: PlanHandoffRecord): ChatSession {
+    const target = this.getSessionById(record.targetSessionId);
+    if (!target || this.workspaceKey !== record.workspaceKey) throw new Error('Handoff target unavailable / 交接目标不可用');
+    assertHandoffTarget(target, record);
+    this.approvalModeValue = target.approvalMode ?? 'ask';
+    this.setActiveSessionId(target.id);
+    return target;
+  }
+
+  public async acquirePlanHandoffPreparation(record: PlanHandoffRecord): Promise<{ release(): Promise<void> }> {
+    if (this.workspaceKey !== record.workspaceKey || !this.sessionStorage.acquireSessionUse) {
+      throw new Error('Handoff storage unavailable / 交接存储不可用');
+    }
+    const acquire = () => this.sessionStorage.acquireSessionUse!(record.workspaceKey, record.targetSessionId, true);
+    if (record.phase === 'queued') {
+      if (!this.projectQueue) throw new Error('Project queue unavailable / 项目队列不可用');
+      return this.projectQueue.atHandoffHead(record.workspaceKey, record.targetSessionId, acquire);
+    }
+    return acquire();
+  }
+
+  /** Repeat at the physical request boundary. The preparation lease keeps
+   * ordinary cross-window reorders from displacing this writer during fetch. */
+  public async verifyPlanHandoffWriter(record: PlanHandoffRecord): Promise<void> {
+    if (!this.projectQueue || record.workspaceKey !== this.workspaceKey || record.phase !== 'dispatch_unknown') {
+      throw new Error('Handoff dispatch is not claimed / 交接派发尚未认领');
+    }
+    await this.projectQueue.atHandoffHead(record.workspaceKey, record.targetSessionId, async () => {
+      await this.sessionStorage.assertSessionWritable?.(record.workspaceKey, record.targetSessionId);
+    });
+  }
+
+  public async getTargetPlanHandoff(target: ChatSession): Promise<PlanHandoffRecord | undefined> {
+    if (!target.planHandoffId) return undefined;
+    const source = target.planHandoffSourceId && await this.sessionStorage.loadSession?.(
+      target.workspaceKey, target.planHandoffSourceId, { readOnly: true });
+    const record = source && source.planHandoffs?.find(r => r.id === target.planHandoffId);
+    if (!record && target.planHandoffCompleted) return undefined;
+    if (!record) throw new Error('Handoff journal unavailable / 交接记录不可用');
+    assertHandoffTarget(target, record);
+    if (target.planHandoffCompleted && record.phase === 'dispatch_unknown'
+      || !target.planHandoffCompleted && record.phase === 'completed') {
+      await this.finishPlanHandoffDispatch(record);
+    }
+    return record;
+  }
+
+  public async claimPlanHandoffDispatch(record: PlanHandoffRecord, guard: () => void, projectionHash: string,
+    allowUnknownRetry = false): Promise<boolean> {
+    if (!/^[a-f0-9]{64}$/u.test(projectionHash)) throw new Error('Invalid handoff projection hash / 交接投影哈希无效');
+    return this.updateHandoffDispatch(record, async (current, target) => {
+      guard();
+      if (target.planHandoffCompleted || current.phase === 'completed' || (current.phase === 'dispatch_unknown' && !allowUnknownRetry)) return false;
+      if (current.phase !== 'queued' && current.phase !== 'dispatch_unknown') return false;
+      if (current.phase === 'queued' && target.messages.length !== 1) throw new Error('Handoff target changed / 交接目标已变化');
+      // The journal write runs under the same CAS lock as normal queue edits.
+      // Admission therefore sees the exact durable writer at dispatch claim.
+      if (current.projectionHash !== undefined && current.projectionHash !== projectionHash) {
+        throw new Error('Handoff dispatch projection changed / 交接派发投影已变化');
+      }
+      current.projectionHash ??= projectionHash;
+      current.phase = 'dispatch_unknown';
+      return true;
+    }, true);
+  }
+
+  public async finishPlanHandoffDispatch(record: PlanHandoffRecord): Promise<void> {
+    await this.updateHandoffDispatch(record, async (current, target) => {
+      if (current.phase !== 'dispatch_unknown' && current.phase !== 'completed') return false;
+      if (!target.planHandoffCompleted) {
+        target.planHandoffCompleted = true;
+        await this.saveHandoffSession(target);
+      }
+      const live = this.getSessionById(target.id);
+      if (live) live.planHandoffCompleted = true;
+      // The source becomes eligible for retention only AFTER the target's own
+      // completion receipt has crossed its durable barrier.
+      current.phase = 'completed';
+      return true;
+    });
+  }
+
+  private async updateHandoffDispatch(record: PlanHandoffRecord,
+    advance: (current: PlanHandoffRecord, target: ChatSession) => Promise<boolean>, requireHead = false): Promise<boolean> {
+    const storage = this.sessionStorage;
+    if (record.workspaceKey !== this.workspaceKey || !storage.withPlanHandoffGate || !storage.loadSession) {
+      throw new Error('Handoff storage unavailable / 交接存储不可用');
+    }
+    return storage.withPlanHandoffGate(this.workspaceKey, async () => {
+      const source = await storage.loadSession!(record.workspaceKey, record.sourceSessionId, { readOnly: true });
+      const current = source?.planHandoffs?.find(r => r.id === record.id);
+      if (!source || !current || current.targetSessionId !== record.targetSessionId || current.targetMessageId !== record.targetMessageId) {
+        throw new Error('Handoff identity changed / 交接身份已变化');
+      }
+      assertHandoffInput(current, record);
+      const target = await storage.loadSession!(record.workspaceKey, record.targetSessionId, { readOnly: true });
+      if (!target) throw new Error('Handoff target unavailable / 交接目标不可用');
+      assertHandoffTarget(target, current);
+      const persistTransition = async () => {
+        if (!await advance(current, target)) return false;
+        await this.saveHandoffSession(source);
+        this.adoptHandoffSource(source);
+        record.phase = current.phase;
+        record.projectionHash = current.projectionHash;
+        return true;
+      };
+      if (!requireHead) return persistTransition();
+      if (!this.projectQueue) throw new Error('Project queue unavailable / 项目队列不可用');
+      return this.projectQueue.atHandoffHead(record.workspaceKey, target.id, persistTransition);
+    });
   }
 
   public async createNewSession(language: KeepseekLanguage = this.language, onSaving?: (sessionId: string) => void): Promise<ChatSession> {
@@ -531,6 +800,10 @@ ormal while another session is ahead of it in the
       approvalMode: this.approvalModeValue,
       executionMode: 'normal',
       planWorkflows: undefined,
+      planHandoffs: undefined,
+      planHandoffId: undefined,
+      planHandoffSourceId: undefined,
+      planHandoffCompleted: undefined,
       id: randomUUID(),
       messages: source.messages.map(copyMessage),
       contextCompression: undefined,
@@ -1385,6 +1658,11 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
       : workspaceScope.folderUris;
     const autoTitle = normalizeSessionTitle(item.autoTitle, customTitle, { messages });
 
+    if ((item.planHandoffId !== undefined || item.planHandoffSourceId !== undefined || item.planHandoffCompleted !== undefined)
+      && (typeof item.planHandoffId !== 'string' || !/^[a-f0-9]{64}$/u.test(item.planHandoffId)
+        || item.id !== createHash('sha256').update('session:' + item.planHandoffId).digest('hex')
+        || item.planHandoffCompleted !== undefined && item.planHandoffCompleted !== true
+        || typeof item.planHandoffSourceId !== 'string' || !item.planHandoffSourceId)) throw new Error('Invalid plan handoff target');
     sessions.push({
       id: item.id,
       title,
@@ -1394,6 +1672,10 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
       pendingHistoryTruncation: normalizePendingHistoryTruncation(item.pendingHistoryTruncation, item.id, normalizeStoredMessage),
       executionMode: normalizeExecutionMode(item.executionMode),
       planWorkflows: normalizePlanWorkflowRecords(item.planWorkflows, item.id),
+      planHandoffs: normalizePlanHandoffs(item.planHandoffs, item.id, workspaceKey),
+      planHandoffId: item.planHandoffId as string | undefined,
+      planHandoffCompleted: item.planHandoffCompleted === true || undefined,
+      planHandoffSourceId: item.planHandoffSourceId as string | undefined,
       activeSkillIds: normalizeStringArray(item.activeSkillIds),
       projectScopeUri: normalizeProjectScopeUri(item.projectScopeUri),
       frozenImplicitSkillIds: normalizeStringArray(item.frozenImplicitSkillIds),
@@ -1459,6 +1741,7 @@ function normalizeStoredMessage(value: unknown): ChatMessage | undefined {
     userTask: normalizeUserTask(value.userTask),
     role,
     content: value.content,
+    ...(value.externalHandoffContext !== undefined ? { externalHandoffContext: value.externalHandoffContext !== false } : {}),
     expandedContent: typeof value.expandedContent === 'string' ? value.expandedContent : undefined,
     createdAt: normalizeSessionTimestamp(value.createdAt, new Date().toISOString()),
     modelId: typeof value.modelId === 'string' ? value.modelId : undefined,

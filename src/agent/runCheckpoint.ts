@@ -9,6 +9,7 @@ import { validEpochProgressState, type ContextEpochState } from './contextEpoch'
 import { getEffectiveContextWindowTokens } from '../shared/modelProfiles';
 import { DEEPSEEK_MODEL_IDENTITY_VERSION, getCanonicalModelIdentity } from '../shared/deepSeekModels';
 import { migrateContextWindowCalibrationState } from './toolResultAdmission';
+import { validPromptCheckpoint } from './promptGeneration';
 import { normalizeExecutionMode } from './executionMode';
 import { createLogicalRunBudgetState, grantNextToolBudgetSegment, normalizeLogicalRunBudgetLimits, type LogicalRunBudgetState } from './executionPolicy';
 import { normalizeSubagentHostContext } from './subagents/contextCapsule';
@@ -308,7 +309,7 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
         proposal.commandRecoveryResponse = proof;
       }
     }
-    if (!normalizeCheckpointPluginSkills(copy)) return undefined;
+    if (!validPromptCheckpoint(copy) || !normalizeCheckpointPluginSkills(copy)) return undefined;
     copy.budgetLimits = normalizeLogicalRunBudgetLimits(copy.budgetLimits);
     if (copy.request.subagentHostContext !== undefined) {
       const context = normalizeSubagentHostContext(copy.request.subagentHostContext);
@@ -460,6 +461,7 @@ export function recoverNoProgressWithUserTurn(cp: RunCheckpoint, request: AgentR
   if (!source || source.sourceId !== cp.source.sourceId || source.provider !== cp.source.provider
     || endpointHash(source.baseUrl) !== cp.source.endpointHash || request.model.id !== cp.source.modelId
     || JSON.stringify(request.model) !== JSON.stringify(cp.request.model)
+    || request.turnIntent !== cp.request.turnIntent
     || normalizeExecutionMode(request.executionMode) !== normalizeExecutionMode(cp.request.executionMode)
     || request.contextInstructions !== cp.request.contextInstructions
     || JSON.stringify(workspaceFolders) !== JSON.stringify(cp.workspaceFolders)

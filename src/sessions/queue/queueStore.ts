@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import { missing } from '../sessionDeletionAuthority';
+import { withAssociatedStoreGate } from '../sessionAssociatedPersistence';
 import { isRecord } from '../../shared/errors';
 import { writeJsonAtomic } from '../../shared/atomicStorage';
 import {
@@ -83,18 +85,41 @@ export class ProjectQueueStore {
    */
   public async save(
     queue: ProjectSessionQueue,
-    previousRevision: number = queue.revision - 1
+    previousRevision: number = queue.revision - 1,
+    guard?: (previous: ProjectSessionQueue | undefined) => Promise<void>
   ): Promise<QueueSaveResult> {
+    // The comparison and atomic replacement must share the same cross-process
+    // critical section. Atomic rename by itself is not compare-and-swap.
+    return this.withOrderLock(() => this.saveLocked(queue, previousRevision, guard));
+  }
+
+  private async saveLocked(queue: ProjectSessionQueue, previousRevision: number,
+    guard?: (previous: ProjectSessionQueue | undefined) => Promise<void>): Promise<QueueSaveResult> {
     const existing = await this.readRaw();
+    const current = normalizeProjectSessionQueue(existing, queue.workspaceKey);
     if (existing !== undefined) {
-      const current = normalizeProjectSessionQueue(existing, queue.workspaceKey);
       if (current && current.revision !== previousRevision) {
         return { status: 'conflict', current };
       }
       // An invalid on-disk file is replaced: nothing valuable is overwritten.
     }
-    await writeJsonAtomic(this.queueUri, serializeQueue(queue));
+    await guard?.(current);
+    await writeJsonAtomic(this.queueUri, serializeQueue(queue), { durable: true });
     return { status: 'saved' };
+  }
+
+  public withOrderLock<T>(work: () => Promise<T>): Promise<T> {
+    return withAssociatedStoreGate(vscode.Uri.joinPath(this.queueUri, '..'), 'queue', work);
+  }
+
+  public async withVerifiedHead<T>(workspaceKey: string, sessionId: string, work: (queue: ProjectSessionQueue) => Promise<T>): Promise<T> {
+    return this.withOrderLock(async () => {
+      const { queue, status } = await this.load(workspaceKey);
+      if (status !== 'loaded' || queue.entries[0]?.sessionId !== sessionId) {
+        throw new Error('Handoff target is not the durable queue head / 交接目标未取得持久化队首');
+      }
+      return work(queue);
+    });
   }
 
   public async exists(): Promise<boolean> {
@@ -106,7 +131,7 @@ export class ProjectQueueStore {
     try {
       bytes = await vscode.workspace.fs.readFile(this.queueUri);
     } catch (error) {
-      if (isFileNotFound(error)) return undefined;
+      if (missing(error)) return undefined;
       throw error;
     }
     if (!bytes.byteLength) return undefined;
@@ -116,13 +141,6 @@ export class ProjectQueueStore {
       return { __unparseable: true };
     }
   }
-}
-
-function isFileNotFound(error: unknown): boolean {
-  const code = error && typeof error === 'object' && 'code' in error
-    ? String((error as { code?: unknown }).code ?? '')
-    : '';
-  return code === 'FileNotFound' || code === 'ENOENT';
 }
 
 export function serializeQueue(queue: ProjectSessionQueue): ProjectSessionQueue {
@@ -194,7 +212,8 @@ export async function saveQueueWithRebase(input: {
   workspaceKey: string;
   base: ProjectSessionQueue;
   candidate: ProjectSessionQueue;
-  mutate: (queue: ProjectSessionQueue) => ProjectSessionQueue;
+  mutate: (queue: ProjectSessionQueue) => ProjectSessionQueue | Promise<ProjectSessionQueue>;
+  guard?: (previous: ProjectSessionQueue | undefined, candidate: ProjectSessionQueue) => Promise<void>;
   attempts?: number;
   now?: string;
 }): Promise<{ status: 'saved' | 'conflict'; queue: ProjectSessionQueue }> {
@@ -202,11 +221,11 @@ export async function saveQueueWithRebase(input: {
   let base = input.base;
   let candidate = input.candidate;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const result = await input.store.save(candidate, base.revision);
+    const result = await input.store.save(candidate, base.revision, current => input.guard?.(current, candidate) ?? Promise.resolve());
     if (result.status === 'saved') return { status: 'saved', queue: candidate };
     if (!result.current) return { status: 'conflict', queue: base };
     base = result.current;
-    candidate = input.mutate(cloneQueue(base));
+    candidate = await input.mutate(cloneQueue(base));
   }
   return { status: 'conflict', queue: base };
 }

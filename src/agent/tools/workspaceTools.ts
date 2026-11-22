@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { stat, realpath } from 'node:fs/promises';
 import { hashApprovalValue } from '../../approvals/approvalReviewHash';
 import { assertOperationPath } from '../../approvals/authorization/protectedTargets';
@@ -512,6 +513,7 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
       languageId,
       sizeBytes: encodedSize,
       size: formatBytes(encodedSize),
+      fileSha256: createHash('sha256').update(bytes).digest('hex'),
       content
     });
   }

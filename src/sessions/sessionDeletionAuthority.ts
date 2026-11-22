@@ -8,8 +8,11 @@ export interface SessionDeletionRecord {
   version: 1; workspaceKey: string; sessionId: string; operationId: string; confirmedAt: string;
   phase: 'committed' | 'reclaimed'; pendingReasons?: string[];
 }
+export class SessionUseConflictError extends Error {
+  constructor() { super('Session is in use / 此会话正在使用中'); }
+}
 interface Participant { version: 1; pid: number; token: string; choosing: boolean; ticket: number }
-interface UseRecord { version: 1; pid: number; token: string; workspaceKey: string; sessionId: string }
+interface UseRecord { version: 1; pid: number; token: string; workspaceKey: string; sessionId: string; exclusive?: true }
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 /** Only a vanished path is missing. VS Code's FileNotFound also wraps
  * permission, sharing and network failures, so treating it as absent would make
@@ -169,28 +172,41 @@ export class SessionDeletionAuthority {
     }
     return result;
   }
-  public async acquireUse(workspaceKey: string, sessionId: string): Promise<{ release(): Promise<void> }> {
+  public async acquireUse(workspaceKey: string, sessionId: string, exclusive = false): Promise<{ release(): Promise<void> }> {
     if (this.storageUri.scheme !== 'file') {
+      if (exclusive) throw new Error('Exclusive handoff preparation requires local file storage / 独占交接准备需要本地文件存储');
       await this.assertWritable(workspaceKey, sessionId);
       return { release: async () => undefined };
     }
     return this.withSessionGate(workspaceKey, sessionId, async () => {
       await this.assertWritable(workspaceKey, sessionId);
-      const token = randomUUID(), uri = vscode.Uri.joinPath(this.useDirectory(sessionId), `${token}.json`);
+      if (await this.inspectUse(workspaceKey, sessionId, !exclusive)) {
+        throw new SessionUseConflictError();
+      }
+      const token = randomUUID();
+      const uri = vscode.Uri.joinPath(this.useDirectory(sessionId), exclusive ? 'exclusive.json' : token + '.json');
       await this.ensureLocalDirectory(this.useDirectory(sessionId));
-      const record: UseRecord = { version: 1, pid: process.pid, token, workspaceKey, sessionId };
+      const record: UseRecord = { version: 1, pid: process.pid, token, workspaceKey, sessionId, ...(exclusive && { exclusive: true }) };
       await writeJsonAtomic(uri, record);
-      let released = false;
-      return { release: async () => { if (released) return; await unlink(uri.fsPath).catch(error => { if (!missing(error)) throw error; }); released = true; } };
+      let releasing: Promise<void> | undefined;
+      const removeOwnedUse = async () => {
+        try {
+          if (exclusive && (JSON.parse(await readFile(uri.fsPath, 'utf8')) as UseRecord).token !== token) return;
+          await unlink(uri.fsPath);
+        } catch (error) { if (!missing(error)) throw error; }
+      };
+      return { release: () => releasing ??= (exclusive
+        ? this.withSessionGate(workspaceKey, sessionId, removeOwnedUse) : removeOwnedUse())
+        .catch(error => { releasing = undefined; throw error; }) };
     });
   }
   /** Read-only; unknown/corrupt ownership is protected, never treated as idle. */
-  public async inspectUse(workspaceKey: string, sessionId: string): Promise<boolean> {
+  public async inspectUse(workspaceKey: string, sessionId: string, onlyExclusive = false): Promise<boolean> {
     this.validate(workspaceKey, sessionId);
     if (this.storageUri.scheme !== 'file') throw new Error('This storage URI cannot provide cross-process cleanup safety');
     let names: string[];
     await this.verifyLocalPath(this.useDirectory(sessionId));
-    try { names = await readdir(this.useDirectory(sessionId).fsPath); }
+    try { names = onlyExclusive ? ['exclusive.json'] : await readdir(this.useDirectory(sessionId).fsPath); }
     catch (error) { if (missing(error)) return false; throw error; }
     for (const name of names.filter(item => item.endsWith('.json'))) {
       let value: UseRecord;
@@ -200,7 +216,8 @@ export class SessionDeletionAuthority {
         value = JSON.parse(await readFile(file, 'utf8')) as UseRecord;
       }
       catch (error) { if (missing(error)) continue; return true; }
-      if (value.version !== 1 || value.sessionId !== sessionId || !value.workspaceKey || !value.token || !Number.isSafeInteger(value.pid)) return true;
+      if (value.version !== 1 || value.sessionId !== sessionId || value.workspaceKey !== workspaceKey
+        || !value.token || !Number.isSafeInteger(value.pid) || (name === 'exclusive.json' && value.exclusive !== true)) return true;
       if (this.alive(value.pid)) return true;
     }
     return false;

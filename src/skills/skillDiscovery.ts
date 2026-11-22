@@ -6,7 +6,7 @@ import { getConfiguredMaxFileBytes } from '../shared/config';
 import { isReadableTextContent } from '../shared/textFileGuards';
 import { assertRealPathInside, canonicalUri, isMissingFile, projectSkillsUri, readSharedText, userSkillsUri, uriInside } from '../context/sharedConfigPaths';
 import { loadSharedCodexConfig, type SharedCodexConfigSnapshot } from '../context/sharedCodexConfig';
-import { createSkillId, type SkillManifest, type SkillSource } from './skillTypes';
+import { BUILTIN_GEN_PROMPT_ID, createSkillId, type SkillManifest, type SkillSource } from './skillTypes';
 import { parseSkillFrontmatter, parseSkillMetadata } from './skillMetadata';
 import { discoverCodexPlugins, refreshCodexPluginInstallation, type CodexPluginInstallation } from './codexPluginDiscovery';
 import { describeCodexPluginCapability } from './codexPluginResources';
@@ -15,6 +15,8 @@ export { parseSkillFrontmatter } from './skillMetadata';
 export type { ParsedSkillFrontmatter } from './skillMetadata';
 
 export interface SkillDiscoveryOptions {
+  /** The host's installation URI, independent of the workspace and the extension version. */
+  extensionUri?: vscode.Uri;
   userSkillsUri?: vscode.Uri;
   includeUserSkills?: boolean;
   adminSkillsUri?: vscode.Uri;
@@ -73,6 +75,20 @@ export class SkillDiscovery {
     }
     const manifests: SkillManifest[] = [];
     const seenFiles = new Set<string>();
+    if (this.options.extensionUri) {
+      try {
+        const installation = await canonicalUri(this.options.extensionUri);
+        const root = vscode.Uri.joinPath(installation, 'resources', 'builtin-skills', 'gen-prompt');
+        const boundary = await assertRealPathInside(root, [installation]);
+        if (boundary.toString() !== root.toString()) throw new Error('Unexpected built-in Skill location');
+        const builtin = await this.createManifest({ source: 'builtin', uri: root, boundary }, root,
+          vscode.Uri.joinPath(root, 'SKILL.md'), config);
+        manifests.push(builtin);
+        if (builtin.physicalUri) seenFiles.add(builtin.physicalUri);
+      } catch {
+        diagnostics.push('Built-in gen-prompt resources unavailable / 内置 gen-prompt 资源不可用');
+      }
+    }
     let pluginEntriesSeen = 0;
     for (const base of bases) {
       try {
@@ -140,9 +156,9 @@ export class SkillDiscovery {
     const plugin = base.plugin;
     const relativeSkill = plugin ? path.relative(plugin.realRootPath, skillUri.fsPath).split(path.sep).join('/') : undefined;
     const manifest: SkillManifest = {
-      id: plugin ? `codexPlugin:${encodeURIComponent(plugin.id)}:${encodeURIComponent(relativeSkill!)}` : createSkillId(base.source, rootUri),
+      id: base.source === 'builtin' ? BUILTIN_GEN_PROMPT_ID : plugin ? `codexPlugin:${encodeURIComponent(plugin.id)}:${encodeURIComponent(relativeSkill!)}` : createSkillId(base.source, rootUri),
       name: path.basename(rootUri.fsPath), description: '', source: base.source,
-      sourceLabel: plugin ? `${plugin.name} · ${plugin.version} · ${plugin.marketplace}` : rootUri.fsPath,
+      sourceLabel: base.source === 'builtin' ? 'KeepSeek' : plugin ? `${plugin.name} · ${plugin.version} · ${plugin.marketplace}` : rootUri.fsPath,
       pluginInstallation: plugin, rootUri, skillUri, enabled: false,
       allowImplicit: false, hasReferences: false, hasAssets: false, hasScripts: false, readBoundaryUri: base.boundary.toString() };
     try {
@@ -154,6 +170,9 @@ export class SkillDiscovery {
       const parsed = parseSkillFrontmatter(content);
       const metadataText = await readSharedText(vscode.Uri.joinPath(rootUri, 'agents', 'openai.yaml'), [base.boundary], 65536);
       const metadata = parseSkillMetadata(metadataText);
+      if (base.source === 'builtin' && (parsed.name !== 'gen-prompt' || parsed.runAs || metadata.allowImplicit)) {
+        throw new Error('Invalid built-in Skill identity or policy / 内置 Skill 身份或策略无效');
+      }
       Object.assign(manifest, { name: parsed.name, description: parsed.description, enabled: true, allowImplicit: metadata.allowImplicit,
         interface: metadata.interface, dependencies: metadata.dependencies,
         documentHash: createHash('sha256').update(content).digest('hex'),

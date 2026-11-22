@@ -14,9 +14,9 @@ import { deleteStorageUri, withStorageCoordinator, writeJsonAtomic } from '../sh
 import type { StartupPerformanceTrace } from '../shared/startupPerformance';
 import type { ApprovalMode, ChatSession, ChatSessionSummary, WorkspaceSummary } from '../shared/types';
 import { ToolEvidenceStore } from '../agent/evidence/store';
-import { SessionObjectStore } from './sessionObjectStore';
+import { SessionObjectReadError, SessionObjectStore } from './sessionObjectStore';
 import { normalizeSessionTitle } from './sessionTitle';
-import { SessionDeletionAuthority } from './sessionDeletionAuthority';
+import { missing, SessionDeletionAuthority } from './sessionDeletionAuthority';
 import { SessionQuarantine } from './sessionQuarantine';
 import { assertManagedStoragePath } from './sessionAssociatedPersistence';
 import type { HistoryCleanupCatalogEntry, HistoryCleanupTargetResult } from './sessionHistoryCleanup';
@@ -67,6 +67,8 @@ export interface SessionIndexEntry extends ChatSessionSummary {
   byteLength?: number;
   /** The atomic workspace index commits an automatic title, after its shard. */
   autoTitleCommit?: string;
+  /** Source and targets stay recoverable until dispatch reaches a known terminal state. */
+  pendingHandoffTargets?: string[];
 }
 
 interface WorkspaceMetadata {
@@ -188,6 +190,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
         ...summary,
         storageFile: previous?.storageFile ?? getSessionStorageFile(summary.id),
         byteLength: previous?.byteLength,
+        pendingHandoffTargets: previous?.pendingHandoffTargets,
         autoTitleCommit: previous?.autoTitleCommit
       });
     }
@@ -201,6 +204,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
         ...toSessionSummary(session),
         storageFile: getSessionStorageFile(session.id),
         byteLength,
+        ...handoffRetentionIndex(session),
         autoTitleCommit: automaticTitleCommit(session)
       });
     }));
@@ -388,7 +392,9 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     for (const hash of hashes) {
       const index = await this.readWorkspaceIndex(hash, manifestEntryToMetadata(manifest.workspaces[hash]));
       if (!index) continue;
+      const unresolved = unresolvedHandoffOwners(index.sessions);
       const removed = index.sessions.filter((entry) => {
+        if (unresolved.has(entry.id)) return false;
         if (entry.isFavorite || protectedIds.has(entry.id)) return false;
         if (entry.workspaceKey === options.currentWorkspaceKey && entry.id === options.currentActiveSessionId) return false;
         const updatedAt = Date.parse(entry.updatedAt);
@@ -437,7 +443,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     for (const file of orphanFiles) {
       const session = await this.readSessionShard(vscode.Uri.joinPath(this.getSessionsDirectoryUri(hash), file), index);
       if (session && !index.sessions.some((entry) => entry.id === session.id)) {
-        index.sessions.push({ ...toSessionSummary(session), storageFile: `sessions/${file}` });
+        index.sessions.push({ ...toSessionSummary(session), ...handoffRetentionIndex(session), storageFile: `sessions/${file}` });
       }
     }
     index.sessions = sortIndexEntries(index.sessions);
@@ -460,6 +466,10 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     try {
       stored = await this.objects(uri).load(value);
     } catch (error) {
+      if (error instanceof SessionObjectReadError) {
+        console.warn('KeepSeek: session object temporarily unreadable', error);
+        return undefined;
+      }
       // An integrity mismatch is never transient: the manifest and its object
       // graph disagree, so this shard cannot be decoded by retrying. Keep the
       // bytes aside and let every other conversation load normally.
@@ -500,7 +510,16 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
         }
       }
     }
-    const session = normalizeStoredSessions({ sessions: [candidate] }, scope)[0];
+    let session: ChatSession | undefined;
+    try {
+      session = normalizeStoredSessions({ sessions: [candidate] }, scope)[0];
+    } catch (error) {
+      // Normalization is pure. Any failure here concerns decoded protocol
+      // data; read/lock failures above never enter this quarantine path.
+      console.warn('KeepSeek: invalid session protocol', error);
+      await this.quarantine.quarantine(uri, 'corrupt_session_shard');
+      return undefined;
+    }
     return session?.workspaceKey === index.workspaceKey && !await this.isSessionDeleted(index.workspaceKey, session.id) ? session : undefined;
   }
 
@@ -639,8 +658,24 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
   public async assertSessionWritable(workspaceKey: string, sessionId: string): Promise<void> {
     await this.deletionAuthority.assertWritable(workspaceKey, sessionId);
   }
-  public async acquireSessionUse(workspaceKey: string, sessionId: string): Promise<{ release(): Promise<void> }> {
-    return this.deletionAuthority.acquireUse(workspaceKey, sessionId);
+  public async assertNewHandoffTarget(workspaceKey: string, id: string): Promise<void> {
+    const hash = getWorkspaceHash(workspaceKey);
+    const index = await this.readCleanupJson(this.getWorkspaceIndexUri(hash), 'handoff source index');
+    if (!isRecord(index) || index.workspaceKey !== workspaceKey || !Array.isArray(index.sessions)
+      || index.sessions.some(entry => !isRecord(entry) || entry.id === id)) throw new Error('Handoff target cannot be verified absent / 无法确认交接目标尚未创建');
+    try { await vscode.workspace.fs.stat(this.getSessionUri(hash, id)); }
+    catch (error) { if (missing(error)) return; throw error; }
+    throw new Error('Handoff target already exists / 交接目标已存在');
+  }
+
+  public withPlanHandoffGate<T>(workspaceKey: string, work: () => Promise<T>): Promise<T> {
+    return this.deletionAuthority.withSessionIdGate('plan-handoff:' + getWorkspaceHash(workspaceKey), work);
+  }
+  public isSessionInUse(workspaceKey: string, sessionId: string, onlyExclusive = false): Promise<boolean> {
+    return this.deletionAuthority.inspectUse(workspaceKey, sessionId, onlyExclusive);
+  }
+  public async acquireSessionUse(workspaceKey: string, sessionId: string, exclusive = false): Promise<{ release(): Promise<void> }> {
+    return this.deletionAuthority.acquireUse(workspaceKey, sessionId, exclusive);
   }
   private async filterDeleted<T extends { id: string }>(workspaceKey: string, items: T[]): Promise<T[]> {
     const result: T[] = [];
@@ -723,9 +758,11 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
       }
       const workspace: CleanupWorkspaceSnapshot = { workspaceKey: raw.workspaceKey, entries: [], unknown: 0 };
       result.workspaces.set(hash, workspace);
+      const unresolved = unresolvedHandoffOwners(raw.sessions);
       for (const item of raw.sessions) {
         const candidate = this.cleanupEntry(raw.workspaceKey, item);
         if (!candidate) { workspace.unknown++; result.ownershipComplete = false; continue; }
+        if (unresolved.has(candidate.id)) candidate.protectedReason = 'plan_handoff_pending';
         workspace.entries.push(candidate);
         const owner = owners.get(candidate.id);
         if (owner && owner !== raw.workspaceKey) result.collisions.add(candidate.id);
@@ -767,7 +804,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     if (!snapshot.ownershipComplete || snapshot.collisions.has(target.id)) return false;
     const workspace = snapshot.workspaces.get(getWorkspaceHash(target.workspaceKey));
     const actual = workspace?.workspaceKey === target.workspaceKey ? workspace.entries.find(item => item.id === target.id) : undefined;
-    return actual?.version === target.version && !await this.isSessionDeleted(target.workspaceKey, target.id)
+    return !actual?.protectedReason && actual?.version === target.version && !await this.isSessionDeleted(target.workspaceKey, target.id)
       && !await this.deletionAuthority.inspectUse(target.workspaceKey, target.id);
   }
   public async recoverHistoryCleanupTarget(target: HistoryCleanupCatalogEntry, operationId: string): Promise<HistoryCleanupTargetResult | undefined> {
@@ -1036,11 +1073,28 @@ function normalizeSessionIndexEntry(value: unknown, workspaceKey: string, worksp
     workspaceName: nonEmptyString(value.workspaceName) ?? workspaceName,
     isFavorite: value.isFavorite === true,
     customTitle: nonEmptyString(value.customTitle),
+    pendingHandoffTargets: Array.isArray(value.pendingHandoffTargets)
+      ? value.pendingHandoffTargets.filter((id): id is string => typeof id === 'string' && /^[a-f0-9]{64}$/u.test(id)) : undefined,
     autoTitleCommit: typeof value.autoTitleCommit === 'string' && /^[a-f0-9]{64}$/u.test(value.autoTitleCommit)
       ? value.autoTitleCommit : undefined,
     storageFile: nonEmptyString(value.storageFile) ?? getSessionStorageFile(id),
     byteLength: typeof value.byteLength === 'number' && value.byteLength >= 0 ? Math.floor(value.byteLength) : undefined
   };
+}
+
+function handoffRetentionIndex(session: ChatSession): Pick<SessionIndexEntry, 'pendingHandoffTargets'> {
+  const targets = (session.planHandoffs ?? []).filter(record => record.phase !== 'completed').map(record => record.targetSessionId);
+  return targets.length ? { pendingHandoffTargets: targets } : {};
+}
+
+function unresolvedHandoffOwners(entries: readonly unknown[]): Set<string> {
+  const ids = new Set<string>();
+  for (const entry of entries) {
+    if (!isRecord(entry) || typeof entry.id !== 'string' || !Array.isArray(entry.pendingHandoffTargets) || !entry.pendingHandoffTargets.length) continue;
+    ids.add(entry.id);
+    for (const target of entry.pendingHandoffTargets) if (typeof target === 'string') ids.add(target);
+  }
+  return ids;
 }
 
 /** The workspace index attests the exact completed automatic title. */

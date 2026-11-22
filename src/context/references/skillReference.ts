@@ -4,7 +4,7 @@ import * as vscode from 'vscode';
 import { normalizeKeepseekLanguage, type KeepseekLanguage } from '../../shared/i18n';
 import { getMarkdownFence } from '../../shared/markdown';
 import { SkillLoader } from '../../skills/skillLoader';
-import { SKILL_FILE_NAME, type SkillManifest } from '../../skills/skillTypes';
+import { isBuiltinGenPrompt, SKILL_FILE_NAME, type SkillManifest } from '../../skills/skillTypes';
 import { CODEX_PLUGIN_SKILLS_UNAVAILABLE, isCodexPluginSkillsEnabled } from '../../skills/codexPluginSupport';
 import { resolveFileReferenceUri } from './fileReference';
 import { hasUnsafeReferenceTargetCharacters, isInsideMarkdownFence } from './referenceSyntax';
@@ -189,7 +189,7 @@ function findPromptSkillReferences(prompt: string, manifests: readonly SkillMani
 function createAllowedSkillMap(manifests: readonly SkillManifest[]): Map<string, SkillManifest> {
   const allowed = new Map<string, SkillManifest>();
   for (const manifest of manifests) {
-    if (manifest.pluginInstallation) continue;
+    if (manifest.pluginInstallation || isBuiltinGenPrompt(manifest)) continue;
     if (getUriBasename(manifest.skillUri) !== SKILL_FILE_NAME) {
       continue;
     }

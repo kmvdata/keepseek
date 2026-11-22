@@ -740,6 +740,8 @@ export interface DraftRun extends DraftRunProposal {
 }
 
 export interface ChatMessage {
+  /** Host-only provenance for portable prompt export. Absence predates the receipt. */
+  externalHandoffContext?: boolean;
   /** Host-only user task membership; never grants authority or changes provider bytes. */
   userTask?: import('../sessions/userTask').UserTaskLink;
   runCheckpoint?: import('../agent/runCheckpoint').RunCheckpoint;
@@ -982,16 +984,27 @@ export interface PlanWorkflowRecord {
   userMessageId: string;
   assistantMessageId: string;
   contentHash: string;
+  /** An attached external file was visible during planning. Its authored result stays in this session. */
+  externalHandoffContext?: true;
+  /** Chain of actual requirements contributing to a revised plan (oldest first). */
+  priorRequirementIds?: string[];
   status: PlanWorkflowStatus;
   createdAt: string;
   decidedAt?: string;
 }
 
-export interface PlanWorkflowView extends Omit<PlanWorkflowRecord, 'contentHash' | 'status'> {
+export interface PlanWorkflowView extends Omit<PlanWorkflowRecord, 'contentHash' | 'status' | 'priorRequirementIds' | 'externalHandoffContext'> {
   status: PlanWorkflowStatus | 'invalid';
+  promptPreview?: import('../agent/handoffPrompt').HandoffPreview;
+  newSessionBlockedReason?: string;
+  handoff?: { planHash: string; bodyHash: string; phase: 'committed' | 'queued' | 'dispatch_unknown' | 'completed' };
 }
 
 export interface ChatSession {
+  planHandoffs?: import('../sessions/planHandoff').PlanHandoffRecord[];
+  planHandoffId?: string;
+  planHandoffSourceId?: string;
+  planHandoffCompleted?: true;
   /** Host-only automatic naming state; never part of Provider history. */
   autoTitle?: import('../sessions/sessionTitle').SessionTitleMetadata;
   /** Durable edit/resend intent; actions stay blocked until it is reconciled. */
@@ -1605,6 +1618,8 @@ export interface ReferenceResource {
 }
 
 export interface AgentRequest {
+  /** Host-resolved, scoped to this real user submission and its checkpoint. */
+  turnIntent?: 'generate_prompt';
   /** Host-observed slash command; no authorization or child history is implied. */
   explicitSubagentSelection?: { kind: 'single' | 'parallel'; profile: 'research' | 'review' | 'proposal' };
   approvalMode?: ApprovalMode;
@@ -1808,6 +1823,8 @@ export interface AgentTaskBudgetAuthority {
 }
 
 export interface AgentRunCallbacks {
+  /** Runtime-only check of the physical first request when accepting a plan handoff. */
+  beforeFirstDispatch?: (payload: import('../agent/providers/types').ProviderClientRequest['body']) => Promise<void>;
   /** Published after the initial root allowance is durable, including /draft. */
   onTaskBudgetReady?: (budget: AgentTaskBudgetAuthority) => Promise<void> | void;
   /** The first main request owns its slot before auxiliary work may dispatch. */
@@ -1824,7 +1841,7 @@ export interface AgentRunCallbacks {
   /** Mark the boundary after previously completed model output. */
   onModelRoundStart?: () => void;
   onStatus?: (status: AgentActivityInput) => void;
-  onToolRejected?: (event: { toolName: string; errorType: 'subagent_tool_not_exposed' }) => void;
+  onToolRejected?: (event: { toolName: string; errorType: 'subagent_tool_not_exposed' | 'prompt_generation_read_only' }) => void;
   onUsageEstimate?: (usage: ContextUsageEstimate) => void;
   onUsage?: (event: UsageEvent) => void;
   onUsageLedgerRecord?: (record: ProviderUsageLedgerRecord) => Promise<void> | void;

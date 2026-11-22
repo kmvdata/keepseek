@@ -1,3 +1,4 @@
+import { isBuiltinGenPrompt } from '../skills/skillTypes';
 import { DeepSeekFunctionTool, DeepSeekMessage } from './deepseek/types';
 import { formatBytes } from '../shared/format';
 import type { KeepseekLanguage } from '../shared/i18n';
@@ -237,7 +238,7 @@ export function formatCurrentRunContextForAgent(input: {
   const contextBlock = formatAgentContextFiles(input);
   const projectInstructionsBlock = formatProjectInstructionsForAgent(input.currentRunContext, input.language);
   const skillsBlock = formatActiveSkills({
-    skills: input.currentRunContext?.skills.filter(skill => skill.source !== 'codexPlugin'),
+    skills: input.currentRunContext?.skills.filter(skill => skill.source !== 'codexPlugin' && !isBuiltinGenPrompt(skill)),
     language: input.language,
     requestProtocolVersion: input.requestProtocolVersion
   });

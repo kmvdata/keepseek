@@ -9,6 +9,8 @@ import { ChangeSetStore } from '../src/edits/changeSetStore';
 import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
 import { InteractionCoordinator } from '../src/provider/interactionState';
 import { ChatSessionStore } from '../src/sessions/chatSessionStore';
+import { ProjectQueueService } from '../src/sessions/queue/queueService';
+import { SessionUseConflictError } from '../src/sessions/sessionDeletionAuthority';
 import { GlobalSessionStorage } from '../src/sessions/globalSessionStorage';
 import type { ChangeSetFile, ChatSession, DraftEdit } from '../src/shared/types';
 import * as vscode from './stubs/vscode';
@@ -27,7 +29,7 @@ import * as vscode from './stubs/vscode';
 
 type ApproveAllGate = 'non_approve_all' | 'pending_truncation' | 'untrusted' | 'busy'
   | 'slot_unavailable' | 'preflight_failed' | 'identity_mismatch' | 'untrusted_target'
-  | 'deferred_to_boundary' | 'plan_discarded' | 'manually_applied'
+  | 'not_queue_head' | 'deferred_to_boundary' | 'plan_discarded' | 'manually_applied'
   | 'latched' | 'not_applicable' | 'applied' | 'apply_blocked' | 'none_pending';
 type ApproveAllTrigger = 'mode_switch' | 'run_end' | 'checkpoint' | 'change_action'
   | 'session_navigation' | 'continuation' | 'slot_released' | 'manual';
@@ -77,7 +79,7 @@ interface Harness {
   dispose(): Promise<void>;
 }
 
-async function createHarness(options: { approvalMode?: 'ask' | 'approve-all' } = {}): Promise<Harness> {
+async function createHarness(options: { approvalMode?: 'ask' | 'approve-all'; queue?: boolean } = {}): Promise<Harness> {
   const root = await mkdtemp(path.join(tmpdir(), 'keepseek-approve-all-boundary-'));
   const uri = vscode.Uri.file(root);
   const previousWorkspace = { ...(vscode.workspace as unknown as Record<string, unknown>) };
@@ -105,7 +107,8 @@ async function createHarness(options: { approvalMode?: 'ask' | 'approve-all' } =
   if (options.approvalMode) await seed.setApprovalMode(options.approvalMode);
   await seed.persist();
 
-  const sessionStore = new ChatSessionStore(storage, 'en', scope);
+  const queues = options.queue ? new ProjectQueueService(key => storage.getProjectQueueUri(key)) : undefined;
+  const sessionStore = new ChatSessionStore(storage, 'en', scope, queues);
   const initialization = sessionStore.initialize();
   await initialization.catch(() => undefined);
 
@@ -573,4 +576,52 @@ test('the draft file on disk matches the applied draft after a manual fallback',
   await h.host.handleMessage({ type: 'applyChangeSet', id: set.id, requestId: 'manual-write' });
   const text = await readFile(path.join(h.root, 'written.ts'), 'utf8');
   assert.match(text, /edit_write/u, 'the fallback writes the same content the draft describes');
+});
+
+test('automatic Apply waits for an exclusive handoff and holds a use record through the actual write', async t => {
+  const h = await createHarness({ approvalMode: 'approve-all' });
+  t.after(() => h.dispose());
+  const peer = new GlobalSessionStorage(vscode.Uri.file(h.root) as never);
+  const key = h.sessionStore.workspaceKey;
+  const use = await peer.acquireSessionUse(key, h.session.id, true);
+  t.after(() => use.release());
+  const set = h.host.changeSets.addDraftEdits({ runId: 'transfer', sessionId: h.session.id, messageId: 'a',
+    edits: [createDraftFixture(h.root, 'handoff-pending', 'handoff-pending.ts')] })!;
+  const apply = h.host.changeSets.applyAll.bind(h.host.changeSets);
+  let attempts = 0;
+  t.mock.method(h.host.changeSets, 'applyAll', async (...args: Parameters<typeof apply>) => {
+    attempts++;
+    await assert.rejects(peer.acquireSessionUse(key, h.session.id, true), SessionUseConflictError);
+    return apply(...args);
+  });
+  await h.host.drainApproveAllExecution('manual');
+  assert.equal(attempts, 0);
+  assert.equal(statuses(h.host, h.session.id)[0].status, 'pending');
+  assert.ok(gatesFor(h.host, set.id).includes('slot_unavailable'));
+  assert.equal(h.host.approveAllViewModel(h.session.id).scheduled, true);
+  await use.release();
+  assert.equal(await waitFor(() => statuses(h.host, h.session.id)[0]?.status === 'applied'), true);
+  assert.equal(attempts, 1);
+});
+
+test('an automatic Apply from a stale queue head stays pending after another window promotes a target', async t => {
+  const h = await createHarness({ approvalMode: 'approve-all', queue: true });
+  t.after(() => h.dispose());
+  const session = h.session;
+  session.messages.push({ id: 'old-user', role: 'user', content: 'Old task', createdAt: session.createdAt });
+  await h.sessionStore.persist();
+  assert.equal(h.sessionStore.getProjectQueue()?.entries[0]?.sessionId, session.id);
+  const storage = new GlobalSessionStorage(vscode.Uri.file(h.root) as never);
+  const peerQueue = new ProjectQueueService(key => storage.getProjectQueueUri(key));
+  const key = h.sessionStore.workspaceKey;
+  await peerQueue.promoteHandoff(key, session.id, 'handoff-target', async () => {});
+  assert.equal(h.sessionStore.getProjectQueue()?.entries[0]?.sessionId, session.id, 'old window still caches its write position');
+  const set = h.host.changeSets.addDraftEdits({ runId: 'old', sessionId: session.id, messageId: 'a',
+    edits: [createDraftFixture(h.root, 'stale-writer', 'stale-writer.ts')] })!;
+  await h.host.drainApproveAllExecution('manual');
+  assert.equal(h.sessionStore.getProjectQueue()?.entries[0]?.sessionId, 'handoff-target');
+  assert.equal(statuses(h.host, session.id)[0].status, 'pending');
+  assert.ok(gatesFor(h.host, set.id).includes('not_queue_head'));
+  assert.equal(h.host.approveAllViewModel(session.id).blocked.find(item => item.id === set.id)?.manual, false);
+  await assert.rejects(readFile(path.join(h.root, 'stale-writer.ts')), { code: 'ENOENT' });
 });

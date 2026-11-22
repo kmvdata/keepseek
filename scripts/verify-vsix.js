@@ -12,7 +12,9 @@ const requiredEntries = new Set([
   normalizeVsixEntry(path.posix.join('extension', normalizePackagePath(packageJson.main || ''))),
   normalizeVsixEntry(path.posix.join('extension', normalizePackagePath(packageJson.icon || ''))),
   'extension/out/provider/KeepseekChatViewProvider.js',
-  'extension/out/workspace/gitIgnore.js'
+  'extension/out/workspace/gitIgnore.js',
+  'extension/resources/builtin-skills/gen-prompt/SKILL.md',
+  'extension/resources/builtin-skills/gen-prompt/agents/openai.yaml'
 ]);
 
 for (const dependencyName of Object.keys(packageJson.dependencies || {})) {
@@ -56,6 +58,12 @@ if (missing.length || stale.length) {
     console.error('Run bun run package:market so out/ is cleaned before packaging.');
   }
   process.exit(1);
+}
+
+for (const relative of ['resources/builtin-skills/gen-prompt/SKILL.md', 'resources/builtin-skills/gen-prompt/agents/openai.yaml']) {
+  if (readZipEntry(vsixPath, 'extension/' + relative) !== fs.readFileSync(path.join(root, relative), 'utf8')) {
+    throw new Error('Packaged built-in Skill differs from its source: ' + relative);
+  }
 }
 
 console.log(`Verified ${path.relative(root, vsixPath)} (${entries.size} entries).`);

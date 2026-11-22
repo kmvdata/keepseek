@@ -633,13 +633,13 @@ export const referenceMenuImplementationFragment: WebviewFragment = {
         if (!skill.enabled || skill.unavailableReason) {
           return;
         }
-        if (skill.plugin) {
+        if (skill.plugin || isGenPromptSkill(skill)) {
           var range = activeMentionRange && isRangeInsidePrompt(activeMentionRange)
             ? activeMentionRange.cloneRange()
             : getPromptInsertionRange();
           insertSkillChip(skill, range);
           closeReferenceMenu(true);
-          setComposerStatus(t('pluginSkillInserted', { name: getSkillMentionName(skill) }));
+          setComposerStatus(t(isGenPromptSkill(skill) ? 'genPromptSelected' : 'pluginSkillInserted', { name: getSkillMentionName(skill) }));
           return;
         }
         consumeActiveMentionRangeForPicker();

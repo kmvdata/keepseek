@@ -90,6 +90,11 @@ export interface SkillStateView {
 }
 
 export const SKILL_FILE_NAME = 'SKILL.md';
+export const BUILTIN_GEN_PROMPT_ID = 'builtin:gen-prompt';
+
+export function isBuiltinGenPrompt(skill: Pick<SkillManifest, 'id' | 'source'>): boolean {
+  return skill.source === 'builtin' && skill.id === BUILTIN_GEN_PROMPT_ID;
+}
 
 export function createSkillId(source: SkillSource, rootUri: vscode.Uri): string {
   return `${source}:${encodeURIComponent(rootUri.toString())}`;

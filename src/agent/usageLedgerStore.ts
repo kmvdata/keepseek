@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import * as vscode from 'vscode';
 import { writeJsonAtomic } from '../shared/atomicStorage';
-import { SessionDeletionAuthority } from '../sessions/sessionDeletionAuthority';
+import { missing, SessionDeletionAuthority } from '../sessions/sessionDeletionAuthority';
 import { assertManagedStoragePath, hasAssociatedDirectoryEntries } from '../sessions/sessionAssociatedPersistence';
 import type { ChatSession, ProviderUsageLedger, ProviderUsageLedgerRecord } from '../shared/types';
 import { normalizeUsageLedgerRecord, summarizeUsageLedger, preferUsageLedgerRecord,
@@ -202,7 +202,7 @@ export class UsageLedgerStore {
         await assertManagedStoragePath(this.globalStorageUri!, this.sessionUri(hashText(sessionId)));
         await vscode.workspace.fs.delete(this.sessionUri(hashText(sessionId)), { recursive: true, useTrash: false });
       } catch (error) {
-        if (!isMissingFileError(error)) throw error;
+        if (!missing(error)) throw error;
       }
       });
     });
@@ -225,7 +225,7 @@ export class UsageLedgerStore {
       for (const record of inBucket) unique.set(recordIdentity(record), preferUsageLedgerRecord(unique.get(recordIdentity(record)), record));
       return { records: [...unique.values()], damaged: inBucket.length !== value.records.length };
     } catch (error) {
-      return isMissingFileError(error) ? { records: [], damaged: false } : { records: [], damaged: true };
+      return missing(error) ? { records: [], damaged: false } : { records: [], damaged: true };
     }
   }
 
@@ -317,9 +317,4 @@ function decodeCursor(value: string | undefined): number {
   } catch {
     return 0;
   }
-}
-
-function isMissingFileError(error: unknown): boolean {
-  const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined;
-  return code === 'FileNotFound' || code === 'ENOENT';
 }

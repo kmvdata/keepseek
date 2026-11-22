@@ -286,12 +286,16 @@ export function getScript(): string {
       return null;
     }
 
+    function isGenPromptSkill(skill) {
+      return Boolean(skill && skill.source === 'builtin' && skill.id === 'builtin:gen-prompt');
+    }
+
     function getSkillByMentionNameForView(name) {
       var normalized = String(name || '').trim().toLocaleLowerCase();
       if (!normalized) { return null; }
       var items = getSkillItemsForView();
       for (var i = 0; i < items.length; i++) {
-        if (getSkillMentionNameForView(items[i]).toLocaleLowerCase() === normalized) {
+        if (!isGenPromptSkill(items[i]) && getSkillMentionNameForView(items[i]).toLocaleLowerCase() === normalized) {
           return items[i];
         }
       }
@@ -317,6 +321,7 @@ export function getScript(): string {
     }
 
     function getSkillMarkdownTextForView(skill) {
+      if (isGenPromptSkill(skill)) return '[$gen-prompt](builtin:gen-prompt)';
       return '[' + getSkillPromptTextForView(skill) + '](' + getSkillPathForView(skill) + ')';
     }
 
@@ -393,11 +398,14 @@ export function getScript(): string {
         });
         return matches.length === 1 ? matches[0] : null;
       }
-      var skill = getSkillByMentionNameForView(name);
-      if (!skill) {
-        return null;
+      if (normalizedName === 'gen-prompt' && href === 'builtin:gen-prompt') {
+        // Preserve an explicit selection when editing a saved submission, even if discovery failed.
+        return getSkillByIdForView('builtin:gen-prompt') || { id: 'builtin:gen-prompt', source: 'builtin', name: 'gen-prompt', enabled: false };
       }
-      return normalizeSkillPathForView(getSkillPathForView(skill)) === normalizeSkillPathForView(href) ? skill : null;
+      return getSkillItemsForView().find(function(item) {
+        return !isGenPromptSkill(item) && getSkillMentionNameForView(item).toLocaleLowerCase() === normalizedName.toLocaleLowerCase()
+          && normalizeSkillPathForView(getSkillPathForView(item)) === normalizeSkillPathForView(href);
+      }) || null;
     }
 
     function normalizeSkillPathForView(value) {
@@ -1595,7 +1603,7 @@ ${conversationsMenuDismissFragment.source}
       var draftRunProjection = buildDraftRunTimelineProjection();
       renderTranscript(changeSetProjection, draftRunProjection);
       if (focusedAction) {
-        var actionButtons = Array.from(document.querySelectorAll('.draft-run-batch button, .draft-run-card button, .change-set-card button, .plan-decision-card button'));
+        var actionButtons = Array.from(document.querySelectorAll('.draft-run-batch button, .draft-run-card button, .change-set-card button, .plan-decision-card button, .plan-prompt-preview'));
         var nextFocus = findDraftRunActionFocus(actionButtons, focusedAction);
         if (nextFocus) {
           nextFocus.focus({ preventScroll: true });
@@ -1619,6 +1627,7 @@ ${conversationsMenuDismissFragment.source}
       if (!focusedAction) return null;
       var sameTarget = function(button) {
         if (button.disabled) return false;
+        if (focusedAction.planBodyHash && button.dataset.planBodyHash !== focusedAction.planBodyHash) return false;
         if (focusedAction.manualApprovalId) return button.dataset.manualApprovalId === focusedAction.manualApprovalId;
         if (focusedAction.approvalResumeTargetId) return button.dataset.approvalResumeTargetId === focusedAction.approvalResumeTargetId;
         // Batch controls must never fall back to a member card or a later approval.
@@ -3693,8 +3702,10 @@ ${conversationsSessionListFragment.source}
         case 'pending_truncation': return t('approveAllGatePendingTruncation');
         case 'preflight_failed': return t('approveAllGatePreflightFailed');
         case 'identity_mismatch': return t('approveAllGateIdentityMismatch');
+        case 'not_queue_head': return t('approveAllGateNotQueueHead');
         case 'untrusted_target': return t('approveAllGateUntrustedTarget');
         case 'deferred_to_boundary': return t('approveAllGateDeferred');
+        case 'prompt_generation_read_only': return t('approveAllGatePromptOnly');
         case 'plan_discarded': return t('approveAllGatePlanDiscarded');
         case 'manually_applied': return t('approveAllGateManuallyApplied');
         case 'latched': return t('approveAllGateLatched');
@@ -4274,11 +4285,11 @@ ${conversationsSessionListFragment.source}
       var card = document.createElement('section');
       card.className = 'plan-decision-card status-' + String(plan.status || 'invalid');
       card.dataset.planId = String(plan.id || '');
-      card.setAttribute('aria-label', t('planConfirmationTitle'));
+      card.setAttribute('aria-label', t(plan.handoff ? 'planHandoffTitle' : 'planConfirmationTitle'));
 
       var title = document.createElement('div');
       title.className = 'plan-decision-title';
-      title.textContent = t('planConfirmationTitle');
+      title.textContent = t(plan.handoff ? 'planHandoffTitle' : 'planConfirmationTitle');
       var description = document.createElement('div');
       description.className = 'plan-decision-description';
       var statusKey = plan.status === 'pending' ? 'planPendingConfirmation'
@@ -4286,37 +4297,87 @@ ${conversationsSessionListFragment.source}
         : plan.status === 'revision_requested' ? 'planRevisionRequested'
         : plan.status === 'exited' ? 'planExited'
         : 'planInvalidOrSuperseded';
+      var recovery = plan.handoff;
+      var preview = plan.promptPreview;
+      if (recovery) {
+        statusKey = { committed: 'planHandoffCommitted', queued: 'planHandoffQueued',
+          dispatch_unknown: 'planHandoffUnknown', completed: 'planHandoffCompleted' }[recovery.phase] || statusKey;
+      }
       description.textContent = t(statusKey);
       card.append(title, description);
 
-      if (plan.status === 'pending') {
+      if (preview && preview.ok) {
+        var previewTitle = document.createElement('div');
+        previewTitle.className = 'plan-decision-title';
+        previewTitle.textContent = t('planPromptPreview');
+        var previewBody = document.createElement('pre');
+        previewBody.className = 'plan-prompt-preview';
+        previewBody.tabIndex = 0;
+        previewBody.dataset.planId = plan.id;
+        previewBody.dataset.planBodyHash = preview.bodyHash;
+        previewBody.dataset.planAction = 'preview';
+        previewBody.setAttribute('aria-label', t('planPromptPreview'));
+        previewBody.textContent = preview.body;
+        card.append(previewTitle, previewBody);
+      }
+
+      if (plan.status === 'pending' || recovery) {
         var actions = document.createElement('div');
         actions.className = 'plan-decision-actions';
-        [
-          { action: 'start_execution', labelKey: 'planStartExecution', primary: true },
-          { action: 'revise_plan', labelKey: 'planRevise' },
-          { action: 'exit_plan', labelKey: 'planExit' }
-        ].forEach(function(item) {
+        var openTarget = recovery && (recovery.phase === 'completed' || recovery.phase === 'dispatch_unknown');
+        var blockedReason = openTarget
+          ? (canNavigateSessions() ? '' : t('planActionUnavailable'))
+          : plan.newSessionBlockedReason || (!canSubmitPrompt() ? t('planActionUnavailable') : '');
+        var canHandoff = Boolean(recovery || (preview && preview.ok));
+        function addPlanAction(action, labelKey, disabled, primary, activate) {
           var button = document.createElement('button');
           button.type = 'button';
-          button.className = item.primary ? 'primary' : 'secondary';
-          button.dataset.planId = String(plan.id || '');
-          button.dataset.planAction = item.action;
-          button.textContent = t(item.labelKey);
-          button.setAttribute('aria-label', t(item.labelKey));
-          button.disabled = !canSubmitPrompt();
+          button.className = primary ? 'primary' : 'secondary';
+          button.dataset.planId = plan.id;
+          if (preview && preview.ok) button.dataset.planBodyHash = preview.bodyHash;
+          button.dataset.planAction = action;
+          button.textContent = t(labelKey);
+          button.disabled = disabled;
           button.addEventListener('click', function() {
-            if (button.disabled) return;
-            button.disabled = true;
-            vscode.postMessage({
-              type: 'resolvePlanDecision',
-              planId: String(plan.id || ''),
-              action: item.action
-            });
+            if (!button.disabled) activate(button);
           });
           actions.append(button);
-        });
+          return button;
+        }
+        var newButton = addPlanAction('execute_new', recovery ? (openTarget ? 'planHandoffOpen' : 'planHandoffResume') : 'planStartNewSession',
+          !canHandoff || Boolean(blockedReason), canHandoff && !blockedReason, function(button) {
+            button.disabled = true;
+            var shown = recovery || preview;
+            vscode.postMessage({ type: 'executePlanInNewSession', sessionId: plan.sessionId,
+              planId: plan.id, planHash: shown.planHash, bodyHash: shown.bodyHash });
+          });
+        if (blockedReason) newButton.title = blockedReason;
+        if (preview) {
+          addPlanAction('copy_prompt', 'planCopyPrompt', !preview || !preview.ok, false, function() {
+            copyTextToClipboard(preview.body).then(function() { setTransientStatus(t('copied')); },
+              function() { setTransientStatus(t('copyFailed')); });
+          });
+        }
+        if (!recovery) {
+          [
+            { action: 'start_execution', labelKey: 'planStartExecution' },
+            { action: 'revise_plan', labelKey: 'planRevise' },
+            { action: 'exit_plan', labelKey: 'planExit' }
+          ].forEach(function(item) {
+            addPlanAction(item.action, item.labelKey, !canSubmitPrompt(), item.action === 'start_execution' && !canHandoff,
+              function(button) {
+                button.disabled = true;
+                vscode.postMessage({ type: 'resolvePlanDecision', planId: plan.id, action: item.action });
+              });
+          });
+        }
         card.append(actions);
+        if (blockedReason) {
+          var reason = document.createElement('div');
+          reason.className = 'plan-decision-description';
+          reason.textContent = blockedReason;
+          card.append(reason);
+        }
       }
       return card;
     }
@@ -4898,7 +4959,7 @@ ${conversationsSessionListFragment.source}
       return editor.contains(node.nodeType === Node.ELEMENT_NODE ? node : node.parentNode);
     }
 
-    function renderInlineEditorContent(editor, value) {
+    function renderInlineEditorContent(editor, value, usedSkills) {
       editor.innerHTML = '';
       var text = String(value || '');
       var pattern = /\\[\\$([A-Za-z0-9_-]+(?::[A-Za-z0-9_-]+)?)\\]\\(([^)\\n]+)\\)|<([^<>\\n]+)>|\\$([A-Za-z0-9_-]+(?::[A-Za-z0-9_-]+)?)/g;
@@ -4917,7 +4978,8 @@ ${conversationsSessionListFragment.source}
           var skill = match[1]
             ? getSkillByMarkdownReferenceForView(match[1] || '', match[2] || '')
             : getSkillByMentionNameForView(match[4] || '');
-          if (!skill || (skill.plugin && !match[1])) {
+          if (!skill || (skill.plugin && !match[1])
+            || (isGenPromptSkill(skill) && !usedSkills?.some(isGenPromptSkill))) {
             continue;
           }
           appendInlineEditorText(editor, text.slice(cursor, match.index));
@@ -5156,6 +5218,7 @@ ${conversationsSessionListFragment.source}
       if (link.dataset.skillReferenceText) {
         return link.dataset.skillReferenceText;
       }
+      if (link.dataset.skillId === 'builtin:gen-prompt') return '[$gen-prompt](builtin:gen-prompt)';
       var skill = getSkillByIdForView(link.dataset.skillId || '');
       if (skill) {
         return getSkillMarkdownTextForView(skill);
@@ -5185,7 +5248,7 @@ ${conversationsSessionListFragment.source}
     }
 
     function collectInlineEditorSkillIds(editor) {
-      return [];
+      return editor.querySelector('a.rich-skill-link[data-skill-id="builtin:gen-prompt"]') ? ['builtin:gen-prompt'] : [];
     }
 
     function readInlineFileReferenceLink(link) {
@@ -5345,7 +5408,7 @@ ${conversationsSessionListFragment.source}
       editor.setAttribute('role', 'textbox');
       editor.setAttribute('aria-multiline', 'true');
       editor.setAttribute('aria-label', t('editMessage'));
-      renderInlineEditorContent(editor, editingDraftText);
+      renderInlineEditorContent(editor, editingDraftText, message.usedSkills);
 
       var footer = document.createElement('div');
       footer.className = 'message-edit-footer';

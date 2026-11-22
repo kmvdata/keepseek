@@ -261,7 +261,7 @@ function pickAuthority(record: Record<string, unknown>): Record<string, unknown>
   const selected: Record<string, unknown> = {};
   for (const key of [
     'ok', 'id', 'status', 'hash', 'specHash', 'actionHash', 'draftEditId', 'draftRunId', 'changeSetId', 'targetId',
-    'path', 'uri', 'script', 'startLine', 'endLine', 'count', 'total', 'exitCode', 'durationMs', 'timedOut', 'errorType', 'error'
+    'path', 'uri', 'fileSha256', 'script', 'startLine', 'endLine', 'count', 'total', 'exitCode', 'durationMs', 'timedOut', 'errorType', 'error'
   ]) {
     const value = record[key];
     if (typeof value === 'string') selected[key] = value.slice(0, 1_024);

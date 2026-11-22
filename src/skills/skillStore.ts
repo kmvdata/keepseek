@@ -12,6 +12,8 @@ import {
   type SkillActivationResolution
 } from './skillActivationResolver';
 import {
+  BUILTIN_GEN_PROMPT_ID,
+  isBuiltinGenPrompt,
   toSkillManifestView,
   type ActivatedSkill,
   type SkillManifest,
@@ -133,7 +135,7 @@ export class SkillStore {
 
   public async useSkill(session: ChatSession, id: string): Promise<boolean> {
     const manifest = this.getManifest(id);
-    if (!manifest || manifest.pluginInstallation || !this.canUseSkill(manifest)) {
+    if (!manifest || manifest.pluginInstallation || isBuiltinGenPrompt(manifest) || !this.canUseSkill(manifest)) {
       return false;
     }
 
@@ -157,7 +159,7 @@ export class SkillStore {
 
   public async setSkillWorkspaceDefault(id: string, enabled: boolean): Promise<boolean> {
     const manifest = this.getManifest(id);
-    if (!manifest || manifest.pluginInstallation) {
+    if (!manifest || manifest.pluginInstallation || isBuiltinGenPrompt(manifest)) {
       return false;
     }
     const workspaceKey = this.getWorkspaceKey();
@@ -223,6 +225,9 @@ export class SkillStore {
     const failures: ActiveSkillLoadResult['failures'] = activation.skipped
       .filter(skip => (input.explicitSkillIds ?? []).includes(skip.id) && (skip.reason === 'disabled' || skip.reason === 'workspace_untrusted'))
       .map(skip => ({ id: skip.id, name: skip.name, error: this.getManifest(skip.id)?.unavailableReason ?? skip.reason }));
+    if (input.explicitSkillIds?.includes(BUILTIN_GEN_PROMPT_ID) && !this.getManifest(BUILTIN_GEN_PROMPT_ID)) {
+      failures.push({ id: BUILTIN_GEN_PROMPT_ID, name: 'gen-prompt', error: 'Built-in Skill unavailable / 内置 Skill 不可用' });
+    }
     for (const decision of activation.activated) {
       if (decision.manifest.pluginInstallation && input.inheritedPluginSkills) continue;
       try {
@@ -311,7 +316,7 @@ export class SkillStore {
       if (typeof id !== 'string' || !id.trim() || seen.has(id)) {
         continue;
       }
-      if (!isCodexPluginSkillsEnabled() && id.startsWith('codexPlugin:')) continue;
+      if (id === BUILTIN_GEN_PROMPT_ID || (!isCodexPluginSkillsEnabled() && id.startsWith('codexPlugin:'))) continue;
       seen.add(id);
       ids.push(id);
     }
@@ -322,7 +327,7 @@ export class SkillStore {
     const refs = this.workspaceDefaultSkillRefs.get(this.getWorkspaceKey()) ?? [];
     const refKeys = new Set(refs.map((ref) => normalizeUri(ref)));
     return this.manifests
-      .filter((manifest) => !manifest.pluginInstallation && (refs.includes(manifest.id) || refKeys.has(normalizeUri(manifest.skillUri))))
+      .filter((manifest) => !manifest.pluginInstallation && !isBuiltinGenPrompt(manifest) && (refs.includes(manifest.id) || refKeys.has(normalizeUri(manifest.skillUri))))
       .map((manifest) => manifest.id);
   }
 

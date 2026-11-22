@@ -59,6 +59,7 @@ export const composerSerializationFragment: WebviewFragment = {
       }
 
       function skillLinkToText(link) {
+        if (link.dataset.skillId === 'builtin:gen-prompt') return '[$gen-prompt](builtin:gen-prompt)';
         if (link.dataset.skillReferenceText) {
           return link.dataset.skillReferenceText;
         }

@@ -110,6 +110,8 @@ import type {
 } from './subagents/types';
 import { searchHistoryArchive } from './historyArchive';
 import { allocateSharedMessageTokens, createAcceptedRootSubagentHandoffEstimate, getSubagentHandoffKind } from './subagentUsageStats';
+import { isPromptInspectionTool, promptIntentMatches, validPromptCheckpoint } from './promptGeneration';
+import { renderGeneratedHandoffPrompt, handoffPromptError } from './handoffPrompt';
 import { CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION, buildProviderRequestProjection, buildProviderPayloadProjection, getProviderRequestLane, normalizeProviderMessages } from './providerRequestProjection';
 import { snapshotCheckpoint } from '../sessions/persistenceSnapshot';
 import { recordLocalPerformance } from './logging/performanceTrace';
@@ -381,6 +383,9 @@ export class AgentLoop {
     if (request.checkpoint && request.checkpoint.request.requestProtocolVersion !== CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION) {
       throw new AgentInterruptedError('waiting_for_user', 'Unsupported persisted request protocol; start a new session. / 不支持旧请求协议，请新建会话。');
     }
+    if (!promptIntentMatches(request) || request.checkpoint && (
+      !validPromptCheckpoint(request.checkpoint) || request.turnIntent !== request.checkpoint.request.turnIntent
+    )) throw new AgentInterruptedError('waiting_for_user', 'Prompt generation intent changed / 生成提示词的只读意图已变化，请重新选择后发送。');
     // A saved plugin activation is historical data, not permission to resume
     // suspended functionality. Check before reconciliation or any dispatch.
     await assertPluginSkillsCurrent(request.currentRunContext?.skills ?? [], []);
@@ -546,6 +551,12 @@ export class AgentLoop {
           callbacks.onStatus?.(status);
         }
       }, activeRunBudget);
+      if (request.turnIntent === 'generate_prompt' && !response.runDetails.budgetStopReason && !response.runDetails.budgetPause) {
+        this.throwIfAborted(request.signal, request.language);
+        const requirement = [...request.history].reverse().find(message => message.role === 'user')?.content ?? '';
+        const prompt = renderGeneratedHandoffPrompt(requirement, response.message, request.language, cp.workspaceFolders, response.toolRounds);
+        response.message = prompt.ok ? prompt.body : handoffPromptError(request.language, prompt.reason);
+      }
       cp.finalResponse = response;
       cp.status = response.runDetails.budgetPause?.resumable
         ? 'interrupted'
@@ -879,9 +890,11 @@ export class AgentLoop {
       ...callbacks,
       onStatus: emitStatus
     };
-    const draftEdit = request.subagentContext && request.subagentContext.lane !== 'proposal'
-      ? undefined
-      : await this.tryCreateDraftEdit(request.prompt, request.language);
+    // /draft is a host shortcut before tool dispatch. It has the same
+    // write boundary as a model-requested DraftEdit.
+    const mayPrepareDraft = !request.turnIntent && request.executionMode !== 'plan'
+      && (!request.subagentContext || request.subagentContext.lane === 'proposal');
+    const draftEdit = mayPrepareDraft ? await this.tryCreateDraftEdit(request.prompt, request.language) : undefined;
     this.throwIfAborted(request.signal, request.language);
     if (draftEdit) {
       await this.captureDraftBaseline(draftEdit);
@@ -1026,7 +1039,13 @@ export class AgentLoop {
           }
         : undefined;
     providerRunState = createInitialProviderRunState();
-    if (restored?.provider) providerRunState = structuredClone(restored.provider);
+    if (restored?.provider) {
+      if (request.turnIntent && (providerRunState?.protocol !== restored.provider.protocol
+        || JSON.stringify(providerRunState.tools) !== JSON.stringify(restored.provider.tools))) {
+        throw new Error('Read-only provider schema changed / 只读工具协议变化，请重新选择后发送。');
+      }
+      providerRunState = structuredClone(restored.provider);
+    }
     trace.record({
       type: 'context_projection',
       metadata: projection.metadata,
@@ -1909,12 +1928,12 @@ export class AgentLoop {
       const performToolCall = async (toolCall: DeepSeekToolCall): Promise<string> => {
         const toolStarted = performance.now();
         this.throwIfAborted(request.signal, request.language);
-        const exposureError = getToolExposureError(toolCall.function.name, exposedToolNames);
+        const exposureError = getToolExposureError(toolCall.function.name, exposedToolNames, request.turnIntent);
         if (exposureError) {
           const rejected = exposureError;
           callbacks.onToolRejected?.({
             toolName: toolCall.function.name,
-            errorType: 'subagent_tool_not_exposed'
+            errorType: request.turnIntent && !isPromptInspectionTool(toolCall.function.name) ? 'prompt_generation_read_only' : 'subagent_tool_not_exposed'
           });
           trace.record({
             type: 'tool_result',
@@ -2887,6 +2906,10 @@ export class AgentLoop {
     const costReservations: Array<ReturnType<ExecutionCostBudget['reserve']> | undefined> = [];
     const accountedAttempts = new Set<number>();
     let finalUsageEvent: UsageEvent | undefined;
+    const verifyFirstDispatch = callbacks.beforeFirstDispatch;
+    // Only the first physical request of the handed-off turn needs this check.
+    // An indeterminate transport outcome for that request requires a user decision.
+    if (verifyFirstDispatch) callbacks.beforeFirstDispatch = undefined;
     const physicalCallbacks: AgentRunCallbacks = {
       ...callbacks,
       beforeModelRequest: async () => {
@@ -2943,6 +2966,7 @@ export class AgentLoop {
         // Persist dispatch counters/reservations before sending. Storage failure
         // is a hard stop; it must never turn into a transport reconnect.
         await callbacks.beforeModelRequest?.();
+        await verifyFirstDispatch?.(body);
       },
       beforeRetry: async () => {
         this.throwIfAborted(request.signal, request.language);
@@ -2996,7 +3020,9 @@ export class AgentLoop {
       }
     };
     if (tracksModelRound) callbacks.onModelRoundStart?.();
-    const response = await createProviderClient(runtimeConfig.provider).createModelResponse(this.toProviderClientConfig(runtimeConfig), {
+    const clientConfig = this.toProviderClientConfig(runtimeConfig);
+    if (verifyFirstDispatch) clientConfig.maxRequestRetries = initialAttemptCount;
+    const response = await createProviderClient(runtimeConfig.provider).createModelResponse(clientConfig, {
       body, serializedBody, language: request.language, signal: request.signal, callbacks: physicalCallbacks,
       runDeadlineAt, trace, requestId: upstreamRequestId, initialAttemptCount,
       onAttempt: async ({ attemptIndex, startedAt }) => {
@@ -5419,7 +5445,11 @@ function describeRunPendingDraftEdits(
   });
 }
 
-export function getToolExposureError(toolName: string, exposedToolNames: ReadonlySet<string>): string | undefined {
+export function getToolExposureError(toolName: string, exposedToolNames: ReadonlySet<string>, intent?: AgentRequest['turnIntent']): string | undefined {
+  if (intent === 'generate_prompt' && !isPromptInspectionTool(toolName)) {
+    return JSON.stringify({ ok: false, executed: false, toolName, errorType: 'prompt_generation_read_only',
+      error: 'This turn may only inspect the project and generate an execution prompt. / 本轮仅可只读调查并生成执行提示词。' });
+  }
   if (exposedToolNames.has(toolName)) return undefined;
   return JSON.stringify({
     ok: false,

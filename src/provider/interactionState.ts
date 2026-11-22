@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 
 export type InteractionPhase = 'idle' | 'loading_session' | 'preparing_context' | 'preparing_task'
   | 'running' | 'saving' | 'action' | 'failed';
-export type InteractionOperationKind = 'navigation' | 'task' | 'continuation' | 'recovery';
+export type InteractionOperationKind = 'navigation' | 'task' | 'continuation' | 'recovery' | 'handoff';
 
 /** Local history work has no model, Skills or account dependency. Target gates
  * supply the execution authority; preview never owns the composer. */
@@ -13,6 +13,20 @@ export function deriveHistoryCleanupCapability(facts: { sessionReady: boolean; d
   if (facts.operationPending) return { available: false, reason: 'busy' };
   return { available: true };
 }
+export function planHandoffBlockedReason(facts: {
+  ready: boolean; trusted: boolean; scoped: boolean; busy: boolean;
+  queued: boolean; modelReady: boolean;
+}, language: 'zh-CN' | 'en'): string | undefined {
+  const en = language === 'en';
+  if (!facts.ready) return en ? 'Wait for history and project context to finish loading.' : '请等待历史记录和项目上下文就绪。';
+  if (!facts.trusted) return en ? 'Trust the workspace to execute the plan.' : '请先信任工作区，再执行计划。';
+  if (!facts.scoped) return en ? 'Select the project directory again.' : '请重新选择项目目录。';
+  if (!facts.modelReady) return en ? 'Select an available model and source.' : '请选择可用的模型和来源。';
+  if (facts.busy) return en ? 'Wait for the current operation to finish, then retry.' : '请等待当前操作结束后重试。';
+  if (!facts.queued) return en ? 'Reload this project’s session queue and retry.' : '请重新加载本项目的会话队列后重试。';
+  return undefined;
+}
+
 export type InteractionWaitingReason = 'model' | 'session' | 'recovery' | 'context' | 'saving';
 
 export type SessionTitleCapabilityReason = 'loading_sessions' | 'recovering' | 'model_unavailable'
@@ -197,6 +211,8 @@ export class InteractionCoordinator {
     // Ownership is per session: a task running in session A must not prevent session B
     // from reserving its own operation. Within one session the slot stays exclusive,
     // and only a navigation may coexist with that session already running a task.
+    if (kind === 'handoff' && this.navigations.size) return undefined;
+    if (kind === 'navigation' && this.actives.get(sessionId)?.token.kind === 'handoff') return undefined;
     if (this.actives.has(sessionId)
       && !(kind === 'navigation' && this.actives.get(sessionId)!.token.kind !== 'navigation')) return undefined;
     const token: InteractionOperation = Object.freeze({ operationId: this.id(), sessionId,
@@ -214,6 +230,20 @@ export class InteractionCoordinator {
     this.actives.set(sessionId, next);
     this.diagnose('begin', next);
     return token;
+  }
+
+  /** Move the reservation with the first message without exposing an idle slot
+   * or scheduling deferred effects for the source. The new token also binds
+   * sendPrompt's usual identity check to the destination. */
+  public transferHandoff(token: InteractionOperation, targetId: string): InteractionOperation | undefined {
+    const owner = this.actives.get(token.sessionId);
+    if (token.kind !== 'handoff' || owner?.token !== token || this.actives.has(targetId)) return undefined;
+    const target = Object.freeze({ ...token, sessionId: targetId });
+    this.actives.delete(token.sessionId);
+    owner.token = target;
+    owner.sessionId = targetId;
+    this.actives.set(targetId, owner);
+    return target;
   }
 
   /** The operation this token refers to, whether it owns the task slot or navigation. */
@@ -329,7 +359,7 @@ export function deriveInteractionState(facts: InteractionFacts, operation?: {
   // in-flight task reservation are deliberately excluded.
   // Blocks that also stop navigation. A main model run, a running command and an
   const navBlocking = Boolean(facts.backgroundRunning || facts.navigationBlockingAction
-    || (operation?.kind === 'navigation') || (!facts.sessionReady && operation));
+    || (operation?.kind === 'navigation' || operation?.kind === 'handoff') || (!facts.sessionReady && operation));
   // A project always opens a blank session with lazily deferred context, so the
   // composer may accept input before the session bodies load. Recovery stores are
   // still a hard gate: such an action is withheld until they are verified.

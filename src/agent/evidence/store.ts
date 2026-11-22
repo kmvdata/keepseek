@@ -5,7 +5,7 @@ import { createReadStream } from 'node:fs';
 import * as vscode from 'vscode';
 import { hasAssociatedDirectoryEntries } from '../../sessions/sessionAssociatedPersistence';
 import { writeBytesAtomic, writeJsonAtomic } from '../../shared/atomicStorage';
-import { SessionDeletionAuthority } from '../../sessions/sessionDeletionAuthority';
+import { missing, SessionDeletionAuthority } from '../../sessions/sessionDeletionAuthority';
 import { assertManagedStoragePath } from '../../sessions/sessionAssociatedPersistence';
 import { estimateTokenCount } from '../tokenEstimate';
 import type {
@@ -233,8 +233,7 @@ export class ToolEvidenceStore {
       await Promise.resolve(vscode.workspace.fs.delete(
         directory, { recursive: true, useTrash: false }
       )).catch((error) => {
-        const code = (error as { code?: string }).code;
-        if (code !== 'FileNotFound' && code !== 'ENOENT') throw error;
+        if (!missing(error)) throw error;
       });
     };
     await this.queue.catch(() => undefined);
@@ -469,7 +468,7 @@ export class ToolEvidenceStore {
       if (!Buffer.from(existing).equals(Buffer.from(bytes))) throw new Error('Evidence blob integrity mismatch');
       return;
     } catch (error) {
-      if (!['ENOENT', 'FileNotFound'].includes(String((error as { code?: string }).code))) throw error;
+      if (!missing(error)) throw error;
     }
     try { await writeBytesAtomic(uri, bytes, { durable: true }); }
     catch (error) { throw new ToolEvidencePersistenceError('storage_failure', 'Tool evidence blob could not be persisted.', { cause: error }); }

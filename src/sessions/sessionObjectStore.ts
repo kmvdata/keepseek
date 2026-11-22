@@ -1,3 +1,4 @@
+import { handoffWatermarks } from './planHandoff';
 import { createHash } from 'node:crypto';
 import { open, unlink } from 'node:fs/promises';
 import * as vscode from 'vscode';
@@ -22,9 +23,15 @@ interface SessionManifest {
   /** Optional content-free lifecycle index committed with the graph. */
   summary?: unknown;
   summaryHash?: string;
+  handoffs?: ReturnType<typeof handoffWatermarks>;
+  completedHandoff?: string;
 }
 const HASH = /^[a-f0-9]{64}$/u;
 const digest = (text: string) => createHash('sha256').update(text).digest('hex');
+
+export class SessionObjectReadError extends Error {
+  constructor(cause: unknown) { super('Session object could not be read', { cause }); }
+}
 
 /** Per-session immutable graph. Objects are durable BEFORE the manifest switch.
  * No object GC while a session exists: old manifests and recovery references
@@ -125,10 +132,15 @@ export class SessionObjectStore {
     if (!encoded || typeof encoded !== 'object') throw new Error('Expected session object');
     return 'ref' in encoded ? encoded.ref : this.putNode(encoded.inline);
   }
+  private async readObject(hash: string): Promise<Uint8Array> {
+    const uri = this.objectUri(hash);
+    try { return await vscode.workspace.fs.readFile(uri); }
+    catch (error) { throw new SessionObjectReadError(error); }
+  }
   private async decode(hash: string, cache: Map<string, unknown>, stack = new Set<string>()): Promise<unknown> {
     if (stack.has(hash)) throw new Error('Cyclic session object');
     if (cache.has(hash)) return cache.get(hash);
-    const raw = new TextDecoder().decode(await vscode.workspace.fs.readFile(this.objectUri(hash)));
+    const raw = new TextDecoder().decode(await this.readObject(hash));
     if (digest(raw) !== hash) throw new Error('Session object integrity mismatch');
     const node = JSON.parse(raw) as ObjectNode;
     const nextStack = new Set(stack).add(hash);
@@ -163,19 +175,23 @@ export class SessionObjectStore {
     const m = manifest as SessionManifest;
     if (m?.version !== 4 || !Number.isSafeInteger(m.revision) || !Array.isArray(m.messages)
       || !HASH.test(m.header)) throw new Error('Invalid session manifest');
+    if (m.headerInline && digest(JSON.stringify(m.headerInline)) !== m.header) throw new Error('Session header integrity mismatch');
+    return this.loadObjectField(m.headerInline ? { inline: m.headerInline } : { ref: m.header }, path);
+  }
+
+  private async loadObjectField(root: Encoded, path: readonly string[]): Promise<unknown> {
     const visited = new Set<string>();
     const nodeFor = async (encoded: Encoded): Promise<ObjectNode | undefined> => {
       if (!encoded || typeof encoded !== 'object') return undefined;
       if ('inline' in encoded) return encoded.inline;
       if (!HASH.test(encoded.ref) || visited.has(encoded.ref)) throw new Error('Invalid projected object reference');
       visited.add(encoded.ref);
-      const bytes = await vscode.workspace.fs.readFile(this.objectUri(encoded.ref));
+      const bytes = await this.readObject(encoded.ref);
       const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
       if (digest(text) !== encoded.ref) throw new Error('Session object integrity mismatch');
       return JSON.parse(text) as ObjectNode;
     };
-    if (m.headerInline && digest(JSON.stringify(m.headerInline)) !== m.header) throw new Error('Session header integrity mismatch');
-    let current: Encoded = m.headerInline ? { inline: m.headerInline } : { ref: m.header };
+    let current: Encoded = root;
     for (let position = 0; position < path.length; position++) {
       const key = path[position]!;
       const node = await nodeFor(current);
@@ -203,11 +219,21 @@ export class SessionObjectStore {
       : await this.decode(m.header, cache)) as Omit<ChatSession, 'messages'>;
     if (header.id !== m.sessionId || header.workspaceKey !== m.workspaceKey) throw new Error('Session scope mismatch');
     const messages: ChatMessage[] = [];
+    let pendingPlan = Array.isArray(header.planWorkflows) ? header.planWorkflows.find(plan => plan?.status === 'pending') : undefined;
     for (let i = 0; i < m.messages.length; i++) {
       const entry = m.messages[i];
       const message = { ...await this.decode(entry.body, cache) as ChatMessage };
       if (entry.checkpoint) {
         if (!HASH.test(entry.checkpoint)) throw new Error('Invalid checkpoint reference');
+        // Old pending cards have no disclosure receipt. Project just the two
+        // request fields from the verified checkpoint, without hydrating its history.
+        if (pendingPlan && message.externalHandoffContext === undefined) {
+          const root = { ref: entry.checkpoint };
+          const grants = await this.loadObjectField(root, ['request', 'authorizedExternalReferenceUris']);
+          const files = await this.loadObjectField(root, ['request', 'contextFiles']);
+          message.externalHandoffContext = (grants !== undefined && (!Array.isArray(grants) || grants.length > 0))
+            || !Array.isArray(files) || files.some(file => file?.source === 'external');
+        }
         // Only the final, resumable checkpoint is loaded on ordinary startup.
         if (i === m.messages.length - 1 && entry.summary?.status !== 'completed') {
           message.runCheckpoint = structuredClone(await this.decode(entry.checkpoint, cache)) as ChatMessage['runCheckpoint'];
@@ -217,10 +243,19 @@ export class SessionObjectStore {
             summary: { ...entry.summary, canResume: false } };
         } else throw new Error('Missing checkpoint metadata');
       }
+      if (message.id === pendingPlan?.assistantMessageId) pendingPlan = undefined;
       messages.push(message);
     }
+    const session = { ...structuredClone(header), messages };
+    if ((session.planHandoffCompleted ? session.planHandoffId : undefined) !== m.completedHandoff) {
+      throw new Error('Handoff target completion integrity mismatch');
+    }
+    if (session.planHandoffs?.length || m.handoffs !== undefined) {
+      const computed = handoffWatermarks(session);
+      if (JSON.stringify(computed) !== JSON.stringify(m.handoffs)) throw new Error('Plan handoff manifest integrity mismatch');
+    }
     this.revision = m.revision;
-    return { ...structuredClone(header), messages };
+    return session;
   }
   public async save(session: ChatSession, summary?: unknown, scope?: { sessionId: string; taskId?: string; childId?: string }): Promise<number> {
     // Child stores have their own parent gate. Only canonical main shards infer
@@ -249,6 +284,16 @@ export class SessionObjectStore {
       const revision = previous?.revision ?? 0;
       if (revision && this.revision === undefined) throw new Error('Existing session must be loaded before saving');
       if (this.revision !== undefined && revision !== this.revision) throw new Error('Stale session writer; reload before saving');
+      const handoffs = handoffWatermarks(session);
+      const completedHandoff = session.planHandoffCompleted ? session.planHandoffId : undefined;
+      if (previous?.completedHandoff && previous.completedHandoff !== completedHandoff) {
+        throw new Error('Stale handoff target writer / 交接目标已完成');
+      }
+      if (previous?.handoffs?.some(prior => {
+        const next = handoffs?.find(item => item.id === prior.id);
+        return !next || prior.hash !== next.hash || prior.phase > next.phase
+          || prior.projectionHash !== undefined && prior.projectionHash !== next.projectionHash;
+      })) throw new Error('Stale plan handoff writer / 交接记录已由其他写入者更新');
       const { messages, ...header } = session;
       const entries: SessionManifest['messages'] = new Array(messages.length);
       let messageCursor = 0;
@@ -276,6 +321,7 @@ export class SessionObjectStore {
       const manifest: SessionManifest = { version: 4, workspaceKey: session.workspaceKey, sessionId: session.id,
         revision: revision + 1, header: 'ref' in encodedHeader ? encodedHeader.ref : digest(JSON.stringify(encodedHeader.inline)),
         ...('inline' in encodedHeader ? { headerInline: encodedHeader.inline } : {}), messages: entries,
+        ...(handoffs && { handoffs }), ...(completedHandoff && { completedHandoff }),
         ...(summary ? { summary, summaryHash: digest(JSON.stringify(summary)) } : {}) };
       const encoded = performance.now();
       await writeJsonAtomic(this.shard, manifest, { durable: true });

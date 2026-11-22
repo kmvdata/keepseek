@@ -197,7 +197,7 @@ export const commandSkillsImplementationFragment: WebviewFragment = {
       }
 
       function createCommandSkillItem(skill) {
-        var active = skill.plugin ? isPluginSkillInPrompt(skill) : isSkillActive(skill.id);
+        var active = (skill.plugin || isGenPromptSkill(skill)) ? isTaskSkillInPrompt(skill) : isSkillActive(skill.id);
         var canUse = Boolean(skill.enabled && !skill.unavailableReason);
         var item = document.createElement('div');
         item.className = 'command-skill-item' + (active ? ' is-active' : '') + (!canUse ? ' is-disabled' : '');
@@ -239,7 +239,7 @@ export const commandSkillsImplementationFragment: WebviewFragment = {
         checkbox.dataset.skillAction = 'toggle-use';
         checkbox.dataset.skillId = skill.id;
         checkbox.checked = active;
-        checkbox.disabled = !canUse || !canChangeContext();
+        checkbox.disabled = !canChangeContext() || (!canUse && !(active && isGenPromptSkill(skill)));
         checkbox.setAttribute('aria-label', t(active ? 'skillsDeselect' : 'skillsSelect', {
           name: referenceName
         }));
@@ -255,11 +255,11 @@ export const commandSkillsImplementationFragment: WebviewFragment = {
 
       function formatSkillMeta(skill) {
         var parts = [
-          skill.plugin ? formatPluginSkillOrigin(skill.plugin) : (skill.sourceLabel || skill.source || ''),
+          getSkillSourceGroupLabel(skill),
           skill.plugin
             ? t(skill.enabled ? 'pluginSkillEnabled' : 'pluginSkillDisabled')
             : t(skill.enabled ? 'skillsEnabled' : 'skillsDisabled'),
-          skill.plugin ? t('pluginSkillTaskOnly') : t(skill.allowImplicit ? 'skillsAllowAuto' : 'skillsManualOnly'),
+          (skill.plugin || isGenPromptSkill(skill)) ? t('pluginSkillTaskOnly') : t(skill.allowImplicit ? 'skillsAllowAuto' : 'skillsManualOnly'),
           skill.policySource || '',
           skill.workspaceDefault ? t('skillsWorkspaceDefault') : ''
         ];
@@ -289,15 +289,15 @@ export const commandSkillsImplementationFragment: WebviewFragment = {
         var skill = getSkillById(skillId);
         if (!skill) { return; }
         if (action === 'toggle-use') {
-          if (!skill.enabled || skill.unavailableReason) {
+          if ((!skill.enabled || skill.unavailableReason) && (selected || !isGenPromptSkill(skill))) {
             return;
           }
-          if (skill.plugin) {
-            if (selected && !isPluginSkillInPrompt(skill)) {
+          if (skill.plugin || isGenPromptSkill(skill)) {
+            if (selected && !isTaskSkillInPrompt(skill)) {
               insertSkillChip(skill);
-              setComposerStatus(t('pluginSkillInserted', { name: getSkillMentionName(skill) }));
+              setComposerStatus(t(isGenPromptSkill(skill) ? 'genPromptSelected' : 'pluginSkillInserted', { name: getSkillMentionName(skill) }));
             } else if (!selected) {
-              removePromptSkillChip(skillId, getSkillPath(skill));
+              removePromptSkillChip(skillId, isGenPromptSkill(skill) ? undefined : getSkillPath(skill));
               setComposerStatus(t('skillRemoved', { name: getSkillMentionName(skill) }));
             }
             return;

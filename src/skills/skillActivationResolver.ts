@@ -1,6 +1,6 @@
 import type { SkillActivationInfo, SkillActivationSource } from '../shared/types';
 import { normalizeUri } from '../agent/projectInstructions';
-import type { SkillManifest } from './skillTypes';
+import { isBuiltinGenPrompt, type SkillManifest } from './skillTypes';
 import { isCodexPluginSkill, isCodexPluginSkillsEnabled } from './codexPluginSupport';
 
 export interface SkillActivationDecision {
@@ -68,7 +68,7 @@ export class SkillActivationResolver {
         skipped.push(createSkip(manifest, getUnavailableReason(manifest, input.workspaceTrusted)));
         return;
       }
-      if (!manifest.allowImplicit || manifest.pluginInstallation) {
+      if (!manifest.allowImplicit || manifest.pluginInstallation || isBuiltinGenPrompt(manifest)) {
         skipped.push(createSkip(manifest, 'allow_implicit_false'));
         return;
       }
@@ -137,7 +137,7 @@ export class SkillActivationResolver {
       if (!found) {
         continue;
       }
-      if (found.manifest.pluginInstallation && source !== 'explicit') continue;
+      if (source !== 'explicit' && (found.manifest.pluginInstallation || isBuiltinGenPrompt(found.manifest))) continue;
       if (!canActivate(found.manifest, input.workspaceTrusted)) {
         skipped.push(createSkip(found.manifest, getUnavailableReason(found.manifest, input.workspaceTrusted)));
         continue;

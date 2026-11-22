@@ -1,5 +1,5 @@
 export interface SessionUseLease { release(): Promise<void> }
-interface HeldUse { sessionId: string; use: SessionUseLease; checking: boolean; reported: Set<'inspect' | 'release'> }
+interface HeldUse { sessionId: string; use: SessionUseLease; releasePending?: Promise<void>; reported: Set<'inspect' | 'release'> }
 
 /** Bridges local queue/continuation gaps without a project owner. Each record
  * remains the exact lease admitted by storage; no new authorization is created.
@@ -14,7 +14,7 @@ export class SessionUseLifetime {
   /** Resolves after registration or immediate release, never after a user wait. */
   public async releaseWhenIdle(sessionId: string, use: SessionUseLease): Promise<void> {
     if (this.released.has(use) || this.held.has(use)) return;
-    const item: HeldUse = { sessionId, use, checking: false, reported: new Set() };
+    const item: HeldUse = { sessionId, use, reported: new Set() };
     this.held.set(use, item);
     await this.check(item);
     this.schedule();
@@ -37,18 +37,17 @@ export class SessionUseLifetime {
   public get heldCount(): number { return this.held.size; }
 
   private async check(item: HeldUse): Promise<void> {
-    if (item.checking || this.held.get(item.use) !== item) return;
+    if (item.releasePending) return item.releasePending;
+    if (this.held.get(item.use) !== item) return;
     let busy: boolean;
     try { busy = this.inUse(item.sessionId); }
     catch { this.report(item, 'inspect'); return; }
     if (busy) return;
-    item.checking = true;
-    try {
-      await item.use.release();
+    item.releasePending = Promise.resolve().then(() => item.use.release()).then(() => {
       this.held.delete(item.use);
       this.released.add(item.use);
-    } catch { this.report(item, 'release'); }
-    finally { item.checking = false; }
+    }).catch(() => this.report(item, 'release')).finally(() => { item.releasePending = undefined; });
+    return item.releasePending;
   }
 
   private schedule(): void {

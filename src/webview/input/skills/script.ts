@@ -112,9 +112,15 @@ export const skillsImplementationFragment: WebviewFragment = {
             return;
           }
           if (!skill) {
+            if (link.dataset.skillId === 'builtin:gen-prompt') {
+              link.setAttribute('aria-invalid', 'true');
+              link.title = t('genPromptUnavailable');
+              return;
+            }
             link.remove();
             return;
           }
+          if (isGenPromptSkill(skill)) link.setAttribute('aria-invalid', skill.enabled && !skill.unavailableReason ? 'false' : 'true');
           link.setAttribute('href', getSkillPath(skill));
           link.dataset.skillPath = getSkillPath(skill);
           renderSkillReferenceContent(link, getSkillMentionName(skill));
@@ -289,9 +295,9 @@ export const skillsImplementationFragment: WebviewFragment = {
         return getActiveSkillIds().indexOf(skillId) >= 0;
       }
 
-      function isPluginSkillInPrompt(skill) {
+      function isTaskSkillInPrompt(skill) {
         return Array.from(promptInput.querySelectorAll('a.rich-skill-link')).some(function(link) {
-          return link.dataset.skillId === skill.id && isPluginSkillLinkCurrent(link, skill);
+          return link.dataset.skillId === skill.id && (isGenPromptSkill(skill) || isPluginSkillLinkCurrent(link, skill));
         });
       }
 
@@ -321,6 +327,7 @@ export const skillsImplementationFragment: WebviewFragment = {
       }
 
       function getSkillMarkdownText(skill) {
+        if (isGenPromptSkill(skill)) return '[$gen-prompt](builtin:gen-prompt)';
         var target = skill.plugin ? getPluginSkillReferenceTarget(skill, true) : getSkillPath(skill);
         return '[' + getSkillPromptText(skill) + '](' + target + ')';
       }
@@ -353,6 +360,7 @@ export const skillsImplementationFragment: WebviewFragment = {
       }
 
       function getSkillSourceGroupLabel(skill) {
+        if (isGenPromptSkill(skill)) return t('genPromptOrigin');
         if (skill && skill.plugin) {
           return formatPluginSkillOrigin(skill.plugin);
         }

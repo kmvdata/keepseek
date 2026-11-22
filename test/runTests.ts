@@ -1,3 +1,8 @@
+import './builtinGenPrompt.test';
+import './genPromptTurn.test';
+import './handoffPrompt.test';
+import './planHandoffFaults.test';
+import './planExecutionProbe.test';
 import './approveAllExecution.test';
 import './approveAllBoundary.test';
 import './validationAuthorization.test';
