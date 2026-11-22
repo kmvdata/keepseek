@@ -4,25 +4,33 @@ export const conversationsSessionListFragment: WebviewFragment = {
   id: 'conversations.session-list',
   source: `
     function toggleSessionMenu() {
+      cancelSessionMenuHoverTimers();
       if (sessionMenuOpen) {
         closeSessionMenu();
       } else {
-        openSessionMenu();
+        openSessionMenu(true);
       }
     }
 
-    function openSessionMenu() {
+    function openSessionMenu(refreshWorkspaceList) {
       activeWorkspaceTab = 'current';
       sessionRangeDays = 1;
       sessionMultiSelectMode = false;
       selectedSessionIds.clear();
       editingSessionTitleId = '';
       sessionMenuOpen = true;
+      cancelSessionMenuHoverOpen();
       renderSessionControls();
-      vscode.postMessage({ type: 'listOtherWorkspaces' });
+      // A hover open must not rescan the session store; the first open still
+      // needs the workspace list, and explicit activation always refreshes it.
+      if (refreshWorkspaceList || !otherWorkspacesRequested) {
+        otherWorkspacesRequested = true;
+        vscode.postMessage({ type: 'listOtherWorkspaces' });
+      }
     }
 
     function closeSessionMenu() {
+      cancelSessionMenuHoverTimers();
       sessionMenuOpen = false;
       activeWorkspaceTab = 'current';
       sessionMultiSelectMode = false;

@@ -8,6 +8,7 @@ import './sessionStartupStorageContracts.test';
 import './sessionMissingRecordShapes.test';
 import './startupContextFailure.test';
 import './accountEditorStartupFailure.test';
+import './sessionMenuHover.test';
 import './sessionQuarantine.test';
 import './sessionAbsentTombstone.test';
 import { after } from 'node:test';
