@@ -1,6 +1,7 @@
 import './builtinGenPrompt.test';
 import './genPromptTurn.test';
 import './handoffPrompt.test';
+import './handoffGuardCorpus.test';
 import './planHandoffFaults.test';
 import './planExecutionProbe.test';
 import './approveAllExecution.test';

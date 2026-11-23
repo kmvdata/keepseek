@@ -83,11 +83,21 @@ test('gen-prompt removes its selector and keeps the same execution prompt contra
   assert.ok(artifact.ok && fromPlan.ok);
   assert.equal(artifact.bodyHash, fromPlan.bodyHash);
   assert.doesNotMatch(artifact.body, /builtin:gen-prompt/u);
-  assert.deepEqual(renderGeneratedHandoffPrompt('Goal', 'Use /Users/alice/private.txt', 'en'), { ok: false, reason: 'disclosure' });
-  assert.deepEqual(renderGeneratedHandoffPrompt('Goal', 'Use token sk-' + 'x'.repeat(24), 'en'), { ok: false, reason: 'disclosure' });
+  // A user-pasted absolute path is no longer a static refusal: only evidence of a read outside
+  // the project, or a private key block, still blocks. Sensitive values are redacted instead.
+  const pasted = renderGeneratedHandoffPrompt('Goal', 'Use /Users/alice/private.txt', 'en');
+  assert.equal(pasted.ok, true);
+  const secret = 'sk-' + 'aB3dE9fG2hJ5kL8mN1pQ4rS7';
+  const token = renderGeneratedHandoffPrompt('Goal', 'Use token ' + secret, 'en');
+  assert.equal(token.ok, true);
+  if (token.ok) {
+    assert.ok(token.body.includes('[REDACTED]'));
+    assert.ok(!token.body.includes(secret));
+  }
   assert.deepEqual(renderGeneratedHandoffPrompt('Goal', 'Copy this ev_' + '0'.repeat(40) + '.' + 'd'.repeat(24), 'en'),
     { ok: false, reason: 'missing_context' });
   assert.deepEqual(renderGeneratedHandoffPrompt('Goal', 'File SHA-256 ' + 'a'.repeat(64), 'en'), { ok: false, reason: 'missing_context' });
+  assert.deepEqual(renderGeneratedHandoffPrompt('Goal', '-----BEGIN RSA PRIVATE KEY-----', 'en'), { ok: false, reason: 'disclosure' });
   const body = 'a'.repeat(23_000) + '\nmandatory acceptance\n' + 'b'.repeat(10_000);
   assert.deepEqual(renderGeneratedHandoffPrompt('Goal', body, 'en'), { ok: false, reason: 'oversize' });
   const small = renderGeneratedHandoffPrompt('Goal', 'mandatory acceptance', 'en');

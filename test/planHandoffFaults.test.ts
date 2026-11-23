@@ -397,10 +397,29 @@ test('project paths in Chinese punctuation and command options remain portable a
   assert.ok(view.promptPreview?.ok);
   assert.ok(view.promptPreview.body.includes('核对（./src/retry.ts），并在 --cwd=. 运行测试。'));
   assert.equal(view.newSessionBlockedReason, undefined);
-  for (const outside of [w.project.fsPath + '-other/private.ts', w.project.fsPath + '/../private.ts']) {
-    user.content = '核对（' + outside + '）';
-    assert.deepEqual(buildPlanHandoffPrompt(w.source, planId, 'zh-CN'), { ok: false, reason: 'disclosure' });
-  }
+  // Two different sources, two different guards. A sibling directory is refused by exact root
+  // comparison — it is text in the body, whether the user or the model wrote it. Parent
+  // traversal is a structural property rather than a disclosure, so it survives as written and
+  // is only refused when the evidence shows that an outside path was actually read.
+  user.content = '核对（' + w.project.fsPath + '-other/private.ts）';
+  assert.deepEqual(buildPlanHandoffPrompt(w.source, planId, 'zh-CN'), { ok: false, reason: 'disclosure' });
+  user.content = '核对（' + w.project.fsPath + '/../private.ts）';
+  const traversal = buildPlanHandoffPrompt(w.source, planId, 'zh-CN');
+  assert.ok(traversal.ok, JSON.stringify(traversal));
+  assert.ok(traversal.body.includes(w.project.fsPath + '/../private.ts'), 'the traversal text is delivered as written');
+  assert.ok(!traversal.body.includes('核对（./'), 'it must not be rewritten into the project root');
+  // A tool result field naming an outside path refuses the handoff once the body quotes it.
+  const outside = w.project.fsPath + '-other/private.ts';
+  w.source.messages.find(message => message.id === 'plan-assistant')!.toolRounds = [{
+    assistantContent: null, reasoningContent: null,
+    toolCalls: [{ id: 'outside', type: 'function', function: { name: 'keepseek_read_evidence', arguments: '{}' } }],
+    toolResults: [{ toolCallId: 'outside', content: JSON.stringify({ ok: true, path: outside }) }]
+  }];
+  user.content = '核对（' + outside + '）';
+  assert.deepEqual(buildPlanHandoffPrompt(w.source, planId, 'zh-CN'), { ok: false, reason: 'disclosure' });
+  // The same evidence with a body that stays inside the project is not a disclosure by itself.
+  user.content = '核对（' + w.project.fsPath + '/src/retry.ts）';
+  assert.ok(buildPlanHandoffPrompt(w.source, planId, 'zh-CN').ok);
 });
 
 test('a historical plan without its task identity keeps the copy preview and cannot start a handoff', async t => {

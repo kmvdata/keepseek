@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { findSensitiveEvidence } from '../approvals/sensitiveText';
+import { hasPrivateKeyBlock, redactSensitiveMaterial } from '../approvals/sensitiveText';
 import type { KeepseekLanguage } from '../shared/i18n';
 import type { ChatMessage, ChatSession, PlanWorkflowRecord } from '../shared/types';
 import type { ProviderRequestProjection } from './providerRequestProjection';
@@ -33,13 +33,13 @@ export function isPlanRecordContentValid(session: ChatSession, record: PlanWorkf
 const errorMessages = {
   'zh-CN': {
     invalid: '计划或正文版本已变化。请查看最新版本后重试。',
-    disclosure: '正文包含私有路径、敏感信息或来自外部资料的内容。请在当前会话执行，或用项目相对路径和可披露的需求另行规划。',
+    disclosure: '正文涉及本轮读取过的项目外内容，或包含私钥。请改述为项目相对路径，或在本会话直接执行。',
     oversize: '完整正文超过首条消息容量。请在当前会话执行，或缩短计划中的可选说明并保留全部验收条件后重新预览。',
     missing_context: '正文仍依赖原会话的证据或引用。请把必要的目标、项目相对路径和验证方法写入计划后重新预览。'
   },
   en: {
     invalid: 'The plan or prompt has changed. Review its latest version and try again.',
-    disclosure: 'The prompt contains a private path, sensitive material, or external context. Run in this session, or plan again with project-relative paths and a requirement you can share.',
+    disclosure: 'The prompt reflects content read outside this project, or contains a private key. Use project-relative paths, or run in this session.',
     oversize: 'The complete prompt exceeds the first-message limit. Run in this session, or shorten optional details while preserving all acceptance criteria and preview again.',
     missing_context: 'This prompt still depends on evidence or references from its original session. Revise it with the necessary goal, project-relative paths and verification steps.'
   }
@@ -78,76 +78,240 @@ const framing = {
 // Only replace exact directory boundaries, including paths containing spaces.
 function projectRelativeText(value: string, folders: readonly string[]): string {
   let text = value.trim();
-  for (const root of [...folders].sort((a, b) => b.length - a.length)) {
-    let path: string;
-    try {
-      const uri = new URL(root);
-      path = decodeURIComponent(uri.pathname).replace(/\/$/u, '');
-      if (!path || uri.search || uri.hash) continue;
-    } catch { continue; }
-    const roots = [root.replace(/\/$/u, ''), path];
-    if (/^\/[a-z]:\//iu.test(path)) roots.push(path.slice(1), path.slice(1).replace(/\//gu, '\\'));
-    for (const prefix of roots) {
-      const escaped = prefix.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
-      // Leave unrelated or parent-traversing paths visible to the disclosure guard.
-      text = text.replace(new RegExp('(^|[\\u3000-\\u9fff\\s`"\'(：:=<（，；、【「『“‘\\[])(?:' + escaped + ')(?=[/\\\\]|[\\s`"\')，。；、）】」』”’>\\]]|$)', 'gu'), '$1.');
-    }
+  // Both forms appear in stored text: the raw folder string (a file: URI, possibly still
+  // percent-encoded) and the decoded fsPath. Longest first so a nested root wins.
+  const prefixes = [...new Set([...normalizeRoots(folders), ...folders.map(folder => folder.replace(/\/$/u, ''))])]
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length);
+  for (const root of prefixes) {
+    const escaped = root.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+    // A following `..` segment is left as written: traversal is a structural property, not a
+    // disclosure, and it exposes nothing outside the project on its own.
+    const boundary = '(?=[/\\\\](?!\\.\\.(?:[/\\\\]|$))|[\\s`"\')，。；、）】」』>\\]]|$)';
+    text = text.replace(new RegExp('(^|[^A-Za-z0-9._\\-/\\\\])(?:' + escaped + ')' + boundary, 'gu'), '$1.');
   }
   return text;
+}
+
+/**
+ * file:// URIs and bare fsPaths both become plain fsPaths without a trailing separator.
+ * A bare fsPath is also a valid input: `new URL()` rejects it, which previously dropped the
+ * root from portability rewriting without any visible failure.
+ */
+export function normalizeRoots(folders: readonly string[]): string[] {
+  const roots: string[] = [];
+  for (const folder of folders) {
+    let path: string;
+    try {
+      const uri = new URL(folder);
+      if (uri.search || uri.hash) continue;
+      path = decodeURIComponent(uri.pathname);
+    } catch {
+      path = folder;
+    }
+    path = path.replace(/\/$/u, '');
+    if (!path) continue;
+    roots.push(path);
+    if (/^\/[a-z]:\//iu.test(path)) roots.push(path.slice(1), path.slice(1).replace(/\//gu, '\\'));
+  }
+  return [...new Set(roots)];
+}
+
+const TRAILING_PUNCTUATION = /[.,;:!?。，；：、！？…·、)\]}>"'`」』】》〉]+$/u;
+
+/**
+ * Extracts path-shaped candidates without deciding whether they are private. The leading
+ * condition is "not preceded by an ASCII path character" instead of an enumerated character
+ * class, so CJK prose, full-width punctuation, backticks and table pipes all count as starts.
+ * Host classification happens in isOutsideRoot(), which is the only place that knows a root.
+ */
+export function findPathLikeTokens(text: string): string[] {
+  const decoded = text.replace(/%(?:2f|5c|3a)/giu, escape => String.fromCharCode(parseInt(escape.slice(1), 16)));
+  const tokens: string[] = [];
+  // One shared leading boundary: a candidate never starts inside an existing path or word, so
+  // the `s:` of `https://` is not read as a drive letter.
+  const candidate = /(?<![A-Za-z0-9._\-/\\])(?:file:[^\s，。；：、）】」』"'`]*|vscode-remote:[^\s，。；：、）】」』"'`]*|\\\\[^\\\s]+\\[^\s，。；：、）】」』"'`]*|[A-Za-z]:(?![\\/]{2})[\\/][^\s，。；：、）】」』"'`]*|\/(?!\/)[\p{L}\p{N}._\-/]*)/gu;
+  for (const match of decoded.matchAll(candidate)) {
+    const token = match[0].replace(TRAILING_PUNCTUATION, '');
+    if (token && !tokens.includes(token)) tokens.push(token);
+  }
+  return tokens;
+}
+
+function toFsPath(token: string): string {
+  let value = token.trim();
+  if (/^(?:file|vscode-remote):/iu.test(value)) {
+    try {
+      value = decodeURIComponent(new URL(value).pathname);
+    } catch {
+      // A malformed URI still names the same place once the scheme is stripped.
+      value = '/' + value.replace(/^[a-z-]+:\/*/iu, '').replace(/^\/+/u, '');
+    }
+  }
+  return value.replace(/\\/gu, '/');
+}
+
+function looksLikeHostPath(path: string): boolean {
+  if (/^\/?[A-Za-z]:\//u.test(path)) return true;
+  if (path.startsWith('//')) return true;
+  return /^\/(?:Users|home|root|private|etc|opt|var|tmp|usr|Volumes|mnt|srv)\//u.test(path);
+}
+
+function isUnderRoot(path: string, roots: readonly string[]): boolean {
+  for (const root of roots) {
+    const normalized = toFsPath(root).replace(/\/$/u, '');
+    if (!normalized) continue;
+    if (path === normalized || path.startsWith(normalized + '/')) return true;
+  }
+  return false;
+}
+
+/**
+ * True only for a path that is outside every workspace root and also recognisable as a host
+ * path. `/v1/chat/completions`, `/api/users`, `/test` and the single segment `/home` are
+ * routes or commands, not host paths, and stay allowed.
+ *
+ * With no root at all nothing can be shown to be outside the project, so the body comparison
+ * stays silent; production always supplies the session's workspace folders.
+ */
+export function isOutsideRoot(token: string, roots: readonly string[]): boolean {
+  if (!roots.length) return false;
+  const path = toFsPath(token);
+  return Boolean(path) && !isUnderRoot(path, roots) && looksLikeHostPath(path);
+}
+
+const PATH_FIELD_SEGMENTS = new Set(['uri', 'url', 'path', 'root', 'cwd', 'folder', 'directory', 'file', 'dir']);
+const EVIDENCE_SCAN_DEPTH = 4;
+const EVIDENCE_SCAN_STRING = 4_096;
+const EVIDENCE_SCAN_NODES = 5_000;
+
+/** `path`, `cwd`, `canonicalUri` and `parent_path` all name a location; `specHash` does not. */
+function isPathFieldName(key: string): boolean {
+  const segments = key.replace(/([a-z0-9])([A-Z])/gu, '$1_$2').toLowerCase().split(/[^a-z0-9]+/u).filter(Boolean);
+  return segments.length > 0 && PATH_FIELD_SEGMENTS.has(segments[segments.length - 1]);
+}
+
+/**
+ * Structured tool output carries trustworthy boundaries, so the same candidate extraction is
+ * safe here. Limits keep a large evidence envelope from slowing down every plan-card render.
+ */
+function collectStructuredPaths(value: unknown, into: Set<string>): void {
+  let budget = EVIDENCE_SCAN_NODES;
+  const walk = (node: unknown, depth: number): void => {
+    if (budget <= 0 || depth > EVIDENCE_SCAN_DEPTH) return;
+    budget--;
+    if (typeof node === 'string') return;
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item, depth + 1);
+      return;
+    }
+    if (!node || typeof node !== 'object') return;
+    for (const [key, child] of Object.entries(node as Record<string, unknown>)) {
+      if (typeof child === 'string') {
+        if (child.length > EVIDENCE_SCAN_STRING || !isPathFieldName(key)) continue;
+        for (const token of findPathLikeTokens(child)) into.add(toFsPath(token));
+        continue;
+      }
+      walk(child, depth + 1);
+    }
+  };
+  walk(value, 0);
+}
+
+/** A location field names a real path only once it has more than one segment. */
+function isPathValue(path: string): boolean {
+  return Boolean(path) && path.replace(/\/$/u, '').split('/').filter(Boolean).length >= 2;
+}
+
+function mentionsExternalPath(tokens: readonly string[], externalPaths: ReadonlySet<string>): boolean {
+  if (!externalPaths.size) return false;
+  for (const token of tokens) {
+    const path = toFsPath(token);
+    for (const external of externalPaths) {
+      if (path === external || path.startsWith(external + '/')) return true;
+    }
+  }
+  return false;
 }
 
 // Only a host read of the complete byte stream produces fileSha256. Evidence
 // contentHash and scope fingerprints do not enter the file checksum column.
 function inspectFileReads(rounds: ChatMessage['toolRounds'], folders: readonly string[], mentioned: string): {
-  externalRead: boolean; anchors: Map<string, string>;
+  externalRead: boolean; anchors: Map<string, string>; externalPaths: Set<string>;
 } {
   const anchors = new Map<string, string>();
+  const externalPaths = new Set<string>();
+  const roots = normalizeRoots(folders);
   for (const round of rounds ?? []) {
     const reads = new Map(round.toolCalls
       .filter(call => ['keepseek_read_workspace_file', 'keepseek_read_workspace_file_range'].includes(call.function.name))
       .map(call => [call.id, call.function.name]));
     for (const result of round.toolResults) {
-      if (!reads.has(result.toolCallId)) continue;
+      let data: unknown;
       try {
-        const data = JSON.parse(result.content);
-        if (data?.ok !== true || typeof data.uri !== 'string') continue;
-        const relative = projectRelativeText(data.uri, folders);
-        if (!relative.startsWith('./') || relative.split('/').includes('..')) return { externalRead: true, anchors };
-        if (reads.get(result.toolCallId) !== 'keepseek_read_workspace_file' || typeof data.fileSha256 !== 'string'
-          || !/^[a-f0-9]{64}$/u.test(data.fileSha256)) continue;
-        if (!/^[\p{L}\p{N}_./ -]+$/u.test(relative)
-          || !mentioned.includes(relative.slice(2))) continue;
-        anchors.set(relative, data.fileSha256);
-      } catch { /* Omitted, archived or non-JSON tool output supplies no checksum. */ }
+        data = JSON.parse(result.content);
+      } catch {
+        // Omitted, archived or non-JSON tool output supplies no checksum and no fields.
+        continue;
+      }
+      const record = data as { ok?: unknown; uri?: unknown; fileSha256?: unknown } | null;
+      if (reads.has(result.toolCallId) && record?.ok === true && typeof record.uri === 'string') {
+        const relative = projectRelativeText(record.uri, folders);
+        if (!relative.startsWith('./') || relative.split('/').includes('..')) return { externalRead: true, anchors, externalPaths };
+        const name = reads.get(result.toolCallId);
+        if (name === 'keepseek_read_workspace_file' && typeof record.fileSha256 === 'string'
+          && /^[a-f0-9]{64}$/u.test(record.fileSha256)
+          && /^[\p{L}\p{N}_./ -]+$/u.test(relative) && mentioned.includes(relative.slice(2))) {
+          anchors.set(relative, record.fileSha256);
+        }
+      }
+      // Reading a file is not the only way external material enters: any structured field of
+      // any tool result can name one. These are compared exactly, without character classes,
+      // and anything not beneath a root is external — a field has no prose to be a false alarm.
+      const found = new Set<string>();
+      collectStructuredPaths(data, found);
+      for (const path of found) {
+        if (isPathValue(path) && !isUnderRoot(path, roots)) externalPaths.add(path);
+      }
     }
   }
-  return { externalRead: false, anchors };
+  return { externalRead: false, anchors, externalPaths };
 }
 
-function renderPrompt(requirement: string, steps: string, language: KeepseekLanguage, anchors: Map<string, string>): GeneratedHandoffPrompt {
+interface PromptGuardContext {
+  roots: readonly string[];
+  anchors: Map<string, string>;
+  externalPaths: ReadonlySet<string>;
+}
+
+function renderPrompt(requirement: string, steps: string, language: KeepseekLanguage, context: PromptGuardContext): GeneratedHandoffPrompt {
   if (!requirement || !steps) return { ok: false, reason: 'missing_context' };
+  // Four stages, fixed order: the hard refusals must inspect the original bytes, and every
+  // length-based decision below must run on the redacted text that is actually delivered.
   const text = requirement + '\n' + steps;
-  const privatePath = /(?:\b(?:file|vscode-remote):\/|(?:^|[\s(`"'=<：（，；、【「『“‘])(?:\/(?!\/)[\p{L}\p{N}._-]|~[\\/]|(?:\.[\\/])*\.\.[\\/]|[a-z]:[\\/]|\\\\[^\\]))/imu;
-  // Paths can immediately follow Chinese prose, punctuation, an option or a JSON key.
-  const absolutePrivateRoot = /(?:\/(?:Users|home|private|var\/folders)\/|\b[A-Za-z]:[\\/]|\\\\[^\s\\]+\\)/u;
-  const decoded = text.replace(/%(?:2f|5c|3a)/giu, escape => String.fromCharCode(parseInt(escape.slice(1), 16)));
-  if (privatePath.test(decoded) || absolutePrivateRoot.test(decoded) || findSensitiveEvidence(text)) return { ok: false, reason: 'disclosure' };
-  if (/\bev_[a-f\d]{40}\.[a-f\d]{24}\b|\[keepseek-archive:|\[(?:\$|@)[^\]]+\]\([^)]*SKILL\.md\)|(?:see|refer to) (?:the )?(?:above|previous (?:message|session|conversation))|(?:详见|参见|同|见)(?:上文|上述对话|上一条消息)/iu.test(text)) {
+  if (hasPrivateKeyBlock(text)) return { ok: false, reason: 'disclosure' };
+  const tokens = findPathLikeTokens(text);
+  if (tokens.some(token => isOutsideRoot(token, context.roots))
+    || mentionsExternalPath(tokens, context.externalPaths)) return { ok: false, reason: 'disclosure' };
+  const safeRequirement = redactSensitiveMaterial(requirement);
+  const safeSteps = redactSensitiveMaterial(steps);
+  const safeText = safeRequirement + '\n' + safeSteps;
+  if (/\bev_[a-f\d]{40}\.[a-f\d]{24}\b|\[keepseek-archive:|\[(?:\$|@)[^\]]+\]\([^)]*SKILL\.md\)|(?:see|refer to) (?:the )?(?:above|previous (?:message|session|conversation))|(?:详见|参见|同|见)(?:上文|上述对话|上一条消息)/iu.test(safeText)) {
     return { ok: false, reason: 'missing_context' };
   }
-  const knownHashes = new Set(anchors.values());
-  if ([...steps.matchAll(/\b[a-f\d]{64}\b/giu)].some(([digest]) => !knownHashes.has(digest) && !requirement.includes(digest))) {
+  const knownHashes = new Set(context.anchors.values());
+  if ([...safeSteps.matchAll(/\b[a-f\d]{64}\b/giu)].some(([digest]) => !knownHashes.has(digest) && !safeRequirement.includes(digest))) {
     return { ok: false, reason: 'missing_context' };
   }
   const f = framing[language];
   const section = (title: string, body: string) => '## ' + title + '\n\n' + body;
-  let body = ['# ' + f.title, section(f.goal, requirement), section(f.constraints, f.scope),
-    section(f.steps, steps), section(f.assumptions, f.verification), section(f.acceptance, f.delivery)].join('\n\n');
+  let body = ['# ' + f.title, section(f.goal, safeRequirement), section(f.constraints, f.scope),
+    section(f.steps, safeSteps), section(f.assumptions, f.verification), section(f.acceptance, f.delivery)].join('\n\n');
   // The 24k soft target only budgets optional locators; keep mandatory criteria intact.
   const heading = language === 'en' ? 'File-content SHA-256 at inspection' : '调查时的文件内容 SHA-256';
   const rows: string[] = [];
   let length = body.length + heading.length + 8;
-  for (const [path, digest] of [...anchors].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
+  for (const [path, digest] of [...context.anchors].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
     const row = '- `' + path + '` — `' + digest + '`';
     if (length + row.length > 24_000) break;
     rows.push(row);
@@ -168,7 +332,9 @@ export function renderGeneratedHandoffPrompt(requirement: string, authoredPrompt
   const steps = projectRelativeText(authoredPrompt, workspaceFolders);
   const reads = inspectFileReads(toolRounds, workspaceFolders, goal + '\n' + steps);
   if (reads.externalRead) return { ok: false, reason: 'disclosure' };
-  return renderPrompt(goal, steps, language, reads.anchors);
+  return renderPrompt(goal, steps, language, {
+    roots: normalizeRoots(workspaceFolders), anchors: reads.anchors, externalPaths: reads.externalPaths
+  });
 }
 
 export function usedExternalHandoffContext(request: { contextFiles?: readonly { source: string }[]; authorizedExternalReferenceUris?: readonly string[] }): boolean {
@@ -195,7 +361,11 @@ export function buildPlanHandoffPrompt(session: ChatSession, planId: string, lan
   const steps = projectRelativeText(assistant.content, folders);
   const reads = inspectFileReads(assistant.toolRounds, folders, requirement + '\n' + steps);
   if (reads.externalRead) return { ok: false, reason: 'disclosure' };
-  const preview = renderPrompt(requirement, steps, language, reads.anchors);
+  // buildPlanHandoffPrompt() runs on every plan-card render, so the scan above is bounded and
+  // the roots are computed once per call rather than per candidate.
+  const preview = renderPrompt(requirement, steps, language, {
+    roots: normalizeRoots(folders), anchors: reads.anchors, externalPaths: reads.externalPaths
+  });
   return preview.ok ? { ...preview, planHash: plan.contentHash } : preview;
 }
 
