@@ -425,7 +425,10 @@ export class ChangeSetStore {
     const session = this.sessionStore.getActiveSession();
     const origin = session.id === set.sessionId ? session.messages?.find(message => message.id === set.messageId) : undefined;
     // The explicit Create Skill dialog has a host-authored timeline message,
-    // unlike a DraftEdit issued by an Agent execution segment.
+    // unlike a DraftEdit issued by an Agent execution segment. This flag no
+    // longer decides writability: inside a workspace folder .agents/skills is an
+    // ordinary L1 content write. It only marks the Create Skill origin for the
+    // approval and revert path.
     return origin?.role === 'assistant' && origin.contextMeta?.protectedReason === 'draft_edit_result'
       && origin.contextMeta.isProtected === true && !origin.runDetails && !origin.runState && !origin.runCheckpoint && !origin.runCheckpointArchive;
   }

@@ -102,7 +102,7 @@ test/                  按行为契约组织的回归测试
 - 交互能力只由 `provider/interactionState.ts` 派生；异步拥有者须在首个 await 前取得带会话身份的预占，只有持有者可完成/交接。持续提示随操作终态同次清除；提交接受须有正文持久化屏障。后台功能须声明能力、预算、durability 与失败/恢复依赖。
 - `webview/input/composition.ts` 的 fragment 顺序是运行时契约；样式、模板、行为放各自 fragment。共享编辑器快捷键只放 `richTextShortcuts.ts`。
 - 共享文件只读：`.agents/skills`、`~/.agents/skills`、`CODEX_HOME` 配置/指令；任务作用域冻结，变更仅在受控刷新边界生效，标准策略不扩大权限。`.agents/` 未入 `.gitignore`（项目 Skill 随仓库共享），`.workbuddy-ai/` 已忽略（本地记忆不共享），稳定知识须上移为项目 Skill 或本文件条款。
-- 受保护目标只走专用通道：`.agents/skills/**` 只有 SkillCreator 的 scaffold 草稿能写（`protectedTargets.ts` 的 `skillScaffold`），通用 DraftEdit 一律被拒；`.aws`/`.ssh`/`.codex`/凭据文件/`.git` 内部配置同理不可授权。
+- 写入分级：受信任工作区内默认允许 DraftEdit 目标（含 `.agents/**`、`AGENTS.md`、`.env*`），`approve-all` 下与其他文件同权；L2 硬边界为 `.git` 全段、`.npmrc`/`.netrc`/`.pypirc`/`.git-credentials`/`id_rsa*`/`credentials`/`cookies` 与 OS 核心路径，任何模式与来源都不得写入且无人工回退；工作区外仍逐 URI 精确授权。
 - 新持久化字段必须有当前协议校验与恢复；优先 `writeJsonAtomic()`，业务层不拼 globalStorage 版本路径。
 
 ## 4. 改动路由

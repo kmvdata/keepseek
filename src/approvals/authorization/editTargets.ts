@@ -1,12 +1,19 @@
 import { lstat, realpath } from 'node:fs/promises';
 import * as vscode from 'vscode';
 import { canonicalPath, isPathInside } from './pathScope';
-import { assertOperationPath } from './protectedTargets';
+import { assertHardProtectedPath, assertOperationPath } from './protectedTargets';
 
 /** Local metadata only. External provider-backed URIs are never accessed here. */
 export async function inspectDraftEditTarget(uri: vscode.Uri, allowMissing: boolean, skillScaffold = false) {
-  assertOperationPath(uri.fsPath, true, skillScaffold);
   const folder = vscode.workspace.getWorkspaceFolder(uri);
+  // Inside a workspace folder only authority-bearing paths stay blocked; every
+  // other target is an ordinary content write. Outside it the exact-grant
+  // policy still applies unchanged.
+  const assertLocal = (value: string): void => {
+    if (folder && uri.scheme === 'file') assertHardProtectedPath(value);
+    else assertOperationPath(value, true, skillScaffold);
+  };
+  assertLocal(uri.fsPath);
   const identity = { uri: uri.toString(), root: folder?.uri.toString() };
   if (uri.scheme !== 'file') {
     assertOperationPath(uri.path, true, skillScaffold);
@@ -19,7 +26,7 @@ export async function inspectDraftEditTarget(uri: vscode.Uri, allowMissing: bool
   if (info?.isSymbolicLink()) throw new Error('DraftEdit targets cannot be symbolic links.');
   if (info && !info.isFile()) throw new Error('DraftEdit target is not a regular file. / 草稿编辑目标不是普通文件。');
   const canonical = await canonicalPath(uri.fsPath);
-  assertOperationPath(canonical, true, skillScaffold);
+  assertLocal(canonical);
   if (folder && !isPathInside(await realpath(folder.uri.fsPath), canonical)) {
     throw new Error('DraftEdit target escapes the workspace through a symbolic link.');
   }

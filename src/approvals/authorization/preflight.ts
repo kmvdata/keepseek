@@ -122,7 +122,9 @@ export async function assertAutomaticRunAuthorization(run: DraftRun, grants: Exa
 }
 
 /** Edit scope consent uses the existing exact URI contract. Canonical paths,
- * symlinks, base hashes and dirty editors remain enforced by SafeFileEditor. */
+ * symlinks, base hashes and dirty editors remain enforced by SafeFileEditor.
+ * Inside a workspace folder inspectDraftEditTarget applies the L2 hard boundary
+ * only; outside it the exact-grant policy stands unchanged. */
 export async function inspectAutomaticEditAuthorization(input: { sessionId: string; runId: string; edit: DraftEdit; skillScaffold?: boolean },
   grants: ExactOperationGrants, selectedProjectUri?: string) {
   if (!vscode.workspace.isTrusted) throw new Error('DraftEdit requires a trusted workspace.');
