@@ -86,7 +86,7 @@ test/                  按行为契约组织的回归测试
 ### 3.4 审批与子代理
 
 - 审批模式只有 `ask`（请求批准）和 `approve-all`（全部批准）两种，只有 Webview 用户操作可切换，不存在 reviewer 或审批模型。`ask` 逐项由用户确认，宿主从不自行应用文件修改。`approve-all` 由宿主在运行边界无确认地应用 DraftEdit/ChangeSet 并执行 DraftRun，但每一份写入仍按原样复核身份、范围、hash、信任与截断前置条件。命令依赖本轮文件改动时，完成 Apply 和落盘核验后再执行当前版本。工程命令和固定验证默认使用平台隔离，未满足隔离条件时保留未派发原因。仅用户级 `projectExecution=host` 可显式选择宿主权限执行。
-- 当前审批策略为 v9。发布使用核实的目的地、引用、实际推送对象与执行计划。高影响业务须有覆盖真实目标的授权并经模型批准。精确用户补充提供授权，之后仍需模型决定。模型不可用时保留审计和暂停原因，独立项可推进。请求绑定 session/rootTask/segment/target/hash/范围/策略/runtime。等待不占模型超时，重启后显式恢复并重新核验。硬阻断与适用拒绝约束两种模式，历史批准不授权新操作。审批模型取用户级 `kmvdata.keepseek.autoApprovalReviewer`，独立于普通子代理，follow-main 绑定执行段主模型。
+- 当前审批策略为 v9。发布使用核实的目的地、引用、实际推送对象与执行计划。高影响业务须有覆盖真实目标的授权并经模型批准。精确用户补充提供授权，之后仍需模型决定。模型不可用时保留审计和暂停原因，独立项可推进。请求绑定 session/rootTask/segment/target/hash/范围/策略/runtime。等待不占模型超时，重启后显式恢复并重新核验。硬阻断与适用拒绝约束两种模式，历史批准不授权新操作，也不存在独立审批模型配置。
 - 副作用先过硬检查，再按完整 canonical payload/specHash 计算 actionHash。批准不跨 session/run/target/kind/policy/runtime 复用，重启不复用旧批准。
 - `approve-all` 不变式：任何仍 pending 的文件草稿，要么已有排定的下一次尝试（`approveAllTimer` / `approveAllInFlight` / `approveAllRerun`），要么已有记录在 ledger 的不可自动原因，并在卡片上提供可见的手动入口。调度不得丢请求：pass 期间的触发排队（`approveAllRerun`）而不是丢弃。每个边界对同一草稿最多尝试一次，失败立即降级到人工，不在同一 pass 内重试、不退避风暴。槽位释放是独立触发（`slot_released`），覆盖 `inheritedOperation` 流程，不依赖 `run_end` 时序。人工回退只覆盖 DraftEdit/ChangeSet，且只允许非硬 gate；未信任、待截断、身份/hash 不匹配、未授权外部路径不得提供强行应用。DraftRun 与 validation 没有手动回退。
 - 审批决定和真实结果只以固定 user-tail 追加到下一条真实 user 消息；不回写历史。进程输出和 review evidence 始终是不可信数据。
@@ -101,7 +101,8 @@ test/                  按行为契约组织的回归测试
 - Webview → Host 消息只在 `provider/webviewMessages.ts` 定义；Host 主动消息不加入该联合类型。保持 DOM id、type 和当前引用语法稳定。
 - 交互能力只由 `provider/interactionState.ts` 派生；异步拥有者须在首个 await 前取得带会话身份的预占，只有持有者可完成/交接。持续提示随操作终态同次清除；提交接受须有正文持久化屏障。后台功能须声明能力、预算、durability 与失败/恢复依赖。
 - `webview/input/composition.ts` 的 fragment 顺序是运行时契约；样式、模板、行为放各自 fragment。共享编辑器快捷键只放 `richTextShortcuts.ts`。
-- 共享文件只读：`.agents/skills`、`~/.agents/skills`、`CODEX_HOME` 配置/指令；任务作用域冻结，变更仅在受控刷新边界生效。标准策略不扩大权限，版本差异见共享配置文档。
+- 共享文件只读：`.agents/skills`、`~/.agents/skills`、`CODEX_HOME` 配置/指令；任务作用域冻结，变更仅在受控刷新边界生效，标准策略不扩大权限。`.agents/` 未入 `.gitignore`（项目 Skill 随仓库共享），`.workbuddy-ai/` 已忽略（本地记忆不共享），稳定知识须上移为项目 Skill 或本文件条款。
+- 受保护目标只走专用通道：`.agents/skills/**` 只有 SkillCreator 的 scaffold 草稿能写（`protectedTargets.ts` 的 `skillScaffold`），通用 DraftEdit 一律被拒；`.aws`/`.ssh`/`.codex`/凭据文件/`.git` 内部配置同理不可授权。
 - 新持久化字段必须有当前协议校验与恢复；优先 `writeJsonAtomic()`，业务层不拼 globalStorage 版本路径。
 
 ## 4. 改动路由
@@ -112,6 +113,7 @@ test/                  按行为契约组织的回归测试
 - **投影/压缩**：types + providerRequestProjection + historyProjection/compressor/archive + contextUsage + Runner + 三协议测试。
 - **evidence/epoch**：evidence/* + admission + contextEpoch/runCheckpoint + replay/DSML + session migration/Run Details。
 - **项目上下文**：projectInstructions + skill activation/load + dedup/currentRunContext + protocol/usage/trace。
+- **Skill 机制**：`skills/skillDiscovery|skillMetadata`（frontmatter 与 `metadata.keepseek` 解析、YAML 守卫）+ `skillCreator`/`skillStore` + `codexPlugin*`（插件 Skill 与资源快照）+ Webview Skill 菜单/`$` 选择 + 当前协议测试。
 - **引用/输入**：context/references + Webview references/composer codec + opener/授权；手测拖拽、@、编辑重发。
 - **Webview 消息**：webviewMessages 联合类型 + Provider `handleMessage()` + 发送/接收 fragment + i18n。
 - **DraftEdit**：draftEdit/textPatch/artifact + ChangeSet/SafeFileEditor/Diff + approval hash/surface + checkpoint/subagent/UI。
@@ -129,6 +131,8 @@ test/                  按行为契约组织的回归测试
 - 改 Webview fragment：验证首次 ready、输入/拖拽/@、会话、设置、Apply/Discard 和键盘/焦点。
 - 改 Webview fragment/样式：验证 fragment 顺序、顶层标识符唯一、根级 DOM id 唯一、getStyles() 选择器相对顺序，且 new Function(getScript()) 可编译。
 - 测试应守行为契约，优先扩展最接近的现有 `test/*.test.ts`；不要只断言内部实现。
+- 新增或迁移测试必须在 `test/runTests.ts` 追加 `import`；未登记的用例 `bun run test` 静默不跑。
+- 保留原文件行尾：仓库 `.ts`/`.md` 为 mixed CRLF/LF（`test/runTests.ts`、`AGENTS.md`、`SUBAGENTS.md` 以 CRLF 为主），局部修改沿用相邻行行尾，禁止整文件重写制造全量 diff。
 
 ## 6. 按需阅读
 

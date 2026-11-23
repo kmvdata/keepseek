@@ -1,8 +1,8 @@
 # KeepSeek 子代理架构、安全与用量
 
-模型设置位于 `/` → 子代理模型：默认及 research / review / proposal 的覆盖保持独立；review 显示为“代码审查”。同一菜单下的“审批模型”仅使用用户级 `kmvdata.keepseek.autoApprovalReviewer`，默认跟随任务执行段实际主模型，不读取子代理 default。菜单归组不改变两套配置的独立性，父任务选择“帮我审批”不提升任何 child 的权限。
+模型设置位于 `/` → 子代理模型：默认及 research / review / proposal 的覆盖保持独立；review 显示为“代码审查”。菜单归组不改变配置独立性，父任务选择的审批模式也不提升任何 child 的权限。
 
-> 子代理主题的唯一交接入口。本文合并了原 `doc/subagent-runtime-security.md` 与 `doc/subagent-usage-statistics.md`，覆盖当前子代理 runtime 协议 V15 的隔离、调度、结果合同、恢复和统计。主 Agent 工作流见 [`doc/keepseek-agent-runtime-workflow.md`](doc/keepseek-agent-runtime-workflow.md)。P1 变更与验证限制见 [`doc/keepseek-p1-subagent-reliability.md`](doc/keepseek-p1-subagent-reliability.md)。
+> 子代理专题文档，覆盖当前子代理 runtime 协议 V15 的隔离、调度、结果合同、恢复和统计。通用分层、审批边界、验证与改动路由以 [`AGENTS.md`](AGENTS.md) 为唯一权威，本文不复述。
 
 ## 1. 设计目标
 
@@ -16,25 +16,21 @@
 4. proposal 只能产生草案；实际写入和命令仍回到父会话审批管线。
 5. 时间、费用和取消属于同一逻辑任务，不能通过委派重置。
 
-`subagents/runtime.ts` 的 `SUBAGENT_PROTOCOL_VERSION` 与父会话共同取 `CURRENT_AGENT_PROTOCOL_VERSION`，当前仅为 **15**。child 使用结果合同 V2、handoff manifest V3、宿主继承 capsule V1 和结果索引 V1；会话对象存储 V4、审批策略及审批交付协议是独立维度。仅读取当前格式，见[版本权威表](doc/README.md#版本维度)。
+`subagents/runtime.ts` 的 `SUBAGENT_PROTOCOL_VERSION` 与父会话共同取 `CURRENT_AGENT_PROTOCOL_VERSION`，当前仅为 **15**。child 使用结果合同 V2、handoff manifest V3、宿主继承 capsule V1 和结果索引 V1；会话对象存储 V4、审批策略及审批交付协议是独立维度。仅读取当前格式；各维度版本号以源码常量为准，文档不复述。
 
 ## 2. 权威模块
 
+本文只补充 `AGENTS.md` §2 分层图未展开的子代理模块；目录分工以该文为准，不在此重复。
+
 | 关注点 | 模块 |
 | --- | --- |
-| 调度与生命周期 | `src/agent/subagents/runtime.ts`、`scheduler.ts` |
+| 调度、生命周期与容量 | `src/agent/subagents/runtime.ts`、`scheduler.ts` |
 | profile 与 Skill 适配 | `src/agent/subagents/profiles.ts` |
-| 任务/结果协议 | `src/agent/subagents/resultEnvelope.ts`、`types.ts` |
-| 委派候选与父验收 | `src/agent/delegation.ts`、`taskPlan.ts`、`runner.ts` |
-| 宿主继承投影 | `src/agent/subagents/contextCapsule.ts` |
-| 有界回传与独立结果对象 | `src/agent/subagents/handoff.ts`、`resultIndex.ts` |
-| 工具白名单与 child loop | `src/agent/subagents/runtime.ts`、`src/agent/runner.ts` |
-| 路径作用域与冲突检查 | `src/agent/subagents/pathScope.ts`、`scheduler.ts`、`runtime.ts` |
-| continuation/reuse | `src/agent/subagents/runtime.ts`、`store.ts` |
-| 持久化与诊断 | `src/agent/subagents/store.ts` |
-| 模型设置 | `src/accounts/subagentSettingsStore.ts`、`subagentModelResolver.ts` |
-| 用量归集与估算 | `src/agent/subagentUsageStats.ts`、`runtime.ts`、Provider |
-| UI 设置与入口 | `src/provider/KeepseekChatViewProvider.ts`、`src/webview/*` |
+| handoff manifest 与结果索引 | `src/agent/subagents/handoff.ts`、`resultIndex.ts` |
+| 宿主继承 capsule | `src/agent/subagents/contextCapsule.ts` |
+| 路径作用域与冲突检查 | `src/agent/subagents/pathScope.ts` |
+| 持久化、结果分页与 continuation | `src/agent/subagents/store.ts` |
+| 用量归集与本地估算 | `src/agent/subagentUsageStats.ts` |
 
 共享常量和数据结构以源码为准，不要在 Provider 或 Webview 复制调度与权限判断。
 
@@ -51,18 +47,18 @@
 
 斜杠选择保留在可见 user 消息中，并只为当前轮追加稳定选择尾部；它不会切换审批模式、提升工具权限或创建新的后台服务。
 
-当前协议在初始计划和有证据的调查范围扩大时，引导主模型通过 `keepseek_delegation_checkpoint(action=assess)` 记录简短分工判断与候选合同：目标、范围、必要输入、依赖、所需能力和验收标准。小任务可以留在主 Agent，不强迫委派或额外 router 调用。宿主预检声明的依赖、profile、权限、路径、能力和预算；它不证明任务语义独立。同批有依赖或存在依赖环时拒绝并行，必须等待前置结果被父模型采纳后顺序推进。只读 child 不能运行 shell/Python/验证，proposal 也只能准备命令草案。
+初始计划或有证据表明范围扩大时，用 `keepseek_delegation_checkpoint(action=assess)` 登记候选合同（目标、范围、必要输入、依赖、能力、验收）。宿主预检声明的依赖、profile、权限、路径、预算，但不证明任务语义独立；同批存在依赖或依赖环即拒绝并行，须等前置结果被父模型采纳后顺序推进。只读 child 不能运行 shell/Python/验证，proposal 也只能准备命令草案。
 
-显式选择必须由主模型准备自包含 brief 再调用工具。宿主记录选择、请求、拒绝、返回、复用与父验收；未执行或类型不匹配时显示未落实，只有真实记录才能归因为预算或权限。模型判断与宿主事实分别标明，记录不含隐藏推理。`failFast` 继续是保留参数，不承诺新增批次取消策略。
+显式选择必须由主模型准备自包含 brief 再调用工具；宿主记录选择、请求、拒绝、返回、复用与父验收，未执行或类型不匹配时显示未落实。`failFast` 仍是保留参数，不承诺新增批次取消策略。
 
 | profile | 典型用途 | 工具能力 | 可再委派 |
 | --- | --- | --- | --- |
 | `research` | 定位代码、查证事实 | 只读、语义、Git 读取、Evidence | 是；仅 depth < 2 的较小只读任务 |
 | `review` | 代码/方案审查 | 只读、语义、Git 读取、Evidence | 是；仅 depth < 2 的较小只读任务 |
 | `proposal` | 生成修改或命令草案 | 只读 + DraftEdit/DraftRun 提议 | 否 |
-| Skill profile | workspace 特定任务 | 取 profile 与 Skill 声明的交集 | 显式允许且未超深度 |
+| Skill profile | workspace 特定任务 | Skill 显式声明的工具，按已知 child 工具白名单过滤 | 仅 `canDelegate: true` 且未超深度 |
 
-并行 proposal lane 会移除可能引入未知路径副作用的 DraftRun 能力；嵌套 child 只获得 `nested-read` 级别能力，不能无限递归委派。
+`metadata.keepseek.tools` 是 Skill profile 的工具权威，`canDelegate` 只控制再委派、不改变工具集合；两者都不扩大父会话已有的审批与执行边界。并行 proposal lane 会移除可能引入未知路径副作用的 DraftRun 能力；嵌套 child 只获得 `nested-read` 级别能力，不能无限递归委派。
 
 ## 4. Child 输入隔离
 
@@ -103,6 +99,20 @@ nativeStorageRoot/subagent-settings/v2/<workspaceHash>.json
 
 设置仅从当前 workspace V2 快照读取。`modelRequestTimeoutSeconds` 是所有来源共用的单次网络请求超时；`kmvdata.keepseek.agent.subagentMaxExecutionMs` 默认 300000 ms（5 分钟），限制 child 的有效执行；`kmvdata.keepseek.agent.maxExecutionMs` 是根逻辑任务共享时钟的另一层上限。child 还受调用 `timeoutMs` 与 profile 限制，正数限制取更严格值；这三层不能混为同一个超时，也不能通过重试、续接或委派重置。
 
+`metadata.keepseek`（`src/skills/skillMetadata.ts` 的 `parseSkillFrontmatter`）只接受以下字段，越界即拒绝解析：
+
+| 字段 | 约束 |
+| --- | --- |
+| `runAs` | 仅 `subagent` |
+| `profile` | ≤80 字符 |
+| `tools` | ≤64 项字符串，去重后按已知 child 工具过滤 |
+| `maxSteps` | 1–32 |
+| `timeoutMs` | 1000–900000 |
+| `resultMaxChars` | 1000–500000；内置 profile 均为 120000 |
+| `canDelegate` | 布尔，只控制再委派 |
+
+相关配置键：`subagent.handoffPreviewBytes`（1024–24576，默认 10240，window 级）、`skills.maxImplicitActivations`（0–8，默认 3）、`skills.contextBudgetChars`（默认 72000）。SKILL.md frontmatter 另有 YAML 边界：≤64 KiB、禁 anchor/alias/重复键，`name` ≤64、`description` ≤1024。
+
 ## 6. 调度与上限
 
 当前宿主硬边界：
@@ -115,6 +125,8 @@ nativeStorageRoot/subagent-settings/v2/<workspaceHash>.json
 | 最大委派深度 | 2 |
 | 单 parent 的 direct children | 8 |
 | 单任务树 child 总数 | 12 |
+
+两条常被混用的约束：上表“单 parent 8 个 direct children”是 `DEFAULT_SUBAGENT_MAX_CHILDREN_PER_PARENT_RUN`（累计派发数）；单次 `keepseek_delegate_parallel` 的批次任务上限是 `runtime.ts` 的 `MAX_PARALLEL_TASKS = 8`。二者互不替代。
 
 每个 child 的 step 上限从父任务派生，通常为父上限的一半，并限制在 1–32；当前默认下限为 5。队列等待不计入执行时间，但取消、停止、工作区失信或预算耗尽会传播到排队和运行中的 child。
 
@@ -261,32 +273,12 @@ Webview 只接收汇总：次数、状态、token/费用分类和本地估算。
 
 ## 13. 修改检查清单
 
-### 改 profile、工具或协议
+通用验证、审批边界与 `approve-all` 断言按 `AGENTS.md` §3.3–3.4、§5 执行，此处只列子代理特有项：
 
-1. 同步 schema 白名单和 Runner 执行时门禁。
-2. 检查当前 V15 schema 字节稳定、Evidence reader 与 UTF-8 byte-offset result reader。
-3. 确认嵌套与 proposal lane 没有获得额外副作用能力。
-4. 更新 compatibility hash 与 continuation 测试。
-
-### 改调度、超时或预算
-
-1. 保持父子共享逻辑任务时钟、费用和取消状态。
-2. 并行时间按区间并集核算。
-3. 队列不能绕过全局/root/proposal/depth/tree 上限。
-4. 不得重新引入隐式默认超时或预算重置。
-
-### 改 proposal
-
-1. 批次预检和返回后的实际 URI 复检都要保留。
-2. 产物数量以宿主记录为准。
-3. DraftEdit/DraftRun 必须回到父审批管线。
-4. 崩溃和不确定副作用 fail closed。
-
-### 改统计
-
-1. 实际 provider 用量与本地隔离估算分开。
-2. failed/stopped、nested、重复 ID、非法 schema 拒绝和币种分组必须覆盖。
-3. UI payload 做隐私测试。
+1. 改 profile/工具/协议：schema 白名单与 Runner 执行时门禁同步；确认嵌套与 proposal lane 未获得额外副作用能力；V15 schema 字节稳定、Evidence 与 UTF-8 byte-offset result reader 未变。
+2. 改调度/超时/预算：保持父子共享逻辑任务时钟、费用和取消；并行时间按区间并集核算；队列不能绕过全局/root/proposal/depth/tree 上限，不得重新引入隐式默认超时或预算重置。
+3. 改 proposal：批次预检和返回后的实际 URI 复检都要保留；产物数量以宿主记录为准；DraftEdit/DraftRun 必须回到父审批管线。
+4. 改统计：实际 provider 用量与本地隔离估算分开；failed/stopped、nested、重复 ID、非法 schema 拒绝和币种分组必须覆盖；UI payload 做隐私测试。
 
 ## 14. 回归测试
 
@@ -295,16 +287,19 @@ bun run build:test
 bun run test
 ```
 
-重点测试：
+新增测试文件必须在 `test/runTests.ts` 追加 `import`，否则不会执行。
 
 | 测试 | 契约 |
 | --- | --- |
-| `test/subagentArchitecture.test.ts` | profile、调度、协议、结果、continuation 与持久化 |
-| `test/subagentSafety.test.ts` | 输入隔离、工具门禁、路径作用域、proposal 冲突与 fail-closed |
-| `test/subagentUsageStats.test.ts` | 当前 schema 校验、累计/明细、去重、币种和本地估算 |
-| `test/subagentUsageRuntime.test.ts` | 实际 usage 归集、失败/停止、nested 去重与 UI 隐私 |
-| `test/p1Delegation.test.ts` | 候选合同、依赖门禁、显式选择与父验收路由 |
-| `test/runDetails.test.ts` | 生命周期/完成程度/父判断的有界展示与持久化 |
+| `test/subagentProfileCapability.test.ts` | 内置与自定义 profile 的工具集合、`canDelegate` 与 lane 推导 |
+| `test/handoffPrompt.test.ts` | handoff manifest、审批尾巴与计划复制字节 |
+| `test/planHandoffFaults.test.ts` | handoff/plan 故障、恢复与 fail-closed |
+| `test/planExecutionProbe.test.ts` | 计划执行探针与准入 |
+| `test/approveAllBoundary.test.ts`、`test/approveAllExecution.test.ts` | approve-all 边界、ledger 与真实执行 |
+| `test/changeSetBatchAdmission.test.ts` | ChangeSet 批次准入与路径租约 |
+| `test/validationBarrier.test.ts`、`test/validationAuthorization.test.ts` | 验证屏障与授权 |
+
+当前只有 profile 能力有子代理专属测试文件；调度、结果合同、continuation 与用量归集仍无专属用例，改动这些区域时须自行补断言。
 
 审查子代理改动时，最关键的问题是：**这个 child 是否只获得任务必需的信息和能力，它的结果是否仍必须经过父会话原有的安全边界？**
 
@@ -312,4 +307,4 @@ bun run test
 
 父运行的进展按已交付内容/范围与真实宿主状态判断，不按新的 child/evidence ID 判断。`readResult` 对本 runtime 中确实 queued/running、且 parent session 匹配的 child，等待完成事件；不不断请求模型轮询。取消沿用 invocation signal，完成后再次通过 store 校验 lineage、scope 和结果完整性。磁盘上中断的 child 不冒充活跃操作。检查点引用按 session 独立，复制会话不继承旧 session 的可执行 checkpoint/归档引用。费用、时间与用量归属保持现有共享逻辑任务规则。
 
-共享项目指令按全局→仓库根→任务 cwd 的顺序传入隔离 capsule，不按路径重新排序。标准 Skill 不需要 KeepSeek profile；可选 `metadata.keepseek.runAs/profile` 类能力属于 KeepSeek 扩展（实际 profile 字段见源码与共享配置报告），不会因文件声明而增加权限。
+共享项目指令按全局→仓库根→任务 cwd 的顺序传入隔离 capsule，不按路径重新排序。标准 Skill 不需要 KeepSeek profile；可选 `metadata.keepseek.runAs/profile` 属于 KeepSeek 扩展，字段与区间见 §5，不会因文件声明而增加权限。

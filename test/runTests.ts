@@ -18,6 +18,7 @@ import './accountEditorStartupFailure.test';
 import './sessionMenuHover.test';
 import './sessionQuarantine.test';
 import './sessionAbsentTombstone.test';
+import './subagentProfileCapability.test';
 import { after } from 'node:test';
 
 // The provider's startup schedules interval timers; a completed run must not

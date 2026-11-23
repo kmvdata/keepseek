@@ -97,14 +97,18 @@ export function resolveSubagentProfile(input: {
     const requestedTools = custom.subagentProfile.tools?.length
       ? custom.subagentProfile.tools
       : READ_TOOLS;
-    const allowed = new Set(custom.subagentProfile.canDelegate ? PROPOSAL_TOOLS : PROPOSAL_TOOLS);
+    // A Skill profile's declared tools are the authority: `canDelegate` controls only
+    // re-delegation and never widens or narrows the declared set. Declared names outside
+    // the known child-tool allowlist are dropped instead of trusted.
+    const knownChildTools = new Set<string>(PROPOSAL_TOOLS);
+    const toolNames = requestedTools.filter((name) => knownChildTools.has(name));
     return {
       id: custom.subagentProfile.id,
       label: custom.name,
       description: custom.description ?? '',
-      lane: inferCustomLane(requestedTools),
+      lane: inferCustomLane(toolNames),
       instructions: custom.content,
-      toolNames: requestedTools.filter((name) => allowed.has(name)),
+      toolNames,
       maxSteps: custom.subagentProfile.maxSteps,
       timeoutMs: custom.subagentProfile.timeoutMs,
       canDelegate: custom.subagentProfile.canDelegate === true,

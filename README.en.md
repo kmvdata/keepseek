@@ -10,7 +10,7 @@
 
 # KeepSeek
 
-Version 0.5.3 starts a fresh baseline under `kmvdata.keepseek`; earlier data and settings are not imported. See the [storage baseline](doc/keepseek-storage-baseline.md) for account backup, data locations, and reset instructions.
+Version 0.5.3 starts a fresh baseline under `kmvdata.keepseek`; earlier data and settings are not imported. See the storage-baseline section in [AGENTS.md](AGENTS.md) for data locations and reset rules.
 
 ## 1. Turn the Model You Choose into an Agent That Gets Real Work Done
 
@@ -144,7 +144,7 @@ bun run build:test
 bun run test
 ```
 
-The main source directories are organized by responsibility: `src/agent/` handles task orchestration and model protocols, `src/context/` expands references, `src/edits/` and `src/runs/` manage pending edits and commands, `src/sessions/` persists conversations, and `src/webview/` implements the sidebar interface. Before maintaining the project, read [AGENTS.md](AGENTS.md) for its caching, safety, and change-impact rules and the [documentation map](doc/README.md) for current topic owners and historical evidence.
+The main source directories are organized by responsibility: `src/agent/` handles task orchestration and model protocols, `src/context/` expands references, `src/edits/` and `src/runs/` manage pending edits and commands, `src/sessions/` persists conversations, and `src/webview/` implements the sidebar interface. Before maintaining the project, read [AGENTS.md](AGENTS.md) for its caching, safety, and change-impact rules; [SUBAGENTS.md](SUBAGENTS.md) covers the subagent subsystem.
 
 ### Packaging and Local Verification
 
@@ -172,11 +172,9 @@ The packaging scripts resolve `vsce` and `tsc` themselves, so they do not depend
 
 ### Maintainer Resources
 
-- [Agent runtime workflow](./doc/keepseek-agent-runtime-workflow.md)
-- [Request caching and context projection](./doc/cache_keepseek.md)
-- [API payload reference](./doc/keepseek-api-payload-reference.md)
-- [File reference specification](./doc/keepseek-file-reference-spec.md)
+- [Agent conventions and change routing](./AGENTS.md)
 - [Subagent architecture, safety, and usage](./SUBAGENTS.md)
+- [Change log](./CHANGELOG.md)
 
 ### Acknowledgments
 

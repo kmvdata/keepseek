@@ -10,7 +10,7 @@
 
 # KeepSeek
 
-0.5.3 是全新初始版本：扩展身份为 `keepseek.keepseek`，设置命名空间为 `kmvdata.keepseek`，旧数据与设置不导入。账号备份、数据位置与重置入口见[存储基线](doc/keepseek-storage-baseline.md)。
+0.5.3 是全新初始版本：扩展身份为 `keepseek.keepseek`，设置命名空间为 `kmvdata.keepseek`，旧数据与设置不导入。数据位置、重置入口与存储约束见 [AGENTS.md](AGENTS.md) 的“存储初始基线”一节。
 
 ## 一、把你选择的模型，变成真正能干活的编程 Agent
 
@@ -67,9 +67,9 @@ KeepSeek 与 Codex 共享项目 `.agents/skills/<name>/SKILL.md`、可选 `agent
 
 通过命令菜单浏览 Skills，或键入 `$` 按名称和来源选择。多根或子目录任务先用 **KeepSeek: Select Task Directory / 选择任务目录**；单根默认工作区目录。标准 YAML 的隐式资格默认开启；会话选择不能绕过共享配置禁用。创建操作将标准 Markdown 和策略 YAML 放入同一待确认 ChangeSet。
 
-相关 TOML 白名单、Codex 0.133.0 的项目 Skill 禁用限制、刷新机制和新项目验收见 [共享配置说明](doc/keepseek-codex-shared-config.md)。不再扫描旧 Skill 目录或自动读取/迁移 Legacy Memory。MCP、Codex 账号和私有工具不在共享范围内。
+共享范围以本机实现为准：KeepSeek 只读取上述文件与文档化的配置子集，保留自己的审批与执行边界，不提供 Codex MCP 运行时。不再扫描旧 Skill 目录或自动读取/迁移 Legacy Memory。MCP、Codex 账号和私有工具不在共享范围内。
 
-Shared configuration: use the same standard Skill and scoped instruction files in both hosts. Choose a task directory for multi-root/subdirectory work. KeepSeek reads the documented configuration subset, preserves its own approval and execution boundaries, and does not provide a Codex MCP runtime. See the compatibility matrix and acceptance steps in the linked guide.
+Shared configuration: use the same standard Skill and scoped instruction files in both hosts. Choose a task directory for multi-root/subdirectory work. KeepSeek reads the documented configuration subset, preserves its own approval and execution boundaries, and does not provide a Codex MCP runtime. The shared-file scope and parsing boundaries are documented in [SUBAGENTS.md](SUBAGENTS.md) and the Skill entries in `AGENTS.md`.
 
 ### 3. 让 Agent 修改和验证，但保留清晰边界
 
@@ -158,7 +158,7 @@ quadrantChart
 
 ## 三、开发、打包与项目资料
 
-开发定位与专题入口见 [文档导航](doc/README.md)，行为约束见 [AGENTS.md](AGENTS.md)。历史验收记录按各自基线阅读。
+开发约束见 [AGENTS.md](AGENTS.md)，子代理专题见 [SUBAGENTS.md](SUBAGENTS.md)，变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ### 本地开发
 
@@ -205,11 +205,9 @@ bun run reinstall:vsix
 
 ### 维护资料
 
-- [Agent 运行时工作流](./doc/keepseek-agent-runtime-workflow.md)
-- [请求缓存与上下文投影](./doc/cache_keepseek.md)
-- [API Payload 参考](./doc/keepseek-api-payload-reference.md)
-- [文件引用规范](./doc/keepseek-file-reference-spec.md)
+- [Agent 开发约定与改动路由](./AGENTS.md)
 - [子代理架构、安全与用量](./SUBAGENTS.md)
+- [变更记录](./CHANGELOG.md)
 
 ### 致谢
 
