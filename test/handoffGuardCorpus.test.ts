@@ -133,6 +133,19 @@ test('a structured field naming an outside path refuses the body that quotes it'
   assert.deepEqual(outsideCwd, { ok: false, reason: 'disclosure' });
 });
 
+test('a value that is nothing but a path counts even under an unrecognised key', () => {
+  const body = 'Reuse /Users/kermit/elsewhere/dump.json as input.';
+  for (const key of ['origin', 'folderUris', 'source']) {
+    const quoted = renderGeneratedHandoffPrompt('Goal', body, 'en', roots,
+      rounds('keepseek_read_evidence', { ok: true, [key]: '/Users/kermit/elsewhere/dump.json' }));
+    assert.deepEqual(quoted, { ok: false, reason: 'disclosure' }, key);
+  }
+  // A sentence that merely mentions the path is prose, not a location field.
+  const prose = renderGeneratedHandoffPrompt('Goal', 'Reuse ./src/dump.json as input.', 'en', roots,
+    rounds('keepseek_read_evidence', { ok: true, note: 'the user mentioned /Users/kermit/elsewhere/dump.json' }));
+  assert.ok(prose.ok);
+});
+
 test('the structured scan is bounded in depth, string length and node count', () => {
   const envelope = (depth: number) => {
     let node: Record<string, unknown> = { path: '/Users/kermit/elsewhere/deep.ts' };
@@ -193,6 +206,38 @@ test('documentation placeholders survive untouched', () => {
   for (const text of kept) {
     assert.equal(redactSensitiveMaterial(text), text, text);
     assert.equal(verdict(text), 'PASS', text);
+  }
+});
+
+test('every pattern in the credential list is disposed of as documented', () => {
+  // The table mirrors the comment block in src/approvals/sensitiveText.ts: #1 refuses the
+  // body, #2-#10 are rewritten, and only the marked ones honour a placeholder.
+  const table: ReadonlyArray<readonly [string, string, string, boolean]> = [
+    ['1 PEM header', '-----BEGIN RSA PRIVATE KEY-----', 'disclosure', false],
+    ['2 AKIA', 'AKIA' + 'ABCDEFGHIJKLMNOP', 'redacted', true],
+    ['3 AIza', 'AIza' + 'bC3dE9fG2hJ5kL8mN1pQ4rS7tU0vW2xY5zA', 'redacted', false],
+    ['4 sk-', 'sk-aB3dE9fG2hJ5kL8mN1pQ4rS7', 'redacted', true],
+    ['5 glpat-', 'glpat-abcdefghijklmnop1234', 'redacted', false],
+    ['6 gh*_', 'ghp_abcdefghijklmnopqrstuvwx', 'redacted', true],
+    ['7 JWT', 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U', 'redacted', false],
+    ['8 Bearer', 'Bearer aB3dE9fG2hJ5kL8mN1pQ4rS7T0uV', 'redacted', false],
+    ['9 URL userinfo', 'https://user:pass@example.com/db', 'redacted', false],
+    ['10 key=value', 'password=123456789012', 'redacted', true]
+  ];
+  for (const [label, sample, disposition, placeholderExempt] of table) {
+    const preview = renderGeneratedHandoffPrompt('Goal', sample, 'en', roots);
+    if (disposition === 'disclosure') {
+      assert.deepEqual(preview, { ok: false, reason: 'disclosure' }, label);
+      assert.equal(redactSensitiveMaterial(sample), sample, label + ' is never rewritten by the redactor');
+      continue;
+    }
+    assert.ok(preview.ok, label);
+    assert.ok(preview.body.includes('[REDACTED]'), label);
+    assert.ok(!preview.body.includes(sample), label + ' leaves no raw credential material');
+    if (placeholderExempt) {
+      const placeholder = sample.replace(/[A-Za-z0-9]{6,}$/u, 'YOUR_PLACEHOLDER');
+      assert.equal(redactSensitiveMaterial(placeholder), placeholder, label + ' honours a documented placeholder');
+    }
   }
 });
 

@@ -87,7 +87,7 @@ function projectRelativeText(value: string, folders: readonly string[]): string 
     const escaped = root.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
     // A following `..` segment is left as written: traversal is a structural property, not a
     // disclosure, and it exposes nothing outside the project on its own.
-    const boundary = '(?=[/\\\\](?!\\.\\.(?:[/\\\\]|$))|[\\s`"\')，。；、）】」』>\\]]|$)';
+    const boundary = '(?=[/\\\\](?!\\.\\.(?:[/\\\\]|$))|[\\s`"\')，。；、：）】」』”’>\\]]|$)';
     text = text.replace(new RegExp('(^|[^A-Za-z0-9._\\-/\\\\])(?:' + escaped + ')' + boundary, 'gu'), '$1.');
   }
   return text;
@@ -157,11 +157,22 @@ function looksLikeHostPath(path: string): boolean {
   return /^\/(?:Users|home|root|private|etc|opt|var|tmp|usr|Volumes|mnt|srv)\//u.test(path);
 }
 
+/**
+ * Two spellings name the same place on macOS (`/tmp` is `/private/tmp`) and on Windows (drive
+ * letters are case-insensitive). POSIX path case is left alone because it is significant.
+ */
+function comparable(path: string): string {
+  const privateResolved = path.startsWith('/private/') ? path.slice('/private'.length) : path;
+  return privateResolved.replace(/^([a-z]):\//u, (_, letter: string) => letter.toUpperCase() + ':/');
+}
+
 function isUnderRoot(path: string, roots: readonly string[]): boolean {
+  const target = comparable(path);
   for (const root of roots) {
     const normalized = toFsPath(root).replace(/\/$/u, '');
     if (!normalized) continue;
-    if (path === normalized || path.startsWith(normalized + '/')) return true;
+    const base = comparable(normalized);
+    if (target === base || target.startsWith(base + '/')) return true;
   }
   return false;
 }
@@ -185,15 +196,28 @@ const EVIDENCE_SCAN_DEPTH = 4;
 const EVIDENCE_SCAN_STRING = 4_096;
 const EVIDENCE_SCAN_NODES = 5_000;
 
-/** `path`, `cwd`, `canonicalUri` and `parent_path` all name a location; `specHash` does not. */
+/** `path`, `cwd`, `canonicalUri` and `folderUris` all name a location; `specHash` does not. */
 function isPathFieldName(key: string): boolean {
   const segments = key.replace(/([a-z0-9])([A-Z])/gu, '$1_$2').toLowerCase().split(/[^a-z0-9]+/u).filter(Boolean);
-  return segments.length > 0 && PATH_FIELD_SEGMENTS.has(segments[segments.length - 1]);
+  const last = segments.at(-1);
+  if (!last) return false;
+  return PATH_FIELD_SEGMENTS.has(last) || (last.endsWith('s') && PATH_FIELD_SEGMENTS.has(last.slice(0, -1)));
+}
+
+/** A value that is nothing but a path names one wherever it appears, whatever its key. */
+function wholePathValue(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const [token, ...rest] = findPathLikeTokens(trimmed);
+  if (!token || rest.length) return undefined;
+  return trimmed.replace(TRAILING_PUNCTUATION, '') === token ? token : undefined;
 }
 
 /**
  * Structured tool output carries trustworthy boundaries, so the same candidate extraction is
  * safe here. Limits keep a large evidence envelope from slowing down every plan-card render.
+ * Only string values of location-shaped fields are read; prose fields such as `content` are not
+ * interpreted, so a quoted sentence inside a file cannot manufacture a path.
  */
 function collectStructuredPaths(value: unknown, into: Set<string>): void {
   let budget = EVIDENCE_SCAN_NODES;
@@ -208,8 +232,13 @@ function collectStructuredPaths(value: unknown, into: Set<string>): void {
     if (!node || typeof node !== 'object') return;
     for (const [key, child] of Object.entries(node as Record<string, unknown>)) {
       if (typeof child === 'string') {
-        if (child.length > EVIDENCE_SCAN_STRING || !isPathFieldName(key)) continue;
-        for (const token of findPathLikeTokens(child)) into.add(toFsPath(token));
+        if (child.length > EVIDENCE_SCAN_STRING) continue;
+        if (isPathFieldName(key)) {
+          for (const token of findPathLikeTokens(child)) into.add(toFsPath(token));
+          continue;
+        }
+        const whole = wholePathValue(child);
+        if (whole) into.add(toFsPath(whole));
         continue;
       }
       walk(child, depth + 1);

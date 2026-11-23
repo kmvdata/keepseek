@@ -35,7 +35,7 @@ const SECRET_PATTERNS: readonly SecretPattern[] = [
   { pattern: PRIVATE_KEY_BLOCK },
   { pattern: /\bAKIA[0-9A-Z]{16}\b/u },
   { pattern: /\bAIza[0-9A-Za-z_-]{35}\b/u },
-  { pattern: /\b(sk|rk|pk)-([A-Za-z0-9_-]{20,})\b/u, prefixGroup: 1, valueGroup: 2 },
+  { pattern: /\b((?:sk|rk|pk)-)([A-Za-z0-9_-]{20,})\b/u, prefixGroup: 1, valueGroup: 2 },
   { pattern: /\b(?:glpat-|xox[baprs]-)[A-Za-z0-9_-]{16,}\b/u },
   { pattern: /\b(gh[opusr]_)([A-Za-z0-9]{20,})\b/u, prefixGroup: 1, valueGroup: 2 },
   { pattern: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/u },
