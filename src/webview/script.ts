@@ -4399,17 +4399,17 @@ ${conversationsSessionListFragment.source}
       var list = row.querySelector('.activity-list');
       if (!list) return false;
       if (contentTail) {
-        // A delta always belongs to the newest narration. During a run that node
-        // may be followed by the tool row it is about to invoke, so the search
-        // walks back to the last say instead of only inspecting the tail.
-        var say = null;
-        for (var index = list.children.length - 1; index >= 0; index -= 1) {
-          if (list.children[index].classList.contains('activity-say')) { say = list.children[index]; break; }
-        }
+        // The live narration is the last say whose following siblings are all
+        // still-running tool rows. Locating it this way is idempotent: the second
+        // delta of the same round finds the say the first one inserted, instead of
+        // stacking a new one beside the live row on every tick.
+        var say = findLiveActivitySay(list);
         if (!say) {
           say = document.createElement('div');
           say.className = 'activity-say';
-          list.append(say);
+          var firstRunning = findFirstTrailingRunningTool(list);
+          if (firstRunning) list.insertBefore(say, firstRunning);
+          else list.append(say);
         }
         // Markdown renders once the message settles; until then the raw delta
         // keeps its own newlines, so it lives in a pre-wrap span.
@@ -4426,6 +4426,31 @@ ${conversationsSessionListFragment.source}
     }
 
     /** Reconcile the rendered tool rows with the authoritative node list. */
+    function findFirstTrailingRunningTool(list) {
+      for (var index = 0; index < list.children.length; index += 1) {
+        var child = list.children[index];
+        if (!child.classList.contains('activity-tool') || !child.classList.contains('is-running')) continue;
+        // Only a run of running rows at the very end belongs to the open round.
+        var trailing = true;
+        for (var next = index + 1; next < list.children.length; next += 1) {
+          if (!list.children[next].classList.contains('activity-tool')) { trailing = false; break; }
+        }
+        if (trailing) return child;
+      }
+      return null;
+    }
+
+    function findLiveActivitySay(list) {
+      var runningTool = findFirstTrailingRunningTool(list);
+      if (!runningTool) {
+        var tail = list.lastElementChild;
+        return tail && tail.classList.contains('activity-say') ? tail : null;
+      }
+      var previous = runningTool.previousElementSibling;
+      return previous && previous.classList.contains('activity-say')
+        && previous.querySelector('.is-stream-text') ? previous : null;
+    }
+
     function syncActivityToolRows(list, message) {
       var nodes = Array.isArray(message?.activityNodes) ? message.activityNodes : [];
       var toolNodes = nodes.filter(function(node) { return node.kind === 'tool'; });
@@ -4470,17 +4495,23 @@ ${conversationsSessionListFragment.source}
       var hidden = collapsed ? tools.length - ACTIVITY_COLLAPSED_TOOL_LIMIT : 0;
       var renderedTools = 0;
       var toggleInserted = false;
+      // The narration that is still growing is the last say, which during a run
+      // may sit just before the tool row it is about to invoke.
+      var liveSayIndex = -1;
+      if (streaming) {
+        for (var scan = nodes.length - 1; scan >= 0; scan -= 1) {
+          if (nodes[scan].kind === 'say') { liveSayIndex = scan; break; }
+        }
+      }
 
       // Every narration stays visible; only tool rows beyond the limit fold away.
       // The toggle sits where the first hidden step would have been, so the
       // reader sees the run collapse exactly at that point.
-      nodes.forEach(function(node) {
+      nodes.forEach(function(node, nodeIndex) {
         if (node.kind === 'say') {
           if (String(node.text || '').trim()) {
-            // While streaming the final say is still growing, so it is drawn as
-            // raw pre-wrap text; settled narration goes through Markdown.
-            var isLiveTail = streaming && node === nodes[nodes.length - 1];
-            container.append(createActivitySay(node.text, isLiveTail));
+            // A live tail is not valid Markdown yet, so it stays raw text.
+            container.append(createActivitySay(node.text, nodeIndex === liveSayIndex));
           }
           return;
         }

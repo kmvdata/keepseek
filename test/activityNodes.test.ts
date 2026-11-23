@@ -286,6 +286,93 @@ test('user messages never produce activity nodes', () => {
   } as ChatMessage]);
   assert.equal(visible.activityNodes, undefined);
 });
+
+test('the persistence path can skip node derivation entirely', () => {
+  const [visible] = getVisibleMessages([assistantMessage({
+    content: '最终回答',
+    toolRounds: [round(null, [{ id: 'c1', name: 'keepseek_read_workspace_file', args: { path: 'a.ts' } }],
+      [{ toolCallId: 'c1', content: JSON.stringify({ ok: true }) }])]
+  })], [], { includeActivityNodes: false });
+  assert.equal(visible.activityNodes, undefined);
+  assert.equal(Object.hasOwn(visible, 'toolRounds'), false);
+});
+
+/** A minimal checkpoint with the fields the runState projection reads. */
+function checkpoint(pendingExecuting?: { id: string; name: string }): ChatMessage['runCheckpoint'] {
+  return {
+    version: 2,
+    taskId: 'task-1',
+    attempt: 0,
+    attemptIds: [],
+    status: 'running',
+    usedMs: 0,
+    maxExecutionMs: 0,
+    usedCostByCurrency: {},
+    maxCost: 0,
+    limitSource: 'test',
+    modelRequests: 1,
+    retries: 0,
+    updatedAt: new Date().toISOString(),
+    request: {} as never,
+    source: { sourceId: 's', modelId: 'm', provider: 'p', endpointHash: 'h' },
+    workspaceFolders: [],
+    state: {
+      messages: [],
+      // The runner always records rounds; the projection reduces over them.
+      toolRounds: [],
+      draftEdits: [],
+      draftRuns: [],
+      reasoningParts: [],
+      turn: 1,
+      toolCallCount: 1,
+      validationRunCount: 0,
+      toolResultTokens: 0,
+      repairLoop: { status: 'idle', iterations: [], maxIterations: 2 } as never,
+      pending: pendingExecuting
+        ? {
+            response: { message: { role: 'assistant', content: null } },
+            results: {},
+            executing: pendingExecuting
+          }
+        : undefined
+    }
+  } as unknown as ChatMessage['runCheckpoint'];
+}
+
+test('a streaming message shows the executing tool from the checkpoint', () => {
+  const message = assistantMessage({
+    content: '',
+    isStreaming: true,
+    toolRounds: [round(null, [{ id: 'done', name: 'keepseek_read_workspace_file', args: { path: 'a.ts' } }],
+      [{ toolCallId: 'done', content: JSON.stringify({ ok: true }) }])],
+    runCheckpoint: checkpoint({ id: 'live', name: 'keepseek_search_workspace' })
+  });
+  const [visible] = getVisibleMessages([message]);
+  const tools = toolNodes(visible.activityNodes);
+  assert.deepEqual(tools.map((node) => [node.id, node.status]), [['done', 'succeeded'], ['live', 'running']]);
+  assert.equal(tools[1].target, undefined, 'the live checkpoint stores no arguments, so no target is claimed');
+});
+
+test('a settled message ignores a leftover pending execution record', () => {
+  const message = assistantMessage({
+    content: '答案',
+    toolRounds: [round(null, [{ id: 'done', name: 'keepseek_read_workspace_file', args: { path: 'a.ts' } }],
+      [{ toolCallId: 'done', content: JSON.stringify({ ok: true }) }])],
+    runCheckpoint: checkpoint({ id: 'stale', name: 'keepseek_search_workspace' })
+  });
+  const [visible] = getVisibleMessages([message]);
+  assert.deepEqual(toolNodes(visible.activityNodes).map((node) => node.id), ['done']);
+});
+
+test('an oversized result is classified from its head without full parsing', () => {
+  const hugeDenied = `${JSON.stringify({ ok: false, errorType: 'authorization_denied' })}${' '.repeat(200_000)}`;
+  const nodes = buildActivityNodes({
+    content: '',
+    toolRounds: [round(null, [{ id: 'c1', name: 'keepseek_run_draft', args: { executable: 'rm', args: ['-rf'] } }],
+      [{ toolCallId: 'c1', content: hugeDenied }])]
+  });
+  assert.equal(toolNodes(nodes)[0].status, 'denied');
+});
 test('a settled message reuses the cached nodes for the same rounds array', () => {
   // getVisibleMessages() builds a fresh message object on every projection, so the
   // rounds reference is the only identity the derived-view cache can key on.

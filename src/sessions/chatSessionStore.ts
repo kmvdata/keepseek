@@ -1550,8 +1550,13 @@ function copyMessage(message: ChatMessage): ChatMessage {
   };
 }
 
-export function getVisibleMessages(messages: ChatMessage[], models: readonly import('../shared/types').KeepseekModel[] = []): ChatMessage[] {
+export function getVisibleMessages(
+  messages: ChatMessage[],
+  models: readonly import('../shared/types').KeepseekModel[] = [],
+  options: { includeActivityNodes?: boolean } = {}
+): ChatMessage[] {
   const language = getConfiguredKeepseekLanguage();
+  const includeActivityNodes = options.includeActivityNodes !== false;
   return messages.map(({
     runCheckpoint,
     runCheckpointArchive,
@@ -1566,13 +1571,13 @@ export function getVisibleMessages(messages: ChatMessage[], models: readonly imp
     const toolDurations = projectToolDurations(message.runDetails);
     return {
       ...message,
-      ...buildVisibleActivityNodes({
+      ...(includeActivityNodes ? buildVisibleActivityNodes({
         message,
         toolRounds: _toolRounds,
         runCheckpoint,
         toolDurations,
         language
-      }),
+      }) : {}),
       runState: runCheckpoint ? (() => {
         const resumableBudgetPause = isResumableToolBudgetCheckpoint(runCheckpoint);
         return {

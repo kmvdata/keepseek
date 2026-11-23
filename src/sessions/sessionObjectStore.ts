@@ -302,6 +302,8 @@ export class SessionObjectStore {
         const index = messageCursor++, message = messages[index];
         const { runCheckpoint, runCheckpointArchive, ...body } = message;
         delete body.runState;
+        // Derived render-only field: never a stored shape, even by accident.
+        delete (body as { activityNodes?: unknown }).activityNodes;
         if (!runCheckpoint && runCheckpointArchive && !this.written.has(runCheckpointArchive.objectHash)) {
           const hash = runCheckpointArchive.objectHash;
           const bytes = await vscode.workspace.fs.readFile(this.objectUri(hash));
@@ -311,7 +313,11 @@ export class SessionObjectStore {
         entries[index] = { body: await this.object(persistenceMessageBody(message, body)),
           checkpoint: runCheckpoint ? await this.object(runCheckpoint) : runCheckpointArchive?.objectHash,
           pendingTool: runCheckpoint ? Boolean(runCheckpoint.state?.pending) : runCheckpointArchive?.pendingTool,
-          summary: runCheckpoint ? getVisibleMessages([message])[0].runState : runCheckpointArchive?.summary };
+          // Only the runState summary is consumed here; deriving step rows would be
+          // wasted work on every persistence barrier.
+          summary: runCheckpoint
+            ? getVisibleMessages([message], [], { includeActivityNodes: false })[0].runState
+            : runCheckpointArchive?.summary };
       }
       }));
       const failure = workers.find(result => result.status === 'rejected');

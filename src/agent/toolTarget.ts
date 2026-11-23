@@ -16,7 +16,6 @@ import {
   GET_WORKSPACE_SYMBOLS_TOOL_NAME,
   LIST_WORKSPACE_DIRECTORY_TOOL_NAME,
   LIST_WORKSPACE_FILES_TOOL_NAME,
-  READ_PLUGIN_SKILL_TOOL_NAME,
   READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME,
   READ_WORKSPACE_FILE_RANGE_TOOL_NAME,
   READ_WORKSPACE_FILE_TOOL_NAME,
@@ -121,10 +120,6 @@ export function describeToolTarget(
 
   if (toolName === READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME || toolName === LIST_WORKSPACE_FILES_TOOL_NAME) {
     // No path argument exists; there is nothing honest to show.
-    return undefined;
-  }
-
-  if (toolName === READ_PLUGIN_SKILL_TOOL_NAME) {
     return undefined;
   }
 
