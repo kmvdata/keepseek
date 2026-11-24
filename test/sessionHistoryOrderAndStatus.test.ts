@@ -260,8 +260,8 @@ test('the history filter keeps only rows with a recorded run', () => {
     script.indexOf('function getCurrentVisibleSessions()'),
     script.indexOf('function getVisibleOtherWorkspaceSessions(')
   );
-  assert.ok(currentTabList.includes('sessionWithRunOnly && !sessionHasRun(session.id)'),
-    'the current-project tab hides rows without a recorded run');
+  assert.ok(currentTabList.includes('sessionWithRunOnly && sessionHasRun(session.id)'),
+    'the has-run switch admits the rows with a recorded run and leaves the rest out');
   assert.ok(currentTabList.indexOf('sessionHasRun(session.id)')
     < currentTabList.indexOf('sessionRangeDays <= 0'),
   'the has-run filter runs before the date range, so the range never re-adds a row');
@@ -294,7 +294,7 @@ test('the history filter keeps only rows with a recorded run', () => {
   assert.doesNotMatch(script, /withRunOnlyButton\.innerHTML = '[^']*<text/u,
     'the glyph never draws a word, so it stays language-neutral');
   assert.match(script,
-    /trailingControls\.append\(withRunOnlyButton\);\s*trailingControls\.append\(multiSelectButton\);\s*controls\.append\(trailingControls\);/u,
+    /trailingControls\.append\(withRunOnlyButton\);\s*trailingControls\.append\(favoritesOnlyButton\);\s*trailingControls\.append\(multiSelectButton\);\s*controls\.append\(trailingControls\);/u,
     'the leading dropdowns stay left-aligned while the switches share one trailing group');
   assert.match(script,
     /if \(action === 'toggleWithRunOnly'\) \{\s*sessionWithRunOnly = !sessionWithRunOnly;/u,
@@ -325,10 +325,10 @@ test('the history filter keeps only rows with a recorded run', () => {
   assert.equal(zh.sessionCurrentOnly, undefined, 'the provisional current-only label is gone');
 });
 
-/** Favourites are a bookmark, never a move: the switch filters the same
- * current-project list, bypasses the date range, and leaves the creation order
- * untouched. When both switches are on, favourites is the narrower list. */
-test('the history favourites filter keeps only favourites and ignores the range', () => {
+/** Favourites are a bookmark, never a move, and the two switches are switches
+ * rather than gates: each admits its own rows and the list shows their union,
+ * so turning both on can never hide a row that either switch alone would show. */
+test('the two history switches combine as a union', () => {
   const script = getScript();
   assert.doesNotThrow(() => new Function(script), 'the generated webview script must compile');
 
@@ -336,15 +336,21 @@ test('the history favourites filter keeps only favourites and ignores the range'
     script.indexOf('function getCurrentVisibleSessions()'),
     script.indexOf('function getVisibleOtherWorkspaceSessions(')
   );
-  assert.ok(currentTabList.includes('sessionFavoritesOnly && session.isFavorite !== true'),
-    'the favourites switch hides every row that is not followed');
+  assert.ok(currentTabList.includes('sessionFavoritesOnly && session.isFavorite === true'),
+    'the favourites switch admits exactly the followed rows');
+  assert.ok(currentTabList.includes('sessionWithRunOnly && sessionHasRun(session.id)'),
+    'the has-run switch admits exactly the rows with a recorded run');
+  assert.ok(currentTabList.includes('if (!favoritesMatch && !runMatch)'),
+    'a row survives when either switch admits it, so neither switch narrows the other');
+  assert.ok(!currentTabList.includes('sessionFavoritesOnly && session.isFavorite !== true'),
+    'the intersection gate that hid every unfollowed row is gone');
   assert.ok(currentTabList.includes('sessions.sort(compareSessionsByCreation);'),
     'the list keeps its single creation-order sort');
-  assert.ok(currentTabList.indexOf('if (sessionFavoritesOnly) {')
+  assert.ok(currentTabList.indexOf('if (favoritesMatch) {')
     < currentTabList.indexOf('sessionRangeDays <= 0'),
   'a favourite is let through before the range test, so the range never hides it');
   assert.ok(currentTabList.indexOf('sessionHasRun(session.id)')
-    < currentTabList.indexOf('if (sessionFavoritesOnly) {'),
+    < currentTabList.indexOf('if (favoritesMatch) {'),
   'the has-run switch still runs before the favourites bypass');
   assert.doesNotMatch(script, /favoriteDelta/u,
     'no comparator key is added for favourites: the filter never reorders');
@@ -378,12 +384,16 @@ test('the history favourites filter keeps only favourites and ignores the range'
     script.indexOf('var historyNotEmpty ='),
     script.indexOf('empty.textContent = t(emptyKey);')
   );
-  assert.ok(emptyState.includes("emptyKey = 'sessionFavoritesOnlyEmpty'")
+  assert.ok(emptyState.includes("emptyKey = 'sessionFavoritesOrRunOnlyEmpty'")
+    && emptyState.includes("emptyKey = 'sessionFavoritesOnlyEmpty'")
     && emptyState.includes("emptyKey = 'sessionWithRunOnlyEmpty'"),
   'an emptied list names the switch that hid the rows instead of claiming empty history');
+  assert.ok(emptyState.indexOf("'sessionFavoritesOrRunOnlyEmpty'")
+    < emptyState.indexOf("'sessionFavoritesOnlyEmpty'"),
+  'both switches on means both sets were empty, so the union gets its own label first');
   assert.ok(emptyState.indexOf("'sessionFavoritesOnlyEmpty'")
     < emptyState.indexOf("'sessionWithRunOnlyEmpty'"),
-  'favourites is the more specific explanation when both switches are on');
+  'a single switch keeps its own explanation');
   assert.ok(emptyState.includes("var emptyKey = 'noHistory'"),
     'empty history still falls back to the plain empty label');
 
@@ -398,6 +408,11 @@ test('the history favourites filter keeps only favourites and ignores the range'
   assert.ok(zh.sessionFavoritesOnlyEmpty && en.sessionFavoritesOnlyEmpty
     && zh.sessionFavoritesOnlyEmpty !== en.sessionFavoritesOnlyEmpty,
   'both dictionaries explain a favourites-only empty list in their own language');
+  assert.ok(zh.sessionFavoritesOrRunOnlyEmpty && en.sessionFavoritesOrRunOnlyEmpty
+    && zh.sessionFavoritesOrRunOnlyEmpty !== en.sessionFavoritesOrRunOnlyEmpty,
+  'both dictionaries name the union empty list in their own language');
+  assert.ok(zh.sessionFavoritesOnlyHint.includes('并集') && zh.sessionWithRunOnlyHint.includes('并集'),
+    'the tooltips say the two switches combine instead of narrowing each other');
   assert.equal(zh.sessionCurrentOnly, undefined, 'the provisional current-only label is gone');
 });
 

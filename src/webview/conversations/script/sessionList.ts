@@ -169,11 +169,13 @@ export const conversationsSessionListFragment: WebviewFragment = {
         var empty = document.createElement('div');
         empty.className = 'session-menu-empty';
         // A switch can empty the list while history still exists, so name the
-        // filter instead of claiming there is no history at all. Favourites wins
-        // when both switches are on: it is the narrower of the two lists.
+        // filter instead of claiming there is no history at all. Two switches on
+        // means both sets were empty, so neither single-switch wording is true.
         var historyNotEmpty = (Array.isArray(state.sessionSummaries) ? state.sessionSummaries : []).length > 0;
         var emptyKey = 'noHistory';
-        if (historyNotEmpty && sessionFavoritesOnly) {
+        if (historyNotEmpty && sessionFavoritesOnly && sessionWithRunOnly) {
+          emptyKey = 'sessionFavoritesOrRunOnlyEmpty';
+        } else if (historyNotEmpty && sessionFavoritesOnly) {
           emptyKey = 'sessionFavoritesOnlyEmpty';
         } else if (historyNotEmpty && sessionWithRunOnly) {
           emptyKey = 'sessionWithRunOnlyEmpty';
@@ -298,19 +300,22 @@ export const conversationsSessionListFragment: WebviewFragment = {
       // user asks for — or a new conversation enters at the top.
       sessions.sort(compareSessionsByCreation);
       return sessions.filter(function(session) {
-        if (sessionFavoritesOnly && session.isFavorite !== true) {
-          return false;
-        }
-        if (sessionWithRunOnly && !sessionHasRun(session.id)) {
-          return false;
-        }
-        if (sessionFavoritesOnly) {
-          // The star is a bookmark, so a followed row stays visible even when the
-          // range above would hide it. The range itself is only bypassed, never
-          // rewritten: closing the switch restores its effect unchanged.
-          return true;
-        }
-        if (sessionRangeDays <= 0) {
+        // The two switches are switches, not gates: each one admits its own rows
+        // and the list shows the union, so turning both on can never hide a row
+        // that either switch alone would show.
+        var favoritesMatch = sessionFavoritesOnly && session.isFavorite === true;
+        var runMatch = sessionWithRunOnly && sessionHasRun(session.id);
+        if (sessionFavoritesOnly || sessionWithRunOnly) {
+          if (!favoritesMatch && !runMatch) {
+            return false;
+          }
+          if (favoritesMatch) {
+            // The star is a bookmark: a followed row stays visible even when the
+            // range above would hide it. The range is bypassed, never rewritten,
+            // so closing the switch restores its effect unchanged.
+            return true;
+          }
+        }        if (sessionRangeDays <= 0) {
           return true;
         }
         var updatedAt = getSessionTimestamp(session);
