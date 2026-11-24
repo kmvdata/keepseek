@@ -116,13 +116,14 @@ export const conversationsSessionListFragment: WebviewFragment = {
       multiSelectButton.dataset.sessionAction = 'toggleMultiSelect';
       multiSelectButton.setAttribute('aria-pressed', sessionMultiSelectMode ? 'true' : 'false');
       // Icon only: the catalogue labels stay behind as the accessible name and
-      // the tooltip, and the glyph switches from 'edit' to 'done' with the mode
-      // so the control strip never carries a translated word.
+      // the tooltip. The batch glyph is deliberately not the row rename pencil:
+      // the strip edits the list, while a pencil inside a row renames exactly one
+      // conversation, so a checklist marks 'select several rows' instead.
       multiSelectButton.setAttribute('aria-label', t(sessionMultiSelectMode ? 'sessionExitMultiSelect' : 'sessionMultiSelect'));
       multiSelectButton.title = t(sessionMultiSelectMode ? 'sessionExitMultiSelect' : 'sessionMultiSelect');
       multiSelectButton.innerHTML = sessionMultiSelectMode
         ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20 6 9 17l-5-5"/></svg>'
-        : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
+        : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg>';
 
       controls.append(rangeSelect);
       // The date dropdown keeps the leading edge; the switches after it collect

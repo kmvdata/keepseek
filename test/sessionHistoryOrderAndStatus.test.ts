@@ -336,6 +336,15 @@ test('the history edit toggle is an icon button', () => {
   assert.doesNotMatch(script, /multiSelectButton\.innerHTML = '[^']*<text/u,
     'the glyph never draws a word, so it stays language-neutral');
 
+  const switchGlyph = script.slice(
+    script.indexOf('multiSelectButton.innerHTML'),
+    script.indexOf('trailingControls.append')
+  );
+  assert.doesNotMatch(switchGlyph, /M16\.5 3\.5a2\.1 2\.1 0 0 1 3 3L7 19l-4 1 1-4Z/u,
+    'the mode switch never reuses the row rename pencil: the strip edits the list, a row pencil renames one conversation');
+  assert.match(switchGlyph, /<path d="m3 7 2 2 4-4"\/>/u,
+    'the switch draws a checklist, which reads as editing several rows at once');
+
   const styles = conversationsStylesFragment.source;
   assert.match(styles, /\.session-menu-edit-toggle \{[^}]*display: inline-grid;/u,
     'the icon-only switch squares itself off instead of using the text padding');
