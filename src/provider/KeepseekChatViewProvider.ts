@@ -465,14 +465,30 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
    */
   private sessionRunStatusViews(): Record<string, SessionRunStatusView> {
     const backgroundRun = this.backgroundRunCoordinator.getActiveRun();
+    const sessionIds = this.sessionStore.getSessionSummaries().map(summary => summary.id);
     return projectSessionRunStatuses({
-      sessionIds: this.sessionStore.getSessionSummaries().map(summary => summary.id),
+      sessionIds,
       runningSessionIds: this.sessionRuns.activeSessionIds(),
       ...(backgroundRun ? { backgroundRun: { sessionId: backgroundRun.sessionId, status: backgroundRun.status } } : {}),
       ...(this.activeDraftRunSessionId ? { commandRunSessionId: this.activeDraftRunSessionId } : {}),
+      awaitingUserSessionIds: new Set(sessionIds.filter(sessionId => this.sessionAwaitsUser(sessionId))),
       liveFailures: this.sessionRunFailures,
       readLastRun: (sessionId) => this.readLastRunObservation(sessionId)
     });
+  }
+
+  /**
+   * Live "this session still owes the user something" test.
+   *
+   * The durable answer is unusable here: after approve-all applies a ChangeSet the
+   * checkpoint can still say `blocked` and still name the drafts it was waiting
+   * for, so a durable pending set keeps the marker blue forever. These are the
+   * stores that actually still hold unsettled work.
+   */
+  private sessionAwaitsUser(sessionId: string): boolean {
+    if (this.changeSets.hasPendingForSession(sessionId)) return true;
+    if (this.draftRuns.hasPendingForSession(sessionId)) return true;
+    return this.sessionStore.getSessionById(sessionId)?.repairLoop?.status === 'blocked';
   }
 
   /**
@@ -505,7 +521,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         status: checkpoint.status,
         ...(checkpoint.stopReason ? { stopReason: checkpoint.stopReason } : {}),
         ...(checkpoint.error ? { error: checkpoint.error } : {}),
-        pendingUser: (checkpoint.state?.validationState?.pendingDraftEditIds?.length ?? 0) > 0,
         ...(checkpoint.updatedAt ? { updatedAt: checkpoint.updatedAt } : {}),
         source: 'checkpoint'
       };

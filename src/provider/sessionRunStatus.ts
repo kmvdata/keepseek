@@ -8,12 +8,18 @@ import type { BackgroundRunStatus } from '../shared/types';
  * approves, writes or re-sorts; `running` and `failed` are live host
  * observations, so a reload degrades them to whatever the last durable
  * checkpoint still proves.
+ *
+ * "Waiting for the user" is decided by *live* pending work only. A checkpoint
+ * that ended in `blocked` also records which drafts were pending at that moment,
+ * and those ids are not proof that the user still owes an answer: an approve-all
+ * round applies the ChangeSet by itself, so the durable set can outlive the work
+ * it described. Trusting it kept a settled row blue forever.
  */
 export type SessionRunStatusKind = 'running' | 'waiting' | 'failed' | 'stopped' | 'completed' | 'idle';
 
 export interface SessionRunStatusView {
   kind: SessionRunStatusKind;
-  /** Untrusted short reason (stop reason, blocker, draft ids, error) for the tooltip. */
+  /** Untrusted short reason (stop reason, blocker, error) for the tooltip. */
   detail?: string;
   updatedAt?: string;
   source: 'live' | 'checkpoint' | 'archive';
@@ -26,8 +32,6 @@ export interface SessionLastRunObservation {
   stopReason?: string;
   error?: string;
   blocker?: string;
-  /** The run stopped so the user can act, for example on pending DraftEdits. */
-  pendingUser?: boolean;
   updatedAt?: string;
   source?: 'checkpoint' | 'archive';
 }
@@ -39,6 +43,12 @@ export interface SessionRunStatusInput {
   backgroundRun?: { sessionId: string; status: BackgroundRunStatus };
   /** Session that owns the command (DraftRun) currently executing. */
   commandRunSessionId?: string;
+  /**
+   * Sessions whose pending work still owes the user an action, read from the
+   * live stores (pending ChangeSets, pending command approvals, a blocked repair
+   * loop). This — not a durable checkpoint — is what "waiting" means.
+   */
+  awaitingUserSessionIds?: ReadonlySet<string>;
   /** Live failure marks; only host memory holds them. */
   liveFailures?: ReadonlyMap<string, { at: string; detail?: string }>;
   /** Durable last-run lookup; `undefined` means "this session has no run". */
@@ -71,7 +81,7 @@ export function projectSessionRunStatuses(
       continue;
     }
 
-    const waiting = waitingDetail(background, lastRun);
+    const waiting = waitingDetail(background, lastRun, input.awaitingUserSessionIds?.has(sessionId) === true);
     if (waiting) {
       statuses[sessionId] = { kind: 'waiting', detail: waiting, source: durableSource, ...updated };
       continue;
@@ -95,7 +105,10 @@ export function projectSessionRunStatuses(
       continue;
     }
 
-    if (lastRun?.status === 'completed') {
+    if (lastRun?.status === 'completed' || lastRun?.status === 'blocked') {
+      // `blocked` records a run that paused for the user (pending apply, budget
+      // stop). Nothing is pending here any more, so the run is finished — this is
+      // the auto-approved case that used to stay blue.
       statuses[sessionId] = { kind: 'completed', source: durableSource, ...updated };
       continue;
     }
@@ -108,11 +121,11 @@ export function projectSessionRunStatuses(
 /** Why this session is waiting for the user, or `undefined` when it is not. */
 function waitingDetail(
   background: BackgroundRunStatus | undefined,
-  lastRun: SessionLastRunObservation | undefined
+  lastRun: SessionLastRunObservation | undefined,
+  awaitingUser: boolean
 ): string | undefined {
   if (background === 'waiting_for_apply' || background === 'waiting_for_authorization') return background;
-  if (lastRun?.pendingUser) return 'pending_user_action';
   if (lastRun?.blocker) return lastRun.blocker;
-  if (lastRun?.status === 'blocked') return lastRun.stopReason ?? 'blocked';
+  if (awaitingUser) return 'pending_user_action';
   return undefined;
 }

@@ -127,6 +127,48 @@ test('live failures and archived summaries both explain a failed session', () =>
     'an unloaded session gets no invented status');
 });
 
+/** Regression: an approve-all round applies the pending drafts by itself, so
+ * nothing is left to settle. The checkpoint may still say `blocked` and still name
+ * the drafts it waited for; neither may keep the row blue forever. */
+test('a settled auto-approved round turns green instead of staying waiting', () => {
+  const blockedRun: SessionLastRunObservation = { status: 'blocked', source: 'checkpoint' };
+
+  const pending = projectSessionRunStatuses({
+    sessionIds: ['a'],
+    awaitingUserSessionIds: new Set(['a']),
+    readLastRun: () => blockedRun
+  });
+  assert.equal(pending.a.kind, 'waiting', 'work the user must still settle keeps the row waiting');
+
+  const settled = projectSessionRunStatuses({
+    sessionIds: ['a'],
+    awaitingUserSessionIds: new Set<string>(),
+    readLastRun: () => blockedRun
+  });
+  assert.equal(settled.a.kind, 'completed',
+    'once approve-all applied the drafts the run is finished, so the row is green');
+
+  const commandPending = projectSessionRunStatuses({
+    sessionIds: ['a'],
+    awaitingUserSessionIds: new Set(['a']),
+    readLastRun: () => ({ status: 'completed', source: 'checkpoint' })
+  });
+  assert.equal(commandPending.a.kind, 'waiting', 'a pending command approval is live waiting work');
+
+  const commandSettled = projectSessionRunStatuses({
+    sessionIds: ['a'],
+    readLastRun: () => ({ status: 'completed', source: 'checkpoint' })
+  });
+  assert.equal(commandSettled.a.kind, 'completed', 'a settled command approval does not linger');
+
+  const durableOnly = projectSessionRunStatuses({
+    sessionIds: ['a'],
+    readLastRun: () => ({ status: 'blocked', stopReason: 'waiting_for_user', source: 'checkpoint' })
+  });
+  assert.equal(durableOnly.a.kind, 'completed',
+    'a durable blocked checkpoint alone never proves the user still owes an answer');
+});
+
 /** The panel side of the same contract: creation order, one live status marker
  * per row placed beside the favourite star, and the themed colours it relies on. */
 test('the webview orders history by creation and marks each row status', () => {

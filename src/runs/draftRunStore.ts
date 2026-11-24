@@ -1123,6 +1123,16 @@ export class DraftRunStore {
     }
   }
 
+  /** True when this session holds a command the user still has to approve. */
+  public hasPendingForSession(sessionId: string): boolean {
+    for (const draftRun of this.draftRuns.values()) {
+      if (draftRun.sessionId === sessionId && !isHistoryInactive(draftRun) && draftRun.status === 'pending') {
+        return true;
+      }
+    }
+    return false;
+  }
+
   public rejectPendingForSession(sessionId: string): void {
     let changed = false;
     for (const draftRun of this.draftRuns.values()) {
