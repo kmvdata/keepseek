@@ -8,6 +8,7 @@ export const conversationsStateFragment: WebviewFragment = {
     let sessionMultiSelectMode = false;
     let sessionRangeDays = 1;
     let sessionWithRunOnly = false;
+    let sessionFavoritesOnly = false;
     let selectedSessionIds = new Set();
     let editingSessionTitleId = '';`.slice(1)
 };

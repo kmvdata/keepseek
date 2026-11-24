@@ -274,7 +274,7 @@ test('the history filter keeps only rows with a recorded run', () => {
     'the other-project tab carries no projected status, so the filter cannot apply there');
 
   assert.match(script,
-    /sessionMultiSelectMode, sessionRangeDays, sessionWithRunOnly, Array\.from\(selectedSessionIds\),/u,
+    /sessionMultiSelectMode, sessionRangeDays, sessionWithRunOnly, sessionFavoritesOnly, Array\.from\(selectedSessionIds\),/u,
     'the filter state stays in the render key so toggling it repaints the panel');
   assert.match(script, /var withRunOnlyButton = document\.createElement\('button'\);/u,
     'the control strip offers the has-run filter above the current project history');
@@ -299,10 +299,10 @@ test('the history filter keeps only rows with a recorded run', () => {
   assert.match(script,
     /if \(action === 'toggleWithRunOnly'\) \{\s*sessionWithRunOnly = !sessionWithRunOnly;/u,
     'the row action flips the has-run filter and repaints the panel');
-  assert.match(script, /t\('sessionWithRunOnlyEmpty'\)/u,
+  assert.match(script, /'sessionWithRunOnlyEmpty'/u,
     'a filtered-to-nothing list names the filter instead of claiming empty history');
-  assert.doesNotMatch(script, /sessionFavoritesOnly|toggleFavoritesOnly|sessionCurrentOnly/u,
-    'the favourites-only filter and its provisional name are gone');
+  assert.doesNotMatch(script, /sessionCurrentOnly/u,
+    'the provisional current-only name is still gone');
 
   const styles = conversationsStylesFragment.source;
   assert.match(styles, /\.session-menu-controls-tail \{[^}]*display: flex;/u,
@@ -322,8 +322,82 @@ test('the history filter keeps only rows with a recorded run', () => {
     'both dictionaries explain what the filter hides');
   assert.ok(zh.sessionWithRunOnlyEmpty && en.sessionWithRunOnlyEmpty,
     'both dictionaries explain a filtered-to-nothing list');
-  assert.equal(zh.sessionFavoritesOnly, undefined, 'zh-CN drops the favourites-only label');
-  assert.equal(en.sessionFavoritesOnly, undefined, 'en drops the favourites-only label');
+  assert.equal(zh.sessionCurrentOnly, undefined, 'the provisional current-only label is gone');
+});
+
+/** Favourites are a bookmark, never a move: the switch filters the same
+ * current-project list, bypasses the date range, and leaves the creation order
+ * untouched. When both switches are on, favourites is the narrower list. */
+test('the history favourites filter keeps only favourites and ignores the range', () => {
+  const script = getScript();
+  assert.doesNotThrow(() => new Function(script), 'the generated webview script must compile');
+
+  const currentTabList = script.slice(
+    script.indexOf('function getCurrentVisibleSessions()'),
+    script.indexOf('function getVisibleOtherWorkspaceSessions(')
+  );
+  assert.ok(currentTabList.includes('sessionFavoritesOnly && session.isFavorite !== true'),
+    'the favourites switch hides every row that is not followed');
+  assert.ok(currentTabList.includes('sessions.sort(compareSessionsByCreation);'),
+    'the list keeps its single creation-order sort');
+  assert.ok(currentTabList.indexOf('if (sessionFavoritesOnly) {')
+    < currentTabList.indexOf('sessionRangeDays <= 0'),
+  'a favourite is let through before the range test, so the range never hides it');
+  assert.ok(currentTabList.indexOf('sessionHasRun(session.id)')
+    < currentTabList.indexOf('if (sessionFavoritesOnly) {'),
+  'the has-run switch still runs before the favourites bypass');
+  assert.doesNotMatch(script, /favoriteDelta/u,
+    'no comparator key is added for favourites: the filter never reorders');
+
+  assert.match(script, /var favoritesOnlyButton = document\.createElement\('button'\);/u,
+    'the control strip offers the favourites switch');
+  assert.match(script, /favoritesOnlyButton\.dataset\.sessionAction = 'toggleFavoritesOnly';/u,
+    'the control strip exposes the favourites toggle');
+  assert.match(script,
+    /favoritesOnlyButton\.setAttribute\('aria-pressed', sessionFavoritesOnly \? 'true' : 'false'\);/u,
+    'the pressed state follows the favourites filter');
+  assert.match(script, /favoritesOnlyButton\.setAttribute\('aria-label', t\('sessionFavoritesOnly'\)\);/u,
+    'the catalogue label becomes the accessible name of the favourites switch');
+  assert.match(script, /favoritesOnlyButton\.title = t\('sessionFavoritesOnlyHint'\);/u,
+    'the tooltip explains that the range above is ignored');
+  assert.match(script,
+    /favoritesOnlyButton\.innerHTML = sessionFavoritesOnly\s*\? '<svg[^']*<\/svg>'\s*: '<svg[^']*<\/svg>';/u,
+    'the switch draws an inline star for both states');
+  assert.doesNotMatch(script, /favoritesOnlyButton\.innerHTML = '[^']*<text/u,
+    'the star never draws a word, so it stays language-neutral');
+  assert.doesNotMatch(script, /favoritesOnlyButton\.textContent/u,
+    'the switch is icon-only: no dictionary puts a word in the control strip');
+  assert.match(script,
+    /trailingControls\.append\(withRunOnlyButton\);\s*trailingControls\.append\(favoritesOnlyButton\);\s*trailingControls\.append\(multiSelectButton\);\s*controls\.append\(trailingControls\);/u,
+    'the favourites switch sits between the has-run switch and the edit toggle');
+  assert.match(script,
+    /if \(action === 'toggleFavoritesOnly'\) \{\s*sessionFavoritesOnly = !sessionFavoritesOnly;/u,
+    'the control flips the favourites filter and repaints the panel');
+
+  const emptyState = script.slice(
+    script.indexOf('var historyNotEmpty ='),
+    script.indexOf('empty.textContent = t(emptyKey);')
+  );
+  assert.ok(emptyState.includes("emptyKey = 'sessionFavoritesOnlyEmpty'")
+    && emptyState.includes("emptyKey = 'sessionWithRunOnlyEmpty'"),
+  'an emptied list names the switch that hid the rows instead of claiming empty history');
+  assert.ok(emptyState.indexOf("'sessionFavoritesOnlyEmpty'")
+    < emptyState.indexOf("'sessionWithRunOnlyEmpty'"),
+  'favourites is the more specific explanation when both switches are on');
+  assert.ok(emptyState.includes("var emptyKey = 'noHistory'"),
+    'empty history still falls back to the plain empty label');
+
+  const zh = WEBVIEW_TRANSLATIONS['zh-CN'];
+  const en = WEBVIEW_TRANSLATIONS.en;
+  assert.equal(zh.sessionFavoritesOnly, '只看关注', 'zh-CN labels the favourites filter in Chinese');
+  assert.ok(en.sessionFavoritesOnly && en.sessionFavoritesOnly.length > 0,
+    'en labels the favourites filter too');
+  assert.ok(zh.sessionFavoritesOnlyHint && en.sessionFavoritesOnlyHint
+    && zh.sessionFavoritesOnlyHint !== en.sessionFavoritesOnlyHint,
+  'both dictionaries explain the ignored range in their own language');
+  assert.ok(zh.sessionFavoritesOnlyEmpty && en.sessionFavoritesOnlyEmpty
+    && zh.sessionFavoritesOnlyEmpty !== en.sessionFavoritesOnlyEmpty,
+  'both dictionaries explain a favourites-only empty list in their own language');
   assert.equal(zh.sessionCurrentOnly, undefined, 'the provisional current-only label is gone');
 });
 

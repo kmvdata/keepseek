@@ -137,6 +137,19 @@ export const conversationsStylesFragment: WebviewFragment = {
       display: block;
     }
 
+    /* The favourites switch is the third icon-only control in the tail group, so
+       it squares itself off the same way instead of using the text padding. */
+    .session-menu-favorites-toggle {
+      display: inline-grid;
+      place-items: center;
+      min-width: 26px;
+      padding: 3px 5px;
+    }
+
+    .session-menu-favorites-toggle svg {
+      display: block;
+    }
+
     .session-menu-bulk button {
       flex: 1 1 0;
       min-width: 0;

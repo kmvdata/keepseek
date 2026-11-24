@@ -44,7 +44,7 @@ export const conversationsSessionListFragment: WebviewFragment = {
       // dropped then: syncSessionStatusBadges patches the marker in place instead
       // of rebuilding the row underneath the editor.
       return JSON.stringify([getLanguage(), state.activeSessionId,
-        sessionMultiSelectMode, sessionRangeDays, sessionWithRunOnly, Array.from(selectedSessionIds),
+        sessionMultiSelectMode, sessionRangeDays, sessionWithRunOnly, sessionFavoritesOnly, Array.from(selectedSessionIds),
         editingSessionTitleId, sessions,
         editingSessionTitleId ? '' : getSessionStatusRenderKey(sessions)]);
     }
@@ -120,7 +120,23 @@ export const conversationsSessionListFragment: WebviewFragment = {
       withRunOnlyButton.setAttribute('aria-label', t('sessionWithRunOnly'));
       withRunOnlyButton.title = t('sessionWithRunOnlyHint');
       withRunOnlyButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M14.7 8h-2.7l-2 6L6 2l-2 6H1.3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+      // Favourites is a bookmark, not a move: the switch filters this project's
+      // list and never touches the order the rows arrived in.
+      var favoritesOnlyButton = document.createElement('button');
+      favoritesOnlyButton.type = 'button';
+      favoritesOnlyButton.className = 'session-menu-filter session-menu-favorites-toggle'
+        + (sessionFavoritesOnly ? ' is-active' : '');
+      favoritesOnlyButton.dataset.sessionAction = 'toggleFavoritesOnly';
+      favoritesOnlyButton.setAttribute('aria-pressed', sessionFavoritesOnly ? 'true' : 'false');
+      // Icon only: the star repeats the row bookmark glyph, so the catalogue
+      // labels stay behind as the accessible name and the tooltip.
+      favoritesOnlyButton.setAttribute('aria-label', t('sessionFavoritesOnly'));
+      favoritesOnlyButton.title = t('sessionFavoritesOnlyHint');
+      favoritesOnlyButton.innerHTML = sessionFavoritesOnly
+        ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>'
+        : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>';
       trailingControls.append(withRunOnlyButton);
+      trailingControls.append(favoritesOnlyButton);
       trailingControls.append(multiSelectButton);
       controls.append(trailingControls);
       sessionMenu.append(controls);
@@ -152,11 +168,17 @@ export const conversationsSessionListFragment: WebviewFragment = {
       if (!sessions.length) {
         var empty = document.createElement('div');
         empty.className = 'session-menu-empty';
-        // The filter can empty the list while history still exists, so name the
-        // filter instead of claiming there is no history at all.
-        var filteredNothing = sessionWithRunOnly
-          && (Array.isArray(state.sessionSummaries) ? state.sessionSummaries : []).length > 0;
-        empty.textContent = filteredNothing ? t('sessionWithRunOnlyEmpty') : t('noHistory');
+        // A switch can empty the list while history still exists, so name the
+        // filter instead of claiming there is no history at all. Favourites wins
+        // when both switches are on: it is the narrower of the two lists.
+        var historyNotEmpty = (Array.isArray(state.sessionSummaries) ? state.sessionSummaries : []).length > 0;
+        var emptyKey = 'noHistory';
+        if (historyNotEmpty && sessionFavoritesOnly) {
+          emptyKey = 'sessionFavoritesOnlyEmpty';
+        } else if (historyNotEmpty && sessionWithRunOnly) {
+          emptyKey = 'sessionWithRunOnlyEmpty';
+        }
+        empty.textContent = t(emptyKey);
         sessionMenu.append(empty);
         return;
       }
@@ -276,8 +298,17 @@ export const conversationsSessionListFragment: WebviewFragment = {
       // user asks for — or a new conversation enters at the top.
       sessions.sort(compareSessionsByCreation);
       return sessions.filter(function(session) {
+        if (sessionFavoritesOnly && session.isFavorite !== true) {
+          return false;
+        }
         if (sessionWithRunOnly && !sessionHasRun(session.id)) {
           return false;
+        }
+        if (sessionFavoritesOnly) {
+          // The star is a bookmark, so a followed row stays visible even when the
+          // range above would hide it. The range itself is only bypassed, never
+          // rewritten: closing the switch restores its effect unchanged.
+          return true;
         }
         if (sessionRangeDays <= 0) {
           return true;
@@ -376,6 +407,13 @@ export const conversationsSessionListFragment: WebviewFragment = {
 
       if (action === 'toggleWithRunOnly') {
         sessionWithRunOnly = !sessionWithRunOnly;
+        selectedSessionIds.clear();
+        renderSessionMenu();
+        return;
+      }
+
+      if (action === 'toggleFavoritesOnly') {
+        sessionFavoritesOnly = !sessionFavoritesOnly;
         selectedSessionIds.clear();
         renderSessionMenu();
         return;
