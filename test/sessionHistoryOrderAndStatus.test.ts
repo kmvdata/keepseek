@@ -9,6 +9,7 @@ import { WEBVIEW_TRANSLATIONS, localize } from '../src/shared/i18n';
 import { conversationsStylesFragment } from '../src/webview/conversations/styles';
 import { ChatSessionStore, normalizeStoredSessions, sortSessionSummariesByCreatedAt } from '../src/sessions/chatSessionStore';
 import { GlobalSessionStorage } from '../src/sessions/globalSessionStorage';
+import type { ChatSessionSummary } from '../src/shared/types';
 import {
   deriveSessionRunEvidence,
   isSessionRunDismissed,
@@ -629,10 +630,9 @@ test('the dismissal marker is normalized and persisted with the session header',
   assert.equal(byId.get('broken')?.runStatusDismissal, undefined, 'an unknown shape is dropped instead of throwing');
 });
 
-/** Pinning is the only user action that moves a row, and it stays an order
- * change: the pinned group leads, both groups keep the creation order, and an
- * unpinned row lands exactly where its `createdAt` says. */
-test('a pinned row leads the history list without rewriting its creation', () => {
+/** The Host keeps writing the creation order: 'move to top' lives in the Webview's
+ * memory only, so a stray stored flag can never lift a row here. */
+test('the Host history order reads creation only, never a stored movement', () => {
   const base = {
     title: 'task', updatedAt: SB, messageCount: 1,
     workspaceKey: SCOPE_KEY, workspaceName: 'order', isFavorite: false
@@ -642,74 +642,59 @@ test('a pinned row leads the history list without rewriting its creation', () =>
   const newest = { ...base, id: 'newest', createdAt: SB };
 
   assert.deepEqual(sortSessionSummariesByCreatedAt([newest, oldest, middle]).map(row => row.id),
-    ['newest', 'middle', 'oldest'], 'while nothing is pinned, creation still decides the order');
+    ['newest', 'middle', 'oldest'], 'creation decides the order');
 
-  assert.deepEqual(
-    sortSessionSummariesByCreatedAt([newest, { ...oldest, isPinned: true }, { ...middle, isPinned: true }])
-      .map(row => row.id),
-    ['middle', 'oldest', 'newest'],
-    'pinning lifts the rows, and the pinned group keeps the creation order');
-
-  assert.deepEqual(
-    sortSessionSummariesByCreatedAt([{ ...newest, isPinned: false }, { ...oldest, isPinned: true }])
-      .map(row => row.id),
-    ['oldest', 'newest'], 'only `isPinned === true` counts, so an explicit false is unpinned');
+  const decorated = [
+    { ...oldest, isPinned: true },
+    { ...newest, isPinned: true }
+  ] as unknown as ChatSessionSummary[];
+  assert.deepEqual(sortSessionSummariesByCreatedAt(decorated).map(row => row.id),
+    ['newest', 'oldest'], 'a stored movement flag cannot lift a row, so only creation decides');
 
   const tie = { ...base, createdAt: '2024-03-01T00:00:00.000Z' };
   assert.deepEqual(
-    sortSessionSummariesByCreatedAt([{ ...tie, id: 'b', isPinned: true }, { ...tie, id: 'a', isPinned: true }])
+    sortSessionSummariesByCreatedAt([{ ...tie, id: 'b' }, { ...tie, id: 'a' }])
       .map(row => row.id),
-    ['a', 'b'], 'the id still breaks a tie inside the pinned group');
+    ['a', 'b'], 'the id still breaks a tie');
 });
 
-/** The pin lives in the session header and in the workspace index entry, so a
- * reload and a second window both read the same order, and neither write touches
- * the last-activity timestamp that retention ranks by. */
-test('the pin round-trips through the shard and the index without touching activity', async t => {
-  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-pin-order-'));
+/** 'Move to top' is Webview-only, so nothing about it reaches the session header,
+ * the shard or the workspace index. This keeps the flag from coming back. */
+test('moving a row to the top persists no flag in the shard or the index', async t => {
+  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-move-top-'));
   t.after(async () => { await rm(root, { recursive: true, force: true }).catch(() => undefined); });
 
-  const scope = { key: SCOPE_KEY, name: 'pin', folderUris: [SCOPE_KEY] };
+  const scope = { key: SCOPE_KEY, name: 'move-top', folderUris: [SCOPE_KEY] };
   const storage = new GlobalSessionStorage(vscode.Uri.file(root) as never);
   const store = new ChatSessionStore(storage, 'en', scope);
   await store.initialize();
 
   const session = store.getActiveSession();
-  session.messages.push({ id: 'pin-1', role: 'user', content: 'task', createdAt: SA } as never);
+  session.messages.push({ id: 'move-top-1', role: 'user', content: 'task', createdAt: SA } as never);
   await store.persist();
-  assert.equal(store.getSessionSummaries().find(row => row.id === session.id)?.isPinned, false,
-    'a new conversation is not pinned');
 
-  const updatedAtBefore = session.updatedAt;
-  const pinned = await store.toggleSessionPinned(session.id);
-  assert.equal(pinned?.isPinned, true, 'the header keeps the flag');
-  assert.equal(pinned?.updatedAt, updatedAtBefore,
-    'pinning never refreshes the last-activity timestamp, so retention is unchanged');
-  assert.equal(store.getSessionSummaries().find(row => row.id === session.id)?.isPinned, true,
-    'the row is pinned as soon as the header is written');
+  const summary = store.getSessionSummaries().find(row => row.id === session.id);
+  assert.ok(summary, 'the persisted conversation has a summary');
+  assert.equal('isPinned' in summary, false, 'the summary carries no movement flag');
 
   const indexed = (await storage.listWorkspaceSessionSummaries(scope.key))
     .find(row => row.id === session.id);
-  assert.equal(indexed?.isPinned, true, 'the workspace index entry carries the pin');
+  assert.ok(indexed, 'the workspace index lists the conversation');
+  assert.equal('isPinned' in indexed, false, 'the workspace index entry carries no movement flag');
 
   const reloaded = await storage.loadSession(scope.key, session.id);
-  assert.equal(reloaded?.isPinned, true, 'the shard body keeps the pin across a reload');
+  assert.ok(reloaded, 'the shard reloads');
+  assert.equal('isPinned' in reloaded, false, 'the shard body carries no movement flag');
 
-  const unpinned = await store.toggleSessionPinned(session.id);
-  assert.equal(unpinned?.isPinned, false, 'a second click clears the flag again');
-  assert.equal(unpinned?.updatedAt, updatedAtBefore, 'unpinning leaves the activity timestamp alone');
-  assert.equal(session.messages.length, 1, 'the pin never touches the append-only history');
-
-  const normalized = new Map(normalizeStoredSessions({
+  const normalized = normalizeStoredSessions({
     sessions: [
-      { id: 'pinned', createdAt: SA, updatedAt: SA, workspaceKey: SCOPE_KEY, messages: [], isPinned: true },
-      { id: 'unknown', createdAt: SA, updatedAt: SA, workspaceKey: SCOPE_KEY, messages: [], isPinned: 'yes' },
-      { id: 'legacy', createdAt: SA, updatedAt: SA, workspaceKey: SCOPE_KEY, messages: [] }
+      { id: 'legacy', createdAt: SA, updatedAt: SA, workspaceKey: SCOPE_KEY, messages: [], isPinned: true }
     ]
-  }, scope).map(item => [item.id, item]));
-  assert.equal(normalized.get('pinned')?.isPinned, true, 'a stored pin round-trips');
-  assert.equal(normalized.get('unknown')?.isPinned, false, 'an unknown pin value degrades to unpinned');
-  assert.equal(normalized.get('legacy')?.isPinned, false, 'old data is unpinned instead of throwing');
+  }, scope);
+  assert.equal(normalized.length, 1, 'old data still loads');
+  assert.equal('isPinned' in normalized[0], false,
+    'a stored pin is dropped instead of restored, so an upgrade cannot resurrect the order');
+  assert.equal(session.messages.length, 1, 'the movement never touches the append-only history');
 });
 
 /** The row pin is a request, never an authority: it posts one message, the Host

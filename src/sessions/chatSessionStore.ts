@@ -560,22 +560,6 @@ export class ChatSessionStore {
   }
 
   /**
-   * Pinning is an order change, not a bookmark and not an activity signal: the
-   * header flag alone moves the row, so `updatedAt` keeps describing the last real
-   * activity and retention/index ranking stay untouched.
-   */
-  public async toggleSessionPinned(sessionId: string): Promise<ChatSession | undefined> {
-    const session = await this.loadSessionById(sessionId);
-    if (!session) {
-      return undefined;
-    }
-
-    session.isPinned = session.isPinned !== true;
-    await this.persist();
-    return session;
-  }
-
-  /**
    * Records that the user left this run in the history list.
    *
    * The marker is session header state, not history: `session.messages` stays
@@ -1277,7 +1261,6 @@ function toSessionSummary(session: ChatSession, language: KeepseekLanguage): Cha
     workspaceKey: session.workspaceKey,
     workspaceName: session.workspaceName,
     isFavorite: Boolean(session.isFavorite),
-    isPinned: session.isPinned === true,
     customTitle: session.customTitle
   };
 }
@@ -1540,7 +1523,6 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
       workspaceName,
       workspaceFolders,
       isFavorite: item.isFavorite === true,
-      isPinned: item.isPinned === true,
       customTitle
     });
     seen.add(item.id);
@@ -2277,22 +2259,20 @@ function createTitleFromMessages(messages: ChatMessage[], language: KeepseekLang
 }
 
 /**
- * Display order for the history list: pinned rows first, then newest creation,
+ * Display order for the history list: only `createdAt` moves a row, newest first,
  * with the id as a tie-break so two sessions created in the same millisecond
  * never swap places.
  *
- * An explicit pin is the only user action that moves a row on purpose; inside
- * each group only `createdAt` decides. Browsing, streaming, saving or favouriting
- * a conversation changes `updatedAt`, and a list that followed it reshuffled
- * itself under the user's cursor — so a pin never rewrites creation time either,
- * and unpinning returns the row exactly where it was. "Which conversations are
- * kept" is a separate question and keeps using `sortSessionsByUpdatedAt`, as do
- * the cross-workspace index and the retention pass.
+ * Browsing, streaming, saving or favouriting a conversation changes `updatedAt`,
+ * and a list that followed it reshuffled itself under the user's cursor — so
+ * creation time is the only key here. When the user moves a row to the top, that
+ * order lives in the Webview's memory alone: the Host keeps writing the creation
+ * order, so a reload lands every row back where `createdAt` says. "Which
+ * conversations are kept" is a separate question and keeps using
+ * `sortSessionsByUpdatedAt`, as do the cross-workspace index and the retention pass.
  */
 export function sortSessionSummariesByCreatedAt(sessions: ChatSessionSummary[]): ChatSessionSummary[] {
   return [...sessions].sort((left, right) => {
-    const byPinned = Number(right.isPinned === true) - Number(left.isPinned === true);
-    if (byPinned) return byPinned;
     const byCreation = getSessionCreatedTimestamp(right) - getSessionCreatedTimestamp(left);
     if (byCreation) return byCreation;
     return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;

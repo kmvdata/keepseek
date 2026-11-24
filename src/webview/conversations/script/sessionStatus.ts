@@ -18,9 +18,11 @@ export const conversationsSessionStatusFragment: WebviewFragment = {
   source: `
     /**
      * Creation timestamp with the same total order the Host uses. The history list
-     * is the record of what the user created, so only \`createdAt\` moves a row —
-     * except an explicit pin: pinning is the one reorder the user asks for, while
-     * browsing, streaming or saving a conversation must never touch the order.
+     * is the record of what the user created, so only \`createdAt\` moves a row:
+     * browsing, streaming, saving or favouriting a conversation must never touch
+     * the order. The single exception is the user's 'move to top' click, which
+     * reorders the current list in this Webview's memory only — it writes no
+     * session header, so a reload restores the creation order.
      */
     function getSessionCreatedTimestamp(session) {
       var timestamp = Date.parse(session.createdAt || session.updatedAt || '');
@@ -28,9 +30,17 @@ export const conversationsSessionStatusFragment: WebviewFragment = {
       return getSessionTimestamp(session);
     }
 
+    /** Where the user put this row with 'move to top'. Rows the user never moved
+     * are absent from the list and rank last, so the creation order still decides
+     * for them. */
+    function sessionTopRank(sessionId) {
+      var rank = sessionMovedToTopIds.indexOf(String(sessionId || ''));
+      return rank < 0 ? Number.MAX_SAFE_INTEGER : rank;
+    }
+
     function compareSessionsByCreation(a, b) {
-      var byPinned = (b.isPinned === true ? 1 : 0) - (a.isPinned === true ? 1 : 0);
-      if (byPinned) return byPinned;
+      var byRank = sessionTopRank(a.id) - sessionTopRank(b.id);
+      if (byRank) return byRank;
       var delta = getSessionCreatedTimestamp(b) - getSessionCreatedTimestamp(a);
       if (delta) return delta;
       var leftId = String(a.id || '');

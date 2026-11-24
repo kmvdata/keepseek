@@ -1053,8 +1053,6 @@ export interface ChatSession {
   workspaceName: string;
   workspaceFolders: string[];
   isFavorite: boolean;
-  /** 用户显式置顶：只改变历史列表的行顺序，不是保留/清理的保护位。 */
-  isPinned?: boolean;
   customTitle?: string;
 }
 
@@ -1093,8 +1091,6 @@ export interface ChatSessionSummary {
   workspaceKey: string;
   workspaceName: string;
   isFavorite: boolean;
-  /** 见 ChatSession.isPinned；工作区索引条目同样携带它。 */
-  isPinned?: boolean;
   customTitle?: string;
 }
 

@@ -165,7 +165,7 @@ export const conversationsStylesFragment: WebviewFragment = {
 
     .session-menu-item {
       display: grid;
-      /* [status] [favourite] [main] [stop] [pin] [rename] */
+      /* [status] [favourite] [main] [stop] [top] [rename] */
       grid-template-columns: 12px 24px minmax(0, 1fr) 28px 28px 28px;
       align-items: center;
       gap: 6px;
@@ -284,8 +284,8 @@ export const conversationsStylesFragment: WebviewFragment = {
       transition: opacity 120ms ease, transform 120ms ease, background-color 120ms ease, color 120ms ease;
     }
 
-    .session-menu-item:hover .session-menu-pin,
-    .session-menu-item:focus-within .session-menu-pin,
+    .session-menu-item:hover .session-menu-move-top,
+    .session-menu-item:focus-within .session-menu-move-top,
     .session-menu-item:hover .session-menu-rename,
     .session-menu-item:focus-within .session-menu-rename,
     .session-menu-item:hover .session-menu-run-stop,
@@ -327,10 +327,9 @@ export const conversationsStylesFragment: WebviewFragment = {
       outline: none;
     }
 
-    /* The pin copies the rename pencil's geometry and reveal, but it is the only
-       row control that stays visible on its own: a pinned row keeps showing why it
-       leads the list, without a hover. */
-    .session-menu-pin {
+    /* 'Move to top' copies the rename pencil's geometry and reveal: it is an
+       action on the current list, not a state, so it shows on hover/focus only. */
+    .session-menu-move-top {
       display: grid;
       place-items: center;
       width: 26px;
@@ -345,17 +344,11 @@ export const conversationsStylesFragment: WebviewFragment = {
       transition: opacity 120ms ease, transform 120ms ease, background-color 120ms ease, color 120ms ease;
     }
 
-    .session-menu-pin:hover,
-    .session-menu-pin:focus-visible {
+    .session-menu-move-top:hover,
+    .session-menu-move-top:focus-visible {
       color: var(--vscode-textLink-foreground);
       background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
       outline: none;
-    }
-
-    .session-menu-pin.is-active {
-      opacity: 1;
-      transform: translateX(0);
-      color: var(--vscode-textLink-foreground);
     }
 
     .session-menu-rename:hover,

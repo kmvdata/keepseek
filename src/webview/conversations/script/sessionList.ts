@@ -40,6 +40,8 @@ export const conversationsSessionListFragment: WebviewFragment = {
     }
 
     function getSessionMenuRenderKey(sessions) {
+      // The rows arrive sorted, so a 'move to top' changes this key by itself and
+      // the in-memory rank never has to be listed here.
       // A rename input owns the caret while it is open, so the live status key is
       // dropped then: syncSessionStatusBadges patches the marker in place instead
       // of rebuilding the row underneath the editor.
@@ -56,6 +58,7 @@ export const conversationsSessionListFragment: WebviewFragment = {
       sessionMenu.classList.toggle('is-multi-select', sessionMultiSelectMode);
       var sessions = getCurrentVisibleSessions();
       pruneSelectedSessionIds(sessions);
+      pruneMovedToTopIds();
       // Readiness and auxiliary result patches only affect the row controls.
       // Preserve the existing editor, focus and scroll when history itself has
       // not changed, including full Host snapshots after Webview ready.
@@ -190,11 +193,9 @@ export const conversationsSessionListFragment: WebviewFragment = {
         var item = document.createElement('div');
         var isActive = session.id === state.activeSessionId;
         var isFavorite = session.isFavorite === true;
-        var isPinned = session.isPinned === true;
         item.className = 'session-menu-item'
           + (isActive ? ' is-active' : '')
-          + (isFavorite ? ' is-favorite' : '')
-          + (isPinned ? ' is-pinned' : '');
+          + (isFavorite ? ' is-favorite' : '');
         item.dataset.sessionId = session.id;
         item.tabIndex = 0;
         item.setAttribute('role', 'menuitemradio');
@@ -266,19 +267,17 @@ export const conversationsSessionListFragment: WebviewFragment = {
         // so the destructive row action reads left of the edit action; a row with no
         // run keeps an inert spacer in that column so the grid never shifts.
         item.append(renderSessionRunStopButton(session.id));
-        var pinButton = document.createElement('button');
-        pinButton.type = 'button';
-        pinButton.className = 'session-menu-pin' + (isPinned ? ' is-active' : '');
-        pinButton.dataset.sessionAction = 'togglePin';
-        pinButton.dataset.sessionId = session.id;
-        pinButton.setAttribute('aria-pressed', isPinned ? 'true' : 'false');
-        pinButton.setAttribute('aria-label', t(isPinned ? 'unpinSession' : 'pinSession'));
-        pinButton.title = t(isPinned ? 'unpinSession' : 'pinSession');
-        // The pin is the only row action that moves a row, so it never writes here:
-        // the Host flips the header flag and pushes the order back, which keeps this
-        // glyph a request instead of an authority.
-        pinButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>';
-        item.append(pinButton);
+        var moveToTopButton = document.createElement('button');
+        moveToTopButton.type = 'button';
+        moveToTopButton.className = 'session-menu-move-top';
+        moveToTopButton.dataset.sessionAction = 'moveToTop';
+        moveToTopButton.dataset.sessionId = session.id;
+        moveToTopButton.setAttribute('aria-label', t('moveSessionToTop'));
+        moveToTopButton.title = t('moveSessionToTop');
+        // The action moves this row in the current list only: no Host request and
+        // no session header write, so a reload restores the creation order.
+        moveToTopButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 3h14"/><path d="m18 13-6-6-6 6"/><path d="M12 7v14"/></svg>';
+        item.append(moveToTopButton);
         var renameButton = document.createElement('button');
         renameButton.type = 'button';
         renameButton.className = 'session-menu-rename';
@@ -296,8 +295,9 @@ export const conversationsSessionListFragment: WebviewFragment = {
       var sessions = Array.isArray(state.sessionSummaries) ? state.sessionSummaries.slice() : [];
       // Favouriting a row is a bookmark, never a move: 'isFavorite' is not a sort
       // key, so the star leaves the row — and the scroll position around it —
-      // exactly where the user clicked it. Only an explicit pin — the one move the
-      // user asks for — or a new conversation enters at the top.
+      // exactly where the user clicked it. The one exception is 'move to top': it
+      // reorders this Webview's current list only, so it never writes
+      // 'createdAt'/'updatedAt' and never reaches the session store.
       sessions.sort(compareSessionsByCreation);
       return sessions.filter(function(session) {
         // The two switches are switches, not gates: each one admits its own rows
@@ -361,6 +361,17 @@ export const conversationsSessionListFragment: WebviewFragment = {
       });
     }
 
+    /** Drop ids that left the history, so a deleted conversation leaves no stale
+     * rank behind. The whole history decides, never the filtered rows: a date range
+     * or a switch must not forget where the user put a row. */
+    function pruneMovedToTopIds() {
+      var knownIds = new Set((Array.isArray(state.sessionSummaries) ? state.sessionSummaries : [])
+        .map(function(session) { return session.id; }));
+      sessionMovedToTopIds = sessionMovedToTopIds.filter(function(sessionId) {
+        return knownIds.has(sessionId);
+      });
+    }
+
     function beginSessionTitleEdit(sessionId) {
       editingSessionTitleId = sessionId;
       renderSessionMenu();
@@ -392,12 +403,15 @@ export const conversationsSessionListFragment: WebviewFragment = {
         return;
       }
 
-      if (action === 'togglePin') {
-        // Order only: the Host owns the flag, so nothing here edits the summaries.
-        var pinRow = button.closest('.session-menu-item');
-        var pinSessionId = button.dataset.sessionId || pinRow?.dataset.sessionId || '';
-        if (pinSessionId) {
-          vscode.postMessage({ type: 'toggleSessionPinned', sessionId: pinSessionId });
+      if (action === 'moveToTop') {
+        // Only the current list moves: no Host request and no state write.
+        var moveRow = button.closest('.session-menu-item');
+        var moveSessionId = button.dataset.sessionId || moveRow?.dataset.sessionId || '';
+        if (moveSessionId) {
+          sessionMovedToTopIds = [moveSessionId].concat(sessionMovedToTopIds.filter(function(id) {
+            return id !== moveSessionId;
+          }));
+          renderSessionMenu();
         }
         return;
       }

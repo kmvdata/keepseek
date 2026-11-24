@@ -10,5 +10,6 @@ export const conversationsStateFragment: WebviewFragment = {
     let sessionWithRunOnly = false;
     let sessionFavoritesOnly = false;
     let selectedSessionIds = new Set();
-    let editingSessionTitleId = '';`.slice(1)
+    let editingSessionTitleId = '';
+    let sessionMovedToTopIds = [];`.slice(1)
 };

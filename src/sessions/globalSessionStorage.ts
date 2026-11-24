@@ -194,8 +194,8 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     const entries = new Map((existing?.sessions ?? []).map((entry) => [entry.id, entry]));
     for (const summary of state.sessionSummaries ?? []) {
       if (!summary.messageCount || summary.workspaceKey !== workspaceScope.key || await this.isSessionDeleted(summary.workspaceKey, summary.id)) continue;
-      // `{ ...summary }` carries `isPinned` (and `isFavorite`) into the index without
-      // repeating the field list here, so another window reads the same row order.
+      // `{ ...summary }` carries `isFavorite` into the index without repeating the
+      // field list here.
       const previous = entries.get(summary.id);
       entries.set(summary.id, {
         ...summary,
@@ -1024,7 +1024,6 @@ function toSessionSummary(session: ChatSession): ChatSessionSummary {
     workspaceKey: session.workspaceKey,
     workspaceName: session.workspaceName,
     isFavorite: Boolean(session.isFavorite),
-    isPinned: session.isPinned === true,
     customTitle: session.customTitle
   };
 }
@@ -1039,7 +1038,6 @@ function toPublicSummary(entry: SessionIndexEntry): ChatSessionSummary {
     workspaceKey: entry.workspaceKey,
     workspaceName: entry.workspaceName,
     isFavorite: entry.isFavorite,
-    isPinned: entry.isPinned === true,
     customTitle: entry.customTitle
   };
 }
@@ -1098,7 +1096,6 @@ function normalizeSessionIndexEntry(value: unknown, workspaceKey: string, worksp
     workspaceKey,
     workspaceName: nonEmptyString(value.workspaceName) ?? workspaceName,
     isFavorite: value.isFavorite === true,
-    isPinned: value.isPinned === true,
     customTitle: nonEmptyString(value.customTitle),
     autoTitleCommit: typeof value.autoTitleCommit === 'string' && /^[a-f0-9]{64}$/u.test(value.autoTitleCommit)
       ? value.autoTitleCommit : undefined,
