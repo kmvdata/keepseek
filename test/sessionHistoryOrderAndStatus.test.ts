@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { test } from 'node:test';
 import { getScript } from '../src/webview/script';
+import { conversationsStylesFragment } from '../src/webview/conversations/styles';
 import { ChatSessionStore, sortSessionSummariesByCreatedAt } from '../src/sessions/chatSessionStore';
 import { GlobalSessionStorage } from '../src/sessions/globalSessionStorage';
 import { projectSessionRunStatuses, type SessionLastRunObservation } from '../src/provider/sessionRunStatus';
@@ -126,9 +127,9 @@ test('live failures and archived summaries both explain a failed session', () =>
     'an unloaded session gets no invented status');
 });
 
-/** The panel side of the same contract: creation order, creation time in the
- * meta line, and one live status badge per row. */
-test('the webview orders history by creation and shows a status badge', () => {
+/** The panel side of the same contract: creation order, one live status marker
+ * per row placed beside the favourite star, and the themed colours it relies on. */
+test('the webview orders history by creation and marks each row status', () => {
   const script = getScript();
   assert.doesNotThrow(() => new Function(script), 'the generated webview script must compile');
 
@@ -138,20 +139,23 @@ test('the webview orders history by creation and shows a status badge', () => {
     'the favourite group keeps its priority and only its inner order changes');
   assert.match(script, /sessions\.sort\(compareSessionsByCreation\);/u,
     'the other-workspace tab sorts by creation too');
-  assert.doesNotMatch(script, /return getSessionTimestamp\(b\) - getSessionTimestamp\(a\);\)?;\s*return sessions\.filter/u,
+  assert.doesNotMatch(script, /getSessionTimestamp\(b\) - getSessionTimestamp\(a\)/u,
     'no visible list may be ordered by last activity');
-  assert.match(script, /var timeLabel = formatSessionTime\(session\.createdAt \|\| session\.updatedAt\);/u,
-    'the meta line shows the stable creation time');
+  assert.match(script, /t\('sessionCreatedAt', \{ time: created \}\)/u,
+    'the tooltip names the creation time that decides the position');
   assert.match(script, /var lastActive = formatSessionTime\(session\.updatedAt\);/u,
-    'the last activity moves into the tooltip instead of the order');
+    'the last activity stays available as a hint instead of driving the order');
 
   assert.match(script, /function getSessionStatusRenderKey\(sessions\) \{/u,
     'a live status change must reach the panel');
   assert.match(script, /editingSessionTitleId \? '' : getSessionStatusRenderKey\(sessions\)/u,
     'a status change never rebuilds the row while a rename input owns the caret');
   assert.match(script, /syncSessionStatusBadges\(sessions\);/u,
-    'the early return patches badges in place');
+    'the early return patches markers in place');
   assert.match(script, /sessionRunStatuses: \{\},/u, 'the default state carries the status map');
+  assert.match(script,
+    /item\.append\(renderRunStatusBadge\(session\.id\)\);\s*var favoriteButton = document\.createElement\('button'\);/u,
+    'the status marker is placed immediately before the favourite button');
   assert.match(script, /badge\.className = 'session-status-badge is-' \+ kind;/u,
     'the badge kind maps to a themed marker class');
   for (const declaration of [
@@ -159,9 +163,26 @@ test('the webview orders history by creation and shows a status badge', () => {
     'function syncSessionStatusBadges(',
     'function sessionRunStatusKind(',
     'function sessionRunStatusLabel(',
-    'function applyRunStatusBadge('
+    'function applyRunStatusBadge(',
+    'function getSessionCreatedTimestamp(',
+    'function formatSessionActivityTitle('
   ]) {
     assert.equal(script.split(declaration).length - 1, 1,
       `${declaration} must be declared exactly once in the shared script scope`);
   }
+
+  const styles = conversationsStylesFragment.source;
+  assert.match(styles, /grid-template-columns: 12px 24px minmax\(0, 1fr\) 28px;/u,
+    'the row reserves a leading column for the status marker');
+  assert.match(styles, /grid-template-columns: 18px 12px 24px minmax\(0, 1fr\) 28px;/u,
+    'the multi-select row keeps the marker column');
+  assert.match(styles, /\.session-status-badge\.is-failed \{\s*background: var\(--vscode-charts-red/u,
+    'a failed run is red');
+  assert.match(styles, /\.session-status-badge\.is-running \{\s*background: var\(--vscode-charts-orange/u,
+    'a running run is orange');
+  assert.match(styles, /animation: session-status-pulse/u, 'a running run flashes');
+  assert.match(styles, /\.session-status-badge\.is-completed \{\s*background: var\(--vscode-charts-green/u,
+    'a completed run is green');
+  assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/u,
+    'the pulse is disabled when the user asks for reduced motion');
 });

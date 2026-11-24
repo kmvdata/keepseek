@@ -39,11 +39,26 @@ export const conversationsSessionListFragment: WebviewFragment = {
       renderSessionControls();
     }
 
+    function getSessionStatusRenderKey(sessions) {
+      var statuses = state.sessionRunStatuses && typeof state.sessionRunStatuses === 'object'
+        ? state.sessionRunStatuses : {};
+      var parts = [];
+      for (var i = 0; i < sessions.length; i++) {
+        var entry = statuses[sessions[i].id];
+        parts.push(sessions[i].id + '=' + sessionRunStatusKind(entry));
+      }
+      return parts.join(',');
+    }
+
     function getSessionMenuRenderKey(sessions) {
+      // A rename input owns the caret while it is open, so the live status key is
+      // dropped then: syncSessionStatusBadges patches the marker in place instead
+      // of rebuilding the row underneath the editor.
       return JSON.stringify([getLanguage(), state.activeSessionId, activeWorkspaceTab,
         sessionMultiSelectMode, sessionRangeDays, sessionFavoritesOnly, Array.from(selectedSessionIds),
         editingSessionTitleId, sessions, otherWorkspaces, otherWorkspacesError,
-        otherWorkspaceSessionErrors[activeWorkspaceTab], hasOtherWorkspaceSessionsCache(activeWorkspaceTab)]);
+        otherWorkspaceSessionErrors[activeWorkspaceTab], hasOtherWorkspaceSessionsCache(activeWorkspaceTab),
+        editingSessionTitleId ? '' : getSessionStatusRenderKey(sessions)]);
     }
 
     function queueEntryFor(sessionId) {
@@ -247,6 +262,8 @@ export const conversationsSessionListFragment: WebviewFragment = {
         meta.className = 'session-menu-item-meta';
         meta.textContent = formatSessionMeta(session);
         if (currentTab) {
+          var activityTitle = formatSessionActivityTitle(session);
+          if (activityTitle) meta.title = activityTitle;
           var queueBadge = renderQueueBadge(session.id);
           if (queueBadge) {
             meta.append(document.createTextNode(' '), queueBadge);
@@ -265,6 +282,10 @@ export const conversationsSessionListFragment: WebviewFragment = {
           item.append(checkbox);
         }
         if (currentTab) {
+          // The run-status marker sits immediately left of the favourite star. It is
+          // always rendered so the row grid keeps a stable column, and it stays
+          // display-only: it never reorders the row and never expresses a capability.
+          item.append(renderRunStatusBadge(session.id));
           var favoriteButton = document.createElement('button');
           favoriteButton.type = 'button';
           favoriteButton.className = 'session-menu-star' + (isFavorite ? ' is-active' : '');
@@ -330,7 +351,7 @@ export const conversationsSessionListFragment: WebviewFragment = {
       sessions.sort(function(a, b) {
         var favoriteDelta = (b.isFavorite === true ? 1 : 0) - (a.isFavorite === true ? 1 : 0);
         if (favoriteDelta) return favoriteDelta;
-        return getSessionTimestamp(b) - getSessionTimestamp(a);
+        return compareSessionsByCreation(a, b);
       });
       return sessions.filter(function(session) {
         if (sessionFavoritesOnly && session.isFavorite !== true) {
@@ -351,9 +372,7 @@ export const conversationsSessionListFragment: WebviewFragment = {
       var sessions = Array.isArray(otherWorkspaceSessions[workspaceKey])
         ? otherWorkspaceSessions[workspaceKey].slice()
         : [];
-      sessions.sort(function(a, b) {
-        return getSessionTimestamp(b) - getSessionTimestamp(a);
-      });
+      sessions.sort(compareSessionsByCreation);
       return sessions.filter(function(session) {
         if (sessionFavoritesOnly && session.isFavorite !== true) {
           return false;

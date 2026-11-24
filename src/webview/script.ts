@@ -9,6 +9,7 @@ import {
 import { conversationsMenuHoverFragment } from './conversations/script/menuHover';
 import { conversationsTitleRefreshFragment } from './conversations/script/titleRefresh';
 import { conversationsSessionListFragment } from './conversations/script/sessionList';
+import { conversationsSessionStatusFragment } from './conversations/script/sessionStatus';
 import { WEBVIEW_TRANSLATIONS } from '../shared/i18n';
 import { DEFAULT_MODEL_REQUEST_TIMEOUT_SECONDS, MODEL_REQUEST_TIMEOUT_PRESETS } from '../shared/config';
 
@@ -1931,6 +1932,8 @@ ${conversationsTitleRefreshFragment.source}
       }
       renderSettingsControls();
     }
+
+${conversationsSessionStatusFragment.source}
 
 ${conversationsSessionListFragment.source}
 

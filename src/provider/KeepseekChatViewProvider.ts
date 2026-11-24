@@ -8077,6 +8077,18 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           modelId: model.id
         });
       }
+      // The catch paths above restore the visible prefix, so the context meter has
+      // to be re-projected here exactly as the success path does.
+      this.updateActiveSessionContextUsage(this.createCurrentSessionContextUsage(model));
+      // `failed` is a host observation for the history list, not a durable
+      // conclusion: the durable fallback is whatever the checkpoint proves, so a
+      // reload degrades this badge instead of remembering a lie.
+      if (admissionSessionId) {
+        const failureDetail = getErrorMessage(error).trim();
+        this.sessionRunFailures.set(admissionSessionId, {
+          at: new Date().toISOString(), ...(failureDetail ? { detail: failureDetail.slice(0, 200) } : {})
+        });
+      }
       this.setAgentActivity({
         base: 'error',
         phase: 'failed'
@@ -8621,6 +8633,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         titleRegenerationCapability: this.sessionTitleCapability(),
         isBusy: this.runBelongsToViewed() && this.isBusy && !this.activeDraftRunId,
         sessionSummaries: hasSession ? this.sessionStore.getSessionSummaries() : [],
+        sessionRunStatuses: hasSession ? this.sessionRunStatusViews() : {},
         messages,
         hasOlderMessages: Boolean(activeSession && activeSession.messages.length > messages.length),
         changeSets: [],
@@ -8963,6 +8976,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         activeSessionId: this.sessionStore.activeSessionId,
         workspaceFolders: (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath || folder.uri.toString()),
         sessionSummaries: this.sessionStore.getSessionSummaries(),
+        // Display-only hints for the history list: a badge never reorders a row,
+        // authorizes anything or becomes a write precondition.
+        sessionRunStatuses: this.sessionRunStatusViews(),
         projectQueue: this.sessionStore.getProjectQueueView(),
         contextFiles: contextFiles.map(({ content: _content, ...file }) => file),
         skills: this.skillStore.getStateView(activeSession),

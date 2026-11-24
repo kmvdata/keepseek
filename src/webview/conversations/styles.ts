@@ -123,7 +123,8 @@ export const conversationsStylesFragment: WebviewFragment = {
 
     .session-menu-item {
       display: grid;
-      grid-template-columns: 24px minmax(0, 1fr) 28px;
+      /* [status] [favourite] [main] [rename] */
+      grid-template-columns: 12px 24px minmax(0, 1fr) 28px;
       align-items: center;
       gap: 6px;
       width: 100%;
@@ -138,7 +139,7 @@ export const conversationsStylesFragment: WebviewFragment = {
     }
 
     .session-menu.is-multi-select .session-menu-item {
-      grid-template-columns: 18px 24px minmax(0, 1fr) 28px;
+      grid-template-columns: 18px 12px 24px minmax(0, 1fr) 28px;
     }
 
     .session-menu-item.is-other-workspace {
@@ -260,47 +261,53 @@ export const conversationsStylesFragment: WebviewFragment = {
       gap: 3px;
     }
 
-    /* Run-status hint on one history row. Display only: it never reorders the
-       list, never expresses a permission and never becomes a write criterion. */
+    /* Run-status marker beside the favourite star. Display only: it never reorders
+       the list, never expresses a permission and never becomes a write criterion.
+       Red = failed, orange flashing = running, green = completed. */
     .session-status-badge {
-      display: inline-block;
-      width: 7px;
-      height: 7px;
-      margin-right: 5px;
+      display: block;
+      justify-self: center;
+      align-self: center;
+      width: 8px;
+      height: 8px;
+      border: 1px solid transparent;
       border-radius: 50%;
       background: var(--vscode-descriptionForeground);
-      vertical-align: middle;
     }
 
     .session-status-badge.is-running {
-      background: var(--vscode-charts-blue, var(--vscode-textLink-foreground));
-      animation: session-status-pulse 1.4s ease-in-out infinite;
-    }
-
-    .session-status-badge.is-waiting {
-      background: var(--vscode-charts-yellow, var(--vscode-editorWarning-foreground, var(--vscode-descriptionForeground)));
+      background: var(--vscode-charts-orange, var(--vscode-editorWarning-foreground, var(--vscode-charts-yellow, var(--vscode-descriptionForeground))));
+      animation: session-status-pulse 1.2s ease-in-out infinite;
     }
 
     .session-status-badge.is-failed {
-      background: var(--vscode-errorForeground);
-    }
-
-    .session-status-badge.is-stopped {
-      background: var(--vscode-editorWarning-foreground, var(--vscode-descriptionForeground));
+      background: var(--vscode-charts-red, var(--vscode-errorForeground, var(--vscode-descriptionForeground)));
     }
 
     .session-status-badge.is-completed {
-      background: var(--vscode-testing-iconPassed, var(--vscode-charts-green, var(--vscode-descriptionForeground)));
+      background: var(--vscode-charts-green, var(--vscode-testing-iconPassed, var(--vscode-descriptionForeground)));
     }
 
-    .session-status-badge.is-idle {
+    .session-status-badge.is-waiting {
+      background: var(--vscode-charts-blue, var(--vscode-textLink-foreground, var(--vscode-descriptionForeground)));
+    }
+
+    .session-status-badge.is-stopped {
       background: var(--vscode-descriptionForeground);
-      opacity: 0.45;
+      opacity: 0.7;
+    }
+
+    /* Idle is a hollow ring: "no run recorded" must read as an empty slot instead
+       of claiming a colour of its own. */
+    .session-status-badge.is-idle {
+      background: transparent;
+      border-color: var(--vscode-descriptionForeground);
+      opacity: 0.5;
     }
 
     @keyframes session-status-pulse {
       0%, 100% { opacity: 1; }
-      50% { opacity: 0.35; }
+      50% { opacity: 0.4; }
     }
 
     @media (prefers-reduced-motion: reduce) {
