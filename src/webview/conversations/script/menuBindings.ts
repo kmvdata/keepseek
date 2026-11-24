@@ -27,27 +27,15 @@ export const conversationsMenuBindingsFragment: WebviewFragment = {
 
         var item = target.closest('[data-session-id]');
         var sessionId = item?.dataset.sessionId || '';
-        if (!sessionId) {
-          closeSessionMenu();
-          return;
-        }
+        // The panel doubles as a dashboard: a click on its own blank chrome keeps
+        // it open, so only the header button toggles visibility.
+        if (!sessionId) return;
 
-        if (sessionId !== state.activeSessionId || item?.dataset.sessionOrigin === 'other') {
+        if (sessionId !== state.activeSessionId) {
           resetLocalContextUsageEstimate();
         }
         closeSessionMenu();
-        if (item?.dataset.sessionOrigin === 'other') {
-          var workspaceKey = item.dataset.workspaceKey || activeWorkspaceTab;
-          if (workspaceKey) {
-            vscode.postMessage({
-              type: 'copyOtherWorkspaceSession',
-              workspaceKey: workspaceKey,
-              sessionId: sessionId
-            });
-          }
-        } else {
-          vscode.postMessage({ type: 'selectSession', sessionId: sessionId });
-        }
+        vscode.postMessage({ type: 'selectSession', sessionId: sessionId });
       });
 
       sessionMenu.addEventListener('change', function(event) {
@@ -58,11 +46,6 @@ export const conversationsMenuBindingsFragment: WebviewFragment = {
           sessionRangeDays = normalizeSessionRangeDays(target.value);
           selectedSessionIds.clear();
           renderSessionMenu();
-          return;
-        }
-
-        if (target.dataset.sessionWorkspace === 'true') {
-          switchSessionWorkspace(target.value || 'current');
           return;
         }
 
@@ -117,20 +100,11 @@ export const conversationsMenuBindingsFragment: WebviewFragment = {
           if (!canNavigateSessions()) return;
           var keyboardSessionId = item.dataset.sessionId || '';
           if (keyboardSessionId) {
-            var keyboardWorkspaceKey = item.dataset.workspaceKey || activeWorkspaceTab;
-            if (keyboardSessionId !== state.activeSessionId || item.dataset.sessionOrigin === 'other') {
+            if (keyboardSessionId !== state.activeSessionId) {
               resetLocalContextUsageEstimate();
             }
             closeSessionMenu();
-            if (item.dataset.sessionOrigin === 'other' && keyboardWorkspaceKey) {
-              vscode.postMessage({
-                type: 'copyOtherWorkspaceSession',
-                workspaceKey: keyboardWorkspaceKey,
-                sessionId: keyboardSessionId
-              });
-            } else {
-              vscode.postMessage({ type: 'selectSession', sessionId: keyboardSessionId });
-            }
+            vscode.postMessage({ type: 'selectSession', sessionId: keyboardSessionId });
           }
         }
       });

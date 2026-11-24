@@ -9,10 +9,5 @@ export const conversationsStateFragment: WebviewFragment = {
     let sessionRangeDays = 1;
     let sessionWithRunOnly = false;
     let selectedSessionIds = new Set();
-    let editingSessionTitleId = '';
-    let activeWorkspaceTab = 'current';
-    let otherWorkspaces = [];
-    let otherWorkspaceSessions = {};
-    let otherWorkspaceSessionErrors = {};
-    let otherWorkspacesError = '';`.slice(1)
+    let editingSessionTitleId = '';`.slice(1)
 };

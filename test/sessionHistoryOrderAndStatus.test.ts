@@ -271,10 +271,19 @@ test('the history filter keeps only rows with a recorded run', () => {
   assert.match(script,
     /withRunOnlyButton\.setAttribute\('aria-pressed', sessionWithRunOnly \? 'true' : 'false'\);/u,
     'the pressed state follows the filter');
-  assert.match(script, /withRunOnlyButton\.textContent = t\('sessionWithRunOnly'\);/u,
-    'the label comes from the catalogue, never from the raw key');
-  assert.match(script, /controls\.append\(withRunOnlyButton\);\s*\}\s*controls\.append\(multiSelectButton\);/u,
-    'the filter sits between the range select and the edit toggle');
+  assert.doesNotMatch(script, /withRunOnlyButton\.textContent/u,
+    'the switch is icon-only: neither dictionary puts a word in the control strip');
+  assert.match(script, /withRunOnlyButton\.setAttribute\('aria-label', t\('sessionWithRunOnly'\)\);/u,
+    'the catalogue label becomes the accessible name of the icon button');
+  assert.match(script, /withRunOnlyButton\.title = t\('sessionWithRunOnlyHint'\);/u,
+    'the tooltip still explains what the filter hides');
+  assert.match(script, /withRunOnlyButton\.innerHTML = '<svg[^']*<\/svg>';/u,
+    'the switch renders an inline activity glyph instead of an installed icon font');
+  assert.doesNotMatch(script, /withRunOnlyButton\.innerHTML = '[^']*<text/u,
+    'the glyph never draws a word, so it stays language-neutral');
+  assert.match(script,
+    /trailingControls\.append\(withRunOnlyButton\);\s*\}\s*trailingControls\.append\(multiSelectButton\);\s*controls\.append\(trailingControls\);/u,
+    'the leading dropdowns stay left-aligned while the switches share one trailing group');
   assert.match(script,
     /if \(action === 'toggleWithRunOnly'\) \{\s*if \(!isCurrentWorkspaceTab\(\)\) return;/u,
     'toggling from another project tab is ignored');
@@ -282,6 +291,16 @@ test('the history filter keeps only rows with a recorded run', () => {
     'a filtered-to-nothing list names the filter instead of claiming empty history');
   assert.doesNotMatch(script, /sessionFavoritesOnly|toggleFavoritesOnly|sessionCurrentOnly/u,
     'the favourites-only filter and its provisional name are gone');
+
+  const styles = conversationsStylesFragment.source;
+  assert.match(styles, /\.session-menu-controls-tail \{[^}]*display: flex;/u,
+    'the trailing group keeps its buttons on one line');
+  assert.match(styles, /\.session-menu-controls-tail \{[^}]*margin-left: auto;/u,
+    'the trailing group owns the auto margin, so the switches sit at the right edge');
+  assert.match(styles, /\.session-menu-with-run-toggle \{[^}]*place-items: center;/u,
+    'the icon-only switch squares itself off instead of using the text padding');
+  assert.doesNotMatch(styles, /\.session-menu-edit-toggle \{\s*margin-left/u,
+    'the edit toggle no longer needs its own auto margin: the tail group handles it');
 
   const zh = WEBVIEW_TRANSLATIONS['zh-CN'];
   const en = WEBVIEW_TRANSLATIONS.en;

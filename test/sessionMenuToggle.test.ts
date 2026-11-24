@@ -33,6 +33,10 @@ test('the history button toggles the session menu on click only', () => {
   assert.doesNotMatch(script,
     /document\.addEventListener\('mousedown', function\(event\) \{\s*if \(!sessionMenuOpen\) return;/u,
     'a click outside the panel must not close the session menu');
+  assert.doesNotMatch(script, /if \(!sessionId\) \{\s*closeSessionMenu\(\);/u,
+    'a blank click inside the panel must not close it');
+  assert.match(script, /if \(!sessionId\) return;/u,
+    'a blank click inside the panel keeps the dashboard open');
   assert.match(script, /if \(!settingsMenuOpen\) return;/u,
     'the settings menu keeps its own outside-click dismissal');
   assert.match(script, /event\.key !== 'Escape'/u,

@@ -12,21 +12,16 @@ export const conversationsSessionListFragment: WebviewFragment = {
     }
 
     function openSessionMenu() {
-      activeWorkspaceTab = 'current';
       sessionRangeDays = 1;
       sessionMultiSelectMode = false;
       selectedSessionIds.clear();
       editingSessionTitleId = '';
       sessionMenuOpen = true;
       renderSessionControls();
-      // The header button is the only way in, so every open asks the host for a
-      // fresh workspace list instead of trusting the previous scan.
-      vscode.postMessage({ type: 'listOtherWorkspaces' });
     }
 
     function closeSessionMenu() {
       sessionMenuOpen = false;
-      activeWorkspaceTab = 'current';
       sessionMultiSelectMode = false;
       selectedSessionIds.clear();
       editingSessionTitleId = '';
@@ -48,10 +43,9 @@ export const conversationsSessionListFragment: WebviewFragment = {
       // A rename input owns the caret while it is open, so the live status key is
       // dropped then: syncSessionStatusBadges patches the marker in place instead
       // of rebuilding the row underneath the editor.
-      return JSON.stringify([getLanguage(), state.activeSessionId, activeWorkspaceTab,
+      return JSON.stringify([getLanguage(), state.activeSessionId,
         sessionMultiSelectMode, sessionRangeDays, sessionWithRunOnly, Array.from(selectedSessionIds),
-        editingSessionTitleId, sessions, otherWorkspaces, otherWorkspacesError,
-        otherWorkspaceSessionErrors[activeWorkspaceTab], hasOtherWorkspaceSessionsCache(activeWorkspaceTab),
+        editingSessionTitleId, sessions,
         editingSessionTitleId ? '' : getSessionStatusRenderKey(sessions)]);
     }
 
@@ -84,8 +78,7 @@ export const conversationsSessionListFragment: WebviewFragment = {
       sessionMenu.classList.toggle('hidden', !sessionMenuOpen);
       if (!sessionMenuOpen) return;
       sessionMenu.classList.toggle('is-multi-select', sessionMultiSelectMode);
-      sessionMenu.classList.toggle('is-other-workspace', !isCurrentWorkspaceTab());
-      var sessions = getActiveVisibleSessions();
+      var sessions = getCurrentVisibleSessions();
       pruneSelectedSessionIds(sessions);
       // Readiness and auxiliary result patches only affect the row controls.
       // Preserve the existing editor, focus and scroll when history itself has
@@ -102,32 +95,13 @@ export const conversationsSessionListFragment: WebviewFragment = {
       var allVisibleSelected = sessions.length > 0 && sessions.every(function(session) {
         return selectedSessionIds.has(session.id);
       });
-      var currentTab = isCurrentWorkspaceTab();
-      var activeOtherWorkspaceError = currentTab ? '' : (otherWorkspaceSessionErrors[activeWorkspaceTab] || '');
-      var activeOtherWorkspaceLoading = !currentTab
-        && !hasOtherWorkspaceSessionsCache(activeWorkspaceTab)
-        && !activeOtherWorkspaceError;
-
       var title = document.createElement('div');
       title.className = 'session-menu-title';
       title.textContent = t('sessionHistory');
       sessionMenu.append(title);
 
-      if (otherWorkspacesError) {
-        var workspaceError = document.createElement('div');
-        workspaceError.className = 'session-menu-empty session-menu-error';
-        workspaceError.textContent = t('sessionLoadError') + ': ' + otherWorkspacesError;
-        sessionMenu.append(workspaceError);
-      }
-
       var controls = document.createElement('div');
       controls.className = 'session-menu-controls';
-
-      var workspaceSelect = document.createElement('select');
-      workspaceSelect.className = 'session-menu-workspace-select';
-      workspaceSelect.dataset.sessionWorkspace = 'true';
-      workspaceSelect.setAttribute('aria-label', t('sessionProjectSessions'));
-      renderWorkspaceOptions(workspaceSelect);
 
       var rangeSelect = document.createElement('select');
       rangeSelect.className = 'session-menu-range-select';
@@ -143,30 +117,29 @@ export const conversationsSessionListFragment: WebviewFragment = {
       multiSelectButton.setAttribute('aria-pressed', sessionMultiSelectMode ? 'true' : 'false');
       multiSelectButton.textContent = t(sessionMultiSelectMode ? 'sessionExitMultiSelect' : 'sessionMultiSelect');
 
-      controls.append(workspaceSelect, rangeSelect);
+      controls.append(rangeSelect);
+      // The date dropdown keeps the leading edge; the switches after it collect
+      // in a tail group pushed to the trailing edge, so the icon-only has-run
+      // switch is right-aligned instead of drifting beside the range select.
+      var trailingControls = document.createElement('div');
+      trailingControls.className = 'session-menu-controls-tail';
       // The Host projects a run status for this workspace's rows only, so
-      // 'only with a run' has nothing to filter on another project's tab.
-      if (currentTab) {
-        var withRunOnlyButton = document.createElement('button');
-        withRunOnlyButton.type = 'button';
-        withRunOnlyButton.className = 'session-menu-filter' + (sessionWithRunOnly ? ' is-active' : '');
-        withRunOnlyButton.dataset.sessionAction = 'toggleWithRunOnly';
-        withRunOnlyButton.setAttribute('aria-pressed', sessionWithRunOnly ? 'true' : 'false');
-        withRunOnlyButton.textContent = t('sessionWithRunOnly');
-        withRunOnlyButton.title = t('sessionWithRunOnlyHint');
-        controls.append(withRunOnlyButton);
-      }
-      controls.append(multiSelectButton);
+      // 'only with a run' filters this project's history and nothing else.
+      var withRunOnlyButton = document.createElement('button');
+      withRunOnlyButton.type = 'button';
+      withRunOnlyButton.className = 'session-menu-filter session-menu-with-run-toggle'
+        + (sessionWithRunOnly ? ' is-active' : '');
+      withRunOnlyButton.dataset.sessionAction = 'toggleWithRunOnly';
+      withRunOnlyButton.setAttribute('aria-pressed', sessionWithRunOnly ? 'true' : 'false');
+      // Icon only: 'has not run yet' is a visual state, so the catalogue label
+      // becomes the accessible name and the tooltip keeps the explanation.
+      withRunOnlyButton.setAttribute('aria-label', t('sessionWithRunOnly'));
+      withRunOnlyButton.title = t('sessionWithRunOnlyHint');
+      withRunOnlyButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M14.7 8h-2.7l-2 6L6 2l-2 6H1.3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+      trailingControls.append(withRunOnlyButton);
+      trailingControls.append(multiSelectButton);
+      controls.append(trailingControls);
       sessionMenu.append(controls);
-
-      if (!currentTab) {
-        var deleteWorkspaceButton = document.createElement('button');
-        deleteWorkspaceButton.type = 'button';
-        deleteWorkspaceButton.className = 'session-menu-delete-workspace';
-        deleteWorkspaceButton.dataset.sessionAction = 'deleteWorkspace';
-        deleteWorkspaceButton.textContent = t('sessionDeleteWorkspace');
-        sessionMenu.append(deleteWorkspaceButton);
-      }
 
       if (sessionMultiSelectMode) {
         var bulk = document.createElement('div');
@@ -192,28 +165,12 @@ export const conversationsSessionListFragment: WebviewFragment = {
         sessionMenu.append(bulk);
       }
 
-      if (activeOtherWorkspaceError) {
-        var loadError = document.createElement('div');
-        loadError.className = 'session-menu-empty session-menu-error';
-        loadError.textContent = t('sessionLoadError') + ': ' + activeOtherWorkspaceError;
-        sessionMenu.append(loadError);
-        return;
-      }
-
-      if (activeOtherWorkspaceLoading) {
-        var loading = document.createElement('div');
-        loading.className = 'session-menu-empty';
-        loading.textContent = t('loading') + '...';
-        sessionMenu.append(loading);
-        return;
-      }
-
       if (!sessions.length) {
         var empty = document.createElement('div');
         empty.className = 'session-menu-empty';
         // The filter can empty the list while history still exists, so name the
         // filter instead of claiming there is no history at all.
-        var filteredNothing = sessionWithRunOnly && currentTab
+        var filteredNothing = sessionWithRunOnly
           && (Array.isArray(state.sessionSummaries) ? state.sessionSummaries : []).length > 0;
         empty.textContent = filteredNothing ? t('sessionWithRunOnlyEmpty') : t('noHistory');
         sessionMenu.append(empty);
@@ -226,25 +183,18 @@ export const conversationsSessionListFragment: WebviewFragment = {
         var isActive = session.id === state.activeSessionId;
         var isFavorite = session.isFavorite === true;
         item.className = 'session-menu-item'
-          + (currentTab && isActive ? ' is-active' : '')
-          + (currentTab && isFavorite ? ' is-favorite' : '')
-          + (!currentTab ? ' is-other-workspace' : '');
+          + (isActive ? ' is-active' : '')
+          + (isFavorite ? ' is-favorite' : '');
         item.dataset.sessionId = session.id;
-        item.dataset.sessionOrigin = currentTab ? 'current' : 'other';
-        if (!currentTab) {
-          item.dataset.workspaceKey = activeWorkspaceTab;
-        }
         item.tabIndex = 0;
-        item.setAttribute('role', currentTab ? 'menuitemradio' : 'menuitem');
-        if (currentTab) {
-          item.setAttribute('aria-checked', isActive ? 'true' : 'false');
-        }
+        item.setAttribute('role', 'menuitemradio');
+        item.setAttribute('aria-checked', isActive ? 'true' : 'false');
 
         var main = document.createElement('div');
         main.className = 'session-menu-item-main';
 
         var itemTitle;
-        if (currentTab && editingSessionTitleId === session.id) {
+        if (editingSessionTitleId === session.id) {
           itemTitle = document.createElement('input');
           itemTitle.className = 'session-menu-item-title';
           itemTitle.type = 'text';
@@ -264,13 +214,11 @@ export const conversationsSessionListFragment: WebviewFragment = {
         var meta = document.createElement('span');
         meta.className = 'session-menu-item-meta';
         meta.textContent = formatSessionMeta(session);
-        if (currentTab) {
-          var activityTitle = formatSessionActivityTitle(session);
-          if (activityTitle) meta.title = activityTitle;
-          var queueBadge = renderQueueBadge(session.id);
-          if (queueBadge) {
-            meta.append(document.createTextNode(' '), queueBadge);
-          }
+        var activityTitle = formatSessionActivityTitle(session);
+        if (activityTitle) meta.title = activityTitle;
+        var queueBadge = renderQueueBadge(session.id);
+        if (queueBadge) {
+          meta.append(document.createTextNode(' '), queueBadge);
         }
 
         main.append(itemTitle, meta);
@@ -284,68 +232,40 @@ export const conversationsSessionListFragment: WebviewFragment = {
           checkbox.setAttribute('aria-label', t('sessionSelectAll'));
           item.append(checkbox);
         }
-        if (currentTab) {
-          // The run-status marker sits immediately left of the favourite star. It is
-          // always rendered so the row grid keeps a stable column, and it stays
-          // display-only: it never reorders the row and never expresses a capability.
-          item.append(renderRunStatusBadge(session.id));
-          var favoriteButton = document.createElement('button');
-          favoriteButton.type = 'button';
-          favoriteButton.className = 'session-menu-star' + (isFavorite ? ' is-active' : '');
-          favoriteButton.dataset.sessionAction = 'toggleFavorite';
-          favoriteButton.dataset.sessionId = session.id;
-          favoriteButton.setAttribute('aria-pressed', isFavorite ? 'true' : 'false');
-          favoriteButton.setAttribute('aria-label', t(isFavorite ? 'unfavoriteSession' : 'favoriteSession'));
-          favoriteButton.title = t(isFavorite ? 'unfavoriteSession' : 'favoriteSession');
-          favoriteButton.textContent = isFavorite ? '★' : '☆';
-          favoriteButton.addEventListener('click', function(event) {
-            event.preventDefault();
-            event.stopPropagation();
-            var button = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
-            var favoriteSessionId = button?.dataset.sessionId || '';
-            if (favoriteSessionId) {
-              vscode.postMessage({ type: 'toggleSessionFavorite', sessionId: favoriteSessionId });
-            }
-          });
-          item.append(favoriteButton);
-        }
+        // The run-status marker sits immediately left of the favourite star. It is
+        // always rendered so the row grid keeps a stable column, and it stays
+        // display-only: it never reorders the row and never expresses a capability.
+        item.append(renderRunStatusBadge(session.id));
+        var favoriteButton = document.createElement('button');
+        favoriteButton.type = 'button';
+        favoriteButton.className = 'session-menu-star' + (isFavorite ? ' is-active' : '');
+        favoriteButton.dataset.sessionAction = 'toggleFavorite';
+        favoriteButton.dataset.sessionId = session.id;
+        favoriteButton.setAttribute('aria-pressed', isFavorite ? 'true' : 'false');
+        favoriteButton.setAttribute('aria-label', t(isFavorite ? 'unfavoriteSession' : 'favoriteSession'));
+        favoriteButton.title = t(isFavorite ? 'unfavoriteSession' : 'favoriteSession');
+        favoriteButton.textContent = isFavorite ? '★' : '☆';
+        favoriteButton.addEventListener('click', function(event) {
+          event.preventDefault();
+          event.stopPropagation();
+          var button = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+          var favoriteSessionId = button?.dataset.sessionId || '';
+          if (favoriteSessionId) {
+            vscode.postMessage({ type: 'toggleSessionFavorite', sessionId: favoriteSessionId });
+          }
+        });
+        item.append(favoriteButton);
         item.append(main);
-        if (currentTab) {
-          var renameButton = document.createElement('button');
-          renameButton.type = 'button';
-          renameButton.className = 'session-menu-rename';
-          renameButton.dataset.sessionAction = 'startRename';
-          renameButton.dataset.sessionId = session.id;
-          renameButton.setAttribute('aria-label', t('renameSessionTitle'));
-          renameButton.title = t('renameSessionTitle');
-          renameButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
-          item.append(renameButton);
-        }
+        var renameButton = document.createElement('button');
+        renameButton.type = 'button';
+        renameButton.className = 'session-menu-rename';
+        renameButton.dataset.sessionAction = 'startRename';
+        renameButton.dataset.sessionId = session.id;
+        renameButton.setAttribute('aria-label', t('renameSessionTitle'));
+        renameButton.title = t('renameSessionTitle');
+        renameButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
+        item.append(renameButton);
         sessionMenu.append(item);
-      }
-    }
-
-    function renderWorkspaceOptions(select) {
-      var currentOption = document.createElement('option');
-      currentOption.value = 'current';
-      currentOption.textContent = t('sessionTabCurrentProject');
-      currentOption.title = currentOption.textContent;
-      select.append(currentOption);
-
-      otherWorkspaces.forEach(function(workspace) {
-        var workspaceKey = String(workspace.workspaceKey || '');
-        if (!workspaceKey) return;
-        var option = document.createElement('option');
-        option.value = workspaceKey;
-        option.textContent = formatWorkspaceOptionLabel(workspace);
-        option.title = option.textContent;
-        select.append(option);
-      });
-
-      select.value = activeWorkspaceTab;
-      if (select.value !== activeWorkspaceTab) {
-        activeWorkspaceTab = 'current';
-        select.value = 'current';
       }
     }
 
@@ -369,45 +289,6 @@ export const conversationsSessionListFragment: WebviewFragment = {
         }
         return updatedAt >= Date.now() - sessionRangeDays * 24 * 60 * 60 * 1000;
       });
-    }
-
-    function getVisibleOtherWorkspaceSessions(workspaceKey) {
-      var sessions = Array.isArray(otherWorkspaceSessions[workspaceKey])
-        ? otherWorkspaceSessions[workspaceKey].slice()
-        : [];
-      sessions.sort(compareSessionsByCreation);
-      return sessions.filter(function(session) {
-        // 'Only with a run' is a current-workspace filter: the Host projects no run
-        // status for another project's rows, so filtering here would empty the tab.
-        if (sessionRangeDays <= 0) {
-          return true;
-        }
-        var updatedAt = getSessionTimestamp(session);
-        if (!Number.isFinite(updatedAt)) {
-          return true;
-        }
-        return updatedAt >= Date.now() - sessionRangeDays * 24 * 60 * 60 * 1000;
-      });
-    }
-
-    function getActiveVisibleSessions() {
-      return isCurrentWorkspaceTab()
-        ? getCurrentVisibleSessions()
-        : getVisibleOtherWorkspaceSessions(activeWorkspaceTab);
-    }
-
-    function isCurrentWorkspaceTab() {
-      return activeWorkspaceTab === 'current';
-    }
-
-    function hasOtherWorkspaceSessionsCache(workspaceKey) {
-      return Object.prototype.hasOwnProperty.call(otherWorkspaceSessions, workspaceKey);
-    }
-
-    function formatWorkspaceOptionLabel(workspace) {
-      var name = String(workspace.workspaceName || t('sessionTabOtherProject'));
-      var count = Number(workspace.sessionCount) || 0;
-      return name + ' (' + count + ')';
     }
 
     function renderSessionRangeOptions(select) {
@@ -445,22 +326,6 @@ export const conversationsSessionListFragment: WebviewFragment = {
       });
     }
 
-    function switchSessionWorkspace(workspaceKey) {
-      var nextWorkspaceKey = workspaceKey || 'current';
-      if (nextWorkspaceKey === activeWorkspaceTab) {
-        return;
-      }
-      activeWorkspaceTab = nextWorkspaceKey;
-      selectedSessionIds.clear();
-      editingSessionTitleId = '';
-      if (!isCurrentWorkspaceTab() && (!hasOtherWorkspaceSessionsCache(activeWorkspaceTab) || otherWorkspaceSessionErrors[activeWorkspaceTab])) {
-        delete otherWorkspaceSessionErrors[activeWorkspaceTab];
-        delete otherWorkspaceSessions[activeWorkspaceTab];
-        vscode.postMessage({ type: 'loadOtherWorkspaceSessions', workspaceKey: activeWorkspaceTab });
-      }
-      renderSessionMenu();
-    }
-
     function beginSessionTitleEdit(sessionId) {
       editingSessionTitleId = sessionId;
       renderSessionMenu();
@@ -483,15 +348,7 @@ export const conversationsSessionListFragment: WebviewFragment = {
     function handleSessionMenuAction(button) {
       if (button.disabled) return;
       var action = button.dataset.sessionAction || '';
-      if (action === 'switchWorkspaceTab') {
-        switchSessionWorkspace(button.dataset.workspaceTab || 'current');
-        return;
-      }
-
       if (action === 'toggleFavorite') {
-        if (!isCurrentWorkspaceTab()) {
-          return;
-        }
         var favoriteRow = button.closest('.session-menu-item');
         var favoriteSessionId = button.dataset.sessionId || favoriteRow?.dataset.sessionId || '';
         if (favoriteSessionId) {
@@ -509,7 +366,6 @@ export const conversationsSessionListFragment: WebviewFragment = {
       }
 
       if (action === 'toggleWithRunOnly') {
-        if (!isCurrentWorkspaceTab()) return;
         sessionWithRunOnly = !sessionWithRunOnly;
         selectedSessionIds.clear();
         renderSessionMenu();
@@ -517,9 +373,6 @@ export const conversationsSessionListFragment: WebviewFragment = {
       }
 
       if (action === 'startRename') {
-        if (!isCurrentWorkspaceTab()) {
-          return;
-        }
         var renameRow = button.closest('.session-menu-item');
         var renameSessionId = button.dataset.sessionId || renameRow?.dataset.sessionId || '';
         if (renameSessionId) {
@@ -529,7 +382,7 @@ export const conversationsSessionListFragment: WebviewFragment = {
       }
 
       if (action === 'toggleSelectVisible') {
-        var visibleSessions = getActiveVisibleSessions();
+        var visibleSessions = getCurrentVisibleSessions();
         var shouldDeselect = visibleSessions.length > 0 && visibleSessions.every(function(session) {
           return selectedSessionIds.has(session.id);
         });
@@ -555,24 +408,9 @@ export const conversationsSessionListFragment: WebviewFragment = {
           return;
         }
         selectedSessionIds.clear();
-        if (isCurrentWorkspaceTab()) {
-          vscode.postMessage({ type: 'deleteSessions', sessionIds: sessionIds });
-        } else {
-          vscode.postMessage({
-            type: 'deleteOtherWorkspaceSessions',
-            workspaceKey: activeWorkspaceTab,
-            sessionIds: sessionIds
-          });
-        }
+        vscode.postMessage({ type: 'deleteSessions', sessionIds: sessionIds });
         renderSessionMenu();
         return;
-      }
-
-      if (action === 'deleteWorkspace') {
-        if (isCurrentWorkspaceTab()) {
-          return;
-        }
-        vscode.postMessage({ type: 'deleteOtherWorkspace', workspaceKey: activeWorkspaceTab });
       }
     }
 

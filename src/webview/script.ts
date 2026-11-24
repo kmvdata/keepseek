@@ -1328,8 +1328,6 @@ ${conversationsMenuBindingsFragment.source}
         state.sessionSummaries = (Array.isArray(state.sessionSummaries) ? state.sessionSummaries : []).filter(function(summary) {
           return !cleanupIds.has(summary.id) || (summary.workspaceKey && summary.workspaceKey !== cleanupWorkspace);
         });
-        if (otherWorkspaceSessions[cleanupWorkspace]) otherWorkspaceSessions[cleanupWorkspace] = otherWorkspaceSessions[cleanupWorkspace].filter(function(summary) { return !cleanupIds.has(summary.id); });
-        if (activeWorkspaceTab === cleanupWorkspace) cleanupIds.forEach(function(id) { selectedSessionIds.delete(id); });
         sessionMenuRenderKey = '';
         renderSessionMenu();
         return;
@@ -1512,7 +1510,7 @@ ${conversationsMenuBindingsFragment.source}
         if (window.keepseekInputControls && window.keepseekInputControls.onSkillDraftCreated) {
           window.keepseekInputControls.onSkillDraftCreated(message);
         }
-      } else if (message.type === 'otherWorkspaces') {
+      } else if (message.type === 'referenceResources') {
         otherWorkspacesError = message.error || '';
         if (!otherWorkspacesError) {
           otherWorkspaces = Array.isArray(message.workspaces) ? message.workspaces : [];
@@ -1523,8 +1521,7 @@ ${conversationsMenuBindingsFragment.source}
             selectedSessionIds.clear();
           }
         }
-        renderSessionMenu();
-      } else if (message.type === 'otherWorkspaceSessions') {
+PLACEHOLDER_NOT_USED
         var workspaceKey = String(message.workspaceKey || '');
         if (workspaceKey) {
           if (message.error) {

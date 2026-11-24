@@ -104,8 +104,24 @@ export const conversationsStylesFragment: WebviewFragment = {
       background: var(--vscode-button-background);
     }
 
-    .session-menu-edit-toggle {
+    /* The dropdowns keep the leading edge; the tail collects the switches and
+       takes the auto margin, so the icon-only has-run toggle is right-aligned. */
+    .session-menu-controls-tail {
+      display: flex;
+      align-items: center;
+      gap: 6px;
       margin-left: auto;
+    }
+
+    .session-menu-with-run-toggle {
+      display: inline-grid;
+      place-items: center;
+      min-width: 26px;
+      padding: 3px 5px;
+    }
+
+    .session-menu-with-run-toggle svg {
+      display: block;
     }
 
     .session-menu-bulk button {
