@@ -67,7 +67,10 @@ function client(hostDefaults) {
       ? 'Use the available width while preserving readable text and reachable controls. '
       : '充分使用聊天区域的横向空间，同时保留正文可读性和按钮操作空间。';
     const columns = Array.from({ length: 9 }, (_, i) => 'Column ' + (i + 1));
-    return {
+    // A frozen gen-prompt body: a long unbroken line must scroll inside its own block.
+    const promptBody = ['## Goal', '', 'Fix the frozen prompt block and its copy button.', '', '## Steps', '',
+      '1. Keep this line unbroken:', '', '   ' + 'unbroken-'.repeat(75), '',
+      '2. Confirm the transcript never scrolls sideways.'].join('\n');    return {
       language, approvalMode: 'ask', activeSessionId: 'layout', isBusy: false,
       startup: { phase: 'ready', interactiveReady: true, sideEffectsReady: true },
       interaction: { sessionId: 'layout', revision: revision + 1, phase: 'idle', canEdit: true,
@@ -80,9 +83,11 @@ function client(hostDefaults) {
         { id: 'assistant', role: 'assistant', createdAt: '2026-11-10T00:00:01Z', content:
           sentence.repeat(3) + '\n\n```typescript\nconst longLine = "' + 'unbroken-'.repeat(75) + '";\n```\n\n'
           + '| ' + columns.join(' | ') + ' |\n| ' + columns.map(() => '---').join(' | ') + ' |\n| '
-          + columns.map(() => 'Long cell value').join(' | ') + ' |\n\n' + sentence.repeat(8) }
-      ],
-      draftRuns: [], changeSets: [], approvalProcessing: null
+          + columns.map(() => 'Long cell value').join(' | ') + ' |\n\n' + sentence.repeat(8) },
+        { id: 'frozen-prompt', role: 'assistant', createdAt: '2026-11-10T00:00:02Z',
+          content: sentence.repeat(2),
+          handoffPrompt: { version: 1, body: promptBody, bodyHash: 'a'.repeat(64) } }
+      ],      draftRuns: [], changeSets: [], approvalProcessing: null
     };
   }
   async function show(width, language, scale, themeName) {
@@ -139,7 +144,26 @@ function client(hostDefaults) {
     check(style(tableNode).overflowX === 'auto', 'table owns horizontal scrolling');
     check(doc().documentElement.scrollWidth <= doc().documentElement.clientWidth + 1, 'document has no horizontal overflow');
     check(doc().body.scrollWidth <= doc().body.clientWidth + 1, 'body has no horizontal overflow');
-    for (const selector of ['#referenceMenuButton', '#commandMenuButton', '#executionModeButton', '#sendButton']) {
+    check(transcript.scrollWidth <= transcript.clientWidth + 1, 'transcript has no horizontal overflow');
+    /* A frozen gen-prompt block must fit the transcript: only its own pre scrolls. */
+    const promptBlock = inside('.message-prompt-block', width, scale);
+    close(promptBlock.left, assistant.left, 'frozen prompt block aligns with the assistant gutter');
+    close(promptBlock.width, assistant.width, 'frozen prompt block uses the assistant width');
+    const promptCode = inside('.message-prompt-block .message-code-block', width, scale);
+    close(promptCode.width, assistant.width, 'frozen prompt code block uses the assistant width');
+    const promptPre = element('.message-prompt-block pre');
+    check(style(promptPre).overflowX === 'auto', 'frozen prompt owns horizontal scrolling');
+    check(promptPre.scrollWidth > promptPre.clientWidth, 'long frozen prompt line scrolls inside its block');
+    check(!doc().querySelector('.message-prompt-footer'), 'the frozen prompt has no bottom footer');
+    const promptToolbar = rect('.message-prompt-block .message-code-toolbar');
+    const promptCodeRect = rect('.message-prompt-block .message-code-block');
+    const promptCopyRect = rect('.message-prompt-block button[data-code-action="copy"]');
+    check(promptCopyRect.top >= promptToolbar.top - 0.5 && promptCopyRect.bottom <= promptToolbar.bottom + 0.5,
+      'frozen prompt copy button stays in the top toolbar');
+    check(promptCopyRect.bottom <= promptPre.getBoundingClientRect().top + 0.5,
+      'frozen prompt copy button sits above the prompt text');
+    check(promptCopyRect.right >= promptCodeRect.right - 8 && promptCopyRect.right <= promptCodeRect.right,
+      'frozen prompt copy button hugs the top-right corner');    for (const selector of ['#referenceMenuButton', '#commandMenuButton', '#executionModeButton', '#sendButton']) {
       const button = element(selector);
       const bounds = button.getBoundingClientRect();
       check(bounds.width / scale >= 24 && bounds.height / scale >= 24, selector + ' retains click target');

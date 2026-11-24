@@ -492,8 +492,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
-   * Durable last-run summary for one conversation, taken from the newest
-   * assistant message that recorded a checkpoint (or its archive).
+   * The newest message that carries this conversation's durable run proof.
    *
    * The scan stops at the first hit and its position is memoized by message-array
    * identity plus length: unchanged history reuses the index while the checkpoint
@@ -501,8 +500,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
    * stale and a new message invalidates the memo. A session that is not loaded
    * returns nothing instead of forcing a history read, so a badge can never pull
    * an old conversation into memory.
+   *
+   * Reading the badge and writing the dismissal marker both go through this one
+   * lookup, so a marker can never name a different message than the projection.
    */
-  private readLastRunObservation(sessionId: string): SessionLastRunObservation | undefined {
+  private lastRunMessage(sessionId: string): ChatMessage | undefined {
     const session = this.sessionStore.getSessionById(sessionId);
     if (!session) return undefined;
     const messages = session.messages;
@@ -514,7 +516,25 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     if (!memo || memo.messages !== messages || memo.length !== messages.length || memo.index !== index) {
       this.lastRunIndex.set(sessionId, { messages, length: messages.length, index });
     }
-    const message = messages[index];
+    return messages[index];
+  }
+
+  /**
+   * Durable last-run summary for one conversation, taken from the newest
+   * assistant message that recorded a checkpoint (or its archive).
+   *
+   * Display-only, like the rest of this projection: a run the user left in the
+   * history list reads as "no conclusion", so the row is idle. Only the projection
+   * is affected — `session.messages` stays append-only and the checkpoint it
+   * suppressed is still the recovery state. Live signals (running/waiting) never
+   * pass through here, so a new run reappears immediately while a dismissed
+   * finished one stays gone after a reload.
+   */
+  private readLastRunObservation(sessionId: string): SessionLastRunObservation | undefined {
+    const session = this.sessionStore.getSessionById(sessionId);
+    const message = this.lastRunMessage(sessionId);
+    if (!session || !message) return undefined;
+    if (isSessionRunDismissed(session.runStatusDismissal, deriveSessionRunEvidence(message))) return undefined;
     const checkpoint = message.runCheckpoint;
     if (checkpoint) {
       return {
@@ -549,6 +569,159 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
     }
     return -1;
+  }
+
+  /**
+   * Host authority for the history row's square button.
+   *
+   * The Webview reports only a session id: the glyph shape is a hint, so the kind
+   * is recomputed here from live host state and never taken from the message. A
+   * finished row leaves the list directly; a live one is confirmed first, because
+   * leaving it aborts that session's own work and discards what it still holds for
+   * the user. The confirmation is a host modal and is deliberate in both approval
+   * modes: this is a destructive act on the user's own task, not an approval
+   * decision, so neither mode has anything to decide here.
+   */
+  private async dismissSessionRun(sessionId: string): Promise<void> {
+    if (!sessionId) return;
+    const kind = this.sessionRunStatusViews()[sessionId]?.kind ?? 'idle';
+    // Already idle: a stale glyph only needs a fresh projection.
+    if (kind === 'idle') {
+      this.postState();
+      return;
+    }
+    let live = false;
+    if (kind === 'running' || kind === 'waiting') {
+      const confirmAction = this.t('sessionRunDismissConfirmAction');
+      const confirmed = await vscode.window.showWarningMessage(
+        this.t('sessionRunDismissConfirm'), { modal: true }, confirmAction);
+      if (confirmed !== confirmAction) {
+        // Cancel is a no-op by contract: no marker, no abort, no store write.
+        this.postState();
+        return;
+      }
+      await this.stopSessionRunWork(sessionId);
+      live = true;
+    }
+    // A live failure mark is an observation, not a durable conclusion; leaving the
+    // row drops it exactly like a reload would.
+    this.sessionRunFailures.delete(sessionId);
+    if (live) await this.awaitSessionRunQuiescence(sessionId);
+    const message = this.lastRunMessage(sessionId);
+    if (!message) {
+      // The run ended before it recorded any proof, so there is nothing to suppress.
+      this.postState();
+      return;
+    }
+    const evidence = deriveSessionRunEvidence(message);
+    await this.sessionStore.markSessionRunStatusDismissed(sessionId, {
+      version: 1,
+      messageId: evidence.messageId,
+      ...(evidence.proofAt ? { proofAt: evidence.proofAt } : {}),
+      dismissedAt: new Date().toISOString()
+    });
+    const remaining = this.sessionRunStatusViews()[sessionId]?.kind ?? 'idle';
+    // Never fake an idle row: work that could not be dropped keeps its own status
+    // and the reason it stayed is stated instead.
+    if (remaining !== 'idle') this.reportSessionRunStillActive(remaining);
+    this.postState();
+  }
+
+  /** Say why a row could not leave the running list. */
+  private reportSessionRunStillActive(kind: SessionRunStatusView['kind']): void {
+    void vscode.window.showWarningMessage(this.t('sessionRunDismissBlocked', {
+      reason: kind === 'running' ? this.t('sessionRunDismissBlockedRunning')
+        : kind === 'waiting' ? this.t('sessionRunDismissBlockedWaiting')
+          : this.t('sessionRunDismissBlockedOther')
+    }));
+  }
+
+  /**
+   * Stop what one session is running and drop what it still asks the user.
+   *
+   * Session-scoped on purpose. `abortPrompt()` is the viewed session's Stop and it
+   * revokes project-wide authority — external grants, the validation registry, the
+   * command batch — which would hit sessions running in parallel. Every step here
+   * is gated on this session owning the facility, so only its own authority is
+   * spent. Nothing is applied, executed or written to the workspace: drafts are
+   * discarded and commands are rejected, never approved.
+   */
+  private async stopSessionRunWork(sessionId: string): Promise<void> {
+    // ① Commands. The batch and the executor are host-wide, so the batch may only
+    //    be cancelled when it belongs to this session, and the running command may
+    //    only be cancelled when this session owns it.
+    if (this.draftRunBatches.state?.sessionId === sessionId) this.draftRunBatches.cancel();
+    if (this.activeDraftRunSessionId === sessionId && this.activeDraftRunId) {
+      this.draftRuns.cancel(this.activeDraftRunId);
+    }
+
+    // ② Background repair run: the same ownership rule. Its outcome note is
+    //    append-only history, so it is only added for the session in view.
+    const backgroundRun = this.backgroundRunCoordinator.getActiveRun();
+    if (backgroundRun?.sessionId === sessionId && backgroundRun.status !== 'completed'
+      && backgroundRun.status !== 'failed' && backgroundRun.status !== 'stopped') {
+      const stopped = this.backgroundRunCoordinator.stop(this.t('sessionRunDismissStoppedByUser'));
+      if (stopped.sessionId === this.sessionStore.activeSessionId && !this.isBusy) {
+        await this.appendBackgroundOutcomeMessage(stopped.stopReason ?? this.t('sessionRunDismissStoppedByUser'));
+      }
+    }
+
+    // ③ This session's own agent run. The controller is read from the per-session
+    //    map: `abortControllerFor()` falls back to the viewed session's controller
+    //    for an unknown id, which would abort an unrelated conversation.
+    const controller = this.runAbortControllers.get(sessionId);
+    if (controller && !controller.signal.aborted) controller.abort();
+    this.sessionRuns.forceRelease(sessionId);
+
+    // ④ Pending work still owed to the user. Both stores persist on a debounce, so
+    //    the flush is what stops the cards coming back after a reload.
+    this.changeSets.discardPendingForSession(sessionId);
+    this.draftRuns.rejectPendingForSession(sessionId);
+    await this.changeSets.flush();
+    await this.draftRuns.flush();
+
+    // ⑤ A blocked repair loop is the other source of "waiting", and it is durable,
+    //    so dropping the drafts is not enough. `stopReason` keeps its existing
+    //    vocabulary — why the row left is the header marker's story, not a new
+    //    stop reason.
+    const session = this.sessionStore.getSessionById(sessionId);
+    const repairLoop = this.repairLoopsBySession.get(sessionId) ?? session?.repairLoop;
+    if (session && repairLoop && (repairLoop.status === 'blocked' || repairLoop.status === 'waiting_for_apply')) {
+      session.repairLoop = { ...repairLoop, status: 'completed', pendingDraftEditIds: [] };
+      this.repairLoopsBySession.delete(sessionId);
+      await this.sessionStore.persist('dismiss_session_run');
+    }
+  }
+
+  /**
+   * Live facilities this session still owns.
+   *
+   * Polling the projection instead would never converge: a durable blocker or an
+   * interrupted checkpoint outlives the stop on purpose, and the dismissal marker
+   * suppresses it after the stop, not before.
+   */
+  private sessionRunWorkInFlight(sessionId: string): boolean {
+    if (this.sessionRuns.isRunning(sessionId)) return true;
+    if (this.activeDraftRunSessionId === sessionId) return true;
+    const backgroundRun = this.backgroundRunCoordinator.getActiveRun();
+    if (backgroundRun?.sessionId === sessionId && backgroundRun.status !== 'completed'
+      && backgroundRun.status !== 'failed' && backgroundRun.status !== 'stopped') return true;
+    return this.sessionAwaitsUser(sessionId);
+  }
+
+  /**
+   * Give a just-stopped run a bounded moment to release those facilities.
+   *
+   * Aborting is synchronous, but the run unwinds on its own boundaries and only
+   * then gives up the command slot and the interaction slot. Waiting briefly keeps
+   * the following check honest instead of either declaring an idle row while a
+   * stop is still in progress or reporting one that merely needs a tick.
+   */
+  private async awaitSessionRunQuiescence(sessionId: string): Promise<void> {
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      if (!this.sessionRunWorkInFlight(sessionId)) return;
+      await new Promise<void>(resolve => { setTimeout(resolve, 100); });
+    }
   }
 
   private interactionCoordinator?: InteractionCoordinator;
@@ -1600,8 +1773,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     // It also rejects an idle old window after another window deleted its ID.
     const needsUse = isApprovalMutationMessage(message.type) && message.type !== 'sendPrompt' && message.type !== 'editUserPrompt' && message.type !== 'continueAgentTask'
       || message.type === 'startBackgroundRun' || message.type === 'resumeBackgroundRun'
-      || message.type === 'renameSession' || message.type === 'toggleSessionFavorite';
+      || message.type === 'renameSession' || message.type === 'toggleSessionFavorite'
+      || message.type === 'dismissSessionRun';
+    // A row action binds its own session: an idle old window must not dispose a task
+    // another window is running, so it takes a use record and the id it named
+    // instead of whatever this window happens to be viewing.
     const useSessionId = message.type === 'renameSession' || message.type === 'toggleSessionFavorite'
+      || message.type === 'dismissSessionRun'
       ? message.sessionId : this.sessionStore.activeSessionId;
     let use: { release(): Promise<void> } | undefined;
     try {
@@ -1742,6 +1920,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         if (await this.sessionStore.toggleSessionFavorite(message.sessionId)) {
           this.postState();
         }
+        return;
+      case 'dismissSessionRun':
+        await this.dismissSessionRun(message.sessionId);
         return;
       case 'renameSession':
         this.cancelSessionTitleWork(message.sessionId);

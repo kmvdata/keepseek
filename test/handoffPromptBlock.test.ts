@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { runInNewContext } from 'node:vm';
-import { normalizeHandoffPromptBlock } from '../src/agent/handoffPrompt';
+import { normalizeHandoffPromptBlock, renderGeneratedHandoffPrompt } from '../src/agent/handoffPrompt';
 import { getScript } from '../src/webview/script';
 
 /** A body that already contains markdown fences: the block must render it verbatim. */
@@ -88,7 +88,7 @@ function matches(node: FakeNode, selector: string): boolean {
   return node.tagName === selector;
 }
 
-test('the frozen prompt renders as one copyable block with the button at its bottom-right', () => {
+test('the frozen prompt renders as one copyable block with the copy button in its top toolbar', () => {
   const script = getScript();
   assert.doesNotThrow(() => new Function(script), 'the generated webview script must compile');
   const start = script.indexOf('function createMarkdownCodeBlock(');
@@ -107,7 +107,9 @@ test('the frozen prompt renders as one copyable block with the button at its bot
   const blocks = card.querySelectorAll('.message-code-block');
   assert.equal(blocks.length, 1, 'the block reuses the existing code-block chrome');
   const block = blocks[0];
-  assert.deepEqual(block.children.map(child => child.className), ['message-code-toolbar', '', 'message-prompt-footer']);
+  assert.deepEqual(block.children.map(child => child.tagName), ['div', 'pre'], 'the block is one toolbar plus its pre');
+  assert.equal(block.children[0].className, 'message-code-toolbar');
+  assert.equal(card.querySelectorAll('.message-prompt-footer').length, 0, 'there is no bottom footer');
 
   const codes = block.querySelectorAll('code');
   assert.equal(codes.length, 1, 'the body is never re-parsed into more blocks');
@@ -116,9 +118,49 @@ test('the frozen prompt renders as one copyable block with the button at its bot
 
   const buttons = card.querySelectorAll('button[data-code-action="copy"]');
   assert.equal(buttons.length, 1, 'the transcript copy delegation needs one copy button');
-  const footer = block.children.at(-1)!;
-  assert.equal(footer.className, 'message-prompt-footer', 'the button sits in the footer at the bottom-right');
-  assert.deepEqual(footer.children, [buttons[0]]);
+  const toolbar = block.children[0];
+  assert.equal(toolbar.querySelectorAll('button[data-code-action="copy"]').length, 1, 'the button stays in the top toolbar');
+  assert.equal(toolbar.children[0].className, 'message-code-language', 'the language label keeps the left slot');
+  assert.deepEqual(toolbar.children.at(-1), buttons[0], 'the copy button keeps the right-hand slot');
   assert.ok(buttons[0].classList.contains('message-prompt-copy'));
-  assert.equal(block.children[0].querySelectorAll('button').length, 0, 'the ordinary top toolbar keeps no copy button here');
+});
+
+const projectRoot = 'file:///Users/kermit/Projects/keepseek';
+
+function fileReadRound(uri: string, fileSha256: string): NonNullable<Parameters<typeof renderGeneratedHandoffPrompt>[4]> {
+  return [{
+    assistantContent: null, reasoningContent: null,
+    toolCalls: [{ id: 'read', type: 'function', function: { name: 'keepseek_read_workspace_file', arguments: '{}' } }],
+    toolResults: [{ toolCallId: 'read', content: JSON.stringify({ ok: true, uri, fileSha256 }) }]
+  }];
+}
+
+test('the frozen body is the authored prompt alone, with measured hashes only after it', () => {
+  const requirement = '[$gen-prompt](builtin:gen-prompt) 修复 gen-prompt 的展示问题，改 src/webview/script.ts';
+  const authored = ['## 目标', '', '修复提示词块的展示形态。', '', '## 步骤', '',
+    '1. 修改 src/webview/script.ts 的 createHandoffPromptCard。'].join('\n');
+  const preview = renderGeneratedHandoffPrompt(requirement, authored, 'zh-CN', [projectRoot]);
+  assert.ok(preview.ok);
+  assert.equal(preview.body, authored, 'the delivered bytes are exactly the authored prompt');
+  for (const template of ['# 实施任务', '## 目标与工作范围', '## 明确限制', '## 已决定的方案与具体步骤',
+    '## 待核实假设', '## 验收与交付物', '[$gen-prompt](builtin:gen-prompt)', '修复 gen-prompt 的展示问题']) {
+    assert.ok(!preview.body.includes(template), template + ' must not enter the frozen body');
+  }
+  assert.equal(preview.bodyHash, createHash('sha256').update(preview.body).digest('hex'));
+
+  // A `/draft` composer shortcut still reaches the executor: its bytes open the body.
+  const draft = renderGeneratedHandoffPrompt('/draft src/a.ts\nexport const a = 1;', 'Update src/a.ts.',
+    'en', [projectRoot]);
+  assert.ok(draft.ok);
+  assert.ok(draft.body.startsWith('Create src/a.ts with exactly this content:\n\nexport const a = 1;'), draft.body);
+  assert.ok(draft.body.endsWith('Update src/a.ts.'), draft.body);
+  assert.ok(!draft.body.includes('/draft '), 'the composer shortcut itself is not part of the prompt');
+
+  // Measured hashes are an appendix after the prompt, never a preamble.
+  const anchored = renderGeneratedHandoffPrompt('Goal', 'Update src/a.ts.', 'en', [projectRoot],
+    fileReadRound(projectRoot + '/src/a.ts', 'b'.repeat(64)));
+  assert.ok(anchored.ok);
+  assert.ok(anchored.body.startsWith('Update src/a.ts.'), anchored.body);
+  assert.ok(anchored.body.endsWith('## File-content SHA-256 at inspection\n\n- `./src/a.ts` — `'
+    + 'b'.repeat(64) + '`'), anchored.body);
 });

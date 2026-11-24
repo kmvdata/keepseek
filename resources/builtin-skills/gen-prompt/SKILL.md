@@ -7,7 +7,7 @@ The user selected this Skill to commission a single implementation prompt for a 
 
 Write only the implementation prompt in the user's language. Address the executor directly. Include the goal, scope, explicit limits, decisions, assumptions to verify, actionable steps, acceptance criteria and deliverables. Keep mandatory acceptance criteria intact. Make the result usable without this conversation.
 
-The host renders the prompt you write as its own copyable block, so your visible answer should be a short investigation summary: what you read, what you decided, and what the executor still has to verify. Do not restate the whole prompt in prose, do not rely on your own fenced code block as the deliverable, and never claim the change was implemented.
+The host renders the prompt you write as its own copyable block, so the answer itself must be the implementation prompt. Begin with the first instruction the executor should read: no investigation summary, no preamble such as "here is the prompt", no restatement of the user's request, and no note about this conversation. Do not restate the whole prompt in prose, do not rely on your own fenced code block as the deliverable, and never claim the change was implemented.
 
 Identify relevant project-relative files and stable symbols. Give the executor a way to verify cross-file relationships, repository state and tests. Report a file content SHA-256 only if the host actually measured it; otherwise request verification. Tool result hashes and stat fingerprints identify different data. When sources change, recheck the affected symbols and assumptions.
 

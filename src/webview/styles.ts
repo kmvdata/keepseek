@@ -1669,14 +1669,19 @@ ${conversationsStylesFragment.source}
     }
 
     /* The frozen prompt block reuses the code-block chrome so copying keeps a
-       single implementation, but its copy button sits at the bottom-right. */
+       single implementation; its copy button stays in the block's top-right toolbar. */
     .message-prompt-block {
       display: flex;
       flex-direction: column;
       gap: 6px;
+      /* As a flex item of .message-body the automatic minimum size is the widest
+         unbreakable line, which would widen the transcript instead of letting the
+         inner pre scroll. Clamp to the available width and keep the size explicit. */
+      width: 100%;
+      min-width: 0;
+      max-width: 100%;
       margin: 10px 0;
     }
-
     .message-prompt-block .message-code-block {
       margin: 0;
     }
@@ -1687,13 +1692,6 @@ ${conversationsStylesFragment.source}
       font-weight: 600;
       letter-spacing: 0.02em;
       text-transform: uppercase;
-    }
-
-    .message-prompt-footer {
-      display: flex;
-      justify-content: flex-end;
-      padding: 2px 4px 4px;
-      border-top: 1px solid var(--vscode-panel-border);
     }
 
     .message-prompt-copy:focus-visible {
