@@ -10,6 +10,7 @@ import { getEffectiveContextWindowTokens } from '../shared/modelProfiles';
 import { DEEPSEEK_MODEL_IDENTITY_VERSION, getCanonicalModelIdentity } from '../shared/deepSeekModels';
 import { migrateContextWindowCalibrationState } from './toolResultAdmission';
 import { validPromptCheckpoint } from './promptGeneration';
+import { normalizeHandoffPromptBlock } from './handoffPrompt';
 import { createLogicalRunBudgetState, grantNextToolBudgetSegment, normalizeLogicalRunBudgetLimits, type LogicalRunBudgetState } from './executionPolicy';
 import { normalizeSubagentHostContext } from './subagents/contextCapsule';
 import { normalizeDelegationState } from './delegation';
@@ -298,6 +299,13 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
     if (observations) copy.commandRecoveryObservations = observations;
     if (copy.state?.pending && recoveryResponse) copy.state.pending.commandRecoveryResponse = recoveryResponse;
 
+    if (copy.finalResponse) {
+      // The frozen prompt block is display-only state: a block whose hash no longer
+      // matches its bytes is dropped instead of refusing the whole recovery.
+      const handoffPrompt = normalizeHandoffPromptBlock(copy.finalResponse.handoffPrompt);
+      if (handoffPrompt) copy.finalResponse.handoffPrompt = handoffPrompt;
+      else delete copy.finalResponse.handoffPrompt;
+    }
     for (const proposals of [copy.state?.draftRuns, copy.finalResponse?.draftRuns]) {
       if (proposals === undefined) continue;
       if (!Array.isArray(proposals)) return undefined;

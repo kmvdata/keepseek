@@ -323,6 +323,11 @@ export class SkillStore {
     return ids;
   }
 
+  /** Enabled-Skill IDs of this session, including the built-in prompt Skill. */
+  public getSessionSkillIds(session: ChatSession): string[] {
+    return this.getSessionActiveSkillIds(session);
+  }
+
   public getWorkspaceDefaultSkillIds(): string[] {
     const refs = this.workspaceDefaultSkillRefs.get(this.getWorkspaceKey()) ?? [];
     const refKeys = new Set(refs.map((ref) => normalizeUri(ref)));

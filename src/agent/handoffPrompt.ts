@@ -1,12 +1,27 @@
 import { createHash } from 'node:crypto';
 import { hasPrivateKeyBlock, redactSensitiveMaterial } from '../approvals/sensitiveText';
 import type { KeepseekLanguage } from '../shared/i18n';
-import type { ChatMessage } from '../shared/types';
+import type { ChatMessage, HandoffPromptBlock } from '../shared/types';
 
 export type HandoffFailureReason = 'invalid' | 'disclosure' | 'oversize' | 'missing_context';
 interface HandoffFailure { ok: false; reason: HandoffFailureReason }
 interface FrozenHandoffPrompt { ok: true; version: 1; body: string; bodyHash: string }
 export type GeneratedHandoffPrompt = FrozenHandoffPrompt | HandoffFailure;
+
+/**
+ * Validate a stored host-only prompt block. The hash must match the bytes it
+ * claims to protect, so a tampered or truncated field is dropped instead of
+ * being shown or copied as if it were the frozen output.
+ */
+export function normalizeHandoffPromptBlock(value: unknown): HandoffPromptBlock | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const block = value as Partial<HandoffPromptBlock>;
+  if (block.version !== 1 || typeof block.body !== 'string' || !block.body.trim()) return undefined;
+  if (typeof block.bodyHash !== 'string' || !/^[a-f0-9]{64}$/u.test(block.bodyHash)) return undefined;
+  return createHash('sha256').update(block.body).digest('hex') === block.bodyHash
+    ? { version: 1, body: block.body, bodyHash: block.bodyHash }
+    : undefined;
+}
 
 const errorMessages = {
   'zh-CN': {

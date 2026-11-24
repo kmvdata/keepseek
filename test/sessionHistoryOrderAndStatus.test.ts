@@ -178,10 +178,10 @@ test('the webview orders history by creation and marks each row status', () => {
 
   assert.match(script, /function compareSessionsByCreation\(a, b\) \{/u,
     'creation order must be a named comparator so both tabs share it');
-  assert.match(script, /return compareSessionsByCreation\(a, b\);/u,
-    'the favourite group keeps its priority and only its inner order changes');
   assert.match(script, /sessions\.sort\(compareSessionsByCreation\);/u,
-    'the other-workspace tab sorts by creation too');
+    'the history list sorts by creation alone');
+  assert.doesNotMatch(script, /favoriteDelta/u,
+    'the favourite star is never a sort key, so starring a row cannot move it');
   assert.doesNotMatch(script, /getSessionTimestamp\(b\) - getSessionTimestamp\(a\)/u,
     'no visible list may be ordered by last activity');
   assert.match(script, /t\('sessionCreatedAt', \{ time: created \}\)/u,
@@ -313,4 +313,41 @@ test('the history filter keeps only rows with a recorded run', () => {
   assert.equal(zh.sessionFavoritesOnly, undefined, 'zh-CN drops the favourites-only label');
   assert.equal(en.sessionFavoritesOnly, undefined, 'en drops the favourites-only label');
   assert.equal(zh.sessionCurrentOnly, undefined, 'the provisional current-only label is gone');
+});
+
+/** The history mode switch used to be a word: an icon carries the mode now,
+ * while the dictionary labels survive as the accessible name and the tooltip,
+ * so the control strip stays language-neutral. */
+test('the history edit toggle is an icon button', () => {
+  const script = getScript();
+  assert.doesNotThrow(() => new Function(script), 'the generated webview script must compile');
+
+  assert.doesNotMatch(script, /multiSelectButton\.textContent/u,
+    'the edit toggle draws a glyph, never a translated word');
+  assert.match(script,
+    /multiSelectButton\.setAttribute\('aria-label', t\(sessionMultiSelectMode \? 'sessionExitMultiSelect' : 'sessionMultiSelect'\)\);/u,
+    'the dictionary label becomes the accessible name of the icon button');
+  assert.match(script,
+    /multiSelectButton\.title = t\(sessionMultiSelectMode \? 'sessionExitMultiSelect' : 'sessionMultiSelect'\);/u,
+    'the tooltip still names the mode switch in both directions');
+  assert.match(script,
+    /multiSelectButton\.innerHTML = sessionMultiSelectMode\s*\? '<svg[^']*<\/svg>'\s*: '<svg[^']*<\/svg>';/u,
+    'the glyph follows the mode instead of the button switching between icon and text');
+  assert.doesNotMatch(script, /multiSelectButton\.innerHTML = '[^']*<text/u,
+    'the glyph never draws a word, so it stays language-neutral');
+
+  const styles = conversationsStylesFragment.source;
+  assert.match(styles, /\.session-menu-edit-toggle \{[^}]*display: inline-grid;/u,
+    'the icon-only switch squares itself off instead of using the text padding');
+  assert.match(styles, /\.session-menu-edit-toggle \{[^}]*place-items: center;/u,
+    'the glyph is centred inside the squared button');
+  assert.match(styles, /\.session-menu-edit-toggle svg \{[^}]*display: block;/u,
+    'the inline glyph lays out as a block inside the grid button');
+
+  const zh = WEBVIEW_TRANSLATIONS['zh-CN'];
+  const en = WEBVIEW_TRANSLATIONS.en;
+  assert.ok(zh.sessionMultiSelect && en.sessionMultiSelect,
+    'both dictionaries still name the mode for assistive tech');
+  assert.ok(zh.sessionExitMultiSelect && en.sessionExitMultiSelect,
+    'both dictionaries still name the way out of the mode');
 });

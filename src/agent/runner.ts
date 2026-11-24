@@ -552,7 +552,14 @@ export class AgentLoop {
         this.throwIfAborted(request.signal, request.language);
         const requirement = [...request.history].reverse().find(message => message.role === 'user')?.content ?? '';
         const prompt = renderGeneratedHandoffPrompt(requirement, response.message, request.language, cp.workspaceFolders, response.toolRounds);
-        response.message = prompt.ok ? prompt.body : handoffPromptError(request.language, prompt.reason);
+        // The answer keeps this turn's own text. The frozen prompt becomes a separate
+        // host-only block, so a copy equals the frozen bytes and nothing else.
+        if (prompt.ok) {
+          response.handoffPrompt = { version: 1, body: prompt.body, bodyHash: prompt.bodyHash };
+        } else {
+          response.message = [response.message.trim(), handoffPromptError(request.language, prompt.reason)]
+            .filter(Boolean).join('\n\n');
+        }
       }
       cp.finalResponse = response;
       cp.status = response.runDetails.budgetPause?.resumable

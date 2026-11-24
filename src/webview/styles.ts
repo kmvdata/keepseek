@@ -1668,6 +1668,39 @@ ${conversationsStylesFragment.source}
       color: var(--vscode-testing-iconPassed, var(--vscode-charts-green));
     }
 
+    /* The frozen prompt block reuses the code-block chrome so copying keeps a
+       single implementation, but its copy button sits at the bottom-right. */
+    .message-prompt-block {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin: 10px 0;
+    }
+
+    .message-prompt-block .message-code-block {
+      margin: 0;
+    }
+
+    .message-prompt-title {
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
+
+    .message-prompt-footer {
+      display: flex;
+      justify-content: flex-end;
+      padding: 2px 4px 4px;
+      border-top: 1px solid var(--vscode-panel-border);
+    }
+
+    .message-prompt-copy:focus-visible {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: 1px;
+    }
+
     .message-code-block pre {
       margin: 0;
       overflow-x: auto;

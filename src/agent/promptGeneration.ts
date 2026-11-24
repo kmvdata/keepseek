@@ -1,5 +1,5 @@
 import type { ActivatedSkill, AgentRequest, ChatMessage } from '../shared/types';
-import { isBuiltinGenPrompt } from '../skills/skillTypes';
+import { BUILTIN_GEN_PROMPT_ID, isBuiltinGenPrompt } from '../skills/skillTypes';
 import type { RunCheckpoint } from './runCheckpoint';
 
 /** Explicit allowlist: new tools require review before a generated prompt may use them. */
@@ -14,8 +14,27 @@ export function isPromptInspectionTool(name: string): boolean {
   return inspectionTools.has(name);
 }
 
-export function explicitPromptSkill(skills?: readonly ActivatedSkill[]): ActivatedSkill | undefined {
-  return skills?.find(skill => isBuiltinGenPrompt(skill) && skill.activation?.source === 'explicit');
+/**
+ * The dominant built-in prompt Skill of this turn. Every activation source counts:
+ * a selected, session-enabled or workspace-default gen-prompt all make the turn a
+ * read-only prompt-generation turn whose output contract nothing else may change.
+ */
+export function dominantPromptSkill(skills?: readonly ActivatedSkill[]): ActivatedSkill | undefined {
+  return skills?.find(skill => isBuiltinGenPrompt(skill));
+}
+
+/**
+ * True when this submission asks for prompt generation through any source the user
+ * configured: the request itself, the session's enabled Skills, or workspace defaults.
+ * It is evaluated before Skill resolution so tool exposure can fail closed first.
+ */
+export function dominantPromptRequested(input: {
+  explicitSkillIds?: readonly string[];
+  sessionSkillIds?: readonly string[];
+  workspaceDefaultSkillIds?: readonly string[];
+}): boolean {
+  return [input.explicitSkillIds, input.sessionSkillIds, input.workspaceDefaultSkillIds]
+    .some(ids => ids?.includes(BUILTIN_GEN_PROMPT_ID) === true);
 }
 
 /** The persisted receipt is written only after the selected bundled body loaded successfully. */
@@ -29,7 +48,7 @@ export function lastUserSelectedPrompt(messages: readonly ChatMessage[]): boolea
 export function promptIntentMatches(request: Pick<AgentRequest, 'turnIntent' | 'currentRunContext' | 'history'>): boolean {
   const promptOnly = request.turnIntent === 'generate_prompt';
   return (request.turnIntent === undefined || promptOnly)
-    && promptOnly === Boolean(explicitPromptSkill(request.currentRunContext?.skills))
+    && promptOnly === Boolean(dominantPromptSkill(request.currentRunContext?.skills))
     && promptOnly === lastUserSelectedPrompt(request.history);
 }
 

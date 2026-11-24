@@ -104,7 +104,7 @@ import { ChangeSetStore, type PendingDeleteTarget } from '../edits/changeSetStor
 import { DraftRunStore, type DraftRunStoreEvent, type WebviewDraftRun } from '../runs/draftRunStore';
 import { gitReleaseIntent } from '../runs/gitTaskIntent';
 import { snapshotProjectGitPushDestination } from '../runs/gitReleaseAuthorization';
-import { explicitPromptSkill, isPromptInspectionTool, lastUserSelectedPrompt } from '../agent/promptGeneration';
+import { dominantPromptRequested, dominantPromptSkill, isPromptInspectionTool, lastUserSelectedPrompt } from '../agent/promptGeneration';
 import { BUILTIN_GEN_PROMPT_ID, isBuiltinGenPrompt } from '../skills/skillTypes';
 import { hasExternalHandoffContext, usedExternalHandoffContext } from '../agent/handoffPrompt';
 import { getApprovalModeUserTail, normalizeApprovalMode } from '../agent/approvalMode';
@@ -6705,6 +6705,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         message.toolRounds = checkpoint.finalResponse.toolRounds;
         message.providerReplay = normalizeProviderReplay(checkpoint.finalResponse.providerReplay);
         message.runDetails = checkpoint.finalResponse.runDetails;
+        // Recovery must restore the frozen block, never merge it into the answer.
+        if (checkpoint.finalResponse.handoffPrompt) message.handoffPrompt = checkpoint.finalResponse.handoffPrompt;
       }
       session.updatedAt = checkpoint.updatedAt;
       // A prompt-generation turn is a planning-only turn: it never produces
@@ -6840,8 +6842,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         const selection = await this.skillStore.resolveAndLoadSkills({
           session, prompt: '', explicitSkillIds: [BUILTIN_GEN_PROMPT_ID]
         });
-        const current = explicitPromptSkill(selection.skills);
-        if (!current || current.content !== explicitPromptSkill(cp.request.currentRunContext?.skills)?.content) {
+        const current = dominantPromptSkill(selection.skills);
+        if (!current || current.content !== dominantPromptSkill(cp.request.currentRunContext?.skills)?.content) {
           throw new Error(this.language === 'en' ? 'The bundled gen-prompt Skill is unavailable or has changed. Start a fresh prompt generation turn.'
             : '内置 gen-prompt 无法加载或内容已更新，请重新选择并发送。');
         }
@@ -7014,12 +7016,26 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  /**
+   * A gen-prompt turn is a read-only prompt-generation turn from any source the
+   * user configured it in: the submitted selection, the session's enabled Skills
+   * or the workspace defaults. Tool exposure and the output contract follow it.
+   */
+  private promptOnlyTurnRequested(session: ChatSession, explicitSkillIds?: readonly string[]): boolean {
+    return dominantPromptRequested({
+      explicitSkillIds: normalizeSkillIds(explicitSkillIds),
+      sessionSkillIds: this.skillStore.getSessionSkillIds(session),
+      workspaceDefaultSkillIds: this.skillStore.getWorkspaceDefaultSkillIds()
+    });
+  }
+
   private async sendPrompt(...args: Parameters<KeepseekChatViewProvider['sendPromptImpl']>): Promise<AgentResponse | undefined> {
     if (!args[0].trim()) return;
     const incoming = args[4];
     const inheritedOperation = incoming?.interactionOperation;
+    const promptTurnIncoming = this.promptOnlyTurnRequested(this.sessionStore.getActiveSession(), incoming?.skillIds);
     if (this.isBusy || this.activeDraftRunId || this.activeChangeActions?.size
-      || (normalizeSkillIds(incoming?.skillIds)?.includes(BUILTIN_GEN_PROMPT_ID) && this.approveAllInFlight)
+      || (promptTurnIncoming && this.approveAllInFlight)
       || (!inheritedOperation && this.draftRunAutoContinueInFlight)
       || (this.hasActiveBackgroundRun() && !incoming?.backgroundRunId)
       || (this.isStartingRun && !this.interactions.owns(inheritedOperation))) return;
@@ -7031,7 +7047,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     if (!operation || !this.interactions.owns(operation)) return;
     this.interactions.update(operation, 'preparing_task');
     const taskSessionForSave = this.sessionStore.getActiveSession();
-    const promptOnlyRequested = normalizeSkillIds(incoming?.skillIds)?.includes(BUILTIN_GEN_PROMPT_ID) === true;
+    const promptOnlyRequested = this.promptOnlyTurnRequested(taskSessionForSave, incoming?.skillIds);
     if (!incoming?.draftRunBatch && !promptOnlyRequested) this.draftRunBatches?.cancel();
     if (promptOnlyRequested) this.promptOnlyPreparation = taskSessionForSave.id;
     else if (this.promptOnlyPreparation === taskSessionForSave.id) this.promptOnlyPreparation = undefined;
@@ -7353,7 +7369,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     };
 
     try {
-      const promptOnlyRequested = normalizeSkillIds(options?.skillIds)?.includes(BUILTIN_GEN_PROMPT_ID) === true;
+      const promptOnlyRequested = this.promptOnlyTurnRequested(this.sessionStore.getActiveSession(), options?.skillIds);
       // A reference grant for this conversation is not permission to export the file.
       if (promptOnlyRequested && (this.fileContext.getAll().some(file => file.source === 'external')
         || options?.references?.some(ref => {
@@ -7469,7 +7485,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         { availableTools, routingAvailable: availableTools.includes(READ_PLUGIN_SKILL_TOOL_NAME) },
         inheritedPluginSkills
       );
-      const promptSkill = explicitPromptSkill(runContextResult.context.skills);
+      const promptSkill = dominantPromptSkill(runContextResult.context.skills);
       if (promptOnlyRequested !== Boolean(promptSkill) || (promptOnlyRequested &&
         runContextResult.context.metadata.sources.some(source => source.id === BUILTIN_GEN_PROMPT_ID && source.truncated))) {
         vscode.window.showWarningMessage(this.language === 'en'
@@ -7992,6 +8008,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
       if (assistantMessage) {
         assistantMessage.content = response.message;
+        if (response.handoffPrompt) assistantMessage.handoffPrompt = response.handoffPrompt;
+        else delete assistantMessage.handoffPrompt;
         assistantMessage.reasoningContent = response.reasoningContent;
         if (!planPhaseViolation && (response.draftEdits.length || response.draftRuns?.length)) {
           assistantMessage.contextMeta = createProtectedContextMeta(

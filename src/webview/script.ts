@@ -4253,6 +4253,9 @@ ${conversationsSessionListFragment.source}
             }
             body.append(content);
           }
+          if (message.role === 'assistant' && !message.isStreaming && message.handoffPrompt) {
+            body.append(createHandoffPromptCard(message.handoffPrompt));
+          }
           if (message.role === 'user' && !isDraftRunAutoContinuation) {
             body.append(createUserMessageActions(message));
           } else if (message.role === 'assistant' && !message.isStreaming && String(message.content || '').length > 0) {
@@ -6358,6 +6361,36 @@ ${conversationsSessionListFragment.source}
       pre.append(codeElement);
       block.append(toolbar, pre);
       return block;
+    }
+
+    /**
+     * The frozen prompt of a gen-prompt turn is its own block. The body is assigned
+     * as text and never re-parsed, so the model's own answer cannot mix into the
+     * copyable bytes and a body containing triple backticks cannot escape. No fence
+     * text is injected either: 'code.textContent' stays byte-identical to the frozen
+     * body, which is exactly what the copy button reads.
+     */
+    function createHandoffPromptCard(prompt) {
+      var wrapper = document.createElement('div');
+      wrapper.className = 'message-prompt-block';
+      wrapper.title = t('handoffPromptCopyHint');
+
+      var heading = document.createElement('div');
+      heading.className = 'message-prompt-title';
+      heading.textContent = t('handoffPromptBlock');
+
+      var block = createMarkdownCodeBlock('markdown', prompt.body);
+      var toolbar = block.querySelector('.message-code-toolbar');
+      var copy = toolbar ? toolbar.querySelector('button[data-code-action="copy"]') : null;
+      if (copy) {
+        copy.classList.add('message-prompt-copy');
+        var footer = document.createElement('div');
+        footer.className = 'message-prompt-footer';
+        footer.append(copy);
+        block.append(footer);
+      }
+      wrapper.append(heading, block);
+      return wrapper;
     }
 
     function getCopyIconSvg() {

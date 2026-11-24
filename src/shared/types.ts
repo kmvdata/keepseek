@@ -739,9 +739,19 @@ export interface DraftRun extends DraftRunProposal {
   updatedAt: string;
 }
 
+/** Frozen gen-prompt output. Host-only: never provider-visible, never a request field. */
+export interface HandoffPromptBlock {
+  version: 1;
+  body: string;
+  bodyHash: string;
+}
+
 export interface ChatMessage {
   /** Host-only provenance for portable prompt export. Absence predates the receipt. */
   externalHandoffContext?: boolean;
+  /** Host-only frozen prompt of a prompt-generation turn: rendered as its own
+   * block and copied byte-exact. Never enters a provider request or projection. */
+  handoffPrompt?: HandoffPromptBlock;
   /** Host-only user task membership; never grants authority or changes provider bytes. */
   userTask?: import('../sessions/userTask').UserTaskLink;
   runCheckpoint?: import('../agent/runCheckpoint').RunCheckpoint;
@@ -1718,6 +1728,9 @@ export interface AgentResponse {
   runId: string;
   message: string;
   reasoningContent?: string;
+  /** Frozen prompt of a generate_prompt turn. It stays out of `message` so this
+   * turn's own answer and the copyable prompt bytes cannot be conflated. */
+  handoffPrompt?: HandoffPromptBlock;
   draftEdits: DraftEdit[];
   draftRuns?: DraftRunProposal[];
   taskPlan: TaskPlan;

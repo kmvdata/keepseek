@@ -115,7 +115,14 @@ export const conversationsSessionListFragment: WebviewFragment = {
       multiSelectButton.className = 'session-menu-filter session-menu-edit-toggle' + (sessionMultiSelectMode ? ' is-active' : '');
       multiSelectButton.dataset.sessionAction = 'toggleMultiSelect';
       multiSelectButton.setAttribute('aria-pressed', sessionMultiSelectMode ? 'true' : 'false');
-      multiSelectButton.textContent = t(sessionMultiSelectMode ? 'sessionExitMultiSelect' : 'sessionMultiSelect');
+      // Icon only: the catalogue labels stay behind as the accessible name and
+      // the tooltip, and the glyph switches from 'edit' to 'done' with the mode
+      // so the control strip never carries a translated word.
+      multiSelectButton.setAttribute('aria-label', t(sessionMultiSelectMode ? 'sessionExitMultiSelect' : 'sessionMultiSelect'));
+      multiSelectButton.title = t(sessionMultiSelectMode ? 'sessionExitMultiSelect' : 'sessionMultiSelect');
+      multiSelectButton.innerHTML = sessionMultiSelectMode
+        ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20 6 9 17l-5-5"/></svg>'
+        : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
 
       controls.append(rangeSelect);
       // The date dropdown keeps the leading edge; the switches after it collect
@@ -271,11 +278,10 @@ export const conversationsSessionListFragment: WebviewFragment = {
 
     function getCurrentVisibleSessions() {
       var sessions = Array.isArray(state.sessionSummaries) ? state.sessionSummaries.slice() : [];
-      sessions.sort(function(a, b) {
-        var favoriteDelta = (b.isFavorite === true ? 1 : 0) - (a.isFavorite === true ? 1 : 0);
-        if (favoriteDelta) return favoriteDelta;
-        return compareSessionsByCreation(a, b);
-      });
+      // Favouriting a row is a bookmark, never a move: 'isFavorite' is not a sort
+      // key, so the star leaves the row — and the scroll position around it —
+      // exactly where the user clicked it. Only a new conversation enters at the top.
+      sessions.sort(compareSessionsByCreation);
       return sessions.filter(function(session) {
         if (sessionWithRunOnly && !sessionHasRun(session.id)) {
           return false;

@@ -124,6 +124,19 @@ export const conversationsStylesFragment: WebviewFragment = {
       display: block;
     }
 
+    /* The mode switch is icon-only as well, so it squares itself off like the
+       has-run toggle instead of reserving the text padding for a word. */
+    .session-menu-edit-toggle {
+      display: inline-grid;
+      place-items: center;
+      min-width: 26px;
+      padding: 3px 5px;
+    }
+
+    .session-menu-edit-toggle svg {
+      display: block;
+    }
+
     .session-menu-bulk button {
       flex: 1 1 0;
       min-width: 0;

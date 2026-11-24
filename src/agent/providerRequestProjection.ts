@@ -1,4 +1,4 @@
-import { explicitPromptSkill, isPromptInspectionTool } from './promptGeneration';
+import { dominantPromptSkill, isPromptInspectionTool } from './promptGeneration';
 import type { KeepseekLanguage } from '../shared/i18n';
 import type { ProviderClientRequest } from './providers/types';
 import type { ModelSourceProvider } from '../accounts/types';
@@ -230,7 +230,7 @@ export function buildProviderRequestProjection(
         requestProtocolVersion
       ))]
     : [];
-  const promptOnly = Boolean(explicitPromptSkill(input.currentRunContext?.skills));
+  const promptOnly = Boolean(dominantPromptSkill(input.currentRunContext?.skills));
   // getAgentTools historically treats an empty list as "all". Narrow the
   // canonical list itself so even stale and empty frozen schemas fail closed.
   const schema = includeTools ? getAgentTools({ toolNames: requestedNames, requestProtocolVersion }) : [];

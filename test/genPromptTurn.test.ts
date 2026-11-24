@@ -1,5 +1,6 @@
 import './registerVscodeStub';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { access, mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
@@ -137,8 +138,19 @@ for (const mode of ['ask', 'approve-all'] as const) {
     assert.equal(calls, 2, JSON.stringify({ notices, events: events.filter(e => e.type === 'submissionResult'), tail: session.messages.at(-1)?.content }));
     assert.ok(cp && normalizeRunCheckpoint(cp));
     const frozen = cp.request;
-    assert.match(session.messages.at(-1)!.content, /addOne\(3\) equals 4/u);
-    assert.equal(cp.finalResponse?.message, session.messages.at(-1)!.content);
+    // The answer keeps this turn's own text; the frozen prompt is a separate block.
+    const answer = session.messages.at(-1)!;
+    assert.equal(answer.content, 'Update counter.ts to export addOne. Verify addOne(3) equals 4.');
+    assert.equal(cp.finalResponse?.message, answer.content);
+    const block = answer.handoffPrompt;
+    assert.ok(block, 'the frozen prompt is delivered as its own block');
+    assert.equal(block.version, 1);
+    assert.equal(block.body, cp.finalResponse?.handoffPrompt?.body);
+    assert.equal(block.bodyHash, createHash('sha256').update(block.body).digest('hex'));
+    // Persist, reload and normalize must return the same bytes.
+    const persistedAfterRun = await new GlobalSessionStorage(state as never)
+      .loadSession(scope.key, session.id, { readOnly: true });
+    assert.deepEqual(persistedAfterRun?.messages.find(message => message.id === answer.id)?.handoffPrompt, block);
     assert.equal(cp.state?.validationRunCount, 0);
     assert.deepEqual(cp.finalResponse?.draftEdits, []);
     assert.equal(cp.finalResponse?.changeSet, undefined);
@@ -155,6 +167,8 @@ for (const mode of ['ask', 'approve-all'] as const) {
       const names = projection.responses?.tools.map(tool => tool.name) ?? projection.anthropic?.tools.map(tool => tool.name)
         ?? projection.tools.map(tool => tool.function.name);
       assert.deepEqual(names.sort(), ['keepseek_read_evidence', 'keepseek_read_workspace_file']);
+      // The frozen prompt must never reach provider-visible bytes.
+      assert.ok(!JSON.stringify(projection).includes(block.body));
     }
     for (const name of forbidden) {
       assert.match(getToolExposureError(name, new Set([name]), frozen.turnIntent)!, /prompt_generation_read_only/u);
@@ -172,5 +186,14 @@ for (const mode of ['ask', 'approve-all'] as const) {
     assert.match(notices.join(' '), /gen-prompt/u);
     await host.drainApproveAllExecution('slot_released');
     await assert.rejects(access(waiting));
+    // A block whose hash no longer matches its body is dropped on load while the
+    // message itself still loads.
+    answer.handoffPrompt = { version: 1, body: block.body, bodyHash: 'f'.repeat(64) };
+    await store.persist();
+    const reopenedTampered = await new GlobalSessionStorage(state as never)
+      .loadSession(scope.key, session.id, { readOnly: true });
+    const tamperedMessage = reopenedTampered?.messages.find(message => message.id === answer.id);
+    assert.ok(tamperedMessage, 'the message survives a dropped prompt block');
+    assert.equal(tamperedMessage.handoffPrompt, undefined);
   });
 }

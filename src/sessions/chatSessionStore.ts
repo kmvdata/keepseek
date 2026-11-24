@@ -7,6 +7,7 @@ import { normalizeRequestBudget } from '../agent/requestBudget';
 import { normalizeRunDetailsDelegation } from '../agent/logging/subagentDetails';
 import { buildActivityNodes, type ActivityNode } from '../agent/logging/activityNodes';
 import { isResumableToolBudgetCheckpoint, normalizeRunCheckpoint, recoveryBlocker } from '../agent/runCheckpoint';
+import { normalizeHandoffPromptBlock } from '../agent/handoffPrompt';
 import { normalizeHistoryWorkFacts } from '../agent/historyProtection';
 import { snapshotSession } from './persistenceSnapshot';
 import { recordLocalPerformance } from '../agent/logging/performanceTrace';
@@ -1552,6 +1553,9 @@ function normalizeStoredMessage(value: unknown): ChatMessage | undefined {
     role,
     content: value.content,
     ...(value.externalHandoffContext !== undefined ? { externalHandoffContext: value.externalHandoffContext !== false } : {}),
+    // Host-only frozen prompt. An unverifiable block is dropped while the message
+    // itself is kept, so a tampered hash never surfaces as the frozen output.
+    ...(normalizeHandoffPromptBlock(value.handoffPrompt) ? { handoffPrompt: normalizeHandoffPromptBlock(value.handoffPrompt) } : {}),
     expandedContent: typeof value.expandedContent === 'string' ? value.expandedContent : undefined,
     createdAt: normalizeSessionTimestamp(value.createdAt, new Date().toISOString()),
     modelId: typeof value.modelId === 'string' ? value.modelId : undefined,
