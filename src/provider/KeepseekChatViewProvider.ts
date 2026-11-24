@@ -1774,12 +1774,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const needsUse = isApprovalMutationMessage(message.type) && message.type !== 'sendPrompt' && message.type !== 'editUserPrompt' && message.type !== 'continueAgentTask'
       || message.type === 'startBackgroundRun' || message.type === 'resumeBackgroundRun'
       || message.type === 'renameSession' || message.type === 'toggleSessionFavorite'
+      || message.type === 'toggleSessionPinned'
       || message.type === 'dismissSessionRun';
     // A row action binds its own session: an idle old window must not dispose a task
     // another window is running, so it takes a use record and the id it named
     // instead of whatever this window happens to be viewing.
     const useSessionId = message.type === 'renameSession' || message.type === 'toggleSessionFavorite'
-      || message.type === 'dismissSessionRun'
+      || message.type === 'dismissSessionRun' || message.type === 'toggleSessionPinned'
       ? message.sessionId : this.sessionStore.activeSessionId;
     let use: { release(): Promise<void> } | undefined;
     try {
@@ -1918,6 +1919,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'toggleSessionFavorite':
         if (await this.sessionStore.toggleSessionFavorite(message.sessionId)) {
+          this.postState();
+        }
+        return;
+      case 'toggleSessionPinned':
+        if (await this.sessionStore.toggleSessionPinned(message.sessionId)) {
           this.postState();
         }
         return;

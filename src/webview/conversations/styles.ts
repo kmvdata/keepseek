@@ -152,8 +152,8 @@ export const conversationsStylesFragment: WebviewFragment = {
 
     .session-menu-item {
       display: grid;
-      /* [status] [favourite] [main] [stop] [rename] */
-      grid-template-columns: 12px 24px minmax(0, 1fr) 28px 28px;
+      /* [status] [favourite] [main] [stop] [pin] [rename] */
+      grid-template-columns: 12px 24px minmax(0, 1fr) 28px 28px 28px;
       align-items: center;
       gap: 6px;
       width: 100%;
@@ -168,7 +168,7 @@ export const conversationsStylesFragment: WebviewFragment = {
     }
 
     .session-menu.is-multi-select .session-menu-item {
-      grid-template-columns: 18px 12px 24px minmax(0, 1fr) 28px 28px;
+      grid-template-columns: 18px 12px 24px minmax(0, 1fr) 28px 28px 28px;
     }
 
     .session-menu-item.is-other-workspace {
@@ -271,6 +271,8 @@ export const conversationsStylesFragment: WebviewFragment = {
       transition: opacity 120ms ease, transform 120ms ease, background-color 120ms ease, color 120ms ease;
     }
 
+    .session-menu-item:hover .session-menu-pin,
+    .session-menu-item:focus-within .session-menu-pin,
     .session-menu-item:hover .session-menu-rename,
     .session-menu-item:focus-within .session-menu-rename,
     .session-menu-item:hover .session-menu-run-stop,
@@ -310,6 +312,37 @@ export const conversationsStylesFragment: WebviewFragment = {
       color: var(--vscode-textLink-foreground);
       background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
       outline: none;
+    }
+
+    /* The pin copies the rename pencil's geometry and reveal, but it is the only
+       row control that stays visible on its own: a pinned row keeps showing why it
+       leads the list, without a hover. */
+    .session-menu-pin {
+      display: grid;
+      place-items: center;
+      width: 26px;
+      height: 26px;
+      padding: 0;
+      border: none;
+      border-radius: 4px;
+      color: var(--vscode-descriptionForeground);
+      background: transparent;
+      opacity: 0;
+      transform: translateX(6px);
+      transition: opacity 120ms ease, transform 120ms ease, background-color 120ms ease, color 120ms ease;
+    }
+
+    .session-menu-pin:hover,
+    .session-menu-pin:focus-visible {
+      color: var(--vscode-textLink-foreground);
+      background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+      outline: none;
+    }
+
+    .session-menu-pin.is-active {
+      opacity: 1;
+      transform: translateX(0);
+      color: var(--vscode-textLink-foreground);
     }
 
     .session-menu-rename:hover,

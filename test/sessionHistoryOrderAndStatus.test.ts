@@ -206,8 +206,8 @@ test('the webview orders history by creation and marks each row status', () => {
     /item\.append\(renderRunStatusBadge\(session\.id\)\);\s*var favoriteButton = document\.createElement\('button'\);/u,
     'the status marker is placed immediately before the favourite button');
   assert.match(script,
-    /item\.append\(main\);[\s\S]{0,400}?item\.append\(renderSessionRunStopButton\(session\.id\)\);\s*var renameButton = document\.createElement\('button'\);/u,
-    'the stop square is appended immediately left of the rename pencil');
+    /item\.append\(renderSessionRunStopButton\(session\.id\)\);\s*var pinButton = document\.createElement\('button'\);[\s\S]{0,700}?item\.append\(pinButton\);\s*var renameButton = document\.createElement\('button'\);/u,
+    'the pin sits between the stop square and the rename pencil, so every row action keeps its place');
   assert.match(script, /badge\.className = 'session-status-badge is-' \+ kind;/u,
     'the badge kind maps to a themed marker class');
   for (const declaration of [
@@ -227,10 +227,10 @@ test('the webview orders history by creation and marks each row status', () => {
   }
 
   const styles = conversationsStylesFragment.source;
-  assert.match(styles, /grid-template-columns: 12px 24px minmax\(0, 1fr\) 28px 28px;/u,
-    'the row reserves a leading column for the status marker and a trailing one for the stop square');
-  assert.match(styles, /grid-template-columns: 18px 12px 24px minmax\(0, 1fr\) 28px 28px;/u,
-    'the multi-select row keeps both trailing columns, so no row collapses');
+  assert.match(styles, /grid-template-columns: 12px 24px minmax\(0, 1fr\) 28px 28px 28px;/u,
+    'the row reserves the status column, the stop square and the pin beside the pencil');
+  assert.match(styles, /grid-template-columns: 18px 12px 24px minmax\(0, 1fr\) 28px 28px 28px;/u,
+    'the multi-select row keeps every trailing column, so no row collapses');
   assert.match(styles, /\.session-status-badge\.is-failed \{\s*background: var\(--vscode-charts-red/u,
     'a failed run is red');
   assert.match(styles, /\.session-status-badge\.is-running \{\s*background: var\(--vscode-charts-orange/u,
@@ -509,4 +509,153 @@ test('the dismissal marker is normalized and persisted with the session header',
   assert.equal(byId.get('kept')?.runStatusDismissal?.messageId, 'm-1', 'a valid marker round-trips');
   assert.equal(byId.get('legacy')?.runStatusDismissal, undefined, 'old data has no marker instead of a guess');
   assert.equal(byId.get('broken')?.runStatusDismissal, undefined, 'an unknown shape is dropped instead of throwing');
+});
+
+/** Pinning is the only user action that moves a row, and it stays an order
+ * change: the pinned group leads, both groups keep the creation order, and an
+ * unpinned row lands exactly where its `createdAt` says. */
+test('a pinned row leads the history list without rewriting its creation', () => {
+  const base = {
+    title: 'task', updatedAt: SB, messageCount: 1,
+    workspaceKey: SCOPE_KEY, workspaceName: 'order', isFavorite: false
+  };
+  const oldest = { ...base, id: 'oldest', createdAt: SA };
+  const middle = { ...base, id: 'middle', createdAt: '2024-01-15T00:00:00.000Z' };
+  const newest = { ...base, id: 'newest', createdAt: SB };
+
+  assert.deepEqual(sortSessionSummariesByCreatedAt([newest, oldest, middle]).map(row => row.id),
+    ['newest', 'middle', 'oldest'], 'while nothing is pinned, creation still decides the order');
+
+  assert.deepEqual(
+    sortSessionSummariesByCreatedAt([newest, { ...oldest, isPinned: true }, { ...middle, isPinned: true }])
+      .map(row => row.id),
+    ['middle', 'oldest', 'newest'],
+    'pinning lifts the rows, and the pinned group keeps the creation order');
+
+  assert.deepEqual(
+    sortSessionSummariesByCreatedAt([{ ...newest, isPinned: false }, { ...oldest, isPinned: true }])
+      .map(row => row.id),
+    ['oldest', 'newest'], 'only `isPinned === true` counts, so an explicit false is unpinned');
+
+  const tie = { ...base, createdAt: '2024-03-01T00:00:00.000Z' };
+  assert.deepEqual(
+    sortSessionSummariesByCreatedAt([{ ...tie, id: 'b', isPinned: true }, { ...tie, id: 'a', isPinned: true }])
+      .map(row => row.id),
+    ['a', 'b'], 'the id still breaks a tie inside the pinned group');
+});
+
+/** The pin lives in the session header and in the workspace index entry, so a
+ * reload and a second window both read the same order, and neither write touches
+ * the last-activity timestamp that retention ranks by. */
+test('the pin round-trips through the shard and the index without touching activity', async t => {
+  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-pin-order-'));
+  t.after(async () => { await rm(root, { recursive: true, force: true }).catch(() => undefined); });
+
+  const scope = { key: SCOPE_KEY, name: 'pin', folderUris: [SCOPE_KEY] };
+  const storage = new GlobalSessionStorage(vscode.Uri.file(root) as never);
+  const store = new ChatSessionStore(storage, 'en', scope);
+  await store.initialize();
+
+  const session = store.getActiveSession();
+  session.messages.push({ id: 'pin-1', role: 'user', content: 'task', createdAt: SA } as never);
+  await store.persist();
+  assert.equal(store.getSessionSummaries().find(row => row.id === session.id)?.isPinned, false,
+    'a new conversation is not pinned');
+
+  const updatedAtBefore = session.updatedAt;
+  const pinned = await store.toggleSessionPinned(session.id);
+  assert.equal(pinned?.isPinned, true, 'the header keeps the flag');
+  assert.equal(pinned?.updatedAt, updatedAtBefore,
+    'pinning never refreshes the last-activity timestamp, so retention is unchanged');
+  assert.equal(store.getSessionSummaries().find(row => row.id === session.id)?.isPinned, true,
+    'the row is pinned as soon as the header is written');
+
+  const indexed = (await storage.listWorkspaceSessionSummaries(scope.key))
+    .find(row => row.id === session.id);
+  assert.equal(indexed?.isPinned, true, 'the workspace index entry carries the pin');
+
+  const reloaded = await storage.loadSession(scope.key, session.id);
+  assert.equal(reloaded?.isPinned, true, 'the shard body keeps the pin across a reload');
+
+  const unpinned = await store.toggleSessionPinned(session.id);
+  assert.equal(unpinned?.isPinned, false, 'a second click clears the flag again');
+  assert.equal(unpinned?.updatedAt, updatedAtBefore, 'unpinning leaves the activity timestamp alone');
+  assert.equal(session.messages.length, 1, 'the pin never touches the append-only history');
+
+  const normalized = new Map(normalizeStoredSessions({
+    sessions: [
+      { id: 'pinned', createdAt: SA, updatedAt: SA, workspaceKey: SCOPE_KEY, messages: [], isPinned: true },
+      { id: 'unknown', createdAt: SA, updatedAt: SA, workspaceKey: SCOPE_KEY, messages: [], isPinned: 'yes' },
+      { id: 'legacy', createdAt: SA, updatedAt: SA, workspaceKey: SCOPE_KEY, messages: [] }
+    ]
+  }, scope).map(item => [item.id, item]));
+  assert.equal(normalized.get('pinned')?.isPinned, true, 'a stored pin round-trips');
+  assert.equal(normalized.get('unknown')?.isPinned, false, 'an unknown pin value degrades to unpinned');
+  assert.equal(normalized.get('legacy')?.isPinned, false, 'old data is unpinned instead of throwing');
+});
+
+/** The row pin is a request, never an authority: it posts one message, the Host
+ * owns the flag, and the order lives in the shared comparator. */
+test('the history row pin requests the order instead of deciding it', () => {
+  const script = getScript();
+  assert.doesNotThrow(() => new Function(script), 'the generated webview script must compile');
+
+  assert.ok(script.includes('var byPinned = (b.isPinned === true ? 1 : 0) - (a.isPinned === true ? 1 : 0);'),
+    'the shared comparator lifts pinned rows before it compares creation dates');
+  const comparator = script.slice(
+    script.indexOf('function compareSessionsByCreation(a, b) {'),
+    script.indexOf('function formatSessionActivityTitle(')
+  );
+  assert.ok(comparator.indexOf('if (byPinned) return byPinned;')
+    < comparator.indexOf('getSessionCreatedTimestamp(b)'),
+  'a pin decides before creation, and creation still decides inside each group');
+
+  for (const expected of [
+    "pinButton.dataset.sessionAction = 'togglePin';",
+    'pinButton.dataset.sessionId = session.id;',
+    "pinButton.className = 'session-menu-pin' + (isPinned ? ' is-active' : '');",
+    "pinButton.setAttribute('aria-pressed', isPinned ? 'true' : 'false');",
+    "pinButton.setAttribute('aria-label', t(isPinned ? 'unpinSession' : 'pinSession'));",
+    "pinButton.title = t(isPinned ? 'unpinSession' : 'pinSession');",
+    "+ (isPinned ? ' is-pinned' : '');"
+  ]) {
+    assert.ok(script.includes(expected), `${expected} is part of the row pin`);
+  }
+
+  const pinGlyph = script.slice(script.indexOf('pinButton.innerHTML'), script.indexOf('item.append(pinButton)'));
+  assert.ok(pinGlyph.includes('M12 17v5'), 'the pin draws a pushpin, not another action glyph');
+  assert.ok(pinGlyph.includes('stroke="currentColor"'), 'the glyph follows the theme colour');
+  assert.ok(!pinGlyph.includes('M16.5 3.5a2.1'), 'the pin never reuses the rename pencil path');
+  assert.ok(!pinGlyph.includes('<text'), 'the glyph never draws a word, so it stays language-neutral');
+  assert.ok(!script.includes('pinButton.textContent'),
+    'the pin is icon-only, so no dictionary word lands in the row');
+
+  assert.ok(script.includes("vscode.postMessage({ type: 'toggleSessionPinned', sessionId: pinSessionId });"),
+    'the row action reports the session id and nothing else');
+  const pinBranch = script.slice(
+    script.indexOf("if (action === 'togglePin')"),
+    script.indexOf("if (action === 'toggleMultiSelect')")
+  );
+  assert.ok(!pinBranch.includes('state.sessionSummaries'),
+    'the pin waits for the Host projection instead of reordering locally');
+
+  const styles = conversationsStylesFragment.source;
+  assert.ok(styles.includes('/* [status] [favourite] [main] [stop] [pin] [rename] */'),
+    'the grid comment names the column the pin occupies');
+  const pinRule = styles.slice(styles.indexOf('.session-menu-pin {'), styles.indexOf('.session-menu-pin:hover'));
+  assert.ok(pinRule.includes('display: grid;') && pinRule.includes('opacity: 0;'),
+    'the pin stays hidden until the row is hovered, exactly like the rename pencil');
+  const pinnedRule = styles.slice(styles.indexOf('.session-menu-pin.is-active'),
+    styles.indexOf('.session-menu-item-main'));
+  assert.ok(pinnedRule.includes('opacity: 1;'), 'a pinned row keeps its pin visible without a hover');
+  assert.ok(styles.includes('.session-menu-item:focus-within .session-menu-pin,'),
+    'the pin joins the same hover/focus reveal group as the pencil and the stop square');
+
+  const zh = WEBVIEW_TRANSLATIONS['zh-CN'];
+  const en = WEBVIEW_TRANSLATIONS.en;
+  assert.equal(zh.pinSession, '置顶会话', 'zh-CN names the pin action');
+  assert.equal(zh.unpinSession, '取消置顶', 'zh-CN names the way back');
+  assert.ok(en.pinSession && en.unpinSession, 'en names both states too');
+  assert.notEqual(zh.pinSession, en.pinSession, 'the pin label is translated rather than copied');
+  assert.notEqual(zh.unpinSession, en.unpinSession, 'the unpin label is translated rather than copied');
 });

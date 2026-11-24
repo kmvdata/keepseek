@@ -18,8 +18,9 @@ export const conversationsSessionStatusFragment: WebviewFragment = {
   source: `
     /**
      * Creation timestamp with the same total order the Host uses. The history list
-     * is the record of what the user created, so only \`createdAt\` moves a row:
-     * browsing, streaming or saving a conversation must never reorder it.
+     * is the record of what the user created, so only \`createdAt\` moves a row —
+     * except an explicit pin: pinning is the one reorder the user asks for, while
+     * browsing, streaming or saving a conversation must never touch the order.
      */
     function getSessionCreatedTimestamp(session) {
       var timestamp = Date.parse(session.createdAt || session.updatedAt || '');
@@ -28,6 +29,8 @@ export const conversationsSessionStatusFragment: WebviewFragment = {
     }
 
     function compareSessionsByCreation(a, b) {
+      var byPinned = (b.isPinned === true ? 1 : 0) - (a.isPinned === true ? 1 : 0);
+      if (byPinned) return byPinned;
       var delta = getSessionCreatedTimestamp(b) - getSessionCreatedTimestamp(a);
       if (delta) return delta;
       var leftId = String(a.id || '');
