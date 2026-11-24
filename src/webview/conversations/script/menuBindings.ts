@@ -136,17 +136,3 @@ export const conversationsMenuBindingsFragment: WebviewFragment = {
       });
     }`.slice(1)
 };
-
-export const conversationsMenuDismissFragment: WebviewFragment = {
-  id: 'conversations.menu-dismiss',
-  source: `
-    document.addEventListener('mousedown', function(event) {
-      if (!sessionMenuOpen) return;
-      var target = event.target instanceof Element ? event.target : null;
-      if (!target) return;
-      if ((sessionMenu && sessionMenu.contains(target)) || (historyTab && historyTab.contains(target))) {
-        return;
-      }
-      closeSessionMenu();
-    });`.slice(1)
-};

@@ -14,7 +14,5 @@ export const conversationsStateFragment: WebviewFragment = {
     let otherWorkspaces = [];
     let otherWorkspaceSessions = {};
     let otherWorkspaceSessionErrors = {};
-    let otherWorkspacesError = '';
-    // Hover opening reuses the cached workspace list; only explicit activation scans again.
-    let otherWorkspacesRequested = false;`.slice(1)
+    let otherWorkspacesError = '';`.slice(1)
 };
