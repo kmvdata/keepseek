@@ -31,7 +31,6 @@ import {
 } from '../shared/types';
 import type { ProjectQueueService } from './queue/queueService';
 import { moveToIndex, promoteToFront } from './queue/projectQueue';
-import { buildQueueView, type QueueView } from './queue/queueView';
 import type { ProjectSessionQueue } from './queue/types';
 import {
   CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION,
@@ -311,8 +310,7 @@ export class ChatSessionStore {
     private readonly sessionStorage: ChatSessionStorageAdapter,
     private language: KeepseekLanguage = getConfiguredKeepseekLanguage(),
     private workspaceScope: WorkspaceSessionScope = getCurrentWorkspaceSessionScope(),
-    /** Project queue authority for fairness order and queue presentation. */
-    private readonly projectQueue?: ProjectQueueService
+    /** Project queue authority for fairness order and cross-window write serialization. */    private readonly projectQueue?: ProjectQueueService
   ) {
     if (sessionStorage.listWorkspaceSessionSummaries) {
       projectQueue?.setSessionCatalog(key => sessionStorage.listWorkspaceSessionSummaries!(key),
@@ -1022,21 +1020,6 @@ export class ChatSessionStore {
     return this.sessionStorage.getProjectWriteLeaseUri?.(this.workspaceScope.key);
   }
 
-  /**
-   * Read-only queue projection for the webview (P1: display only).
-   *
-   * Titles come from the summary index; a session without a title yet falls
-   * back to its id inside uildQueueView.
-   */
-  public getProjectQueueView(): QueueView | undefined {
-    const queue = this.getProjectQueue();
-    if (!queue) return undefined;
-    const titles = new Map<string, string>();
-    for (const summary of this.sessionSummaries.values()) {
-      if (summary.workspaceKey === this.workspaceScope.key) titles.set(summary.id, summary.title);
-    }
-    return buildQueueView({ queue, titles });
-  }
   /**
    * Move a session to the tail so the next queued session becomes the head.
    * Used when the user switches a normal session back to plan.

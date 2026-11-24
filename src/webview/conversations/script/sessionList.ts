@@ -49,30 +49,6 @@ export const conversationsSessionListFragment: WebviewFragment = {
         editingSessionTitleId ? '' : getSessionStatusRenderKey(sessions)]);
     }
 
-    function queueEntryFor(sessionId) {
-      var queue = state.projectQueue;
-      if (!queue || !Array.isArray(queue.entries)) return null;
-      for (var i = 0; i < queue.entries.length; i++) {
-        if (queue.entries[i].sessionId === sessionId) return queue.entries[i];
-      }
-      return null;
-    }
-
-    /** Position and derived mode, shown only for sessions that are in the project queue. */
-    function renderQueueBadge(sessionId) {
-      var entry = queueEntryFor(sessionId);
-      if (!entry) return null;
-      var isNormal = entry.mode === 'normal';
-      var badge = document.createElement('span');
-      badge.className = 'session-queue-badge' + (entry.isHead ? ' is-head' : '') + (isNormal ? ' is-normal' : ' is-plan');
-      badge.dataset.queueSessionId = sessionId;
-      badge.textContent = '#' + entry.position + ' ' + (isNormal ? 'N' : 'P');
-      badge.title = entry.isHead
-        ? t('queueHeadHint')
-        : t('queuePositionHint', { position: entry.position });
-      return badge;
-    }
-
     function renderSessionMenu() {
       if (!sessionMenu) return;
       sessionMenu.classList.toggle('hidden', !sessionMenuOpen);
@@ -226,10 +202,6 @@ export const conversationsSessionListFragment: WebviewFragment = {
         meta.textContent = formatSessionMeta(session);
         var activityTitle = formatSessionActivityTitle(session);
         if (activityTitle) meta.title = activityTitle;
-        var queueBadge = renderQueueBadge(session.id);
-        if (queueBadge) {
-          meta.append(document.createTextNode(' '), queueBadge);
-        }
 
         main.append(itemTitle, meta);
         if (sessionMultiSelectMode) {

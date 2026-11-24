@@ -2155,25 +2155,5 @@ ${conversationsStylesFragment.source}
 .run-state-panel > div + div { margin-top: 4px; }
 .run-state-panel button { margin-top: 8px; }
 .is-stream-text { white-space: pre-wrap; overflow-wrap: anywhere; }
-.session-queue-badge {
-  display: inline-block;
-  margin-left: 4px;
-  padding: 0 4px;
-  border-radius: 3px;
-  font-size: 0.85em;
-  font-variant-numeric: tabular-nums;
-  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
-  color: var(--vscode-descriptionForeground);
-  vertical-align: baseline;
-}
-
-.session-queue-badge.is-normal {
-  color: var(--vscode-terminal-ansiGreen, #2ea043);
-  border-color: currentColor;
-}
-
-.session-queue-badge.is-head {
-  font-weight: 600;
-}
 `;
 }

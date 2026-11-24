@@ -9199,7 +9199,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         // Display-only hints for the history list: a badge never reorders a row,
         // authorizes anything or becomes a write precondition.
         sessionRunStatuses: this.sessionRunStatusViews(),
-        projectQueue: this.sessionStore.getProjectQueueView(),
         contextFiles: contextFiles.map(({ content: _content, ...file }) => file),
         skills: this.skillStore.getStateView(activeSession),
         subagents: this.subagentProgress.filter((item) => item.parentSessionId === activeSession.id)

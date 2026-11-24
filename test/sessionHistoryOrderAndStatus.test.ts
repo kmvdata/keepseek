@@ -659,3 +659,40 @@ test('the history row pin requests the order instead of deciding it', () => {
   assert.notEqual(zh.pinSession, en.pinSession, 'the pin label is translated rather than copied');
   assert.notEqual(zh.unpinSession, en.unpinSession, 'the unpin label is translated rather than copied');
 });
+/** The history row used to carry a queue badge. The projection behind it never
+ * carried a mode, so every row printed the same plan marker, and the tooltip keys
+ * it asked for do not exist. The queue still orders approve-all and serializes
+ * writes, but a row shows only its meta and its action order. */
+test('the history row has no queue badge and keeps its creation order', () => {
+  const script = getScript();
+  assert.doesNotThrow(() => new Function(script), 'the generated webview script must compile');
+
+  for (const removed of ['renderQueueBadge', 'session-queue-badge', 'projectQueue',
+    'queuePositionHint', 'queueHeadHint']) {
+    assert.equal(script.includes(removed), false,
+      `${removed} belonged to the display-only queue badge and must stay gone`);
+  }
+
+  assert.match(script, /function compareSessionsByCreation\(a, b\) \{/u,
+    'the history list still sorts through one named creation comparator');
+  assert.match(script, /sessions\.sort\(compareSessionsByCreation\);/u,
+    'creation stays the only sort key, so dropping the badge reorders nothing');
+  assert.match(script, /meta\.textContent = formatSessionMeta\(session\);/u,
+    'the row meta is still the creation time and the message count');
+
+  assert.match(script,
+    /item\.append\(renderRunStatusBadge\(session\.id\)\);\s*var favoriteButton = document\.createElement\('button'\);/u,
+    'the status marker still sits immediately before the favourite star');
+  assert.match(script,
+    /item\.append\(renderSessionRunStopButton\(session\.id\)\);\s*var pinButton = document\.createElement\('button'\);/u,
+    'the stop square still comes first among the row actions');
+  assert.match(script,
+    /item\.append\(pinButton\);\s*var renameButton = document\.createElement\('button'\);/u,
+    'the pin still sits between the stop square and the rename pencil');
+
+  const styles = conversationsStylesFragment.source;
+  assert.equal(styles.includes('.session-queue-badge'), false,
+    'the badge rules left with the badge');
+  assert.match(styles, /\.session-status-badge\.is-completed \{\s*background: var\(--vscode-charts-green/u,
+    'the run status marker keeps its themed colour, so only the queue badge was removed');
+});
