@@ -285,7 +285,7 @@ test('the history filter keeps only rows with a recorded run', () => {
 
   const zh = WEBVIEW_TRANSLATIONS['zh-CN'];
   const en = WEBVIEW_TRANSLATIONS.en;
-  assert.equal(zh.sessionWithRunOnly, '只看运行过', 'zh-CN labels the filter in Chinese');
+  assert.equal(zh.sessionWithRunOnly, '只看进行时', 'zh-CN labels the filter in Chinese');
   assert.ok(en.sessionWithRunOnly && en.sessionWithRunOnly.length > 0, 'en labels the filter too');
   assert.ok(zh.sessionWithRunOnlyHint && en.sessionWithRunOnlyHint,
     'both dictionaries explain what the filter hides');
