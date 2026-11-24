@@ -59,6 +59,12 @@ export const conversationsSessionStatusFragment: WebviewFragment = {
       return ['running', 'waiting', 'failed', 'stopped', 'completed'].indexOf(kind) >= 0 ? kind : 'idle';
     }
 
+    /** A row has a run when the Host projected a conclusion for it. An unprojected
+     * or unknown kind is the hollow idle ring, so it must not claim a run. */
+    function sessionHasRun(sessionId) {
+      return sessionRunStatusKind(sessionRunStatusEntry(sessionId)) !== 'idle';
+    }
+
     function sessionRunStatusLabel(kind) {
       if (kind === 'running') return t('sessionStatusRunning');
       if (kind === 'waiting') return t('sessionStatusWaiting');

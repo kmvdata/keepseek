@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { test } from 'node:test';
 import { getScript } from '../src/webview/script';
+import { WEBVIEW_TRANSLATIONS } from '../src/shared/i18n';
 import { conversationsStylesFragment } from '../src/webview/conversations/styles';
 import { ChatSessionStore, sortSessionSummariesByCreatedAt } from '../src/sessions/chatSessionStore';
 import { GlobalSessionStorage } from '../src/sessions/globalSessionStorage';
@@ -227,4 +228,70 @@ test('the webview orders history by creation and marks each row status', () => {
     'a completed run is green');
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/u,
     'the pulse is disabled when the user asks for reduced motion');
+});
+
+/** The history control strip filters to rows with a recorded run: a row counts
+ * when the Host projected a run for it, so the hollow idle ring is exactly what
+ * the filter hides. Another project's rows carry no projected status at all, so
+ * that tab is never filtered and never offers the button. */
+test('the history filter keeps only rows with a recorded run', () => {
+  const script = getScript();
+  assert.doesNotThrow(() => new Function(script), 'the generated webview script must compile');
+
+  assert.equal(script.split('function sessionHasRun(').length - 1, 1,
+    'the has-run predicate is declared exactly once in the shared script scope');
+  assert.match(script,
+    /function sessionHasRun\(sessionId\) \{\s*return sessionRunStatusKind\(sessionRunStatusEntry\(sessionId\)\) !== 'idle';/u,
+    'an unprojected or unknown kind is the idle ring, so no run is recorded');
+
+  const currentTabList = script.slice(
+    script.indexOf('function getCurrentVisibleSessions()'),
+    script.indexOf('function getVisibleOtherWorkspaceSessions(')
+  );
+  assert.ok(currentTabList.includes('sessionWithRunOnly && !sessionHasRun(session.id)'),
+    'the current-project tab hides rows without a recorded run');
+  assert.ok(currentTabList.indexOf('sessionHasRun(session.id)')
+    < currentTabList.indexOf('sessionRangeDays <= 0'),
+  'the has-run filter runs before the date range, so the range never re-adds a row');
+
+  const otherTabList = script.slice(
+    script.indexOf('function getVisibleOtherWorkspaceSessions('),
+    script.indexOf('function getActiveVisibleSessions(')
+  );
+  assert.doesNotMatch(otherTabList, /sessionWithRunOnly/u,
+    'the other-project tab carries no projected status, so the filter cannot apply there');
+
+  assert.match(script,
+    /sessionMultiSelectMode, sessionRangeDays, sessionWithRunOnly, Array\.from\(selectedSessionIds\),/u,
+    'the filter state stays in the render key so toggling it repaints the panel');
+  assert.match(script, /if \(currentTab\) \{\s*var withRunOnlyButton = document\.createElement\('button'\);/u,
+    'the filter is only offered where a status is projected');
+  assert.match(script, /withRunOnlyButton\.dataset\.sessionAction = 'toggleWithRunOnly';/u,
+    'the control strip exposes the has-run toggle');
+  assert.match(script,
+    /withRunOnlyButton\.setAttribute\('aria-pressed', sessionWithRunOnly \? 'true' : 'false'\);/u,
+    'the pressed state follows the filter');
+  assert.match(script, /withRunOnlyButton\.textContent = t\('sessionWithRunOnly'\);/u,
+    'the label comes from the catalogue, never from the raw key');
+  assert.match(script, /controls\.append\(withRunOnlyButton\);\s*\}\s*controls\.append\(multiSelectButton\);/u,
+    'the filter sits between the range select and the edit toggle');
+  assert.match(script,
+    /if \(action === 'toggleWithRunOnly'\) \{\s*if \(!isCurrentWorkspaceTab\(\)\) return;/u,
+    'toggling from another project tab is ignored');
+  assert.match(script, /t\('sessionWithRunOnlyEmpty'\)/u,
+    'a filtered-to-nothing list names the filter instead of claiming empty history');
+  assert.doesNotMatch(script, /sessionFavoritesOnly|toggleFavoritesOnly|sessionCurrentOnly/u,
+    'the favourites-only filter and its provisional name are gone');
+
+  const zh = WEBVIEW_TRANSLATIONS['zh-CN'];
+  const en = WEBVIEW_TRANSLATIONS.en;
+  assert.equal(zh.sessionWithRunOnly, '只看运行过', 'zh-CN labels the filter in Chinese');
+  assert.ok(en.sessionWithRunOnly && en.sessionWithRunOnly.length > 0, 'en labels the filter too');
+  assert.ok(zh.sessionWithRunOnlyHint && en.sessionWithRunOnlyHint,
+    'both dictionaries explain what the filter hides');
+  assert.ok(zh.sessionWithRunOnlyEmpty && en.sessionWithRunOnlyEmpty,
+    'both dictionaries explain a filtered-to-nothing list');
+  assert.equal(zh.sessionFavoritesOnly, undefined, 'zh-CN drops the favourites-only label');
+  assert.equal(en.sessionFavoritesOnly, undefined, 'en drops the favourites-only label');
+  assert.equal(zh.sessionCurrentOnly, undefined, 'the provisional current-only label is gone');
 });

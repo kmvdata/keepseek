@@ -49,7 +49,7 @@ export const conversationsSessionListFragment: WebviewFragment = {
       // dropped then: syncSessionStatusBadges patches the marker in place instead
       // of rebuilding the row underneath the editor.
       return JSON.stringify([getLanguage(), state.activeSessionId, activeWorkspaceTab,
-        sessionMultiSelectMode, sessionRangeDays, sessionFavoritesOnly, Array.from(selectedSessionIds),
+        sessionMultiSelectMode, sessionRangeDays, sessionWithRunOnly, Array.from(selectedSessionIds),
         editingSessionTitleId, sessions, otherWorkspaces, otherWorkspacesError,
         otherWorkspaceSessionErrors[activeWorkspaceTab], hasOtherWorkspaceSessionsCache(activeWorkspaceTab),
         editingSessionTitleId ? '' : getSessionStatusRenderKey(sessions)]);
@@ -144,13 +144,18 @@ export const conversationsSessionListFragment: WebviewFragment = {
       multiSelectButton.textContent = t(sessionMultiSelectMode ? 'sessionExitMultiSelect' : 'sessionMultiSelect');
 
       controls.append(workspaceSelect, rangeSelect);
-      var favoriteOnlyButton = document.createElement('button');
-      favoriteOnlyButton.type = 'button';
-      favoriteOnlyButton.className = 'session-menu-filter' + (sessionFavoritesOnly ? ' is-active' : '');
-      favoriteOnlyButton.dataset.sessionAction = 'toggleFavoritesOnly';
-      favoriteOnlyButton.setAttribute('aria-pressed', sessionFavoritesOnly ? 'true' : 'false');
-      favoriteOnlyButton.textContent = t('sessionFavoritesOnly');
-      controls.append(favoriteOnlyButton);
+      // The Host projects a run status for this workspace's rows only, so
+      // 'only with a run' has nothing to filter on another project's tab.
+      if (currentTab) {
+        var withRunOnlyButton = document.createElement('button');
+        withRunOnlyButton.type = 'button';
+        withRunOnlyButton.className = 'session-menu-filter' + (sessionWithRunOnly ? ' is-active' : '');
+        withRunOnlyButton.dataset.sessionAction = 'toggleWithRunOnly';
+        withRunOnlyButton.setAttribute('aria-pressed', sessionWithRunOnly ? 'true' : 'false');
+        withRunOnlyButton.textContent = t('sessionWithRunOnly');
+        withRunOnlyButton.title = t('sessionWithRunOnlyHint');
+        controls.append(withRunOnlyButton);
+      }
       controls.append(multiSelectButton);
       sessionMenu.append(controls);
 
@@ -206,7 +211,11 @@ export const conversationsSessionListFragment: WebviewFragment = {
       if (!sessions.length) {
         var empty = document.createElement('div');
         empty.className = 'session-menu-empty';
-        empty.textContent = t('noHistory');
+        // The filter can empty the list while history still exists, so name the
+        // filter instead of claiming there is no history at all.
+        var filteredNothing = sessionWithRunOnly && currentTab
+          && (Array.isArray(state.sessionSummaries) ? state.sessionSummaries : []).length > 0;
+        empty.textContent = filteredNothing ? t('sessionWithRunOnlyEmpty') : t('noHistory');
         sessionMenu.append(empty);
         return;
       }
@@ -348,7 +357,7 @@ export const conversationsSessionListFragment: WebviewFragment = {
         return compareSessionsByCreation(a, b);
       });
       return sessions.filter(function(session) {
-        if (sessionFavoritesOnly && session.isFavorite !== true) {
+        if (sessionWithRunOnly && !sessionHasRun(session.id)) {
           return false;
         }
         if (sessionRangeDays <= 0) {
@@ -368,9 +377,8 @@ export const conversationsSessionListFragment: WebviewFragment = {
         : [];
       sessions.sort(compareSessionsByCreation);
       return sessions.filter(function(session) {
-        if (sessionFavoritesOnly && session.isFavorite !== true) {
-          return false;
-        }
+        // 'Only with a run' is a current-workspace filter: the Host projects no run
+        // status for another project's rows, so filtering here would empty the tab.
         if (sessionRangeDays <= 0) {
           return true;
         }
@@ -500,8 +508,9 @@ export const conversationsSessionListFragment: WebviewFragment = {
         return;
       }
 
-      if (action === 'toggleFavoritesOnly') {
-        sessionFavoritesOnly = !sessionFavoritesOnly;
+      if (action === 'toggleWithRunOnly') {
+        if (!isCurrentWorkspaceTab()) return;
+        sessionWithRunOnly = !sessionWithRunOnly;
         selectedSessionIds.clear();
         renderSessionMenu();
         return;
