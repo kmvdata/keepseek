@@ -1,44 +1,22 @@
 import { createHash } from 'node:crypto';
 import { hasPrivateKeyBlock, redactSensitiveMaterial } from '../approvals/sensitiveText';
 import type { KeepseekLanguage } from '../shared/i18n';
-import type { ChatMessage, ChatSession, PlanWorkflowRecord } from '../shared/types';
-import type { ProviderRequestProjection } from './providerRequestProjection';
-import type { ProviderClientRequest } from './providers/types';
+import type { ChatMessage } from '../shared/types';
 
 export type HandoffFailureReason = 'invalid' | 'disclosure' | 'oversize' | 'missing_context';
 interface HandoffFailure { ok: false; reason: HandoffFailureReason }
 interface FrozenHandoffPrompt { ok: true; version: 1; body: string; bodyHash: string }
 export type GeneratedHandoffPrompt = FrozenHandoffPrompt | HandoffFailure;
-export type HandoffPreview = (FrozenHandoffPrompt & { planHash: string }) | HandoffFailure;
-
-export function hashPlanContent(content: string): string {
-  return createHash('sha256').update(content, 'utf8').digest('hex');
-}
-
-export function getLatestPendingPlan(session: ChatSession): PlanWorkflowRecord | undefined {
-  const records = session.planWorkflows ?? [];
-  for (let i = records.length - 1; i >= 0; i--) {
-    if (records[i].status === 'pending') return records[i];
-  }
-  return undefined;
-}
-
-export function isPlanRecordContentValid(session: ChatSession, record: PlanWorkflowRecord): boolean {
-  if (record.sessionId !== session.id) return false;
-  const user = session.messages.find(message => message.id === record.userMessageId && message.role === 'user');
-  const assistant = session.messages.find(message => message.id === record.assistantMessageId && message.role === 'assistant');
-  return Boolean(user && assistant && hashPlanContent(assistant.content) === record.contentHash);
-}
 
 const errorMessages = {
   'zh-CN': {
-    invalid: '计划或正文版本已变化。请查看最新版本后重试。',
+    invalid: '提示词或正文版本已变化。请查看最新版本后重试。',
     disclosure: '正文涉及本轮读取过的项目外内容，或包含私钥。请改述为项目相对路径，或在本会话直接执行。',
-    oversize: '完整正文超过首条消息容量。请在当前会话执行，或缩短计划中的可选说明并保留全部验收条件后重新预览。',
-    missing_context: '正文仍依赖原会话的证据或引用。请把必要的目标、项目相对路径和验证方法写入计划后重新预览。'
+    oversize: '完整正文超过首条消息容量。请在当前会话执行，或缩短可选说明并保留全部验收条件后重新预览。',
+    missing_context: '正文仍依赖原会话的证据或引用。请把必要的目标、项目相对路径和验证方法写入后重新预览。'
   },
   en: {
-    invalid: 'The plan or prompt has changed. Review its latest version and try again.',
+    invalid: 'The prompt has changed. Review its latest version and try again.',
     disclosure: 'The prompt reflects content read outside this project, or contains a private key. Use project-relative paths, or run in this session.',
     oversize: 'The complete prompt exceeds the first-message limit. Run in this session, or shorten optional details while preserving all acceptance criteria and preview again.',
     missing_context: 'This prompt still depends on evidence or references from its original session. Revise it with the necessary goal, project-relative paths and verification steps.'
@@ -348,7 +326,7 @@ function renderPrompt(requirement: string, steps: string, language: KeepseekLang
   }
   if (rows.length) body += '\n\n' + section(heading, rows.join('\n'));
   if (body.length > 32_000) return { ok: false, reason: 'oversize' };
-  return { ok: true, version: 1, body, bodyHash: hashPlanContent(body) };
+  return { ok: true, version: 1, body, bodyHash: createHash('sha256').update(body).digest('hex') };
 }
 
 export function renderGeneratedHandoffPrompt(requirement: string, authoredPrompt: string, language: KeepseekLanguage,
@@ -374,48 +352,3 @@ export function hasExternalHandoffContext(message: ChatMessage): boolean {
   return message.externalHandoffContext === true || Boolean(message.runCheckpoint && usedExternalHandoffContext(message.runCheckpoint.request));
 }
 
-export function buildPlanHandoffPrompt(session: ChatSession, planId: string, language: KeepseekLanguage): HandoffPreview {
-  const plan = getLatestPendingPlan(session);
-  if (!plan || plan.id !== planId || !isPlanRecordContentValid(session, plan)) return { ok: false, reason: 'invalid' };
-  const user = session.messages.find(message => message.id === plan.userMessageId)!;
-  const assistant = session.messages.find(message => message.id === plan.assistantMessageId)!;
-  if (plan.externalHandoffContext || session.messages.slice(0, session.messages.indexOf(assistant) + 1).some(hasExternalHandoffContext)) {
-    return { ok: false, reason: 'disclosure' };
-  }
-  const folders = session.projectScopeUri ? [session.projectScopeUri] : session.workspaceFolders ?? [];
-  // Never export expandedContent, provider tails, tool results, replay or grants.
-  const earlier = (plan.priorRequirementIds ?? []).map(id => session.messages.find(message => message.id === id && message.role === 'user'));
-  if (earlier.some(message => !message)) return { ok: false, reason: 'missing_context' };
-  const requirement = projectRelativeText([...earlier.map(message => message!.content), user.content].join('\n\n'), folders);
-  const steps = projectRelativeText(assistant.content, folders);
-  const reads = inspectFileReads(assistant.toolRounds, folders, requirement + '\n' + steps);
-  if (reads.externalRead) return { ok: false, reason: 'disclosure' };
-  // buildPlanHandoffPrompt() runs on every plan-card render, so the scan above is bounded and
-  // the roots are computed once per call rather than per candidate.
-  const preview = renderPrompt(requirement, steps, language, {
-    roots: normalizeRoots(folders), anchors: reads.anchors, externalPaths: reads.externalPaths
-  });
-  return preview.ok ? { ...preview, planHash: plan.contentHash } : preview;
-}
-
-type MessageList = readonly { role?: string; content?: unknown }[];
-
-function verifyProjectedUser(messages: MessageList, body: string, bodyHash: string): string {
-  const users = messages.filter(message => message.role === 'user');
-  const content = users[0]?.content;
-  const visible = typeof content === 'string' ? content
-    : Array.isArray(content) && content.length === 1 && content[0]?.type === 'text' ? content[0].text : undefined;
-  if (users.length !== 1 || !body || hashPlanContent(body) !== bodyHash || typeof visible !== 'string'
-    || visible.length > 32_000 || !(visible === body || visible.startsWith(body + '\n'))) {
-    throw new Error('The first provider message does not preserve the preview. Shorten the plan and preview again. / 首条实际请求无法完整保留预览正文，请缩短计划后重新预览。');
-  }
-  return hashPlanContent(visible);
-}
-
-export function verifyHandoffPayload(payload: ProviderClientRequest['body'], body: string, bodyHash: string): string {
-  return verifyProjectedUser('input' in payload ? payload.input : payload.messages, body, bodyHash);
-}
-
-export function verifyHandoffProjection(projection: ProviderRequestProjection, body: string, bodyHash: string): string {
-  return verifyProjectedUser(projection.responses?.input ?? projection.anthropic?.messages ?? projection.messages, body, bodyHash);
-}

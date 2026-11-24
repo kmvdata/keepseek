@@ -1,9 +1,6 @@
 import './builtinGenPrompt.test';
 import './genPromptTurn.test';
-import './handoffPrompt.test';
 import './handoffGuardCorpus.test';
-import './planHandoffFaults.test';
-import './planExecutionProbe.test';
 import './approveAllExecution.test';
 import './approveAllBoundary.test';
 import './validationAuthorization.test';
@@ -21,6 +18,7 @@ import './sessionQuarantine.test';
 import './sessionAbsentTombstone.test';
 import './subagentProfileCapability.test';
 import './protectedTargetPolicy.test';
+import './writeLease.test';
 import { after } from 'node:test';
 
 // The provider's startup schedules interval timers; a completed run must not

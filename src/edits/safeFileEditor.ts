@@ -7,7 +7,7 @@ import { getConfiguredPatchSettings } from '../shared/config';
 import { formatBytes } from '../shared/format';
 import { decodeRollbackSafeUtf8Text } from '../shared/safeTextSnapshot';
 import { findSensitiveEvidence } from '../approvals/sensitiveText';
-import { assertHardProtectedPath, assertOperationPath } from '../approvals/authorization/protectedTargets';
+import { assertOperationPath } from '../approvals/authorization/protectedTargets';
 import { assertCleanDraftEditTarget, findDraftEditTargetTabs, inspectDraftEditTarget } from '../approvals/authorization/editTargets';
 import { fileIdentity } from '../approvals/authorization/projectLaunchIdentity';
 import { shouldSkipTextUri } from '../shared/textFileGuards';
@@ -30,10 +30,66 @@ export interface ChangeCheckpointJournal {
 }
 
 export class SafeFileEditError extends Error {
-  public constructor(message: string, public readonly checkpoint?: ChangeCheckpoint) {
+  public constructor(
+    message: string,
+    public readonly checkpoint?: ChangeCheckpoint,
+    /** Set only when the underlying cause was a file conflict. */
+    public readonly conflict?: WriteConflictError
+  ) {
     super(message);
     this.name = 'SafeFileEditError';
   }
+}
+
+/**
+ * Stable machine-readable reason for an apply that could not touch the file.
+ *
+ * Drafts are prepared without the project write lock, so a stale base is the
+ * *expected* outcome when two sessions propose the same file. Callers need to
+ * tell "the file moved under this draft" apart from "this write was refused",
+ * which the human-readable message alone cannot do.
+ */
+export type WriteConflictCode =
+  /** The file changed after the draft was prepared. */
+  | 'draft_base_mismatch'
+  /** A create draft targets a path that now exists. */
+  | 'draft_target_exists'
+  /** A modify/delete draft targets a path that no longer exists. */
+  | 'draft_target_missing';
+
+/**
+ * A conflict with the file on disk, not a policy or trust refusal.
+ *
+ * Only this error type is eligible for the one bounded regeneration attempt: a
+ * refusal (untrusted workspace, revoked approval, protected path) must never be
+ * retried, because nothing about the file content would change the outcome.
+ */
+export class WriteConflictError extends Error {
+  public constructor(
+    message: string,
+    public readonly code: WriteConflictCode,
+    public readonly uri: string,
+    public readonly label: string,
+    /** Content identity the draft was prepared against. */
+    public readonly expected?: FileContentIdentity,
+    /** Content identity observed on disk now. */
+    public readonly actual?: FileContentIdentity
+  ) {
+    super(message);
+    this.name = 'WriteConflictError';
+  }
+}
+
+/** True for errors that a regenerated draft could plausibly resolve. */
+export function isWriteConflict(error: unknown): error is WriteConflictError {
+  return error instanceof WriteConflictError;
+}
+
+/** The conflict carried by a wrapped apply failure, if any. */
+export function conflictOf(error: unknown): WriteConflictError | undefined {
+  if (error instanceof WriteConflictError) return error;
+  if (error instanceof SafeFileEditError) return error.conflict;
+  return undefined;
 }
 
 export interface DelegatedEditApproval {
@@ -132,6 +188,11 @@ export class SafeFileEditor {
       if (checkpoint) {
         checkpoint.state = mutationStarted ? 'uncertain' : 'interrupted';
         await journal?.persist(checkpoint).catch(() => undefined);
+      }
+      // Preserve the conflict identity: a stale base is retryable with a new
+      // draft, while every other failure stays a plain SafeFileEditError.
+      if (error instanceof WriteConflictError) {
+        throw new SafeFileEditError(error.message, checkpoint, error);
       }
       throw new SafeFileEditError(error instanceof Error ? error.message : String(error), checkpoint);
     }
@@ -290,8 +351,25 @@ export class SafeFileEditor {
   }
 
   private assertActionMatchesSnapshot(edit: DraftEdit, snapshot: FileSnapshot): void {
-    if (edit.action === 'create' && snapshot.exists) throw new Error(this.t('cannotApplyCreatedFileExists', { label: edit.label }));
-    if (edit.action !== 'create' && !snapshot.exists) throw new Error(this.t('cannotApplyMissingDraftTarget', { label: edit.label }));
+    if (edit.action === 'create' && snapshot.exists) {
+      throw new WriteConflictError(
+        this.t('cannotApplyCreatedFileExists', { label: edit.label }),
+        'draft_target_exists',
+        edit.uri,
+        edit.label,
+        undefined,
+        snapshot.byteIdentity
+      );
+    }
+    if (edit.action !== 'create' && !snapshot.exists) {
+      throw new WriteConflictError(
+        this.t('cannotApplyMissingDraftTarget', { label: edit.label }),
+        'draft_target_missing',
+        edit.uri,
+        edit.label,
+        getDraftEditBase(edit)
+      );
+    }
   }
 
   private assertBaselineMatches(edit: DraftEdit, snapshot: FileSnapshot): void {
@@ -301,7 +379,14 @@ export class SafeFileEditor {
     const sizeChanged = base.sizeBytes >= 0 && base.sizeBytes !== snapshot.byteIdentity?.sizeBytes;
     const hashChanged = Boolean(base.sha256) && base.sha256 !== actualHash;
     if (sizeChanged || hashChanged) {
-      throw new Error(this.t(edit.action === 'delete' ? 'cannotApplyChangedDeleteTarget' : 'cannotApplyChangedDraftTarget', { label: edit.label }));
+      throw new WriteConflictError(
+        this.t(edit.action === 'delete' ? 'cannotApplyChangedDeleteTarget' : 'cannotApplyChangedDraftTarget', { label: edit.label }),
+        'draft_base_mismatch',
+        edit.uri,
+        edit.label,
+        { sha256: base.sha256, sizeBytes: base.sizeBytes },
+        snapshot.byteIdentity
+      );
     }
   }
 

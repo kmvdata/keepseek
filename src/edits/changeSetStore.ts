@@ -3,6 +3,8 @@ import { SessionDeletionAuthority } from '../sessions/sessionDeletionAuthority';
 import { hasAssociatedRecordOwner, isMissingAssociatedFile, assertManagedStoragePath, deleteAssociatedUri, readAssociatedJson, withAssociatedStoreGate, withoutDeletedSessions } from '../sessions/sessionAssociatedPersistence';
 import { createHash, randomUUID } from 'node:crypto';
 import { assertWriteAuthorized } from '../sessions/queue/writeGate';
+import { withWriteLease, type AcquireFailReason } from '../sessions/queue/writeLeaseRegistry';
+import { conflictOf } from './safeFileEditor';
 import { isWorkspaceSkillScaffoldPath } from '../approvals/authorization/protectedTargets';
 import { canonicalPath, isPathInside, resolveSelectedProjectRoot } from '../approvals/authorization/pathScope';
 import { assertCleanDraftEditTarget, inspectDraftEditTarget } from '../approvals/authorization/editTargets';
@@ -105,6 +107,9 @@ export class ChangeSetStore {
   private artifactGcTimer: ReturnType<typeof setTimeout> | undefined;
   private artifactGcQueued = false;
   private readonly activeEditOperations = new Set<string>();
+  /** Last refusal to acquire the project write lease, for diagnostics. */
+  private writeLeaseRefusal: AcquireFailReason | undefined;
+  private onWriteLeaseRefused?: (sessionId: string, outcome: { reason: AcquireFailReason; holderSessionId?: string }) => void;
   private readonly historyInvalidations = new Map<string, HistoryTruncationScope[]>();
   private initialized = false;
 
@@ -641,12 +646,20 @@ export class ChangeSetStore {
     if (!found || !isApplicable(found.edit)) {
       return undefined;
     }
-    assertWriteAuthorized(found.changeSet.sessionId, 'edit');
-    const result = await this.applyFiles(found.changeSet, [found.edit], approval, options);
-    if (result.appliedEditIds.length) {
-      await this.recordAppliedResult(found.changeSet, result).catch(() => undefined);
+    // The lease is a batch claim: acquired before the first file write and
+    // released only after the whole batch and its journal are durable. The gate
+    // is re-checked inside the claim because the gate itself now reads the lease:
+    // checking it first would deadlock against the claim it is meant to guard.
+    const result = await this.withProjectWriteLease(found.changeSet.sessionId, `edits:${found.changeSet.id}`,
+      async () => {
+        assertWriteAuthorized(found.changeSet.sessionId, 'edit');
+        return this.applyFiles(found.changeSet, [found.edit], approval, options);
+      });
+    if (!result.ran) return undefined;
+    if (result.value.appliedEditIds.length) {
+      await this.recordAppliedResult(found.changeSet, result.value).catch(() => undefined);
     }
-    return result;
+    return result.value;
   }
 
   public async applyAll(
@@ -657,19 +670,75 @@ export class ChangeSetStore {
     if (!changeSet || !hasActiveHistory(changeSet)) {
       return undefined;
     }
-    // Every apply path passes the project write gate: the queue decides which
-    // session may touch the workspace, and a non-head session must be refused
-    // here rather than relying on UI state.
-    assertWriteAuthorized(changeSet.sessionId, 'edit');
     const files = changeSet.files.filter(isApplicable);
     if (!files.length) {
       return undefined;
     }
-    const result = await this.applyFiles(changeSet, files, undefined, options);
-    if (result.appliedEditIds.length) {
-      await this.recordAppliedResult(changeSet, result).catch(() => undefined);
+    // Claim first, then verify: the gate is lease-aware, so checking it before the
+    // claim would refuse every write that the claim is about to authorize.
+    const result = await this.withProjectWriteLease(changeSet.sessionId, `edits:${changeSet.id}`,
+      async () => {
+        assertWriteAuthorized(changeSet.sessionId, 'edit');
+        return this.applyFiles(changeSet, files, undefined, options);
+      });
+    if (!result.ran) return undefined;
+    if (result.value.appliedEditIds.length) {
+      await this.recordAppliedResult(changeSet, result.value).catch(() => undefined);
     }
-    return result;
+    return result.value;
+  }
+
+  /**
+   * Run one file batch while holding the project write lease.
+   *
+   * A refusal runs nothing: the caller sees `undefined` and the refused lease is
+   * reported to the UI. Drafts themselves are never guarded, so a session may
+   * always prepare proposals while another session is writing.
+   */
+  private async withProjectWriteLease<T>(
+    sessionId: string | undefined,
+    batchId: string,
+    work: () => Promise<T>
+  ): Promise<{ ran: true; value: T } | { ran: false }> {
+    if (!sessionId) return { ran: true, value: await work() };
+    const outcome = await withWriteLease({ sessionId, purpose: 'edit', batchId }, work);
+    if (outcome.ran) return outcome;
+    this.writeLeaseRefusal = outcome.outcome.reason;
+    this.onWriteLeaseRefused?.(sessionId, outcome.outcome);
+    return { ran: false };
+  }
+
+  /** Report a refused write so the host can name the holder. */
+  public setWriteLeaseRefusalHandler(
+    handler: (sessionId: string, outcome: { reason: AcquireFailReason; holderSessionId?: string }) => void
+  ): void {
+    this.onWriteLeaseRefused = handler;
+  }
+
+  /** Last refusal reason, for diagnostics. */
+  public get lastWriteLeaseRefusal(): AcquireFailReason | undefined {
+    return this.writeLeaseRefusal;
+  }
+
+  /**
+   * Mark a conflicted draft as blocked after its one regeneration also failed.
+   *
+   * The draft stays pending in the store (so the user still sees the card and can
+   * act on it) but carries the conflict reason, which is what tells the UI and the
+   * automatic pass to stop retrying it.
+   */
+  public markEditBlockedByConflict(editId: string, reason: string): boolean {
+    const found = this.findEdit(editId);
+    if (!found || !isApplicable(found.edit)) return false;
+    found.edit.error = reason;
+    this.recordTrace(found.changeSet, {
+      type: 'change_set_file_discarded',
+      changeSetId: found.changeSet.id,
+      editId: found.edit.id,
+      label: found.edit.label
+    });
+    this.schedulePersist();
+    return true;
   }
 
   public discardEdit(editId: string, automaticStopReason?: string): boolean {
@@ -908,7 +977,22 @@ export class ChangeSetStore {
             : interruptedCheckpoint?.state === 'interrupted' ? 'interrupted'
               : 'apply_failed';
           file.error = message;
-          failed.push({ editId: file.id, label: file.label, error: message });
+          // A conflict with the file on disk is retryable with a fresh draft;
+          // every other failure is a refusal that a retry cannot fix.
+          const conflict = conflictOf(error);
+          failed.push({
+            editId: file.id,
+            label: file.label,
+            error: message,
+            ...(conflict ? {
+              conflict: {
+                code: conflict.code,
+                uri: conflict.uri,
+                ...(conflict.expected?.sha256 ? { expectedSha256: conflict.expected.sha256 } : {}),
+                ...(conflict.actual?.sha256 ? { actualSha256: conflict.actual.sha256 } : {})
+              }
+            } : {})
+          });
           options.onProgress?.({ changeSetId: changeSet.id, editId: file.id, status: file.status });
         } finally {
           this.activeEditOperations.delete(file.id);

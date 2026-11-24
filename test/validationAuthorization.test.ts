@@ -6,7 +6,7 @@ import {
   validationAuthorizationRegistry,
   ValidationAuthorizationRegistry
 } from '../src/agent/tools/toolAuthorization';
-import { toolNamesForMode } from '../src/sessions/queue/planGate';
+import { isReadOnlyTool, isWriteSideEffectTool } from '../src/sessions/queue/toolPolicy';
 import type {
   ToolAuthorizationDecision,
   ValidationAuthorizationRequest,
@@ -93,11 +93,14 @@ test('only host-issued sources can authorize validation', () => {
   assert.equal(isValidationAuthorizationValid(decision({ source: 'user_confirmed' }), expected), true);
 });
 
-test('validation stays in the normal tool set; approval mode never removes tools', () => {
-  // Approval mode is an independent axis: both modes expose the same tools and
-  // differ only in who authorizes a side effect.
+test('validation is a side effect classified with the other write tools', () => {
+  // Every session receives the full frozen tool set; what differs is whether the
+  // project write lease admits the side effect, never which tools are offered.
   const available = ['keepseek_read_workspace_file', RUN_VALIDATION, 'keepseek_run_draft'];
-  assert.deepEqual(toolNamesForMode('normal', available), available);
+  assert.equal(isReadOnlyTool(RUN_VALIDATION), false);
+  assert.equal(isWriteSideEffectTool(RUN_VALIDATION), true);
+  assert.equal(isReadOnlyTool('keepseek_read_workspace_file'), true);
+  assert.deepEqual(available, [...available]);
 });
 
 test('the request/result contract carries no model-authored field', () => {

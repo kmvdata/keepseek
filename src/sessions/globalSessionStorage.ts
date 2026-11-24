@@ -68,7 +68,7 @@ export interface SessionIndexEntry extends ChatSessionSummary {
   /** The atomic workspace index commits an automatic title, after its shard. */
   autoTitleCommit?: string;
   /** Source and targets stay recoverable until dispatch reaches a known terminal state. */
-  pendingHandoffTargets?: string[];
+
 }
 
 interface WorkspaceMetadata {
@@ -190,7 +190,6 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
         ...summary,
         storageFile: previous?.storageFile ?? getSessionStorageFile(summary.id),
         byteLength: previous?.byteLength,
-        pendingHandoffTargets: previous?.pendingHandoffTargets,
         autoTitleCommit: previous?.autoTitleCommit
       });
     }
@@ -204,7 +203,6 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
         ...toSessionSummary(session),
         storageFile: getSessionStorageFile(session.id),
         byteLength,
-        ...handoffRetentionIndex(session),
         autoTitleCommit: automaticTitleCommit(session)
       });
     }));
@@ -392,9 +390,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     for (const hash of hashes) {
       const index = await this.readWorkspaceIndex(hash, manifestEntryToMetadata(manifest.workspaces[hash]));
       if (!index) continue;
-      const unresolved = unresolvedHandoffOwners(index.sessions);
       const removed = index.sessions.filter((entry) => {
-        if (unresolved.has(entry.id)) return false;
         if (entry.isFavorite || protectedIds.has(entry.id)) return false;
         if (entry.workspaceKey === options.currentWorkspaceKey && entry.id === options.currentActiveSessionId) return false;
         const updatedAt = Date.parse(entry.updatedAt);
@@ -443,7 +439,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     for (const file of orphanFiles) {
       const session = await this.readSessionShard(vscode.Uri.joinPath(this.getSessionsDirectoryUri(hash), file), index);
       if (session && !index.sessions.some((entry) => entry.id === session.id)) {
-        index.sessions.push({ ...toSessionSummary(session), ...handoffRetentionIndex(session), storageFile: `sessions/${file}` });
+        index.sessions.push({ ...toSessionSummary(session), storageFile: `sessions/${file}` });
       }
     }
     index.sessions = sortIndexEntries(index.sessions);
@@ -758,11 +754,9 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
       }
       const workspace: CleanupWorkspaceSnapshot = { workspaceKey: raw.workspaceKey, entries: [], unknown: 0 };
       result.workspaces.set(hash, workspace);
-      const unresolved = unresolvedHandoffOwners(raw.sessions);
       for (const item of raw.sessions) {
         const candidate = this.cleanupEntry(raw.workspaceKey, item);
         if (!candidate) { workspace.unknown++; result.ownershipComplete = false; continue; }
-        if (unresolved.has(candidate.id)) candidate.protectedReason = 'plan_handoff_pending';
         workspace.entries.push(candidate);
         const owner = owners.get(candidate.id);
         if (owner && owner !== raw.workspaceKey) result.collisions.add(candidate.id);
@@ -973,6 +967,11 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     return vscode.Uri.joinPath(this.getWorkspaceDirectoryUri(getWorkspaceHash(workspaceKey)), 'queue.json');
   }
 
+  /** Location of the per-project write lease, beside the session queue. */
+  public getProjectWriteLeaseUri(workspaceKey: string): vscode.Uri {
+    return vscode.Uri.joinPath(this.getWorkspaceDirectoryUri(getWorkspaceHash(workspaceKey)), 'write-lease.json');
+  }
+
   private getSessionUri(workspaceHash: string, sessionId: string): vscode.Uri {
     return vscode.Uri.joinPath(this.getSessionsDirectoryUri(workspaceHash), `${getSessionHash(sessionId)}.json`);
   }
@@ -1073,28 +1072,11 @@ function normalizeSessionIndexEntry(value: unknown, workspaceKey: string, worksp
     workspaceName: nonEmptyString(value.workspaceName) ?? workspaceName,
     isFavorite: value.isFavorite === true,
     customTitle: nonEmptyString(value.customTitle),
-    pendingHandoffTargets: Array.isArray(value.pendingHandoffTargets)
-      ? value.pendingHandoffTargets.filter((id): id is string => typeof id === 'string' && /^[a-f0-9]{64}$/u.test(id)) : undefined,
     autoTitleCommit: typeof value.autoTitleCommit === 'string' && /^[a-f0-9]{64}$/u.test(value.autoTitleCommit)
       ? value.autoTitleCommit : undefined,
     storageFile: nonEmptyString(value.storageFile) ?? getSessionStorageFile(id),
     byteLength: typeof value.byteLength === 'number' && value.byteLength >= 0 ? Math.floor(value.byteLength) : undefined
   };
-}
-
-function handoffRetentionIndex(session: ChatSession): Pick<SessionIndexEntry, 'pendingHandoffTargets'> {
-  const targets = (session.planHandoffs ?? []).filter(record => record.phase !== 'completed').map(record => record.targetSessionId);
-  return targets.length ? { pendingHandoffTargets: targets } : {};
-}
-
-function unresolvedHandoffOwners(entries: readonly unknown[]): Set<string> {
-  const ids = new Set<string>();
-  for (const entry of entries) {
-    if (!isRecord(entry) || typeof entry.id !== 'string' || !Array.isArray(entry.pendingHandoffTargets) || !entry.pendingHandoffTargets.length) continue;
-    ids.add(entry.id);
-    for (const target of entry.pendingHandoffTargets) if (typeof target === 'string') ids.add(target);
-  }
-  return ids;
 }
 
 /** The workspace index attests the exact completed automatic title. */

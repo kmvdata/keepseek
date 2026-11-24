@@ -1,17 +1,17 @@
 import type * as vscode from 'vscode';
 import type { ChatSession } from '../../shared/types';
 import { ProjectQueueStore, saveQueueWithRebase, type QueueLoadResult } from './queueStore';
-import { cloneQueue, createEmptyQueue, enqueueNewSession, effectiveMode, promoteToFront, reconcile, removeEntry } from './projectQueue';
-import type { ProjectSessionQueue, SessionExecutionMode } from './types';
+import { cloneQueue, createEmptyQueue, enqueueNewSession, promoteToFront, reconcile, removeEntry } from './projectQueue';
+import type { ProjectSessionQueue } from './types';
 
 /**
  * Project queue service — the single serialized entry point for queue reads
  * and writes.
  *
- * P1 scope: this service is authoritative for ORDER and for the DERIVED mode,
- * but it does not yet own write permissions or lease transfer (P3/P4). Callers
- * use `getDerivedMode()` for display; the legacy per-session `executionMode`
- * field remains the runtime authority until P2.
+ * This service is authoritative for ORDER only. It grants no write permission:
+ * that belongs to the project write lease (`writeLeaseRegistry`), which may be
+ * held by any queued session. Keeping the two separate is what allows several
+ * `normal` sessions to coexist while exactly one writes at a time.
  */
 export class ProjectQueueService {
   private readonly stores = new Map<string, ProjectQueueStore>();
@@ -92,18 +92,8 @@ export class ProjectQueueService {
   }
 
   /**
-   * Derived mode for display. Falls back to `'plan'` for an unloaded queue so
-   * the UI never promises write access it cannot verify.
-   */
-  public getDerivedMode(workspaceKey: string, sessionId: string): SessionExecutionMode | undefined {
-    const queue = this.queues.get(workspaceKey);
-    if (!queue) return undefined;
-    return effectiveMode(queue, sessionId);
-  }
-
-  /**
-   * Register a newly created session at the tail. A new session is therefore
-   * `plan` whenever the project already has one.
+   * Register a newly created session at the tail, so it waits behind every
+   * session created before it.
    */
   public async enqueue(
     workspaceKey: string,

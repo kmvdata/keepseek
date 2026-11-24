@@ -1,85 +1,68 @@
-import type { ProjectSessionQueue, SessionExecutionMode } from './types';
-import { effectiveMode, headSessionId, positionOf } from './projectQueue';
+import type { WriteLeaseRecord } from './writeLease';
 
 /**
- * Write capability kinds. Only a `normal` session that also holds the project
- * write lease may produce these; every other session is read-only.
+ * Write capability kinds. Every one of these is a workspace side effect, so
+ * every one requires the project write lease.
  */
 export type WriteCapability = 'edit' | 'command' | 'validation' | 'git_mutation';
 
-
-export interface WriteLeaseFacts {
-  /** Session currently holding the project write lease, if any. */
-  holderSessionId?: string;
-}
-
 export interface WritePermissionInput {
-  queue: ProjectSessionQueue;
   sessionId: string;
-  lease: WriteLeaseFacts;
   capability: WriteCapability;
+  /**
+   * The mirrored lease snapshot. Passed in rather than read from a module
+   * singleton so the decision stays pure and testable.
+   */
+  lease: WriteLeaseRecord;
 }
 
 export type WriteBlockReason =
-  | 'not_queued'
-  | 'queued_not_head'
+  | 'no_session'
+  /** Another session holds the project write lease. */
   | 'lease_held_by_other'
+  /** The lease is free: nobody acquired it, so nothing may write yet. */
   | 'lease_free';
 
 export type WritePermission =
-  | { allowed: true; mode: 'normal'; capability: WriteCapability }
+  | { allowed: true; capability: WriteCapability }
   | {
       allowed: false;
-      mode: SessionExecutionMode;
       capability: WriteCapability;
       reason: WriteBlockReason;
-      /** Waiting session that must hand off before this one can write. */
-      waitingFor?: string;
-      /** Zero-based queue position, -1 when not queued. */
-      position: number;
+      /** Session that must release before this one can write. */
+      holderSessionId?: string;
+      /** What the holder is doing, for the UI. */
+      holderCapability?: WriteCapability;
     };
 
 /**
  * The single authority for "may this session write right now".
  *
- * A session may write only when it is both the queue head (`normal`) and the
- * write-lease holder. Under explicit handoff (no preemption) the lease is not
- * stolen: when another session holds it the caller must wait for that owner to
- * reach a boundary and hand off.
+ * There is no mode anymore: every session is equally `normal`, and the only
+ * question is whether it holds the project's write lease. Queue position is
+ * fairness and display, never permission.
+ *
+ * `lease_free` is a refusal, not a grant: the caller must acquire the lease
+ * asynchronously first, then re-check. Treating "free" as allowed would let a
+ * write slip in between the check and the acquire.
  */
 export function checkWritePermission(input: WritePermissionInput): WritePermission {
-  const position = positionOf(input.queue, input.sessionId);
-  const mode = effectiveMode(input.queue, input.sessionId);
-
-  if (position < 0) {
-    return { allowed: false, mode, capability: input.capability, reason: 'not_queued', position };
+  if (!input.sessionId) {
+    return { allowed: false, capability: input.capability, reason: 'no_session' };
   }
-  if (mode !== 'normal') {
-    const head = headSessionId(input.queue);
-    return {
-      allowed: false,
-      mode,
-      capability: input.capability,
-      reason: 'queued_not_head',
-      ...(head ? { waitingFor: head } : {}),
-      position
-    };
+  if (input.lease.state !== 'held' || !input.lease.holderSessionId) {
+    return { allowed: false, capability: input.capability, reason: 'lease_free' };
   }
-  const holder = input.lease.holderSessionId;
-  if (holder === input.sessionId) {
-    return { allowed: true, mode: 'normal', capability: input.capability };
+  if (input.lease.holderSessionId === input.sessionId) {
+    return { allowed: true, capability: input.capability };
   }
-  if (holder) {
-    return {
-      allowed: false,
-      mode,
-      capability: input.capability,
-      reason: 'lease_held_by_other',
-      waitingFor: holder,
-      position
-    };
-  }
-  return { allowed: false, mode, capability: input.capability, reason: 'lease_free', position };
+  return {
+    allowed: false,
+    capability: input.capability,
+    reason: 'lease_held_by_other',
+    holderSessionId: input.lease.holderSessionId,
+    ...(input.lease.purpose ? { holderCapability: input.lease.purpose } : {})
+  };
 }
 
 export function canWrite(input: WritePermissionInput): boolean {
@@ -87,27 +70,22 @@ export function canWrite(input: WritePermissionInput): boolean {
 }
 
 /** Human-readable, non-technical explanation for the UI. */
-export function describeWriteBlock(permission: WritePermission, language: 'zh-CN' | 'en' = 'zh-CN'): string | undefined {
+export function describeWriteBlock(
+  permission: WritePermission,
+  language: 'zh-CN' | 'en' = 'zh-CN'
+): string | undefined {
   if (permission.allowed) return undefined;
-  const position = permission.position >= 0 ? permission.position + 1 : 0;
   const en = language === 'en';
   switch (permission.reason) {
-    case 'not_queued':
-      return en ? 'This session is not in the project queue.' : '该会话不在项目队列中。';
-    case 'queued_not_head':
-      return en
-        ? `Queued at position ${position}. Only the first session can write.`
-        : `排队中，第 ${position} 位；只有队首会话可以写入。`;
+    case 'no_session':
+      return en ? 'No session is bound to this operation.' : '没有会话绑定到该操作。';
     case 'lease_held_by_other':
       return en
-        ? 'Waiting for the current writer to hand off write access.'
-        : '正在等待当前会话交棒写权限。';
+        ? 'Waiting for another session to release the project write lock.'
+        : '正在等待其他会话释放项目写锁。';
     case 'lease_free':
-      return en
-        ? 'The write lease is not acquired yet.'
-        : '尚未取得写租约。';
+      return en ? 'The project write lock is not acquired yet.' : '尚未取得项目写锁。';
     default:
       return undefined;
   }
 }
-

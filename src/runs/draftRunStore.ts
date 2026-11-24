@@ -24,6 +24,7 @@ import type { ChatMessage } from '../shared/types';
 import { executionSegmentId } from '../sessions/userTask';
 import { hasExactCommandScope, type CommandScope } from '../approvals/authorization/commandScope';
 import { analyzeDraftRunEffects, inspectDraftRunScope, checkDraftRunApprovalBoundary, validateDraftRunBeforeApproval } from '../approvals/authorization';
+import { acquireWriteLease } from '../sessions/queue/writeLeaseRegistry';
 import { DraftRunAuthorizationService } from './draftRunAuthorization';
 import { redactSensitiveReviewText } from '../approvals/sensitiveText';
 import { normalizeApprovalDependency, normalizeDraftRunReplan, type ApprovalDependency, type DraftRunReplanResult } from '../approvals/approvalProcessing';
@@ -713,6 +714,22 @@ export class DraftRunStore {
     let executionStarted = false;
     let pausedForPersistence = false;
     let sessionUse: { release(): Promise<void> } | undefined;
+    // Commands are workspace side effects, so the batch claim starts here and
+    // ends after the process (and its terminal reconciliation) is settled. The
+    // claim is reference counted, so a batch caller that already holds the lease
+    // keeps it across every member run.
+    let writeGrant: Awaited<ReturnType<typeof acquireWriteLease>> | undefined;
+    if (draftRun.sessionId) {
+      writeGrant = await acquireWriteLease({
+        sessionId: draftRun.sessionId,
+        purpose: 'command',
+        batchId: `runs:${draftRun.agentRunId ?? draftRun.id}`
+      });
+      if (!writeGrant.acquired) {
+        this.approving.delete(id);
+        return undefined;
+      }
+    }
     try {
       draftRun.autoContinueRequested = options.autoContinue === true || undefined;
       const assertAuthorized = () => {
@@ -887,6 +904,7 @@ export class DraftRunStore {
       this.abortControllers.delete(id);
       this.cancelRequests.delete(id);
       await sessionUse?.release();
+      if (writeGrant?.acquired) await writeGrant.grant.release();
     }
   }
 

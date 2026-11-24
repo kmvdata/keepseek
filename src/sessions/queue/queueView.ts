@@ -1,10 +1,14 @@
-import type { ProjectSessionQueue, SessionExecutionMode } from './types';
-import { effectiveMode, positionOf } from './projectQueue';
-import type { LeaseSnapshot } from './writeLease';
+import type { ProjectSessionQueue } from './types';
+import { positionOf } from './projectQueue';
+import type { WriteLeaseRecord } from './writeLease';
 
 /**
  * Host projection for the webview. This module only shapes data for display; it
  * never decides whether a write may happen (`modeGate` does that).
+ *
+ * The queue no longer implies a mode: every session is equally `normal`, and
+ * write permission comes from the project write lease. The queue is therefore
+ * purely the fairness order and the "who is holding / waiting" display.
  */
 
 export interface QueueEntryView {
@@ -12,11 +16,9 @@ export interface QueueEntryView {
   title: string;
   /** One-based display position. */
   position: number;
-  mode: SessionExecutionMode;
   isHead: boolean;
+  /** True when this session currently holds the project write lease. */
   holdingLease: boolean;
-  /** Session currently blocking a handoff to this entry, when any. */
-  waitingFor?: string;
 }
 
 export interface QueueView {
@@ -24,39 +26,31 @@ export interface QueueView {
   revision: number;
   headSessionId?: string;
   leaseHolderSessionId?: string;
-  pendingHandoffToSessionId?: string;
   entries: QueueEntryView[];
 }
 
 export interface QueueViewInput {
   queue: ProjectSessionQueue;
-  lease?: LeaseSnapshot;
+  lease?: WriteLeaseRecord;
   /** Display titles by session id; missing ids fall back to the id. */
   titles?: ReadonlyMap<string, string> | Record<string, string>;
 }
 
 export function buildQueueView(input: QueueViewInput): QueueView {
   const { queue } = input;
-  const holder = input.lease?.holderSessionId;
-  const pending = input.lease?.pendingHandoffToSessionId;
-  const entries: QueueEntryView[] = queue.entries.map((entry, index) => {
-    const mode = effectiveMode(queue, entry.sessionId);
-    return {
-      sessionId: entry.sessionId,
-      title: resolveTitle(input.titles, entry.sessionId),
-      position: index + 1,
-      mode,
-      isHead: index === 0,
-      holdingLease: entry.sessionId === holder,
-      ...(holder && holder !== entry.sessionId && mode === 'normal' ? { waitingFor: holder } : {})
-    };
-  });
+  const holder = input.lease?.state === 'held' ? input.lease.holderSessionId : undefined;
+  const entries: QueueEntryView[] = queue.entries.map((entry, index) => ({
+    sessionId: entry.sessionId,
+    title: resolveTitle(input.titles, entry.sessionId),
+    position: index + 1,
+    isHead: index === 0,
+    holdingLease: entry.sessionId === holder
+  }));
   return {
     workspaceKey: queue.workspaceKey,
     revision: queue.revision,
     ...(queue.entries[0] ? { headSessionId: queue.entries[0].sessionId } : {}),
     ...(holder ? { leaseHolderSessionId: holder } : {}),
-    ...(pending ? { pendingHandoffToSessionId: pending } : {}),
     entries
   };
 }
@@ -65,12 +59,11 @@ export function buildQueueView(input: QueueViewInput): QueueView {
 export function queueBadge(
   queue: ProjectSessionQueue,
   sessionId: string,
-  lease?: LeaseSnapshot
-): { mode: SessionExecutionMode; position: number; holdingLease: boolean } {
+  lease?: WriteLeaseRecord
+): { position: number; holdingLease: boolean } {
   return {
-    mode: effectiveMode(queue, sessionId),
     position: positionOf(queue, sessionId),
-    holdingLease: lease?.holderSessionId === sessionId
+    holdingLease: lease?.state === 'held' && lease.holderSessionId === sessionId
   };
 }
 
@@ -80,4 +73,3 @@ function resolveTitle(titles: QueueViewInput['titles'], sessionId: string): stri
   const value = (titles as Record<string, string>)[sessionId];
   return typeof value === 'string' && value ? value : sessionId;
 }
-

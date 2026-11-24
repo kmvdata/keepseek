@@ -104,11 +104,20 @@ export function clearCommandHandlers(): void {
 }
 
 export class Uri {
+  public readonly authority = '';
+  public readonly query = '';
+  public readonly fragment = '';
+
   private constructor(
     public readonly scheme: string,
     public readonly fsPath: string,
     public readonly path: string
   ) {}
+
+  /** Matches vscode.Uri's shape so stubbed URIs assign to the real type. */
+  public toJSON(): { scheme: string; path: string } {
+    return { scheme: this.scheme, path: this.path };
+  }
 
   public static file(filePath: string): Uri {
     const absolutePath = path.resolve(filePath);

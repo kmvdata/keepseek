@@ -10,7 +10,6 @@ import { getEffectiveContextWindowTokens } from '../shared/modelProfiles';
 import { DEEPSEEK_MODEL_IDENTITY_VERSION, getCanonicalModelIdentity } from '../shared/deepSeekModels';
 import { migrateContextWindowCalibrationState } from './toolResultAdmission';
 import { validPromptCheckpoint } from './promptGeneration';
-import { normalizeExecutionMode } from './executionMode';
 import { createLogicalRunBudgetState, grantNextToolBudgetSegment, normalizeLogicalRunBudgetLimits, type LogicalRunBudgetState } from './executionPolicy';
 import { normalizeSubagentHostContext } from './subagents/contextCapsule';
 import { normalizeDelegationState } from './delegation';
@@ -334,7 +333,6 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
       reason: m.reason, oldPolicy: m.oldPolicy, newPolicy: m.newPolicy, oldRequestHash: m.oldRequestHash,
       newRequestHash: m.newRequestHash, oldOutputTokens: m.oldOutputTokens, newOutputTokens: m.newOutputTokens
     }));
-    copy.request.executionMode = normalizeExecutionMode(copy.request.executionMode);
     copy.maxCost ??= 0;
     copy.usedCostByCurrency ??= {};
     const hasSerializedRunBudget = Object.prototype.hasOwnProperty.call(copy, 'runBudget');
@@ -462,7 +460,8 @@ export function recoverNoProgressWithUserTurn(cp: RunCheckpoint, request: AgentR
     || endpointHash(source.baseUrl) !== cp.source.endpointHash || request.model.id !== cp.source.modelId
     || JSON.stringify(request.model) !== JSON.stringify(cp.request.model)
     || request.turnIntent !== cp.request.turnIntent
-    || normalizeExecutionMode(request.executionMode) !== normalizeExecutionMode(cp.request.executionMode)
+    // The execution mode axis no longer exists: approval mode is the only
+    // frozen policy dimension, so a checkpoint never disagrees about it.
     || request.contextInstructions !== cp.request.contextInstructions
     || JSON.stringify(workspaceFolders) !== JSON.stringify(cp.workspaceFolders)
     || cp.request.authorizedExternalReferenceUris?.some(uri => !request.authorizedExternalReferenceUris?.includes(uri))) {

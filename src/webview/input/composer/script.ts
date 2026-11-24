@@ -24,7 +24,6 @@ export const composerSubmitBindingsFragment: WebviewFragment = {
         event.preventDefault();
         if (!canSubmitPrompt()) {
           closeCommandMenu();
-          closeExecutionModeMenu(false);
           closeReferenceMenu(false);
           setComposerStatus(t(state.isBusy ? 'taskAlreadyRunning' : 'submissionNotReady'));
           promptInput.focus();
@@ -40,7 +39,6 @@ export const composerSubmitBindingsFragment: WebviewFragment = {
         var requestId = beginPromptSubmission('composer', prompt);
         if (!requestId) return;
         closeCommandMenu();
-        closeExecutionModeMenu(false);
         closeReferenceMenu(false);
         vscode.postMessage({
           type: 'sendPrompt',
@@ -66,7 +64,6 @@ export const composerSubmitBindingsFragment: WebviewFragment = {
           event.preventDefault();
           event.stopPropagation();
           closeCommandMenu();
-          closeExecutionModeMenu(false);
           closeReferenceMenu(false);
           vscode.postMessage({ type: 'abortPrompt', operationId: currentInteraction()?.cancelOperationId });
         });
@@ -136,7 +133,6 @@ export const composerStatusFragment: WebviewFragment = {
         promptShortcutController.invalidateYank();
         promptShortcutController.closeContextMenu();
         closeCommandMenu();
-        closeExecutionModeMenu(false);
         closeReferenceMenu(false);
         promptInput.innerHTML = '';
         promptShortcutController.deactivateMark();

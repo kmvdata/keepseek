@@ -111,13 +111,10 @@ export function getScript(): string {
       draftRunBatch: null,
       draftRunBatchHistory: [],
       activeDraftRunId: '',
-      executionMode: 'normal',
-      planWorkflows: [],
       approvalMode: 'ask',
       commandSettingsReadiness: {
         mainModel: 'loading',
         subagentModel: 'loading',
-        executionMode: 'loading',
         approvalMode: 'loading'
       },
       authorizedExternalReferenceUris: [],
@@ -1379,7 +1376,6 @@ ${conversationsMenuDismissFragment.source}
         if (incomingRevision && incomingRevision <= lastStateRevision) return;
         if (incomingRevision) lastStateRevision = incomingRevision;
         var previousActiveSessionId = state.activeSessionId || '';
-        var hadPlanCards = Boolean(state.planWorkflows?.length);
         if (message.state?.activeSessionId && previousActiveSessionId !== message.state.activeSessionId) {
           // Missing fields in an old or partial message cannot carry another
           // session's interaction lease into the newly selected session.
@@ -1400,10 +1396,6 @@ ${conversationsMenuDismissFragment.source}
         if (message.type === 'statePatch' && message.scope === 'startupSettings') {
           rememberTerminalAgentActivity(state.agentActivity);
           // Model and recovery readiness can change the actions on an existing card.
-          if (hadPlanCards || state.planWorkflows?.length) {
-            render();
-            return;
-          }
           renderStatus();
           if (window.keepseekInputControls) {
             window.keepseekInputControls.render();
@@ -4268,13 +4260,6 @@ ${conversationsSessionListFragment.source}
           }
         }
 
-        if (message.role === 'assistant' && !message.isStreaming) {
-          var planWorkflow = Array.isArray(state.planWorkflows)
-            ? state.planWorkflows.find(function(plan) { return plan && plan.assistantMessageId === message.id; })
-            : null;
-          if (planWorkflow) body.append(createPlanDecisionCard(planWorkflow));
-        }
-
         if (message.role === 'assistant' && message.runState) {
           var runStatePanel = createRunStatePanel(message);
           if (runStatePanel) body.append(runStatePanel);
@@ -4578,110 +4563,6 @@ ${conversationsSessionListFragment.source}
       // While collapsed, the live summary is what assistive tech should hear; the
       // reasoning text itself must not be announced chunk by chunk.
       details.setAttribute('aria-live', live && !details.open ? 'polite' : 'off');
-    }
-
-    function createPlanDecisionCard(plan) {
-      var card = document.createElement('section');
-      card.className = 'plan-decision-card status-' + String(plan.status || 'invalid');
-      card.dataset.planId = String(plan.id || '');
-      card.setAttribute('aria-label', t(plan.handoff ? 'planHandoffTitle' : 'planConfirmationTitle'));
-
-      var title = document.createElement('div');
-      title.className = 'plan-decision-title';
-      title.textContent = t(plan.handoff ? 'planHandoffTitle' : 'planConfirmationTitle');
-      var description = document.createElement('div');
-      description.className = 'plan-decision-description';
-      var statusKey = plan.status === 'pending' ? 'planPendingConfirmation'
-        : plan.status === 'approved' ? 'planApproved'
-        : plan.status === 'revision_requested' ? 'planRevisionRequested'
-        : plan.status === 'exited' ? 'planExited'
-        : 'planInvalidOrSuperseded';
-      var recovery = plan.handoff;
-      var preview = plan.promptPreview;
-      if (recovery) {
-        statusKey = { committed: 'planHandoffCommitted', queued: 'planHandoffQueued',
-          dispatch_unknown: 'planHandoffUnknown', completed: 'planHandoffCompleted' }[recovery.phase] || statusKey;
-      }
-      description.textContent = t(statusKey);
-      card.append(title, description);
-
-      if (preview && preview.ok) {
-        var previewTitle = document.createElement('div');
-        previewTitle.className = 'plan-decision-title';
-        previewTitle.textContent = t('planPromptPreview');
-        var previewBody = document.createElement('pre');
-        previewBody.className = 'plan-prompt-preview';
-        previewBody.tabIndex = 0;
-        previewBody.dataset.planId = plan.id;
-        previewBody.dataset.planBodyHash = preview.bodyHash;
-        previewBody.dataset.planAction = 'preview';
-        previewBody.setAttribute('aria-label', t('planPromptPreview'));
-        previewBody.textContent = preview.body;
-        card.append(previewTitle, previewBody);
-      }
-
-      if (plan.status === 'pending' || recovery) {
-        var actions = document.createElement('div');
-        actions.className = 'plan-decision-actions';
-        var openTarget = recovery && (recovery.phase === 'completed' || recovery.phase === 'dispatch_unknown');
-        var canSubmit = canSubmitPrompt();
-        var canStartNewSession = !recovery && preview && preview.ok && canSubmit && !plan.newSessionBlockedReason;
-        var recoveryBlock = recovery && (openTarget
-          ? (canNavigateSessions() ? '' : t('planActionUnavailable'))
-          : plan.newSessionBlockedReason || (!canSubmit ? t('planActionUnavailable') : ''));
-        function addPlanAction(action, labelKey, disabled, primary, activate) {
-          var button = document.createElement('button');
-          button.type = 'button';
-          button.className = primary ? 'primary' : 'secondary';
-          button.dataset.planId = plan.id;
-          if (preview && preview.ok) button.dataset.planBodyHash = preview.bodyHash;
-          button.dataset.planAction = action;
-          button.textContent = t(labelKey);
-          button.disabled = disabled;
-          button.addEventListener('click', function() {
-            if (!button.disabled) activate(button);
-          });
-          actions.append(button);
-          return button;
-        }
-        if (canStartNewSession || recovery) {
-          var label = recovery ? (openTarget ? 'planHandoffOpen' : 'planHandoffResume') : 'planStartNewSession';
-          var handoffButton = addPlanAction('execute_new', label, Boolean(recoveryBlock), !recoveryBlock, function(button) {
-            button.disabled = true;
-            var shown = recovery || preview;
-            vscode.postMessage({ type: 'executePlanInNewSession', sessionId: plan.sessionId,
-              planId: plan.id, planHash: shown.planHash, bodyHash: shown.bodyHash });
-          });
-          if (recoveryBlock) handoffButton.title = recoveryBlock;
-        }
-        if (preview && preview.ok) {
-          addPlanAction('copy_prompt', 'planCopyPrompt', false, false, function() {
-            window.keepseekRichTextShortcuts.writeClipboardText(preview.body).then(function() { setTransientStatus(t('copied')); },
-              function() { setTransientStatus(t('copyFailed')); });
-          });
-        }
-        if (!recovery) {
-          [
-            { action: 'start_execution', labelKey: 'planStartExecution' },
-            { action: 'revise_plan', labelKey: 'planRevise' },
-            { action: 'exit_plan', labelKey: 'planExit' }
-          ].forEach(function(item) {
-            addPlanAction(item.action, item.labelKey, !canSubmit, item.action === 'start_execution' && !canStartNewSession,
-              function(button) {
-                button.disabled = true;
-                vscode.postMessage({ type: 'resolvePlanDecision', planId: plan.id, action: item.action });
-              });
-          });
-        }
-        card.append(actions);
-        if (recoveryBlock) {
-          var reason = document.createElement('div');
-          reason.className = 'plan-decision-description';
-          reason.textContent = recoveryBlock;
-          card.append(reason);
-        }
-      }
-      return card;
     }
 
     function createRunStatePanel(message) {

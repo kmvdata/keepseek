@@ -132,7 +132,6 @@ for (const mode of ['ask', 'approve-all'] as const) {
       assert.ok(recovered && recovered.request.turnIntent === 'generate_prompt');
       assert.equal(recovered.taskId, interrupted.runCheckpoint?.taskId);
       interrupted.runCheckpoint = recovered;
-      assert.equal(session.planWorkflows?.length ?? 0, 0);
       await host.handleMessage({ type: 'continueAgentTask', messageId: interrupted.id });
     }
     assert.equal(calls, 2, JSON.stringify({ notices, events: events.filter(e => e.type === 'submissionResult'), tail: session.messages.at(-1)?.content }));
@@ -140,7 +139,6 @@ for (const mode of ['ask', 'approve-all'] as const) {
     const frozen = cp.request;
     assert.match(session.messages.at(-1)!.content, /addOne\(3\) equals 4/u);
     assert.equal(cp.finalResponse?.message, session.messages.at(-1)!.content);
-    assert.equal(session.planWorkflows?.length ?? 0, 0);
     assert.equal(cp.state?.validationRunCount, 0);
     assert.deepEqual(cp.finalResponse?.draftEdits, []);
     assert.equal(cp.finalResponse?.changeSet, undefined);

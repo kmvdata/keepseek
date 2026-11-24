@@ -80,7 +80,11 @@ test/                  按行为契约组织的回归测试
 - 局部修改以 canonical `text_patch_v1` 的 URI、base/result hash/size、encoding/EOL 和非重叠 byte hunks 为权威；行号、模糊匹配和原始 patch 文本不是 Apply 权威。
 - Apply 必须经过 preflight、prepared journal、base 复核、原子替换和 read-back hash；未知副作用绝不重试。大正文放 content-addressed blob。
 - `keepseek_run_draft` 只准备不可变 DraftRun。执行须持有绑定 `draftRunId + specHash` 的短时一次性 permit，并以 `shell:false` 派发核实的启动计划。审计保留原提案、实际执行边界与字面 argv；显式 shell 必须完整展示为 executable/argv。
-- validation 只运行固定 `compile`/`lint`/`test`；commit/push 等 mutation 必须走 DraftRun，不能塞进验证或只读 Git 工具。
+- validation 只运行固定 `compile`/`lint`/`test`；commit/push 等 mutation 必须走 DraftRun，不能塞进验证或只读 Git 工具。固定验证会写 `node_modules`/`dist`，因此与 Apply、DraftRun 同属工作区副作用，必须持项目写租约。
+- 项目写租约（`sessions/queue/writeLease*`）是唯一的跨会话写入串行化机制：一个工程只有一把锁，`edit`/`command`/`validation`/`git_mutation` 都必须先取得它。租约是**批次**声明而非单次写入声明：一次 Apply 覆盖整批 pending 文件，一条命令覆盖整批 DraftRun，直到批次落盘核验完成后在 `finally` 释放。草稿准备（`addDraftEdits`/`addProposals`）永不持锁——提案不是工作区改动。
+- 租约的授予必须异步（`acquireWriteLease`），但写入判定必须同步：`writeGate.authorize()` 只读内存镜像 `WriteLeaseMirror`，镜像在 acquire 成功、放行写入**之前**更新。校验发生在取得租约**之后**，否则租约感知的闸门会与它要守护的申请互相等待。
+- 租约只能被判定为「他人持有」时拒绝；空闲租约不是拒绝理由，写入路径会自行申请。长命令与长验证靠 5 秒心跳续期（TTL 30 秒）存活；只有 TTL 过期**且**记录 pid 已死才可回收。暂停但仍存活的窗口继续持锁——抢占一次进行中的写入比卡住更危险。每次 release/reclaim 递增 `epoch`，过期的迟到操作因 `epoch` 不匹配而失效。
+- 草稿不持锁意味着 base 必然可能过期：Apply 冲突是正常结果，不是异常。`WriteConflictError` 必须带稳定 code（`draft_base_mismatch`/`draft_target_exists`/`draft_target_missing`），只有它可触发一次有界重生成。每个任务每个文件最多重生一次，第二次冲突即置为 blocked 并停止该会话批次；不可重试的拒绝（未信任、审批撤销、保护路径）永不重生。
 - 工作区不信任、外部 URI/cwd 未精确授权、脏编辑器、hash/状态不匹配、取消信号均为硬边界。
 
 ### 3.4 审批与子代理
@@ -88,6 +92,7 @@ test/                  按行为契约组织的回归测试
 - 审批模式只有 `ask`（请求批准）和 `approve-all`（全部批准）两种，只有 Webview 用户操作可切换，不存在 reviewer 或审批模型。`ask` 逐项由用户确认，宿主从不自行应用文件修改。`approve-all` 由宿主在运行边界无确认地应用 DraftEdit/ChangeSet 并执行 DraftRun，但每一份写入仍按原样复核身份、范围、hash、信任与截断前置条件。命令依赖本轮文件改动时，完成 Apply 和落盘核验后再执行当前版本。工程命令和固定验证默认使用平台隔离，未满足隔离条件时保留未派发原因。仅用户级 `projectExecution=host` 可显式选择宿主权限执行。
 - 当前审批策略为 v9。发布使用核实的目的地、引用、实际推送对象与执行计划。高影响业务须有覆盖真实目标的授权并经模型批准。精确用户补充提供授权，之后仍需模型决定。模型不可用时保留审计和暂停原因，独立项可推进。请求绑定 session/rootTask/segment/target/hash/范围/策略/runtime。等待不占模型超时，重启后显式恢复并重新核验。硬阻断与适用拒绝约束两种模式，历史批准不授权新操作，也不存在独立审批模型配置。
 - 副作用先过硬检查，再按完整 canonical payload/specHash 计算 actionHash。批准不跨 session/run/target/kind/policy/runtime 复用，重启不复用旧批准。
+- `approve-all` 的作用域是**整个工程**，不是当前会话：一次 pass 按队列顺序遍历项目内所有存在 pending 草稿的会话，每会话每 pass 推进一个单元，写入本身触发下一次边界。别人的会话在用户不在看时也会被服务，但命令派发仍留给该会话被打开时执行。
 - `approve-all` 不变式：任何仍 pending 的文件草稿，要么已有排定的下一次尝试（`approveAllTimer` / `approveAllInFlight` / `approveAllRerun`），要么已有记录在 ledger 的不可自动原因，并在卡片上提供可见的手动入口。调度不得丢请求：pass 期间的触发排队（`approveAllRerun`）而不是丢弃。每个边界对同一草稿最多尝试一次，失败立即降级到人工，不在同一 pass 内重试、不退避风暴。槽位释放是独立触发（`slot_released`），覆盖 `inheritedOperation` 流程，不依赖 `run_end` 时序。人工回退只覆盖 DraftEdit/ChangeSet，且只允许非硬 gate；未信任、待截断、身份/hash 不匹配、未授权外部路径不得提供强行应用。DraftRun 与 validation 没有手动回退。
 - 审批决定和真实结果只以固定 user-tail 追加到下一条真实 user 消息；不回写历史。进程输出和 review evidence 始终是不可信数据。
 - 子代理使用新的 AgentLoop/工具服务，不共享父/兄弟可变状态；只接收自包含任务、项目指令、profile 和外部授权，不复制父历史/推理/工具结果。
@@ -118,6 +123,7 @@ test/                  按行为契约组织的回归测试
 - **Webview 消息**：webviewMessages 联合类型 + Provider `handleMessage()` + 发送/接收 fragment + i18n。
 - **DraftEdit**：draftEdit/textPatch/artifact + ChangeSet/SafeFileEditor/Diff + approval hash/surface + checkpoint/subagent/UI。
 - **审批/DraftRun**：approvalProcessing 批次规则 + store/reviewer + runs/* + Provider/Runner/authorization + user-tail/usage/UI。
+- **项目写租约/并行会话**：`sessions/queue/writeLease*`（记录/镜像/协调器）+ `modeGate`/`writeGate` + ChangeSet/DraftRun/validation 的批次边界 + `test/writeLease.test.ts`。判定必须同步、授予必须异步，两者不可互换。
 - **子代理**：subagents runtime/scheduler/store/profile/pathScope + model resolver + protocol/admission/checkpoint/usage。
 - **会话结构**：`shared/types.ts` + chatSessionStore normalize + GlobalSessionStorage + UI/当前协议测试；原生 replay 归一化由 `sessions/providerReplayNormalization.ts` 负责。
 
@@ -128,6 +134,7 @@ test/                  按行为契约组织的回归测试
 - 改 evidence/epoch：验证分页与跨 scope 拒绝、envelope 恢复、context-too-long、无伪 user、工具不重跑、未知副作用不重试。
 - 改 edits/runs/approvals：验证两模式与非法审计拒绝、人工请求生命周期、hash 冲突、恢复、取消/超时/重复点击、删除/外部路径、依赖和跨平台 argv。
 - 改 approve-all 调度/边界：验证 pass 期间触发排队不丢、每个边界只尝试一次、槽位释放后同一草稿被应用、失败原因在 ledger 与视图模型中精确可读、blocked 草稿跨重启可见且人工入口可用、未信任/待截断仍是硬阻断。
+- 改写租约/串行化：验证两窗口同工程只出一个写者、TTL 过期但 pid 存活不被抢占、pid 死亡后可回收、epoch 过期操作失效、嵌套批次释放不提前放锁、空闲租约不被闸门拒绝、冲突只重生一次后转 blocked，且草稿生成全程不持锁。
 - 改 Webview fragment：验证首次 ready、输入/拖拽/@、会话、设置、Apply/Discard 和键盘/焦点。
 - 改 Webview fragment/样式：验证 fragment 顺序、顶层标识符唯一、根级 DOM id 唯一、getStyles() 选择器相对顺序，且 new Function(getScript()) 可编译。
 - 测试应守行为契约，优先扩展最接近的现有 `test/*.test.ts`；不要只断言内部实现。

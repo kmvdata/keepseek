@@ -441,7 +441,7 @@ test('a pending history truncation is a hard block for the manual fallback too',
   assert.equal(h.host.approveAllStops.has(set.id), false, 'a refused start is not recorded as a block');
 });
 
-test('a plan-stage draft that is dropped says why (R7)', async t => {
+test('a prompt-generation draft that is dropped says why (R7)', async t => {
   const h = await createHarness({ approvalMode: 'approve-all' });
   t.after(() => h.dispose());
   const host = h.host as unknown as {
@@ -457,7 +457,9 @@ test('a plan-stage draft that is dropped says why (R7)', async t => {
     version: 2, taskId: 'task-1', attempt: 1, attemptIds: ['task-1'], status: 'completed',
     usedMs: 0, maxExecutionMs: 1000, limitSource: 'default', modelRequests: 1, retries: 0,
     updatedAt: new Date().toISOString(),
-    request: { executionMode: 'plan', approvalMode: 'approve-all', prompt: 'plan', history: [], contextFiles: [], model: {}, settings: {} },
+    // A prompt-generation turn is the only planning-only turn in this format; it
+    // must never produce workspace writes.
+    request: { turnIntent: 'generate_prompt', approvalMode: 'approve-all', prompt: 'plan', history: [], contextFiles: [], model: {}, settings: {} },
     source: { sourceId: 'source', modelId: 'model', provider: 'deepseek', endpointHash: 'hash' },
     workspaceFolders: [h.root],
     finalResponse: {
@@ -472,10 +474,10 @@ test('a plan-stage draft that is dropped says why (R7)', async t => {
   await host.saveAgentCheckpoint(session, message, checkpoint);
 
   const entry = h.host.approveAllLedger.find(item => item.gate === 'plan_discarded');
-  assert.ok(entry, 'a dropped plan draft is recorded: ' + JSON.stringify(h.host.approveAllLedger));
+  assert.ok(entry, 'a dropped planning draft is recorded: ' + JSON.stringify(h.host.approveAllLedger));
   assert.equal(entry?.draftId, 'edit-planned');
   assert.equal(entry?.reason, 'plan_mode_produces_no_writes');
-  assert.equal(h.host.changeSets.hasPendingForSession(session.id), false, 'plan mode prepares no writes');
+  assert.equal(h.host.changeSets.hasPendingForSession(session.id), false, 'a planning turn prepares no writes');
 });
 
 test('a checkpoint no longer attempts a write while the run holds the slot (D2)', async t => {
@@ -604,24 +606,24 @@ test('automatic Apply waits for an exclusive handoff and holds a use record thro
   assert.equal(attempts, 1);
 });
 
-test('an automatic Apply from a stale queue head stays pending after another window promotes a target', async t => {
+test('an automatic Apply is refused while another session holds the project write lease', async t => {
   const h = await createHarness({ approvalMode: 'approve-all', queue: true });
   t.after(() => h.dispose());
   const session = h.session;
   session.messages.push({ id: 'old-user', role: 'user', content: 'Old task', createdAt: session.createdAt });
   await h.sessionStore.persist();
-  assert.equal(h.sessionStore.getProjectQueue()?.entries[0]?.sessionId, session.id);
-  const storage = new GlobalSessionStorage(vscode.Uri.file(h.root) as never);
-  const peerQueue = new ProjectQueueService(key => storage.getProjectQueueUri(key));
-  const key = h.sessionStore.workspaceKey;
-  await peerQueue.promoteHandoff(key, session.id, 'handoff-target', async () => {});
-  assert.equal(h.sessionStore.getProjectQueue()?.entries[0]?.sessionId, session.id, 'old window still caches its write position');
+  // Another session owns the project: the lease, not the queue position, is what
+  // grants a write, so this window must not apply its own draft.
+  const holder = { version: 1 as const, workspaceKey: h.sessionStore.workspaceKey, state: 'held' as const,
+    holderSessionId: 'other-session', holderPid: process.pid, purpose: 'edit' as const, epoch: 5,
+    acquiredAt: new Date().toISOString(), heartbeatAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 60_000).toISOString() };
+  (h.host as unknown as { writeLease?: { snapshot: { adopt(lease: unknown): void } } }).writeLease?.snapshot.adopt(holder);
+
   const set = h.host.changeSets.addDraftEdits({ runId: 'old', sessionId: session.id, messageId: 'a',
     edits: [createDraftFixture(h.root, 'stale-writer', 'stale-writer.ts')] })!;
   await h.host.drainApproveAllExecution('manual');
-  assert.equal(h.sessionStore.getProjectQueue()?.entries[0]?.sessionId, 'handoff-target');
-  assert.equal(statuses(h.host, session.id)[0].status, 'pending');
-  assert.ok(gatesFor(h.host, set.id).includes('not_queue_head'));
-  assert.equal(h.host.approveAllViewModel(session.id).blocked.find(item => item.id === set.id)?.manual, false);
+  assert.equal(statuses(h.host, session.id)[0].status, 'pending', 'a foreign lease keeps the draft pending');
   await assert.rejects(readFile(path.join(h.root, 'stale-writer.ts')), { code: 'ENOENT' });
+  assert.ok(gatesFor(h.host, set.id).length > 0, 'the refusal is recorded with a stated reason');
 });

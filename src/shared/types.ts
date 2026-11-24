@@ -976,41 +976,7 @@ export interface CurrentRunContext {
 
 export type ApprovalMode = 'ask' | 'approve-all';
 
-export type ExecutionMode = 'normal' | 'plan';
-
-export type PlanWorkflowStatus = 'pending' | 'approved' | 'revision_requested' | 'exited' | 'superseded';
-
-/**
- * Host-owned approval state for one assistant-authored implementation plan.
- * The plan body remains solely in the referenced assistant message.
- */
-export interface PlanWorkflowRecord {
-  id: string;
-  sessionId: string;
-  userMessageId: string;
-  assistantMessageId: string;
-  contentHash: string;
-  /** An attached external file was visible during planning. Its authored result stays in this session. */
-  externalHandoffContext?: true;
-  /** Chain of actual requirements contributing to a revised plan (oldest first). */
-  priorRequirementIds?: string[];
-  status: PlanWorkflowStatus;
-  createdAt: string;
-  decidedAt?: string;
-}
-
-export interface PlanWorkflowView extends Omit<PlanWorkflowRecord, 'contentHash' | 'status' | 'priorRequirementIds' | 'externalHandoffContext'> {
-  status: PlanWorkflowStatus | 'invalid';
-  promptPreview?: import('../agent/handoffPrompt').HandoffPreview;
-  newSessionBlockedReason?: string;
-  handoff?: { planHash: string; bodyHash: string; phase: 'committed' | 'queued' | 'dispatch_unknown' | 'completed' };
-}
-
 export interface ChatSession {
-  planHandoffs?: import('../sessions/planHandoff').PlanHandoffRecord[];
-  planHandoffId?: string;
-  planHandoffSourceId?: string;
-  planHandoffCompleted?: true;
   /** Host-only automatic naming state; never part of Provider history. */
   autoTitle?: import('../sessions/sessionTitle').SessionTitleMetadata;
   /** Durable edit/resend intent; actions stay blocked until it is reconciled. */
@@ -1018,8 +984,6 @@ export interface ChatSession {
   userTaskBudgets?: Record<string, import('../sessions/userTaskBudget').UserTaskBudget>;
   executionTime?: import('../sessions/executionTimeStats').SessionExecutionTime;
   approvalMode?: ApprovalMode;
-  executionMode?: ExecutionMode;
-  planWorkflows?: PlanWorkflowRecord[];
   id: string;
   title: string;
   messages: ChatMessage[];
@@ -1254,6 +1218,16 @@ export interface ChangeSetApplyFailure {
   editId: string;
   label: string;
   error: string;
+  /**
+   * Set when the file moved under the draft, so the caller can offer one
+   * bounded regeneration instead of asking the user to redo the work.
+   */
+  conflict?: {
+    code: import('../edits/safeFileEditor').WriteConflictCode;
+    uri: string;
+    expectedSha256?: string;
+    actualSha256?: string;
+  };
 }
 
 export interface ChangeSetApplyResult {
@@ -1629,8 +1603,6 @@ export interface AgentRequest {
   /** Host-observed slash command; no authorization or child history is implied. */
   explicitSubagentSelection?: { kind: 'single' | 'parallel'; profile: 'research' | 'review' | 'proposal' };
   approvalMode?: ApprovalMode;
-  /** Frozen for the whole logical turn. ApprovalMode remains an independent axis. */
-  executionMode?: ExecutionMode;
   /** Root of approval and command-correction accounting. */
   approvalRootTaskId?: string;
   /** Host-selected targets with concrete diagnostics in the approval continuation. */

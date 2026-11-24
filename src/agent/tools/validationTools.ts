@@ -1,4 +1,5 @@
 import { redactSensitiveReviewText } from '../../approvals/sensitiveText';
+import { acquireWriteLease } from '../../sessions/queue/writeLeaseRegistry';
 import { spawn } from 'node:child_process';
 import { terminateProcessTree } from '../../runs/draftRunExecutor';
 import { getProjectExecutionMode, prepareProjectExecution, ProjectExecutionUnavailableError } from '../../runs/projectExecutionIsolation';
@@ -36,6 +37,8 @@ export interface ValidationToolAdapter {
     authorization: ToolAuthorizationDecision;
     expectedSnapshot?: string;
     approvalMode?: ApprovalMode;
+    /** Owning session; the fixed script writes build output, so it needs the lease. */
+    sessionId?: string;
   }): Promise<string>;
 }
 
@@ -53,6 +56,7 @@ export class ValidationToolService implements ValidationToolAdapter {
     authorization: ToolAuthorizationDecision;
     expectedSnapshot?: string;
     approvalMode?: ApprovalMode;
+    sessionId?: string;
   }): Promise<string> {
     const startedAt = Date.now();
     const createResult = (result: Partial<ValidationToolResult>): ValidationToolResult => ({
@@ -131,11 +135,29 @@ export class ValidationToolService implements ValidationToolAdapter {
       }
       const remainingMs = input.runDeadlineAt === undefined ? timeoutMs : Math.min(timeoutMs, input.runDeadlineAt - Date.now());
       if (remainingMs <= 0) throw new Error(localizeValidation(input.language, 'timedOut'));
-      const outcome = await executeValidation(snapshot, remainingMs, input.signal, async () => {
-        if (!vscode.workspace.workspaceFolders?.includes(workspaceFolder)) return false;
-        const current = await inspectValidationSnapshot(workspaceFolder, input.script, approvalMode);
-        return current.fingerprint === snapshot.fingerprint;
-      }, input.language);
+      // A fixed npm script writes node_modules/dist, so it is a workspace side
+      // effect: it must not run while another session is applying source edits.
+      const lease = input.sessionId
+        ? await acquireWriteLease({ sessionId: input.sessionId, purpose: 'validation', batchId: `validation:${input.script}` })
+        : { acquired: true as const, grant: { release: async () => undefined } };
+      if (!lease.acquired) {
+        return JSON.stringify(createResult({
+          workspaceFolder: workspaceFolder.name,
+          authorized: true,
+          errorType: 'validation_write_locked',
+          error: localizeValidation(input.language, 'writeLocked')
+        }));
+      }
+      let outcome: Awaited<ReturnType<typeof executeValidation>>;
+      try {
+        outcome = await executeValidation(snapshot, remainingMs, input.signal, async () => {
+          if (!vscode.workspace.workspaceFolders?.includes(workspaceFolder)) return false;
+          const current = await inspectValidationSnapshot(workspaceFolder, input.script, approvalMode);
+          return current.fingerprint === snapshot.fingerprint;
+        }, input.language);
+      } finally {
+        await lease.grant.release().catch(() => undefined);
+      }
       const diagnostics = createWorkspaceDiagnosticSummary();
       const ok = !outcome.timedOut && !outcome.aborted && outcome.exitCode === 0;
       return JSON.stringify(createResult({
@@ -453,7 +475,7 @@ Promise<{ exitCode?: number; timedOut: boolean; aborted: boolean; output?: strin
 
 function localizeValidation(
   language: KeepseekLanguage,
-  key: 'unsupportedScript' | 'untrusted' | 'stopped' | 'workspaceMissing' | 'manifestMissing' | 'scriptMissing' | 'snapshotChanged' | 'notAuthorized' | 'timedOut' | 'failed',
+  key: 'unsupportedScript' | 'untrusted' | 'stopped' | 'workspaceMissing' | 'manifestMissing' | 'scriptMissing' | 'snapshotChanged' | 'notAuthorized' | 'timedOut' | 'failed' | 'writeLocked',
   script?: string,
   exitCode?: number
 ): string {
@@ -467,6 +489,7 @@ function localizeValidation(
     snapshotChanged: 'Validation launch snapshot changed or authorization was revoked.',
     notAuthorized: 'The user did not authorize this validation task.',
     timedOut: 'The validation task reached its time limit and was stopped.',
+    writeLocked: 'Another session is writing the workspace. Validation was not started; retry when the project write lock is released.',
     failed: `The "${script ?? ''}" validation task exited with code ${exitCode ?? 'unknown'}.`
   };
   const zh: Record<typeof key, string> = {
@@ -477,6 +500,7 @@ function localizeValidation(
     manifestMissing: '当前工作区文件夹没有 package.json，无法使用固定 npm 验证。未运行脚本。如果该验证不是任务必需项，请继续处理剩余工作。',
     scriptMissing: `package.json 未定义脚本“${script ?? ''}”。未运行脚本。如果该验证不是任务必需项，请继续处理剩余工作。`,
     snapshotChanged: '验证启动快照已变化或授权已撤销。',
+    writeLocked: '另一个会话正在写入工作区，验证未启动；请等项目写锁释放后重试。',
     notAuthorized: '用户未授权本次验证任务。',
     timedOut: '验证任务达到时间上限，已停止。',
     failed: `验证任务“${script ?? ''}”退出，代码为 ${exitCode ?? '未知'}。`

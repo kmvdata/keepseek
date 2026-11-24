@@ -208,10 +208,6 @@ import { analyzeCommandCapability } from '../approvals/authorization/commandCapa
 import { normalizeDraftRunPlan } from '../runs/draftRunProposal';
 import { createDraftRunProposal } from '../runs/draftRunProposal';
 import { normalizeApprovalMode } from './approvalMode';
-import {
-  createPlanPhaseBlockedToolResult,
-  getPlanPhaseToolBlockReason
-} from './executionMode';
 import { ToolEvidencePersistenceError, ToolEvidenceStore } from './evidence/store';
 import { prepareEvidenceEnvelope, stableStringify } from './evidence/shaping';
 import type { ToolEvidence } from './evidence/types';
@@ -893,7 +889,7 @@ export class AgentLoop {
     };
     // /draft is a host shortcut before tool dispatch. It has the same
     // write boundary as a model-requested DraftEdit.
-    const mayPrepareDraft = !request.turnIntent && request.executionMode !== 'plan'
+    const mayPrepareDraft = !request.turnIntent
       && (!request.subagentContext || request.subagentContext.lane === 'proposal');
     const draftEdit = mayPrepareDraft ? await this.tryCreateDraftEdit(request.prompt, request.language) : undefined;
     this.throwIfAborted(request.signal, request.language);
@@ -2011,12 +2007,6 @@ export class AgentLoop {
         try {
           toolArgs = this.parseToolArguments(toolCall.function.arguments);
           runDetailsBuilderRef.current?.recordToolArguments(toolCall.id, toolCall.function.name, toolArgs);
-          const planPhaseBlockReason = getPlanPhaseToolBlockReason({
-            executionMode: request.executionMode,
-            toolName: toolCall.function.name,
-            args: toolArgs,
-            skills: request.currentRunContext?.skills
-          });
           const isValidation = toolCall.function.name === RUN_VALIDATION_TOOL_NAME;
           const validationScript = isValidation ? this.readSafeNpmScript(toolArgs, 'script') : undefined;
           const validationWorkspaceFolder = isValidation ? this.readOptionalString(toolArgs, 'workspaceFolder') : undefined;
@@ -2030,7 +2020,7 @@ export class AgentLoop {
           const hostPending = pendingValidationChanges
             ? describeRunPendingDraftEdits(draftEdits, validationState.getPendingDraftEditIds())
             : undefined;
-          const validationPreflight = isValidation && !planPhaseBlockReason && !pendingValidationChanges && !validationLimitReached
+          const validationPreflight = isValidation && !pendingValidationChanges && !validationLimitReached
             ? await preflightSafeValidation({
                 script: validationScript!,
                 workspaceFolder: validationWorkspaceFolder,
@@ -2038,9 +2028,7 @@ export class AgentLoop {
                 approvalMode: request.approvalMode
               })
             : undefined;
-          if (planPhaseBlockReason) {
-            rawToolResult = createPlanPhaseBlockedToolResult(toolCall.function.name, planPhaseBlockReason);
-          } else if (pendingValidationChanges) {
+          if (pendingValidationChanges) {
             rawToolResult = validationState.createBlockedValidationResult(request.language, {
               pendingDrafts: hostPending,
               nextTrigger: 'run_end_host_apply'
@@ -3984,7 +3972,8 @@ export class AgentLoop {
             runDeadlineAt: options.runDeadlineAt,
             authorization: options.authorization,
             expectedSnapshot: options.authorization.executionSnapshot,
-            approvalMode: options.parentRequest?.approvalMode
+            approvalMode: options.parentRequest?.approvalMode,
+            sessionId: options.parentRequest?.sessionId ?? options.parentRequest?.subagentContext?.parentSessionId
           });
         case RUN_DRAFT_TOOL_NAME:
           return await this.createDraftRun(args, draftRuns, options.parentRequest?.approvalMode, language,

@@ -1,4 +1,4 @@
-import type { ProjectSessionQueue, QueueEntry, SessionExecutionMode } from './types';
+import type { ProjectSessionQueue, QueueEntry } from './types';
 
 /**
  * Pure queue operations. Every function returns a new queue and never mutates
@@ -7,6 +7,9 @@ import type { ProjectSessionQueue, QueueEntry, SessionExecutionMode } from './ty
  *
  * The array order is the only authority. "Creation order" is preserved by
  * `serial`, which is assigned once and never changes.
+ *
+ * This module decides ORDER ONLY. Write permission is the project lease's job,
+ * never the queue's, so there is no `effectiveMode` anymore.
  */
 
 function nowIso(now?: string | Date): string {
@@ -51,25 +54,14 @@ export function positionOf(queue: ProjectSessionQueue, sessionId: string): numbe
   return indexOfSession(queue, sessionId);
 }
 
-/**
- * The only write-capable position. A session is normal exactly when it is
- * first in the queue.
- */
-export function effectiveMode(
-  queue: ProjectSessionQueue,
-  sessionId: string
-): SessionExecutionMode {
-  const head = queue.entries[0];
-  return head && head.sessionId === sessionId ? 'normal' : 'plan';
-}
-
 export function headSessionId(queue: ProjectSessionQueue): string | undefined {
   return queue.entries[0]?.sessionId;
 }
 
 /**
- * Append a new session at the end. A newly created session is therefore
- * `plan` whenever another session already exists, which is the requirement.
+ * Append a new session at the tail. A new session therefore waits behind every
+ * session created before it, which is the fairness order the approve-all drain
+ * follows.
  *
  * Idempotent: enqueueing an already-queued session returns the input queue so
  * a retried create cannot duplicate an entry.
@@ -140,7 +132,7 @@ export function moveToIndex(
   return reorder(queue, from, targetIndex, now);
 }
 
-/** Promote a session to the head; this is what "execute plan" does. */
+/** Move a session to the head of the fairness order. */
 export function promoteToFront(queue: ProjectSessionQueue, sessionId: string, now?: string | Date): ProjectSessionQueue {
   return moveToIndex(queue, sessionId, 0, now);
 }

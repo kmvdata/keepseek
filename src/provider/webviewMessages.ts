@@ -1,5 +1,5 @@
 import type { KeepseekLanguage } from '../shared/i18n';
-import type { AgentSettings, ApprovalMode, ExecutionMode, SafeNpmScript, DraftRunBatchSnapshot } from '../shared/types';
+import type { AgentSettings, ApprovalMode, SafeNpmScript, DraftRunBatchSnapshot } from '../shared/types';
 import type { ModelSourceProvider } from '../accounts/types';
 
 export interface PromptReferenceInput {
@@ -21,9 +21,6 @@ export interface DroppedFileReferenceInput {
 
 export type WebviewMessage =
   | { type: 'setApprovalMode'; mode: ApprovalMode }
-  | { type: 'setExecutionMode'; mode: ExecutionMode }
-  | { type: 'executePlanInNewSession'; sessionId: string; planId: string; planHash: string; bodyHash: string }
-  | { type: 'resolvePlanDecision'; planId: string; action: 'start_execution' | 'revise_plan' | 'exit_plan' }
   | { type: 'ready' }
   | { type: 'retryInteraction' }
   | { type: 'startupRendered'; revision?: number }

@@ -90,36 +90,31 @@ test('a startup project-context failure keeps its cause instead of a bare reload
   });
 });
 
-test('startup settings refresh existing plan actions and keep the empty composer lightweight', () => {
+test('startup settings keep the empty composer lightweight', () => {
+  // There are no plan cards anymore, so a startup settings patch can only change
+  // the composer's availability. It must never trigger a full transcript redraw:
+  // that is what keeps the empty composer cheap while models are still loading.
   const script = getScript();
   const start = script.indexOf('function handleKeepseekHostMessage(');
   const end = script.indexOf('function applyAgentRunStreamPatch(', start);
   assert.ok(start > 0 && end > start);
   const sessionId = 'session';
-  const plan = { id: 'plan', sessionId, assistantMessageId: 'reply', status: 'pending' };
-  const state = { activeSessionId: sessionId, planWorkflows: [] as typeof plan[], interaction: { sessionId, canSubmit: false } };
-  const redraws: Array<{ plans: string[]; canSubmit: boolean }> = [];
+  const state = { activeSessionId: sessionId, interaction: { sessionId, canSubmit: false } };
+  let redraws = 0;
   let composerRefreshes = 0;
   const handle = runInNewContext(script.slice(start, end) + ';handleKeepseekHostMessage', {
     state, lastStateRevision: 0, window: {}, changeVisibleSession() {}, rememberTerminalAgentActivity() {},
     renderStatus() {}, syncSendButtonAvailability() { composerRefreshes++; },
-    render() { redraws.push({ plans: state.planWorkflows.map(p => p.id), canSubmit: state.interaction.canSubmit }); }
+    render() { redraws++; }
   }) as (event: { data: unknown }) => void;
-  const send = (revision: number, plans: typeof plan[], canSubmit: boolean) => handle({ data: {
+  const send = (revision: number, canSubmit: boolean) => handle({ data: {
     type: 'statePatch', scope: 'startupSettings', revision,
-    state: { activeSessionId: sessionId, planWorkflows: plans, interaction: { sessionId, canSubmit } }
+    state: { activeSessionId: sessionId, interaction: { sessionId, canSubmit } }
   } });
 
-  send(1, [], false);
-  assert.equal(composerRefreshes, 1);
-  assert.deepEqual(redraws, []);
-  send(2, [plan], false);
-  send(3, [plan], true);
-  send(2, [plan], false); // late update cannot hide an action that has just become available
-  send(4, [], true);
-  send(5, [], true);
-  assert.deepEqual(redraws, [
-    { plans: ['plan'], canSubmit: false }, { plans: ['plan'], canSubmit: true }, { plans: [], canSubmit: true }
-  ]);
-  assert.equal(composerRefreshes, 2);
+  send(1, false);
+  send(2, true);
+  send(1, false); // a late update cannot revoke availability that already arrived
+  assert.equal(redraws, 0, 'a startup patch never redraws the transcript');
+  assert.equal(composerRefreshes, 2, 'only the composer is refreshed, once per accepted revision');
 });

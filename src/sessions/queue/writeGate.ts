@@ -3,9 +3,10 @@ import type { WriteCapability } from './modeGate';
 /**
  * Process-wide write gate.
  *
- * The project queue decides which session is `normal`, but a mode alone does not
- * stop a foreign session from applying an edit or launching a command. This module
- * is the single choke point every file/command side effect passes through.
+ * The project write lease decides who may write, but a lease record alone does
+ * not stop a foreign session from applying an edit or launching a command. This
+ * module is the single choke point every file/command side effect passes
+ * through.
  *
  * It is deliberately a registry rather than a function import graph: the edit and
  * run stores live below the provider and must not import it. The provider installs
@@ -17,7 +18,7 @@ export type WriteGateResult =
   | {
       allowed: false;
       /** Stable reason for logs and UI. */
-      code: 'no_authority' | 'not_queue_head' | 'lease_not_held';
+      code: 'no_authority' | 'lease_not_held';
       /** Human-readable explanation (already localized by the authority). */
       message: string;
     };

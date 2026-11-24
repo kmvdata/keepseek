@@ -3,12 +3,14 @@
  * adapter and the host projection.
  *
  * Nothing in this module imports `vscode`. The queue is the single authority
- * for "which session comes first" and therefore for the derived normal/plan
- * mode of every session in one project.
+ * for *fairness order* only. It no longer derives an execution mode: every
+ * session is equally writable in principle, and permission to touch the
+ * workspace comes from the project write lease (`writeLease.ts`).
+ *
+ * Keeping order here and permission there is deliberate: the queue can be
+ * reordered by the user at any time without ever granting a write, and the
+ * lease can move between sessions without touching the ordering file.
  */
-
-/** Derived view of a session's write capability. Never stored on the session. */
-export type SessionExecutionMode = 'normal' | 'plan';
 
 /**
  * One project session entry.
@@ -34,13 +36,13 @@ export interface QueueEntry {
  * Per-project ordering authority. Exactly one of these exists per
  * `workspaceKey`.
  *
- * INVARIANT: `entries` has no duplicate `sessionId` and no duplicate
- * `serial`. `entries[0]` is the only session that may derive `normal`.
+ * INVARIANT: `entries` has no duplicate `sessionId` and no duplicate `serial`.
+ * `entries[0]` is the head used by the project-level approve-all drain to pick
+ * the next session to serve.
  */
 export interface ProjectSessionQueue {
   version: 1;
   workspaceKey: string;
-  /** The only meaningful order. `entries[0]` is the normal session. */
   entries: QueueEntry[];
   /** Increased on every accepted mutation; the basis for cross-window CAS. */
   revision: number;

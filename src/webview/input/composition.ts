@@ -12,7 +12,6 @@ import * as commandModels from './commandMenu/models';
 import * as commandApproval from './commandMenu/approval';
 import * as commandAgentSettings from './commandMenu/agentSettings';
 import * as commandSkills from './commandMenu/skills';
-import * as executionMode from './executionMode';
 import * as usageScript from './usage/script';
 import * as usageFormatters from './usage/formatters';
 import * as accountSettingsScript from './dialogs/accountSettings/script';
@@ -31,7 +30,6 @@ import * as aboutTemplate from './dialogs/about/template';
 import * as createSkillTemplate from './dialogs/createSkill/template';
 import * as composerStyles from './composer/styles';
 import * as editorStyles from './composer/editorStyles';
-import * as executionModeStyles from './executionModeStyles';
 import * as referenceStyles from './references/styles';
 import * as skillStyles from './skills/styles';
 import * as commandMenuStyles from './commandMenu/styles';
@@ -53,7 +51,6 @@ export const INPUT_SCRIPT_FRAGMENTS = [
   dragDrop.dragDropDeclarationFragment,
   referenceChips.referenceButtonDeclarationFragment,
   commandMenuScript.commandMenuDeclarationFragment,
-  executionMode.executionModeDeclarationFragment,
   commandModels.modelSelectorsDeclarationFragment,
   commandApproval.approvalDeclarationFragment,
   commandModels.modelStatusDeclarationFragment,
@@ -63,7 +60,6 @@ export const INPUT_SCRIPT_FRAGMENTS = [
   referenceMenu.referenceMenuDeclarationFragment,
   skillsScript.skillsDeclarationFragment,
   commandMenuScript.commandMenuStateFragment,
-  executionMode.executionModeStateFragment,
   commandApproval.approvalStateFragment,
   commandModels.modelControlsStateFragment,
   commandSkills.commandSkillsStateFragment,
@@ -79,7 +75,6 @@ export const INPUT_SCRIPT_FRAGMENTS = [
   commandModels.modelSelectorBindingsFragment,
   commandApproval.approvalBindingsFragment,
   commandModels.subagentAndPendingBindingsFragment,
-  executionMode.executionModeBindingsFragment,
   commandAgentSettings.compressionBindingsFragment,
   commandSkills.commandSkillsBindingsFragment,
   skillsScript.skillsBarBindingsFragment,
@@ -92,7 +87,6 @@ export const INPUT_SCRIPT_FRAGMENTS = [
   referenceChips.referenceChipClickBindingFragment,
   editorScript.editorPasteBindingFragment,
   commandMenuScript.commandMenuImplementationFragment,
-  executionMode.executionModeImplementationFragment,
   referenceMenu.referenceMenuImplementationFragment,
   composerScript.composerRenderFragment,
   usageScript.usageRenderFragment,
@@ -162,7 +156,6 @@ export const INPUT_STYLE_FRAGMENTS = [
   composerStyles.composerBaseStylesFragment,
   skillStyles.skillsBarStylesFragment,
   composerStyles.composerControlsStylesFragment,
-  executionModeStyles.executionModeStylesFragment,
   usageStyles.usageIndicatorStylesFragment,
   composerStyles.composerStatusStylesFragment,
   commandMenuStyles.commandMenuReadonlyStylesFragment,

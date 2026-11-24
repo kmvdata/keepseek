@@ -43,7 +43,6 @@ import {
   createSubagentRunUsageSummary
 } from '../subagentUsageStats';
 import { getBuiltInReadToolNames, resolveSubagentProfile } from './profiles';
-import { normalizeExecutionMode, PLAN_PHASE_BLOCKED_ERROR_TYPE } from '../executionMode';
 import { SubagentScheduler } from './scheduler';
 import { SubagentStore } from './store';
 import {
@@ -380,12 +379,6 @@ export class SubagentRuntime implements SubagentToolAdapter {
     });
     if (!resolvedProfile) {
       return toolError('subagent_profile_not_found', `Unknown or inactive subagent profile: ${requestedProfile ?? ''}`);
-    }
-    if (normalizeExecutionMode(parentRequest.executionMode) === 'plan' && resolvedProfile.lane === 'proposal') {
-      return toolError(
-        PLAN_PHASE_BLOCKED_ERROR_TYPE,
-        'Writer/proposal-capable subagents are unavailable during the planning phase. Use a read-only research or review profile.'
-      );
     }
     const profile = restrictSubagentRuntimeProfile(resolvedProfile, {
       nested: Boolean(parentChild),
@@ -885,7 +878,6 @@ export class SubagentRuntime implements SubagentToolAdapter {
           thinkingEnabled: false
         },
         contextFiles: [],
-        executionMode: input.context.parentRequest.executionMode,
         subagentHostContext: structuredClone(input.hostContext),
         contextInstructions,
         slimToolNames: toolNames,
@@ -1371,7 +1363,6 @@ export class SubagentRuntime implements SubagentToolAdapter {
         prompt: repairPrompt,
         model: input.model,
         settings: { ...input.input.context.parentRequest.settings, thinkingEnabled: false },
-        executionMode: input.input.context.parentRequest.executionMode,
         subagentHostContext: structuredClone(input.hostContext),
         contextFiles: [],
         contextInstructions: input.contextInstructions,
