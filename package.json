@@ -25,10 +25,15 @@
     "onView:keepseek.chat"
   ],
   "main": "./out/extension.js",
-  "extensionKind": ["workspace"],
+  "extensionKind": [
+    "workspace"
+  ],
   "contributes": {
     "commands": [
-      { "command": "keepseek.selectProjectScope", "title": "KeepSeek: Select Task Directory / 选择任务目录" },
+      {
+        "command": "keepseek.selectProjectScope",
+        "title": "KeepSeek: Select Task Directory / 选择任务目录"
+      },
       {
         "command": "keepseek.showRuntimeDiagnostics",
         "title": "KeepSeek: Runtime Diagnostics / 运行诊断"
@@ -69,6 +74,11 @@
       {
         "command": "keepseek.addExplorerDirectoryToContext",
         "title": "KeepSeek: Add Explorer Folder to Chat"
+      },
+      {
+        "command": "keepseek.collectSessionObjects",
+        "title": "Reclaim Unreferenced Session Objects",
+        "category": "KeepSeek"
       }
     ],
     "configuration": {
@@ -94,22 +104,61 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["repository", "destination", "read", "push"],
+            "required": [
+              "repository",
+              "destination",
+              "read",
+              "push"
+            ],
             "properties": {
-              "repository": { "type": "string", "description": "Canonical absolute repository path / 仓库的真实绝对路径" },
-              "destination": { "type": "string", "description": "Exact resolved HTTPS or SSH URL, or canonical bare repository path / 精确 HTTPS 或 SSH URL，或裸仓库的真实绝对路径" },
-              "read": { "type": "array", "items": { "type": "string" }, "description": "Exact refs or refs/tags/* and refs/heads/* / 精确引用或标签、分支命名空间" },
-              "push": { "type": "array", "items": { "type": "string" }, "description": "Exact refs or named branch/tag prefix followed by * / 精确引用或以 * 结尾的分支、标签名前缀" },
-              "rewrite": { "type": "array", "items": { "type": "string" }, "description": "Exact branches eligible for a model-approved explicit force-with-lease operation / 可由模型批准精确 force-with-lease 操作的分支全名" },
-              "credentialEnvironment": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]{0,127}$", "description": "Name of the host environment variable holding this repository's HTTPS token. Store the name here, without the token. / 持有此仓库 HTTPS 令牌的宿主环境变量名。此处填写变量名。" },
-              "credentialUsername": { "type": "string", "description": "Public HTTPS username for the configured token. Defaults to x-access-token. / 已配置令牌对应的公开 HTTPS 用户名，默认为 x-access-token。" }
+              "repository": {
+                "type": "string",
+                "description": "Canonical absolute repository path / 仓库的真实绝对路径"
+              },
+              "destination": {
+                "type": "string",
+                "description": "Exact resolved HTTPS or SSH URL, or canonical bare repository path / 精确 HTTPS 或 SSH URL，或裸仓库的真实绝对路径"
+              },
+              "read": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Exact refs or refs/tags/* and refs/heads/* / 精确引用或标签、分支命名空间"
+              },
+              "push": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Exact refs or named branch/tag prefix followed by * / 精确引用或以 * 结尾的分支、标签名前缀"
+              },
+              "rewrite": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Exact branches eligible for a model-approved explicit force-with-lease operation / 可由模型批准精确 force-with-lease 操作的分支全名"
+              },
+              "credentialEnvironment": {
+                "type": "string",
+                "pattern": "^[A-Z_][A-Z0-9_]{0,127}$",
+                "description": "Name of the host environment variable holding this repository's HTTPS token. Store the name here, without the token. / 持有此仓库 HTTPS 令牌的宿主环境变量名。此处填写变量名。"
+              },
+              "credentialUsername": {
+                "type": "string",
+                "description": "Public HTTPS username for the configured token. Defaults to x-access-token. / 已配置令牌对应的公开 HTTPS 用户名，默认为 x-access-token。"
+              }
             }
           }
         },
         "kmvdata.keepseek.projectExecution": {
           "type": "string",
           "scope": "machine",
-          "enum": ["isolated", "host"],
+          "enum": [
+            "isolated",
+            "host"
+          ],
           "default": "isolated",
           "markdownDescription": "Execution environment for project commands and fixed validation in Approve for me. `isolated` uses a supported sandbox with project-local writes and restricted network access. `host` explicitly runs with the VS Code extension host account's permissions, including access outside the project. User settings only. / 帮我审批的项目命令与固定验证执行环境。`isolated` 使用支持的沙箱，写入限于工程与临时目录，网络受限。`host` 明确使用 VS Code 扩展宿主账号权限，可以访问工程外资源。仅使用用户设置。"
         },
@@ -120,7 +169,6 @@
           "pattern": "^(?:|sha256:[a-f0-9]{64})$",
           "markdownDescription": "Immutable ID of a trusted, preinstalled Linux Docker toolchain image for isolated Windows execution, for example `sha256:…`. The image must include the tools the project needs. User settings only. / Windows 隔离执行使用的可信、已在本地安装的 Linux Docker 工具链镜像 ID，例如 `sha256:…`。镜像需包含工程所需工具，仅使用用户设置。"
         },
-
         "kmvdata.keepseek.thinkingEnabled": {
           "type": "boolean",
           "default": true,
@@ -167,39 +215,75 @@
           "markdownDescription": "Maximum bytes KeepSeek reads from one referenced or workspace text file. Binary, media, archive, and otherwise unreadable files are still rejected."
         },
         "kmvdata.keepseek.patch.maxPayloadBytes": {
-          "type": "integer", "default": 1048576, "minimum": 1024, "maximum": 16777216, "scope": "window",
+          "type": "integer",
+          "default": 1048576,
+          "minimum": 1024,
+          "maximum": 16777216,
+          "scope": "window",
           "markdownDescription": "Maximum encoded size of one patch tool payload. Independent from kmvdata.keepseek.maxFileBytes."
         },
         "kmvdata.keepseek.patch.maxHunks": {
-          "type": "integer", "default": 256, "minimum": 1, "maximum": 4096, "scope": "window",
+          "type": "integer",
+          "default": 256,
+          "minimum": 1,
+          "maximum": 4096,
+          "scope": "window",
           "markdownDescription": "Maximum number of canonical patch hunks or file operations in one patch request."
         },
         "kmvdata.keepseek.patch.maxChangedBytes": {
-          "type": "integer", "default": 2097152, "minimum": 1, "maximum": 67108864, "scope": "window",
+          "type": "integer",
+          "default": 2097152,
+          "minimum": 1,
+          "maximum": 67108864,
+          "scope": "window",
           "markdownDescription": "Maximum total added plus removed bytes in one text patch. The target file itself may be larger."
         },
         "kmvdata.keepseek.patch.maxInlineBytes": {
-          "type": "integer", "default": 65536, "minimum": 1024, "maximum": 4194304, "scope": "window",
+          "type": "integer",
+          "default": 65536,
+          "minimum": 1024,
+          "maximum": 4194304,
+          "scope": "window",
           "markdownDescription": "Maximum old or new bytes allowed inline in one canonical patch hunk. Larger local changes must be split safely or use an explicitly bounded full replacement."
         },
         "kmvdata.keepseek.patch.maxProviderBufferBytes": {
-          "type": "integer", "default": 16777216, "minimum": 1024, "maximum": 268435456, "scope": "window",
+          "type": "integer",
+          "default": 16777216,
+          "minimum": 1024,
+          "maximum": 268435456,
+          "scope": "window",
           "markdownDescription": "Maximum whole-file fallback buffer for non-file VS Code FileSystemProvider patch targets."
         },
         "kmvdata.keepseek.patch.maxBackupBytes": {
-          "type": "integer", "default": 33554432, "minimum": 1024, "maximum": 536870912, "scope": "window",
+          "type": "integer",
+          "default": 33554432,
+          "minimum": 1024,
+          "maximum": 536870912,
+          "scope": "window",
           "markdownDescription": "Maximum content-addressed backup size for delete and full-file replacement operations."
         },
         "kmvdata.keepseek.patch.maxChangeSetArtifactBytes": {
-          "type": "integer", "default": 134217728, "minimum": 1048576, "maximum": 1073741824, "scope": "window",
+          "type": "integer",
+          "default": 134217728,
+          "minimum": 1048576,
+          "maximum": 1073741824,
+          "scope": "window",
           "markdownDescription": "Maximum checkpoint and blob bytes retained by one active ChangeSet."
         },
         "kmvdata.keepseek.patch.blobStoreQuotaBytes": {
-          "type": "integer", "default": 1073741824, "minimum": 1048576, "maximum": 10737418240, "scope": "window",
+          "type": "integer",
+          "default": 1073741824,
+          "minimum": 1048576,
+          "maximum": 10737418240,
+          "scope": "window",
           "markdownDescription": "Global quota for raw content-addressed rollback blobs. Safe garbage collection removes only unreferenced blobs."
         },
         "kmvdata.keepseek.patch.maxDiffBytes": {
-          "type": "integer", "default": 4194304, "minimum": 65536, "maximum": 67108864, "scope": "window",
+          "type": "integer",
+          "default": 4194304,
+          "minimum": 65536,
+          "maximum": 67108864,
+          "scope": "window",
           "markdownDescription": "Maximum file size for a normal full diff preview; larger patch edits use a hunk-only review document."
         },
         "kmvdata.keepseek.trace.enabled": {
@@ -242,69 +326,142 @@
           "markdownDescription": "Maximum bytes retained for one interaction log file. / 单个交互日志文件的最大保留字节数。"
         },
         "kmvdata.keepseek.providerInlineResultMaxChars": {
-          "type": "integer", "default": 48000, "minimum": 1024, "maximum": 1000000, "scope": "window",
+          "type": "integer",
+          "default": 48000,
+          "minimum": 1024,
+          "maximum": 1000000,
+          "scope": "window",
           "markdownDescription": "Maximum characters a newly produced tool result may inline into one Provider request. Dynamic context admission may choose a smaller envelope. This does not limit workspace reads or evidence storage."
         },
         "kmvdata.keepseek.subagent.handoffPreviewBytes": {
-          "type": "integer", "default": 10240, "minimum": 1024, "maximum": 24576, "scope": "window",
+          "type": "integer",
+          "default": 10240,
+          "minimum": 1024,
+          "maximum": 24576,
+          "scope": "window",
           "markdownDescription": "Maximum UTF-8 bytes previewed in one child-result manifest. The full accepted result remains pageable in isolated storage. / 单个子代理结果清单内联预览的 UTF-8 字节上限；完整结果仍保存在隔离存储中并可分页读取。"
         },
         "kmvdata.keepseek.subagent.parallelHandoffBytes": {
-          "type": "integer", "default": 20480, "minimum": 16384, "maximum": 65536, "scope": "window",
+          "type": "integer",
+          "default": 20480,
+          "minimum": 16384,
+          "maximum": 65536,
+          "scope": "window",
           "markdownDescription": "Total UTF-8 byte budget shared fairly by all previews in one parallel child handoff. Status and result references are reserved first. / 一次并行子代理 handoff 的 UTF-8 总预算；先保留全部状态和引用，再公平分配预览。"
         },
         "kmvdata.keepseek.evidenceMaxBytes": {
-          "type": "integer", "default": 100000000, "minimum": 1000000, "maximum": 1000000000, "scope": "window",
+          "type": "integer",
+          "default": 100000000,
+          "minimum": 1000000,
+          "maximum": 1000000000,
+          "scope": "window",
           "markdownDescription": "Maximum bytes stored for one immutable tool-evidence result. Independent from the workspace read safety limit and Provider inline admission."
         },
         "kmvdata.keepseek.agent.maxExecutionMs": {
-          "type": "number", "default": 0, "minimum": 0, "scope": "window",
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "scope": "window",
           "markdownDescription": "Explicit maximum active time per root logical Agent task, shared with child agents and recovery. 0 = unlimited. Context Epoch rollover never resets it. / 根逻辑任务、子代理及恢复共享的显式有效执行时长上限；0 不限时，Context Epoch rollover 不会重置该预算。"
         },
         "kmvdata.keepseek.agent.subagentMaxExecutionMs": {
-          "type": "number", "default": 300000, "minimum": 0, "scope": "window",
+          "type": "number",
+          "default": 300000,
+          "minimum": 0,
+          "scope": "window",
           "markdownDescription": "Maximum time for one child Agent, additionally bounded by its root task. Default 5 minutes. / 单个子代理最长时间，且仍受根任务限制，默认 5 分钟。"
         },
         "kmvdata.keepseek.agent.maxModelRequests": {
-          "type": "integer", "default": 0, "minimum": 0, "maximum": 512, "scope": "window",
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 512,
+          "scope": "window",
           "markdownDescription": "Explicit maximum physical Provider attempts per root logical run, including retries, recovery, continuation, repair, summary and finalization. 0 = unlimited. / 根逻辑任务的显式物理 Provider 请求上限，包含重试、恢复、续写、修复、摘要和收尾；0 不限。"
         },
         "kmvdata.keepseek.agent.maxToolIterations": {
-          "type": "integer", "default": 0, "minimum": 0, "maximum": 512, "scope": "window",
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 512,
+          "scope": "window",
           "markdownDescription": "Explicit tool-round grant for each interactive root-task segment. 0 = unlimited. Reaching a positive limit requests one tool-free finalization and pauses for Continue. This is user execution policy, not a model capability. / 每个交互式根任务预算段的显式工具轮次额度；0 不限。正数额度到达后执行一次无工具收尾并暂停等待继续；这是用户执行策略，不是模型能力。"
         },
         "kmvdata.keepseek.agent.maxToolCalls": {
-          "type": "integer", "default": 0, "minimum": 0, "maximum": 2048, "scope": "window",
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 2048,
+          "scope": "window",
           "markdownDescription": "Explicit tool-call grant for each interactive root-task segment. 0 = unlimited. Cumulative audit counters and completed evidence are preserved when Continue grants another segment. / 每个交互式根任务预算段的显式工具调用额度；0 不限。点击继续授予新预算段时保留累计审计计数与已完成证据。"
         },
         "kmvdata.keepseek.agent.subagentMaxModelRequests": {
-          "type": "integer", "default": 12, "minimum": 1, "maximum": 512, "scope": "window",
+          "type": "integer",
+          "default": 12,
+          "minimum": 1,
+          "maximum": 512,
+          "scope": "window",
           "markdownDescription": "Maximum physical Provider attempts per child Agent. / 单个子代理的物理 Provider 请求上限。"
         },
         "kmvdata.keepseek.agent.maxContinuations": {
-          "type": "integer", "default": 1, "minimum": 0, "maximum": 8, "scope": "window",
+          "type": "integer",
+          "default": 1,
+          "minimum": 0,
+          "maximum": 8,
+          "scope": "window",
           "markdownDescription": "Maximum automatic continuations after length or pause_turn stops. / length 或 pause_turn 后自动续写的次数上限。"
         },
         "kmvdata.keepseek.agent.maxContextEpochRollovers": {
-          "type": "integer", "default": 0, "minimum": 0, "maximum": 32, "scope": "window",
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 32,
+          "scope": "window",
           "markdownDescription": "Explicit maximum Context Epoch rollovers in one root logical run. 0 = unlimited. Epochs maintain context capacity; they do not reset time, cost, evidence or execution budgets. / 单个根逻辑任务的显式 Context Epoch rollover 上限；0 不限。Epoch 只维护上下文容量，不会重置时间、费用、证据或执行预算。"
         },
         "kmvdata.keepseek.agent.maxTreeUpstreamTokens": {
-          "type": "integer", "default": 0, "minimum": 0, "maximum": 100000000, "scope": "window",
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 100000000,
+          "scope": "window",
           "markdownDescription": "Explicit maximum upstream tokens reserved or reported by a root run and all child agents combined. 0 = unlimited. / 根任务及全部子代理合计的显式上游 token 上限；0 不限。"
         },
         "kmvdata.keepseek.agent.subagentMaxUpstreamTokens": {
-          "type": "integer", "default": 500000, "minimum": 1000, "maximum": 100000000, "scope": "window",
+          "type": "integer",
+          "default": 500000,
+          "minimum": 1000,
+          "maximum": 100000000,
+          "scope": "window",
           "markdownDescription": "Maximum upstream tokens for one child Agent, additionally bounded by the shared tree limit. / 单个子代理的上游 token 上限，且仍受共享树级上限限制。"
         },
         "kmvdata.keepseek.agent.maxCost": {
-          "type": "number", "default": 0, "minimum": 0, "scope": "window",
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "scope": "window",
           "markdownDescription": "Maximum accounted Provider cost per logical Agent task and billing currency, shared with child agents and recovery. 0 = unlimited. A positive value fails closed when the selected source cannot provide priced usage. / 每项逻辑任务、每种计费币种的 Provider 费用上限；子代理与恢复共享，0 不限额。来源不能提供可计费用量时正值配置会安全拒绝请求。"
         },
         "kmvdata.keepseek.modelRequestTimeoutSeconds": {
-          "type": "integer", "default": 3600, "scope": "application",
-          "enum": [300, 900, 3600, 7200, 28800, 86400],
-          "enumItemLabels": ["5 分钟 / 5 minutes", "15 分钟 / 15 minutes", "1 小时 / 1 hour", "2 小时 / 2 hours", "8 小时 / 8 hours", "24 小时 / 24 hours"],
+          "type": "integer",
+          "default": 3600,
+          "scope": "application",
+          "enum": [
+            300,
+            900,
+            3600,
+            7200,
+            28800,
+            86400
+          ],
+          "enumItemLabels": [
+            "5 分钟 / 5 minutes",
+            "15 分钟 / 15 minutes",
+            "1 小时 / 1 hour",
+            "2 小时 / 2 hours",
+            "8 小时 / 8 hours",
+            "24 小时 / 24 hours"
+          ],
           "markdownDescription": "Timeout in seconds for each model request, including response headers and streaming. Shared by all accounts and models, including summaries and approval reviewers. Changes apply to new requests. Task execution limits and cancellation still apply. / 每次模型请求的超时时间（秒），包含等待响应头和流式响应。所有账号、模型、摘要及审批模型共用，修改后对新请求生效；任务执行时限及取消仍然有效。"
         },
         "kmvdata.keepseek.draftRun.timeoutMs": {

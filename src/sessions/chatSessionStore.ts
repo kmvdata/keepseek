@@ -73,7 +73,10 @@ export interface ChatSessionStorageAdapter {
   acquireSessionUse?(workspaceKey: string, sessionId: string, exclusive?: boolean): Promise<{ release(): Promise<void> }>;
   loadMessageCheckpoint?(workspaceKey: string, sessionId: string, messageId: string): Promise<unknown>;
   loadWorkspace(workspaceScope: WorkspaceSessionScope, options?: { fresh?: boolean }): Promise<StoredWorkspaceSessionState>;
-  saveWorkspace(workspaceScope: WorkspaceSessionScope, state: StoredWorkspaceSessionState): Promise<void>;
+  /** `selectionOnly` commits just the catalog (active id + summaries) and skips
+   * rewriting any session shard. Navigation must not cost a full graph rewrite. */
+  saveWorkspace(workspaceScope: WorkspaceSessionScope, state: StoredWorkspaceSessionState,
+    options?: { selectionOnly?: boolean }): Promise<void>;
   listAllWorkspaceSummaries(): Promise<WorkspaceSummary[]>;
   loadWorkspaceSessions(workspaceKey: string): Promise<ChatSession[]>;
   /** Detached selection reads must not reconcile or rewrite the stored active selection. */
@@ -463,11 +466,15 @@ export class ChatSessionStore {
     // The commit is deliberately outside the read deadline. Once memory active
     // has switched, reversing it during persist would create an uncertain state
     // between memory and disk; that is more dangerous than a slow save barrier.
-    session.updatedAt = new Date().toISOString();
+    //
+    // Opening a conversation is not a content change: `updatedAt` orders the
+    // sidebar by last activity, so bumping it here would both reorder the list
+    // on every click and force the shard's header (and therefore every stale
+    // byte beneath it) to be rewritten. Only the catalog's active id changes.
     session.approvalMode = this.approvalModeValue;
     this.setActiveSessionId(session.id);
     options.onSaving?.(session.id);
-    await measureSessionSelection('active-selection-save', session.id, () => this.persist());
+    await measureSessionSelection('active-selection-save', session.id, () => this.persistSelection());
     return { status: 'selected', session };
   }
 
@@ -711,6 +718,8 @@ export class ChatSessionStore {
     checkpointSources: Map<string, ChatMessage['runCheckpoint']>;
     queuedAt: number;
     reason: string;
+    /** Catalog-only commit: skips every shard rewrite. */
+    selectionOnly?: boolean;
   };
   private persistenceDrain?: Promise<void>;
   private readonly persistenceWaiters: Array<{
@@ -720,6 +729,28 @@ export class ChatSessionStore {
   }> = [];
 
   public async persist(reason = 'session_barrier'): Promise<void> {
+    return this.persistInternal({ reason });
+  }
+
+  /** Commit only the selection state: the active id and the catalog list.
+   *
+   * Switching conversations changes no message bytes, so re-encoding every
+   * shard is pure cost — on a real 15-message session it dominated the click at
+   * ~640 ms of a ~760 ms open. This writes the index (which is where the active
+   * id actually lives) and leaves each shard's revision untouched.
+   *
+   * It must never overtake a queued full save: that save carries journal and
+   * checkpoint state, and a later selection commit would still rewrite the
+   * index around it but could not replace it. So a pending full save is honoured
+   * first, and the selection is folded into it. */
+  public async persistSelection(reason = 'session_navigation'): Promise<void> {
+    const queued = this.pendingPersistence;
+    if (queued && !queued.selectionOnly) return this.persistInternal({ reason });
+    return this.persistInternal({ reason, selectionOnly: true });
+  }
+
+  private async persistInternal(options: { reason: string; selectionOnly?: boolean }): Promise<void> {
+    const { reason, selectionOnly } = options;
     const started = performance.now();
     for (const session of this.sessions) session.executionTime = reconcileExecutionTime(session.executionTime, session.messages);
     this.compact();
@@ -729,12 +760,13 @@ export class ChatSessionStore {
       approvalMode: this.approvalModeValue,
       // A usable composer is not yet a historical conversation. Settings and
       // navigation still save their metadata without serializing blank shards.
-      sessions: this.sessions.filter(session => session.messages.length > 0).map(snapshotSession),
+      sessions: selectionOnly ? [] : this.sessions.filter(session => session.messages.length > 0).map(snapshotSession),
       sessionSummaries: this.getSessionSummaries()
     };
-    const checkpointSources = new Map(this.sessions.flatMap(session => session.messages.map(message => [message.id, message.runCheckpoint] as const)));
+    const checkpointSources = selectionOnly ? new Map<string, ChatMessage['runCheckpoint']>()
+      : new Map(this.sessions.flatMap(session => session.messages.map(message => [message.id, message.runCheckpoint] as const)));
     this.pendingPersistence = { revision, scope: { ...this.workspaceScope, folderUris: [...this.workspaceScope.folderUris] }, snapshot, checkpointSources,
-      queuedAt: performance.now(), reason };
+      queuedAt: performance.now(), reason, ...(selectionOnly ? { selectionOnly: true } : {}) };
     for (const session of this.sessions) recordLocalPerformance({ type: 'checkpoint_snapshot', sessionId: session.id,
       snapshotMs: performance.now() - started, reason, queueDepth: Number(Boolean(this.persistenceDrain)) + 1 });
     const completed = new Promise<void>((resolve, reject) => {
@@ -813,7 +845,8 @@ export class ChatSessionStore {
           const summary = next.snapshot.sessionSummaries?.find(item => item.id === saved.id);
           if (summary) { summary.title = saved.title; summary.customTitle = saved.customTitle; }
         }
-        await this.sessionStorage.saveWorkspace(next.scope, next.snapshot);
+        await this.sessionStorage.saveWorkspace(next.scope, next.snapshot,
+          next.selectionOnly ? { selectionOnly: true } : undefined);
         for (const saved of next.snapshot.sessions) {
           const staged = this.stagedTitles.get(saved.id);
           if (staged && titleWrites.get(saved.id) === staged && saved.autoTitle?.status === 'completed'
@@ -1702,6 +1735,14 @@ function normalizeRunDetails(value: unknown, _restoring = false): ChatMessage['r
     delegation: normalizeRunDetailsDelegation(value.delegation),
     modelRequests: {
       requestCount: normalizeNonNegativeInteger(modelRequests.requestCount),
+      // Attempt/response counters are part of the stored type and are rendered by
+      // the usage panel. Rebuild them here or the round-trip drops them, which
+      // both loses statistics and re-hashes the object on every load — turning a
+      // read-only session open into a full graph rewrite.
+      ...(normalizeOptionalNonNegativeInteger(modelRequests.providerAttemptCount) !== undefined
+        ? { providerAttemptCount: normalizeOptionalNonNegativeInteger(modelRequests.providerAttemptCount) } : {}),
+      ...(normalizeOptionalNonNegativeInteger(modelRequests.usageResponseCount) !== undefined
+        ? { usageResponseCount: normalizeOptionalNonNegativeInteger(modelRequests.usageResponseCount) } : {}),
       messageCount: normalizeNonNegativeInteger(modelRequests.messageCount),
       exposedToolCount: normalizeNonNegativeInteger(modelRequests.exposedToolCount),
       maxOutputTokens: typeof modelRequests.maxOutputTokens === 'number' ? Math.max(0, modelRequests.maxOutputTokens) : undefined,
@@ -1881,8 +1922,31 @@ function normalizeRunDetailsCache(
     cacheLaneChanged: value.cacheLaneChanged === true,
     cacheMissPossibleReasons: Array.isArray(value.cacheMissPossibleReasons)
       ? value.cacheMissPossibleReasons.filter((reason): reason is string => typeof reason === 'string' && Boolean(reason.trim())).slice(0, 16)
-      : []
+      : [],
+    // Cache-health metrics belong to the stored type. Dropping them makes the
+    // re-encoded body differ from what was read even when nothing changed.
+    ...cacheHealthCounts(value)
   };
+}
+
+/** Optional non-negative counters/ratios, preserved only when the source had a
+ * valid value so that absent stays absent and the round-trip is stable. */
+function cacheHealthCounts(value: Record<string, unknown>): Partial<NonNullable<ChatMessage['runDetails']>['cache']> {
+  const result: Partial<NonNullable<ChatMessage['runDetails']>['cache']> = {};
+  const ceiling = value.expectedRawHitRateCeiling;
+  if (typeof ceiling === 'number' && Number.isFinite(ceiling) && ceiling >= 0) {
+    result.expectedRawHitRateCeiling = Math.min(100, ceiling);
+  }
+  const efficiency = value.reuseEfficiency;
+  if (typeof efficiency === 'number' && Number.isFinite(efficiency) && efficiency >= 0) {
+    result.reuseEfficiency = Math.min(100, efficiency);
+  }
+  for (const key of ['healthyReusableRequestCount', 'anomalousReusableRequestCount',
+    'controlledBoundaryRequestCount', 'providerCacheEvictionPossibleCount'] as const) {
+    const count = normalizeOptionalNonNegativeInteger(value[key]);
+    if (count !== undefined) result[key] = count;
+  }
+  return result;
 }
 
 function normalizeRunContextDiscardReason(
@@ -1965,6 +2029,14 @@ function cloneRunDetails(details: NonNullable<ChatMessage['runDetails']>): NonNu
 
 function normalizeNonNegativeInteger(value: unknown): number {
   return normalizePositiveInteger(value, 0);
+}
+
+/** Absent stays absent. Coercing through `Number()` would turn a missing
+ * counter into an explicit 0, which changes the encoded bytes and defeats
+ * content-addressed reuse between the read and the next write. */
+function normalizeOptionalNonNegativeInteger(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return undefined;
+  return Math.floor(value);
 }
 
 function normalizeStringArray(value: unknown): string[] {

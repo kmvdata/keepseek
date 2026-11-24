@@ -19,6 +19,9 @@ import './sessionAbsentTombstone.test';
 import './subagentProfileCapability.test';
 import './protectedTargetPolicy.test';
 import './writeLease.test';
+import './sessionObjectGc.test';
+import './sessionOpenLazy.test';
+import './composerReadinessGate.test';
 import { after } from 'node:test';
 
 // The provider's startup schedules interval timers; a completed run must not

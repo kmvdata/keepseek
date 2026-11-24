@@ -2,6 +2,7 @@ import { KEEPSEEK_CONFIGURATION_NAMESPACE, KEEPSEEK_PUBLISHER } from './shared/i
 import * as vscode from 'vscode';
 import { KeepseekChatViewProvider } from './provider/KeepseekChatViewProvider';
 import { GlobalSessionStorage } from './sessions/globalSessionStorage';
+import { abortFromToken, backupOrphans, formatReport, gcMessage, listTargets, sweepAll } from './sessions/sessionObjectGc';
 import { setGateWaitObserver } from './sessions/sessionDeletionAuthority';
 import { recordLocalPerformance } from './agent/logging/performanceTrace';
 import { ChatSessionStore, getCurrentWorkspaceSessionScope } from './sessions/chatSessionStore';
@@ -12,6 +13,7 @@ import { StartupPerformanceTrace } from './shared/startupPerformance';
 import { getRuntimeIdentity, initializeRuntimeIdentity } from './shared/runtimeIdentity';
 import { getNativeStorageUri } from './shared/storageRoot';
 import { getConfigurationRegistrationDiagnostics } from './shared/configurationRegistration';
+import { getErrorMessage } from './shared/errors';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const startupTrace = new StartupPerformanceTrace();
@@ -62,9 +64,52 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('keepseek.showRuntimeDiagnostics', async () => {
       const document = await vscode.workspace.openTextDocument({ language: 'json', content: JSON.stringify({
         ...getRuntimeIdentity(), configuration: getConfigurationRegistrationDiagnostics(context.extension.packageJSON),
-        sessionTitle: provider.getSessionTitleDiagnostics(), historyCleanup: provider.getHistoryCleanupDiagnostics()
+        sessionTitle: provider.getSessionTitleDiagnostics(), historyCleanup: provider.getHistoryCleanupDiagnostics(),
+        composerReadiness: provider.getComposerReadinessDiagnostics()
       }, null, 2) });
       await vscode.window.showTextDocument(document, { preview: true });
+    }),
+    vscode.commands.registerCommand('keepseek.collectSessionObjects', async () => {
+      const directory = globalSessionStorage.getWorkspaceSessionsDirectoryUri(workspaceScope.key);
+      let targets: Awaited<ReturnType<typeof listTargets>>;
+      try {
+        targets = await listTargets(directory);
+      } catch (error) {
+        vscode.window.showWarningMessage(getErrorMessage(error));
+        return;
+      }
+      if (!targets.length) {
+        vscode.window.showInformationMessage(gcMessage('empty'));
+        return;
+      }
+      // Phase 1 — report. The user decides on this project's real numbers, never
+      // on an estimate.
+      const preview = await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification, title: gcMessage('scanning'), cancellable: true
+      }, (_progress, token) => sweepAll(targets, { dryRun: true, signal: abortFromToken(token) }));
+      const answer = await vscode.window.showWarningMessage(formatReport(preview), { modal: true }, gcMessage('confirm'));
+      if (answer !== gcMessage('confirm')) return;
+
+      // Phase 2 — copy, then Phase 3 — delete. A sweep that deleted first would be
+      // unrecoverable if the reachability decision were ever wrong.
+      const collected = await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification, title: gcMessage('collecting'), cancellable: true
+      }, (_progress, token) => sweepAll(targets, { dryRun: true, collectOnly: true, signal: abortFromToken(token) }));
+      let backupUri: vscode.Uri | undefined;
+      try {
+        const backup = await backupOrphans(collected.candidates ?? [],
+          vscode.Uri.joinPath(context.globalStorageUri, 'orphan-backups'));
+        backupUri = backup?.folder;
+      } catch (error) {
+        // No backup, no deletion: the run stops here and says why.
+        vscode.window.showErrorMessage(gcMessage('backupFailed') + ': ' + getErrorMessage(error));
+        return;
+      }
+      const result = await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification, title: gcMessage('collecting'), cancellable: true
+      }, (_progress, token) => sweepAll(targets, { dryRun: false, signal: abortFromToken(token) }));
+      const note = backupUri ? gcMessage('backupAt') + ': ' + backupUri.fsPath : '';
+      vscode.window.showInformationMessage([formatReport(result), note].filter(Boolean).join('\n'));
     }),
     vscode.commands.registerCommand('keepseek.openChat', () => provider.reveal()),
     vscode.commands.registerCommand('keepseek.addCurrentFileToContext', () => provider.addCurrentFileToContext()),

@@ -1412,7 +1412,16 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.submissionResults ??= new Map();
     const key = `${sessionId}\0${requestId}`;
     const previous = requestId ? this.submissionResults.get(key) : undefined;
-    if (requestId && this.pendingSubmissionIds?.has(key)) return;
+    if (requestId && this.pendingSubmissionIds?.has(key)) {
+      // The same request is already in flight. Staying silent here would leave
+      // the composer latched on this id with nothing left to answer it; the
+      // in-flight attempt still owns the real outcome and will report it.
+      this.postToWebview({ type: 'submissionResult', requestId, sessionId, status: 'rejected',
+        reason: this.language === 'en'
+          ? 'This message is already being sent. Your draft is kept until the first attempt reports.'
+          : '这条消息正在发送中，请等待首次结果；草稿已保留。' });
+      return;
+    }
     if (previous) { this.postToWebview(previous); return; }
     let accepted = false;
     const feedback = (status: 'accepted' | 'rejected' | 'failed', reason?: string) => {
@@ -8320,16 +8329,37 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           if (ownsStartupContext()) this.runContextReadiness = 'ready';
         } catch (error) {
           if (ownsStartupContext()) {
-            this.runContextReadiness = 'error';
-            // A failed project-context load is not a broken window, but its cause used
-            // to be discarded: keep it so the reported failure is actionable.
-            this.runContextFailure = getErrorMessage(error);
-            console.warn('[KeepSeek] startup_stage', { stage: 'project-context', event: 'failed', message: this.runContextFailure });
+            // Being superseded is not a failure. A navigation or a New click bumps
+            // the generation while this scan is still reading, which makes the
+            // ownership assertion throw; recording that as a project-context fault
+            // pinned the whole window in startup-error and left the composer
+            // permanently unsubmittable. Only real read/parse faults are recorded,
+            // and a superseded scan defers converging to whoever owns the context
+            // now — that owner always runs its own resolution to a terminal state.
+            if (isSupersededContextError(error)) {
+              console.info('[KeepSeek] startup_stage', { stage: 'project-context', event: 'superseded' });
+            } else {
+              this.runContextReadiness = 'error';
+              // A failed project-context load is not a broken window, but its cause used
+              // to be discarded: keep it so the reported failure is actionable.
+              this.runContextFailure = getErrorMessage(error);
+              console.warn('[KeepSeek] startup_stage', { stage: 'project-context', event: 'failed', message: this.runContextFailure });
+            }
           }
         } finally {
           if (ownsStartupContext()) {
             this.updateRequestContextReadiness();
             this.postStartupSettingsPatch();
+          } else if (this.runContextReadiness === 'loading') {
+            // The scan was superseded before it could conclude, so this owner will
+            // never publish again. Convergence now belongs to whichever operation
+            // replaced it. Between those two points the window must not sit on a
+            // "loading context" phase that no one will ever end: the replacement
+            // always re-resolves context (readiness returns to 'loading' itself),
+            // so declaring it deferred here is both safe and truthful — the next
+            // accepted send resolves the real instructions.
+            this.runContextReadiness = 'deferred';
+            this.updateRequestContextReadiness();
           }
         }
       })();
@@ -8676,6 +8706,48 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       sessionRecoveryReady: this.sessionRecoveryReady, initializationFailed: this.historyCleanupInitializationFailed,
       lastIssue: this.historyCleanupLastIssue ? { ...this.historyCleanupLastIssue } : undefined,
       catalogIssues: this.historyCleanupCatalogIssues?.map(issue => ({ ...issue })) };
+  }
+
+  /** Why the composer can or cannot accept a send, as plain booleans.
+   *
+   * Every gate that can hold `canSubmit` false, plus the operation that owns the
+   * window. A user reporting "the input is blocked" can then name the exact gate
+   * instead of guessing. Read-only display state: this never enters the static
+   * system prompt, session persistence or a trace. */
+  public getComposerReadinessDiagnostics() {
+    const snapshot = this.interactionSnapshot(this.stateRevision);
+    const interaction = this.currentInteractionForDiagnostics();
+    return { version: 1,
+      canSubmit: snapshot.canSubmit, phase: snapshot.phase,
+      waitingReason: snapshot.waitingReason, blockingReason: snapshot.blockingReason,
+      gates: {
+        sessionReady: this.sessionReady,
+        composerProjected: this.bootstrapHistoryProjected,
+        approvalDataReady: this.approvalDataReady,
+        modelReady: this.commandSettingsReadiness.mainModel === 'ready',
+        contextReady: this.runContextReadiness === 'ready' || this.runContextReadiness === 'deferred',
+        requestContextReady: this.requestContextReady,
+        sessionRecoveryReady: this.sessionRecoveryReady,
+        // Negative gates: true here means the fault is present, so a healthy
+        // window reports them false. Named explicitly to avoid reading them as
+        // "a closed gate" in the diagnostics.
+        interactionFailed: Boolean(this.interactionFailure),
+        runContextRefreshFailed: Boolean(this.runContextRefreshError)
+      },
+      runContextReadiness: this.runContextReadiness,
+      startupPhase: this.getStartupState().phase,
+      activeSessionMatchesInteraction: snapshot.sessionId === this.sessionStore.activeSessionId,
+      operation: interaction ? { kind: interaction.kind, phase: interaction.phase } : undefined,
+      commandSettingsReadiness: { ...this.commandSettingsReadiness }
+    };
+  }
+
+  /** The visible operation token, without exporting the coordinator. */
+  private currentInteractionForDiagnostics():
+    { kind: string; phase: string } | undefined {
+    const snapshot = this.interactionSnapshot(this.stateRevision);
+    if (!snapshot.operationId) return undefined;
+    return { kind: snapshot.phase === 'loading_session' ? 'navigation' : 'task', phase: snapshot.phase };
   }
 
   private historyCleanupError(error: unknown, phase: HistoryCleanupPhase): HistoryCleanupIssue {
@@ -9551,6 +9623,14 @@ function isAgentRequestMessage(type: WebviewMessage['type']): boolean {
   ]).has(type);
 }
 
+
+/** A context scan that lost ownership is not a fault: a newer navigation or a
+ * New click legitimately replaced it, and that owner resolves context itself.
+ * Matching the message is unavoidable because the ownership check throws a
+ * plain Error; the wording is fixed by `assertSessionContextOwner()`. */
+function isSupersededContextError(error: unknown): boolean {
+  return /Session preparation superseded/u.test(getErrorMessage(error));
+}
 
 /** True when running under the node test harness rather than a real VS Code host. */
 function isHeadlessTestHost(): boolean {

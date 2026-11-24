@@ -159,8 +159,16 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
    * record of its own: such a lease is neither a deletion proof nor a writer
    * lock, it only makes every other writer of the session wait behind one apply
    * and turns a slow share into "Storage gate is busy". */
-  public async saveWorkspace(workspaceScope: WorkspaceSessionScope, state: StoredWorkspaceSessionState): Promise<void> {
-    await withStorageCoordinator(this.rootUri, async () => this.saveWorkspaceCoordinated(workspaceScope, state));
+  public async saveWorkspace(workspaceScope: WorkspaceSessionScope, state: StoredWorkspaceSessionState,
+    options: { selectionOnly?: boolean } = {}): Promise<void> {
+    await withStorageCoordinator(this.rootUri, async () =>
+      this.saveWorkspaceCoordinated(workspaceScope, state, options));
+    // The workspace index is the authority for the active session; the global
+    // manifest is derived from it. A selection commit therefore becomes durable
+    // with the index write, and making the click wait for the derived manifest's
+    // own durable write buys nothing observable. It still gets refreshed — by
+    // the scheduled debounce that the save just armed.
+    if (options.selectionOnly) return;
     await this.flush();
   }
 
@@ -179,7 +187,8 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     });
   }
 
-  private async saveWorkspaceCoordinated(workspaceScope: WorkspaceSessionScope, state: StoredWorkspaceSessionState): Promise<void> {
+  private async saveWorkspaceCoordinated(workspaceScope: WorkspaceSessionScope, state: StoredWorkspaceSessionState,
+    options: { selectionOnly?: boolean } = {}): Promise<void> {
     const workspaceHash = getWorkspaceHash(workspaceScope.key);
     const existing = await this.readWorkspaceIndex(workspaceHash, workspaceScope);
     const entries = new Map((existing?.sessions ?? []).map((entry) => [entry.id, entry]));
@@ -194,9 +203,13 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
       });
     }
 
+    // A selection commit carries no session bytes at all: the caller passes an
+    // empty session list, so nothing is re-encoded and no shard revision moves.
     const sessions: ChatSession[] = [];
-    for (const session of state.sessions) if (session.messages.length && session.workspaceKey === workspaceScope.key
-      && !await this.isSessionDeleted(session.workspaceKey, session.id)) sessions.push(session);
+    if (!options.selectionOnly) {
+      for (const session of state.sessions) if (session.messages.length && session.workspaceKey === workspaceScope.key
+        && !await this.isSessionDeleted(session.workspaceKey, session.id)) sessions.push(session);
+    }
     await Promise.all(sessions.map(async (session) => {
       const byteLength = await this.objects(this.getSessionUri(workspaceHash, session.id)).save(session, toSessionSummary(session));
       entries.set(session.id, {
@@ -960,6 +973,16 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
 
   private getSessionsDirectoryUri(hash: string): vscode.Uri {
     return vscode.Uri.joinPath(this.getWorkspaceDirectoryUri(hash), 'sessions');
+  }
+
+  /**
+   * The folder holding one project's session shards and their object directories.
+   *
+   * Exposed for maintenance that must look at the files as files — notably object
+   * garbage collection, which has to see directories whose session is gone.
+   */
+  public getWorkspaceSessionsDirectoryUri(workspaceKey: string): vscode.Uri {
+    return this.getSessionsDirectoryUri(getWorkspaceHash(workspaceKey));
   }
 
   /** Location of the per-project session queue, next to this workspace's index. */

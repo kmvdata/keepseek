@@ -1388,6 +1388,15 @@ ${conversationsMenuDismissFragment.source}
           state.agentActivity = { base: 'idle', phase: 'idle' };
         }
         Object.assign(state, message.state);
+        // Every accepted snapshot can prove an in-flight submission is stale: a
+        // lost reply would otherwise block the composer for the window's whole
+        // life. Guarded with typeof so a reduced host context still applies state.
+        if (typeof pendingSubmission !== 'undefined' && pendingSubmission) {
+          if (pendingSubmission.sessionId !== state.activeSessionId) pendingSubmission = null;
+          else if ((state.interaction && state.interaction.sessionId === state.activeSessionId
+            ? state.interaction.canSubmit === true
+            : state.startup?.interactiveReady === true && !state.isBusy)) pendingSubmission = null;
+        }
         if (Array.isArray(state.sessionSummaries)) state.sessionSummaries = state.sessionSummaries.filter(function(summary) {
           return !historyCleanupDeletedSessionKeys.has(JSON.stringify([summary.workspaceKey || '', summary.id]))
             && !historyCleanupDeletedSessionIds.has(summary.id);

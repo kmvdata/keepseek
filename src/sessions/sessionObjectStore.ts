@@ -134,28 +134,58 @@ export class SessionObjectStore {
     try { return await vscode.workspace.fs.readFile(uri); }
     catch (error) { throw new SessionObjectReadError(error); }
   }
+  /** Bound concurrent object reads the same way the writer bounds writes.
+   *
+   * Decoding used to walk the graph one node at a time, so a 15-message session
+   * paid ~90 sequential file reads (measured ~130-200 ms). Siblings are
+   * independent, so they can share the disk queue; the cap keeps the descriptor
+   * count and the read burst identical in shape to the write path. */
+  private decodeSlots = 0;
+  private readonly decodeWaiters: Array<() => void> = [];
+  private async withDecodeSlot<T>(work: () => Promise<T>): Promise<T> {
+    if (this.decodeSlots >= 4) await new Promise<void>(resolve => this.decodeWaiters.push(resolve));
+    else this.decodeSlots++;
+    try { return await work(); }
+    finally { const next = this.decodeWaiters.shift(); if (next) next(); else this.decodeSlots--; }
+  }
   private async decode(hash: string, cache: Map<string, unknown>, stack = new Set<string>()): Promise<unknown> {
     if (stack.has(hash)) throw new Error('Cyclic session object');
     if (cache.has(hash)) return cache.get(hash);
-    const raw = new TextDecoder().decode(await this.readObject(hash));
-    if (digest(raw) !== hash) throw new Error('Session object integrity mismatch');
-    const node = JSON.parse(raw) as ObjectNode;
-    const nextStack = new Set(stack).add(hash);
-    return this.decodeNode(node, cache, nextStack, hash);
+    // Siblings decoding in parallel can request the same shared node (a tool
+    // result referenced by both a body and its checkpoint). Joining the in-flight
+    // read keeps content-addressed reuse intact and avoids a duplicate read.
+    const pending = this.decodePending.get(hash);
+    if (pending) {
+      await pending;
+      if (cache.has(hash)) return cache.get(hash);
+    }
+    const work = (async () => {
+      // The slot must cover only the read/verify/parse step. Holding it across
+      // the recursive descent would let parents occupy every slot while waiting
+      // on their own children, which serialises the walk again and can starve
+      // the leaves entirely.
+      const node = await this.withDecodeSlot(async () => {
+        const raw = new TextDecoder().decode(await this.readObject(hash));
+        if (digest(raw) !== hash) throw new Error('Session object integrity mismatch');
+        return JSON.parse(raw) as ObjectNode;
+      });
+      return this.decodeNode(node, cache, new Set(stack).add(hash), hash);
+    })();
+    this.decodePending.set(hash, work);
+    try { return await work; } finally { this.decodePending.delete(hash); }
   }
+  private readonly decodePending = new Map<string, Promise<unknown>>();
   private async decodeNode(node: ObjectNode, cache: Map<string, unknown>, stack: Set<string>, hash?: string): Promise<unknown> {
-    const child = async (value: Encoded): Promise<unknown> => value && typeof value === 'object'
-      ? 'ref' in value ? this.decode(value.ref, cache, stack) : this.decodeNode(value.inline, cache, stack) : value;
+    const child = (value: Encoded): Promise<unknown> => value && typeof value === 'object'
+      ? 'ref' in value ? this.decode(value.ref, cache, stack) : this.decodeNode(value.inline, cache, stack) : Promise.resolve(value);
     let value: unknown;
     if (node.kind === 'json') value = node.value;
     else if (node.kind === 'text') value = node.text;
     else if (node.kind === 'array') {
-      const values: unknown[] = [];
-      for (const item of node.values) values.push(await child(item));
-      value = values;
+      // Order is positional and preserved by Promise.all; only the reads overlap.
+      value = await Promise.all(node.values.map(child));
     } else if (node.kind === 'object') {
-      const entries: Array<[string, unknown]> = [];
-      for (const [key, item] of node.entries) entries.push([key, await child(item)]);
+      const entries = await Promise.all(node.entries.map(async ([key, item]) => [key, await child(item)] as const));
       value = Object.fromEntries(entries);
     } else throw new Error('Invalid session object kind');
     freezeTree(value);
