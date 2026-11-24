@@ -67,10 +67,12 @@ function client(hostDefaults) {
       ? 'Use the available width while preserving readable text and reachable controls. '
       : '充分使用聊天区域的横向空间，同时保留正文可读性和按钮操作空间。';
     const columns = Array.from({ length: 9 }, (_, i) => 'Column ' + (i + 1));
-    // A frozen gen-prompt body: a long unbroken line must scroll inside its own block.
+    // A frozen gen-prompt body: markdown list lines and unbreakable tokens must wrap.
     const promptBody = ['## Goal', '', 'Fix the frozen prompt block and its copy button.', '', '## Steps', '',
-      '1. Keep this line unbroken:', '', '   ' + 'unbroken-'.repeat(75), '',
-      '2. Confirm the transcript never scrolls sideways.'].join('\n');    return {
+      '- ' + 'unbroken-'.repeat(75), '',
+      '- ' + sentence.repeat(12), '',
+      '2. Confirm the transcript never scrolls sideways.'].join('\n');
+    return {
       language, approvalMode: 'ask', activeSessionId: 'layout', isBusy: false,
       startup: { phase: 'ready', interactiveReady: true, sideEffectsReady: true },
       interaction: { sessionId: 'layout', revision: revision + 1, phase: 'idle', canEdit: true,
@@ -87,7 +89,8 @@ function client(hostDefaults) {
         { id: 'frozen-prompt', role: 'assistant', createdAt: '2026-11-10T00:00:02Z',
           content: sentence.repeat(2),
           handoffPrompt: { version: 1, body: promptBody, bodyHash: 'a'.repeat(64) } }
-      ],      draftRuns: [], changeSets: [], approvalProcessing: null
+      ],
+      draftRuns: [], changeSets: [], approvalProcessing: null
     };
   }
   async function show(width, language, scale, themeName) {
@@ -145,15 +148,15 @@ function client(hostDefaults) {
     check(doc().documentElement.scrollWidth <= doc().documentElement.clientWidth + 1, 'document has no horizontal overflow');
     check(doc().body.scrollWidth <= doc().body.clientWidth + 1, 'body has no horizontal overflow');
     check(transcript.scrollWidth <= transcript.clientWidth + 1, 'transcript has no horizontal overflow');
-    /* A frozen gen-prompt block must fit the transcript: only its own pre scrolls. */
+    /* A frozen gen-prompt block must fit the transcript: its text wraps, nothing scrolls. */
     const promptBlock = inside('.message-prompt-block', width, scale);
     close(promptBlock.left, assistant.left, 'frozen prompt block aligns with the assistant gutter');
     close(promptBlock.width, assistant.width, 'frozen prompt block uses the assistant width');
     const promptCode = inside('.message-prompt-block .message-code-block', width, scale);
     close(promptCode.width, assistant.width, 'frozen prompt code block uses the assistant width');
     const promptPre = element('.message-prompt-block pre');
-    check(style(promptPre).overflowX === 'auto', 'frozen prompt owns horizontal scrolling');
-    check(promptPre.scrollWidth > promptPre.clientWidth, 'long frozen prompt line scrolls inside its block');
+    check(style(promptPre).whiteSpace === 'pre-wrap', 'frozen prompt uses pre-wrap');
+    check(promptPre.scrollWidth <= promptPre.clientWidth + 1, 'frozen prompt wraps inside its block');
     check(!doc().querySelector('.message-prompt-footer'), 'the frozen prompt has no bottom footer');
     const promptToolbar = rect('.message-prompt-block .message-code-toolbar');
     const promptCodeRect = rect('.message-prompt-block .message-code-block');
@@ -163,7 +166,8 @@ function client(hostDefaults) {
     check(promptCopyRect.bottom <= promptPre.getBoundingClientRect().top + 0.5,
       'frozen prompt copy button sits above the prompt text');
     check(promptCopyRect.right >= promptCodeRect.right - 8 && promptCopyRect.right <= promptCodeRect.right,
-      'frozen prompt copy button hugs the top-right corner');    for (const selector of ['#referenceMenuButton', '#commandMenuButton', '#executionModeButton', '#sendButton']) {
+      'frozen prompt copy button hugs the top-right corner');
+    for (const selector of ['#referenceMenuButton', '#commandMenuButton', '#executionModeButton', '#sendButton']) {
       const button = element(selector);
       const bounds = button.getBoundingClientRect();
       check(bounds.width / scale >= 24 && bounds.height / scale >= 24, selector + ' retains click target');

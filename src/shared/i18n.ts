@@ -224,8 +224,46 @@ const SESSION_TITLE_REFRESH_TRANSLATIONS: Record<KeepseekLanguage, TranslationCa
   }
 };
 
+/**
+ * The history row's "stop and leave the running list" copy.
+ *
+ * Both catalogs consume it: the Webview renders its tooltips through `t()`, while
+ * the host renders the confirmation, the blocked reason and the background-stop
+ * note through `localize()`. One definition is what keeps the two sides from
+ * drifting — a key the extension catalog is missing prints its own name.
+ */
+const SESSION_RUN_DISMISS_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> = {
+  'zh-CN': {
+    sessionRunDismissIdle: '退出进行时',
+    sessionRunDismissIdleHint: '把这一行移出“只看进行时”',
+    sessionRunDismissActive: '停止并退出进行时',
+    sessionRunDismissActiveHint: '中止该会话正在执行或等待的任务，并丢弃其待确认的改动与命令',
+    sessionRunDismissConfirm: '停止这个会话正在执行或等待的任务？会中止正在执行的任务，并丢弃该会话待确认的改动与命令。',
+    sessionRunDismissConfirmAction: '停止并退出',
+    sessionRunDismissBlocked: '未能退出进行时：{reason}',
+    sessionRunDismissBlockedRunning: '该会话仍在执行命令。',
+    sessionRunDismissBlockedWaiting: '该会话仍有必须由你处理的待确认工作。',
+    sessionRunDismissBlockedOther: '该会话仍有运行中的操作。',
+    sessionRunDismissStoppedByUser: '已由用户停止。'
+  },
+  en: {
+    sessionRunDismissIdle: 'Leave the running list',
+    sessionRunDismissIdleHint: 'Move this row out of working only',
+    sessionRunDismissActive: 'Stop and leave the running list',
+    sessionRunDismissActiveHint: 'Stop what this session is running or waiting for and discard its pending changes and commands',
+    sessionRunDismissConfirm: 'Stop what this session is running or waiting for? This aborts the running task and discards the changes and commands this session still has pending.',
+    sessionRunDismissConfirmAction: 'Stop and leave',
+    sessionRunDismissBlocked: 'Could not leave the running list: {reason}',
+    sessionRunDismissBlockedRunning: 'the session is still executing a command.',
+    sessionRunDismissBlockedWaiting: 'the session still has pending work only you can settle.',
+    sessionRunDismissBlockedOther: 'the session still has an operation in flight.',
+    sessionRunDismissStoppedByUser: 'Stopped by the user.'
+  }
+};
+
 export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> = {
   'zh-CN': {
+    ...SESSION_RUN_DISMISS_TRANSLATIONS['zh-CN'],
     approvalMode: '审批模式',
     approvalModeDescription: '为当前项目选择写入文件和运行命令的审批方式',
     approvalAsk: '请求批准',
@@ -1265,17 +1303,6 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
     sessionWithRunOnly: '只看进行时',
     sessionWithRunOnlyHint: '隐藏没有运行记录的会话',
     sessionWithRunOnlyEmpty: '没有运行过的会话',
-    sessionRunDismissIdle: '退出进行时',
-    sessionRunDismissIdleHint: '把这一行移出“只看进行时”',
-    sessionRunDismissActive: '停止并退出进行时',
-    sessionRunDismissActiveHint: '中止该会话正在执行或等待的任务，并丢弃其待确认的改动与命令',
-    sessionRunDismissConfirm: '停止这个会话正在执行或等待的任务？会中止正在执行的任务，并丢弃该会话待确认的改动与命令。',
-    sessionRunDismissConfirmAction: '停止并退出',
-    sessionRunDismissBlocked: '未能退出进行时：{reason}',
-    sessionRunDismissBlockedRunning: '该会话仍在执行命令。',
-    sessionRunDismissBlockedWaiting: '该会话仍有必须由你处理的待确认工作。',
-    sessionRunDismissBlockedOther: '该会话仍有运行中的操作。',
-    sessionRunDismissStoppedByUser: '已由用户停止。',
     sessionMultiSelect: '编辑',
     sessionExitMultiSelect: '完成',
     sessionSelectAll: '全选',
@@ -1356,6 +1383,7 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
     stopShortcutHintMac: '按 Ctrl+Enter 或 Command+Enter 中止'
   },
   en: {
+    ...SESSION_RUN_DISMISS_TRANSLATIONS.en,
     approvalMode: 'Approvals',
     approvalModeDescription: 'Choose project-wide approval for file writes and commands',
     approvalAsk: 'Ask for approval',
@@ -2395,17 +2423,6 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
     sessionWithRunOnly: 'working only',
     sessionWithRunOnlyHint: 'Hide conversations without a run',
     sessionWithRunOnlyEmpty: 'No sessions have run yet',
-    sessionRunDismissIdle: 'Leave the running list',
-    sessionRunDismissIdleHint: 'Move this row out of working only',
-    sessionRunDismissActive: 'Stop and leave the running list',
-    sessionRunDismissActiveHint: 'Stop what this session is running or waiting for and discard its pending changes and commands',
-    sessionRunDismissConfirm: 'Stop what this session is running or waiting for? This aborts the running task and discards the changes and commands this session still has pending.',
-    sessionRunDismissConfirmAction: 'Stop and leave',
-    sessionRunDismissBlocked: 'Could not leave the running list: {reason}',
-    sessionRunDismissBlockedRunning: 'the session is still executing a command.',
-    sessionRunDismissBlockedWaiting: 'the session still has pending work only you can settle.',
-    sessionRunDismissBlockedOther: 'the session still has an operation in flight.',
-    sessionRunDismissStoppedByUser: 'Stopped by the user.',
     sessionMultiSelect: 'Edit',
     sessionExitMultiSelect: 'Done',
     sessionSelectAll: 'Select all',
@@ -2491,6 +2508,7 @@ const EXTENSION_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> = {
   'zh-CN': {
     ...TASK_APPROVAL_TRANSLATIONS['zh-CN'],
     ...SESSION_TITLE_REFRESH_TRANSLATIONS['zh-CN'],
+    ...SESSION_RUN_DISMISS_TRANSLATIONS['zh-CN'],
     noModelSourceConfigured: '尚未配置任何模型来源，请先添加账号。',
     runRecoveryTurnKindChanged: '该任务保存时的轮次类型与当前消息不一致，不能原位恢复；请发起新请求。',
     runContinue: '继续任务',
@@ -2664,6 +2682,7 @@ const EXTENSION_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> = {
   en: {
     ...TASK_APPROVAL_TRANSLATIONS.en,
     ...SESSION_TITLE_REFRESH_TRANSLATIONS.en,
+    ...SESSION_RUN_DISMISS_TRANSLATIONS.en,
     noModelSourceConfigured: 'No model source is configured yet. Add an account to continue.',
     runRecoveryTurnKindChanged: 'The saved task was a different kind of turn. It cannot be resumed in place; start a new request.',
     runContinue: 'Continue task',

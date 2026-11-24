@@ -1686,6 +1686,15 @@ ${conversationsStylesFragment.source}
       margin: 0;
     }
 
+    /* The frozen body is markdown prose, not code: wrap it so a long list item or an
+       unbreakable token cannot widen the block past the transcript. Ordinary code blocks
+       keep 'white-space: pre' and their own local horizontal scrolling. */
+    .message-prompt-block .message-code-block pre,
+    .message-prompt-block .message-code-block code {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
     .message-prompt-title {
       color: var(--vscode-descriptionForeground);
       font-size: 11px;

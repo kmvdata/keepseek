@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import { normalizeHandoffPromptBlock, renderGeneratedHandoffPrompt } from '../src/agent/handoffPrompt';
+import { getStyles } from '../src/webview/styles';
 import { getScript } from '../src/webview/script';
 
 /** A body that already contains markdown fences: the block must render it verbatim. */
@@ -163,4 +164,17 @@ test('the frozen body is the authored prompt alone, with measured hashes only af
   assert.ok(anchored.body.startsWith('Update src/a.ts.'), anchored.body);
   assert.ok(anchored.body.endsWith('## File-content SHA-256 at inspection\n\n- `./src/a.ts` — `'
     + 'b'.repeat(64) + '`'), anchored.body);
+});
+
+test('the frozen prompt block wraps like prose instead of scrolling sideways', () => {
+  const styles = getStyles();
+  const promptRule = /\.message-prompt-block \.message-code-block pre,\s*\n\s*\.message-prompt-block \.message-code-block code \{([^}]*)\}/u.exec(styles);
+  assert.ok(promptRule, 'the frozen prompt block owns one wrap rule for pre and code');
+  assert.match(promptRule[1], /white-space:\s*pre-wrap;/u);
+  assert.match(promptRule[1], /overflow-wrap:\s*anywhere;/u);
+  // The wrap must stay local: ordinary code blocks keep preformatted local scrolling.
+  const codeRule = /\.message-code-block pre \{([^}]*)\}/u.exec(styles);
+  assert.ok(codeRule, 'the ordinary code block keeps its own rule');
+  assert.match(codeRule[1], /white-space:\s*pre;/u);
+  assert.doesNotMatch(codeRule[1], /pre-wrap/u);
 });

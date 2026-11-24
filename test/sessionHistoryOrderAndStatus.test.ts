@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { test } from 'node:test';
 import { getScript } from '../src/webview/script';
-import { WEBVIEW_TRANSLATIONS } from '../src/shared/i18n';
+import { WEBVIEW_TRANSLATIONS, localize } from '../src/shared/i18n';
 import { conversationsStylesFragment } from '../src/webview/conversations/styles';
 import { ChatSessionStore, normalizeStoredSessions, sortSessionSummariesByCreatedAt } from '../src/sessions/chatSessionStore';
 import { GlobalSessionStorage } from '../src/sessions/globalSessionStorage';
@@ -416,6 +416,23 @@ test('the history row stop square follows the projected kind', () => {
   }
   assert.match(zh.sessionRunDismissConfirm, /待确认的改动与命令/u,
     'the confirmation names the pending changes and commands it discards');
+
+  // The host renders the same copy through localize(), which prints the key itself
+  // when the extension catalog is missing it, so both catalogs must resolve it.
+  for (const language of ['zh-CN', 'en'] as const) {
+    for (const key of ['sessionRunDismissConfirm', 'sessionRunDismissConfirmAction',
+      'sessionRunDismissBlocked', 'sessionRunDismissBlockedRunning', 'sessionRunDismissBlockedWaiting',
+      'sessionRunDismissBlockedOther', 'sessionRunDismissStoppedByUser']) {
+      assert.notEqual(localize(language, key), key, `localize('${language}') resolves ${key}`);
+    }
+  }
+  const blockedZh = localize('zh-CN', 'sessionRunDismissBlocked', { reason: '原因' });
+  assert.ok(blockedZh.includes('原因'), 'the blocked template receives its reason');
+  assert.ok(!blockedZh.includes('{reason}'), 'the blocked template leaves no placeholder behind');
+  const blockedEn = localize('en', 'sessionRunDismissBlocked', { reason: 'busy' });
+  assert.ok(blockedEn.includes('busy') && !blockedEn.includes('{reason}'),
+    'the English blocked template fills its reason too');
+
   assert.equal(zh.sessionWithRunOnly, '只看进行时', 'the filter label stays untouched');
 });
 

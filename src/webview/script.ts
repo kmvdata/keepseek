@@ -6382,13 +6382,9 @@ ${conversationsSessionListFragment.source}
       var block = createMarkdownCodeBlock('markdown', prompt.body);
       var toolbar = block.querySelector('.message-code-toolbar');
       var copy = toolbar ? toolbar.querySelector('button[data-code-action="copy"]') : null;
-      if (copy) {
-        copy.classList.add('message-prompt-copy');
-        var footer = document.createElement('div');
-        footer.className = 'message-prompt-footer';
-        footer.append(copy);
-        block.append(footer);
-      }
+      // The code-block toolbar already renders the copy button at its right edge, which is
+      // the top-right corner of this block; no footer row is added.
+      if (copy) copy.classList.add('message-prompt-copy');
       wrapper.append(heading, block);
       return wrapper;
     }
