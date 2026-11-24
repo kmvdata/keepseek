@@ -11,6 +11,7 @@ import { classifyHistoryCleanupError, localizeHistoryCleanupIssue, HistoryCleanu
 import { SessionUseConflictError } from '../sessions/sessionDeletionAuthority';
 import { InteractionCoordinator, deriveSessionTitleCapability, deriveHistoryCleanupCapability, type InteractionOperation, type InteractionPhase } from './interactionState';
 import { SessionRunRegistry } from './sessionRunRegistry';
+import { projectSessionRunStatuses, type SessionLastRunObservation, type SessionRunStatusView } from './sessionRunStatus';
 import { installWriteGateAuthority, type WriteGateResult } from '../sessions/queue/writeGate';
 import { checkWritePermission, type WriteCapability } from '../sessions/queue/modeGate';
 import { ProjectWriteLeaseStore } from '../sessions/queue/writeLeaseStore';
@@ -454,6 +455,87 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     return Boolean(this.sessionRuns?.isRunning(sessionId));
   }
 
+  /**
+   * One display status per listed conversation.
+   *
+   * Display-only: it reads the run registry, the background coordinator and the
+   * last checkpoint, and never writes, approves or reorders anything. Only the
+   * current workspace's summary ids are projected; another workspace's entry has
+   * no message body here, so it stays unprojected instead of inventing a status.
+   */
+  private sessionRunStatusViews(): Record<string, SessionRunStatusView> {
+    const backgroundRun = this.backgroundRunCoordinator.getActiveRun();
+    return projectSessionRunStatuses({
+      sessionIds: this.sessionStore.getSessionSummaries().map(summary => summary.id),
+      runningSessionIds: this.sessionRuns.activeSessionIds(),
+      ...(backgroundRun ? { backgroundRun: { sessionId: backgroundRun.sessionId, status: backgroundRun.status } } : {}),
+      ...(this.activeDraftRunSessionId ? { commandRunSessionId: this.activeDraftRunSessionId } : {}),
+      liveFailures: this.sessionRunFailures,
+      readLastRun: (sessionId) => this.readLastRunObservation(sessionId)
+    });
+  }
+
+  /**
+   * Durable last-run summary for one conversation, taken from the newest
+   * assistant message that recorded a checkpoint (or its archive).
+   *
+   * The scan stops at the first hit and its position is memoized by message-array
+   * identity plus length: unchanged history reuses the index while the checkpoint
+   * fields are re-read live, so progress and draft reconciliation are never served
+   * stale and a new message invalidates the memo. A session that is not loaded
+   * returns nothing instead of forcing a history read, so a badge can never pull
+   * an old conversation into memory.
+   */
+  private readLastRunObservation(sessionId: string): SessionLastRunObservation | undefined {
+    const session = this.sessionStore.getSessionById(sessionId);
+    if (!session) return undefined;
+    const messages = session.messages;
+    const memo = this.lastRunIndex.get(sessionId);
+    const index = memo && memo.messages === messages && memo.length === messages.length
+      ? memo.index
+      : this.findLastRunMessageIndex(messages);
+    if (index < 0) return undefined;
+    if (!memo || memo.messages !== messages || memo.length !== messages.length || memo.index !== index) {
+      this.lastRunIndex.set(sessionId, { messages, length: messages.length, index });
+    }
+    const message = messages[index];
+    const checkpoint = message.runCheckpoint;
+    if (checkpoint) {
+      return {
+        status: checkpoint.status,
+        ...(checkpoint.stopReason ? { stopReason: checkpoint.stopReason } : {}),
+        ...(checkpoint.error ? { error: checkpoint.error } : {}),
+        pendingUser: (checkpoint.state?.validationState?.pendingDraftEditIds?.length ?? 0) > 0,
+        ...(checkpoint.updatedAt ? { updatedAt: checkpoint.updatedAt } : {}),
+        source: 'checkpoint'
+      };
+    }
+    const archive = message.runCheckpointArchive?.summary;
+    if (!archive) return undefined;
+    // The archived summary is a historical projection; only a status this view
+    // understands is adopted, so an unknown value degrades to "no conclusion".
+    const archivedStatus: SessionLastRunObservation['status'] = archive.status === 'running'
+      || archive.status === 'interrupted' || archive.status === 'completed'
+      || archive.status === 'blocked' ? archive.status : undefined;
+    return {
+      ...(archivedStatus ? { status: archivedStatus } : {}),
+      ...(archive.stopReason ? { stopReason: archive.stopReason } : {}),
+      ...(archive.error ? { error: archive.error } : {}),
+      ...(archive.blocker ? { blocker: archive.blocker } : {}),
+      source: 'archive'
+    };
+  }
+
+  private findLastRunMessageIndex(messages: readonly ChatMessage[]): number {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (message.role === 'assistant' && (message.runCheckpoint || message.runCheckpointArchive?.summary)) {
+        return index;
+      }
+    }
+    return -1;
+  }
+
   private interactionCoordinator?: InteractionCoordinator;
   /** Host mutual-exclusion guard; UI capabilities come from interactionState. */
   /** True when the VIEWED session has an operation in flight, not any session. */
@@ -641,6 +723,14 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.currentRunAbortController = controller;
   }
   private readonly sessionRuns = new SessionRunRegistry();
+  /**
+   * Live failure marks for the history list. `failed` is a host observation, not
+   * a durable conclusion: a reload drops it and the list falls back to whatever
+   * the last checkpoint proves. A session's next run clears its mark.
+   */
+  private readonly sessionRunFailures = new Map<string, { at: string; detail?: string }>();
+  /** Cached last-run message index per session; invalidated by a new message. */
+  private readonly lastRunIndex = new Map<string, { messages: readonly ChatMessage[]; length: number; index: number }>();
   private activeDraftRunId: string | undefined;
   /** Session that owns the command (DraftRun) currently executing. */
   private activeDraftRunSessionId: string | undefined;
@@ -6802,6 +6892,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       streamPublisher.resetAttempt();
       this.setAgentActivity({ base: 'thinking', phase: 'requesting_model', detail: this.t('runRecoveryNotice') });
       let usage: TurnUsageStats | undefined;
+    this.sessionRunFailures.delete(session.id);
     this.sessionRuns.tryStart(session.id);
       this.setInteractionPhase('running', operation);
       const response = await this.agentRunner.run({
@@ -7697,6 +7788,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         // any Provider request. No approval/permit is copied by this transition.
         await this.saveAgentCheckpoint(activeSession, assistantMessage, agentRequest.checkpoint);
       }
+      this.sessionRunFailures.delete(activeSession.id);
       this.sessionRuns.tryStart(activeSession.id);
       this.setInteractionPhase('running', options?.interactionOperation);
       const response = await this.agentRunner.run(agentRequest, {
@@ -7985,7 +8077,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           modelId: model.id
         });
       }
-      this.updateActiveSessionContextUsage(this.createCurrentSessionContextUsage(model));
       this.setAgentActivity({
         base: 'error',
         phase: 'failed'

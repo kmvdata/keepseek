@@ -1029,9 +1029,8 @@ export class ChatSessionStore {
       if (session.messages.length) this.sessionSummaries.set(session.id, toSessionSummary(session, this.language));
       else this.sessionSummaries.delete(session.id);
     }
-    return Array.from(this.sessionSummaries.values())
-      .filter((summary) => summary.workspaceKey === this.workspaceScope.key)
-      .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+    return sortSessionSummariesByCreatedAt(Array.from(this.sessionSummaries.values())
+      .filter((summary) => summary.workspaceKey === this.workspaceScope.key));
   }
 
   public async getAllWorkspaceSummaries(): Promise<WorkspaceSummary[]> {
@@ -2233,6 +2232,31 @@ function normalizeSummaryProvenance(value: unknown): HistorySummary['provenance'
 function createTitleFromMessages(messages: ChatMessage[], language: KeepseekLanguage = getConfiguredKeepseekLanguage()): string {
   const firstUserMessage = messages.find((message) => message.role === 'user');
   return firstUserMessage ? createSessionTitle(firstUserMessage.content, language) : localize(language, 'defaultSessionTitle');
+}
+
+/**
+ * Display order for the history list: newest creation first, with the id as a
+ * tie-break so two sessions created in the same millisecond never swap places.
+ *
+ * Only `createdAt` moves a row on purpose: browsing, streaming, saving or
+ * favouriting a conversation changes `updatedAt`, and a list that followed it
+ * reshuffled itself under the user's cursor. "Which conversations are kept" is a
+ * separate question and keeps using `sortSessionsByUpdatedAt`, as do the
+ * cross-workspace index and the retention pass.
+ */
+export function sortSessionSummariesByCreatedAt(sessions: ChatSessionSummary[]): ChatSessionSummary[] {
+  return [...sessions].sort((left, right) => {
+    const byCreation = getSessionCreatedTimestamp(right) - getSessionCreatedTimestamp(left);
+    if (byCreation) return byCreation;
+    return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
+  });
+}
+
+export function getSessionCreatedTimestamp(session: ChatSessionSummary): number {
+  const createdAt = Date.parse(session.createdAt);
+  if (Number.isFinite(createdAt)) return createdAt;
+  const updatedAt = Date.parse(session.updatedAt);
+  return Number.isFinite(updatedAt) ? updatedAt : 0;
 }
 
 export function sortSessionsByUpdatedAt(sessions: ChatSession[]): ChatSession[] {

@@ -83,6 +83,9 @@ export const conversationsSessionListFragment: WebviewFragment = {
       // not changed, including full Host snapshots after Webview ready.
       var renderKey = getSessionMenuRenderKey(sessions);
       if (renderKey === sessionMenuRenderKey) {
+        // A live status change must never rebuild the panel: patch the badges only,
+        // so a rename input keeps its focus, caret and scroll position.
+        syncSessionStatusBadges(sessions);
         return;
       }
       sessionMenuRenderKey = renderKey;

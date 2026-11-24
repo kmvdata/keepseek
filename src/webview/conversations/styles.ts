@@ -260,6 +260,55 @@ export const conversationsStylesFragment: WebviewFragment = {
       gap: 3px;
     }
 
+    /* Run-status hint on one history row. Display only: it never reorders the
+       list, never expresses a permission and never becomes a write criterion. */
+    .session-status-badge {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      margin-right: 5px;
+      border-radius: 50%;
+      background: var(--vscode-descriptionForeground);
+      vertical-align: middle;
+    }
+
+    .session-status-badge.is-running {
+      background: var(--vscode-charts-blue, var(--vscode-textLink-foreground));
+      animation: session-status-pulse 1.4s ease-in-out infinite;
+    }
+
+    .session-status-badge.is-waiting {
+      background: var(--vscode-charts-yellow, var(--vscode-editorWarning-foreground, var(--vscode-descriptionForeground)));
+    }
+
+    .session-status-badge.is-failed {
+      background: var(--vscode-errorForeground);
+    }
+
+    .session-status-badge.is-stopped {
+      background: var(--vscode-editorWarning-foreground, var(--vscode-descriptionForeground));
+    }
+
+    .session-status-badge.is-completed {
+      background: var(--vscode-testing-iconPassed, var(--vscode-charts-green, var(--vscode-descriptionForeground)));
+    }
+
+    .session-status-badge.is-idle {
+      background: var(--vscode-descriptionForeground);
+      opacity: 0.45;
+    }
+
+    @keyframes session-status-pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.35; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .session-status-badge.is-running {
+        animation: none;
+      }
+    }
+
     .session-menu-empty {
       padding: 12px 8px;
       color: var(--vscode-descriptionForeground);

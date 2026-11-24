@@ -50,6 +50,7 @@ export function getScript(): string {
       activeSessionId: '',
       workspaceFolders: [],
       sessionSummaries: [],
+      sessionRunStatuses: {},
       contextFiles: [],
       skills: {
         workspaceTrusted: true,
