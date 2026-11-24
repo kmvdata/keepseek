@@ -22,6 +22,7 @@ import './writeLease.test';
 import './sessionObjectGc.test';
 import './sessionOpenLazy.test';
 import './composerReadinessGate.test';
+import './webviewHelperResolution.test';
 import { after } from 'node:test';
 
 // The provider's startup schedules interval timers; a completed run must not

@@ -83,7 +83,6 @@ export const composerRenderFragment: WebviewFragment = {
         renderActiveSkillsBar();
         renderContextProgress();
         renderCommandMenu();
-        renderExecutionModeControl();
         renderReferenceMenuButton();
         if (referenceMenuOpen && referenceMenuSource === 'skill') {
           renderReferenceMenu();
