@@ -90,7 +90,7 @@ test/                  按行为契约组织的回归测试
 ### 3.4 审批与子代理
 
 - 审批模式只有 `ask`（请求批准）和 `approve-all`（全部批准）两种，只有 Webview 用户操作可切换，不存在 reviewer 或审批模型。`ask` 逐项由用户确认，宿主从不自行应用文件修改。`approve-all` 由宿主在运行边界无确认地应用 DraftEdit/ChangeSet 并执行 DraftRun，但每一份写入仍按原样复核身份、范围、hash、信任与截断前置条件。命令依赖本轮文件改动时，完成 Apply 和落盘核验后再执行当前版本。工程命令和固定验证默认使用平台隔离，未满足隔离条件时保留未派发原因。仅用户级 `projectExecution=host` 可显式选择宿主权限执行。
-- 当前审批策略为 v9。发布使用核实的目的地、引用、实际推送对象与执行计划。高影响业务须有覆盖真实目标的授权并经模型批准。精确用户补充提供授权，之后仍需模型决定。模型不可用时保留审计和暂停原因，独立项可推进。请求绑定 session/rootTask/segment/target/hash/范围/策略/runtime。等待不占模型超时，重启后显式恢复并重新核验。硬阻断与适用拒绝约束两种模式，历史批准不授权新操作，也不存在独立审批模型配置。
+- 审批策略版本以源码常量为准，文档不固定数字。发布使用核实的目的地、引用、实际推送对象与执行计划。高影响业务须有覆盖真实目标的用户授权，之后仍需模型决定。请求绑定 session/rootTask/segment/target/hash/范围/策略/runtime。等待不占模型超时，重启后显式恢复并重新核验。硬阻断与适用拒绝约束两种模式，历史批准不授权新操作，也不存在独立审批模型配置；`approvalReview` 只是历史审计字段，没有 reviewer 或续跑路径。
 - 副作用先过硬检查，再按完整 canonical payload/specHash 计算 actionHash。批准不跨 session/run/target/kind/policy/runtime 复用，重启不复用旧批准。
 - `approve-all` 的作用域是**整个工程**，不是当前会话：一次 pass 按队列顺序遍历项目内所有存在 pending 草稿的会话，每会话每 pass 推进一个单元，写入本身触发下一次边界。别人的会话在用户不在看时也会被服务，但命令派发仍留给该会话被打开时执行。
 - `approve-all` 不变式：任何仍 pending 的文件草稿，要么已有排定的下一次尝试（`approveAllTimer` / `approveAllInFlight` / `approveAllRerun`），要么已有记录在 ledger 的不可自动原因，并在卡片上提供可见的手动入口。调度不得丢请求：pass 期间的触发排队（`approveAllRerun`）而不是丢弃。每个边界对同一草稿最多尝试一次，失败立即降级到人工，不在同一 pass 内重试、不退避风暴。槽位释放是独立触发（`slot_released`），覆盖 `inheritedOperation` 流程，不依赖 `run_end` 时序。人工回退只覆盖 DraftEdit/ChangeSet，且只允许非硬 gate；未信任、待截断、身份/hash 不匹配、未授权外部路径不得提供强行应用。DraftRun 与 validation 没有手动回退。
