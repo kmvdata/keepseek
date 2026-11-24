@@ -174,6 +174,35 @@ test('a settled auto-approved round turns green instead of staying waiting', () 
   });
   assert.equal(durableOnly.a.kind, 'completed',
     'a durable blocked checkpoint alone never proves the user still owes an answer');
+
+  // The stored summary of a finished run records why it cannot be resumed, and
+  // that reason literally reads "Task already completed". Trusting it painted a
+  // settled row blue forever, so the conclusion outranks its own resume blocker.
+  const completedWithResumeBlocker = projectSessionRunStatuses({
+    sessionIds: ['a'],
+    readLastRun: () => ({ status: 'completed', blocker: 'Task already completed / 任务已完成', source: 'archive' })
+  });
+  assert.equal(completedWithResumeBlocker.a.kind, 'completed',
+    'a finished run stays green even though resuming it is impossible');
+  assert.equal(completedWithResumeBlocker.a.detail, undefined,
+    'the resume blocker never becomes the row explanation');
+
+  const concludedButLiveWork = projectSessionRunStatuses({
+    sessionIds: ['a'],
+    awaitingUserSessionIds: new Set(['a']),
+    readLastRun: () => ({ status: 'completed', blocker: 'Task already completed / 任务已完成', source: 'archive' })
+  });
+  assert.equal(concludedButLiveWork.a.kind, 'waiting',
+    'live pending work still outranks a finished status');
+  assert.equal(concludedButLiveWork.a.detail, 'pending_user_action',
+    'the row explains the live work it waits for, never the resume blocker');
+
+  const unresolvedBlocker = projectSessionRunStatuses({
+    sessionIds: ['a'],
+    readLastRun: () => ({ status: 'interrupted', blocker: 'No-progress state is preserved', source: 'archive' })
+  });
+  assert.equal(unresolvedBlocker.a.kind, 'waiting',
+    'a run that did not conclude still waits through the reason it cannot resume');
 });
 
 /** The panel side of the same contract: creation order, one live status marker

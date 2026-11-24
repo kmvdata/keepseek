@@ -14,6 +14,11 @@ import type { BackgroundRunStatus, ChatMessage, ChatSession } from '../shared/ty
  * and those ids are not proof that the user still owes an answer: an approve-all
  * round applies the ChangeSet by itself, so the durable set can outlive the work
  * it described. Trusting it kept a settled row blue forever.
+ *
+ * A durable `blocker` is a *resume* reason, not proof that the user still owes an
+ * answer: `recoveryBlocker()` reports "Task already completed" for a finished
+ * checkpoint, so a completed run carries a blocker that must never outrank its
+ * own conclusion. A row whose last run concluded stays green.
  */
 export type SessionRunStatusKind = 'running' | 'waiting' | 'failed' | 'stopped' | 'completed' | 'idle';
 
@@ -31,6 +36,8 @@ export interface SessionLastRunObservation {
   status?: 'running' | 'interrupted' | 'completed' | 'blocked';
   stopReason?: string;
   error?: string;
+  /** Why the run cannot resume on its own. "Already completed" is such a reason,
+   * so it never counts as waiting work: a concluded status outranks it. */
   blocker?: string;
   updatedAt?: string;
   source?: 'checkpoint' | 'archive';
@@ -125,7 +132,10 @@ function waitingDetail(
   awaitingUser: boolean
 ): string | undefined {
   if (background === 'waiting_for_apply' || background === 'waiting_for_authorization') return background;
-  if (lastRun?.blocker) return lastRun.blocker;
+  // A blocker explains why the run cannot resume by itself, and one of its values
+  // is "the task is already completed". Only a run that did not conclude can still
+  // owe the user an answer, so the conclusion outranks its resume blocker.
+  if (lastRun && lastRun.blocker && lastRun.status !== 'completed') return lastRun.blocker;
   if (awaitingUser) return 'pending_user_action';
   return undefined;
 }
