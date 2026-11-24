@@ -1,4 +1,4 @@
-import type { BackgroundRunStatus } from '../shared/types';
+import type { BackgroundRunStatus, ChatMessage, ChatSession } from '../shared/types';
 
 /**
  * Display-only projection of one conversation's run status for the history list.
@@ -128,4 +128,49 @@ function waitingDetail(
   if (lastRun?.blocker) return lastRun.blocker;
   if (awaitingUser) return 'pending_user_action';
   return undefined;
+}
+
+/** Durable identity of one run: which message proves it and when it was last seen. */
+export interface SessionRunEvidence {
+  messageId: string;
+  /** Newest timestamp the durable proof still carries; absent when it carries none. */
+  proofAt?: string;
+}
+
+/** The session header's "the user already dismissed this run" marker. */
+export type SessionRunStatusDismissal = NonNullable<ChatSession['runStatusDismissal']>;
+
+/**
+ * The single derivation of "which run is this session's newest durable proof".
+ *
+ * Reading the badge and writing the dismissal marker both go through here, so a
+ * marker can never describe a different message than the one the projection reads.
+ * The archived projection drops `updatedAt`, so an archived run carries no
+ * `proofAt` and its identity rests on the message id alone.
+ */
+export function deriveSessionRunEvidence(message: ChatMessage): SessionRunEvidence {
+  const proofAt = message.runCheckpoint?.updatedAt;
+  return { messageId: message.id, ...(proofAt ? { proofAt } : {}) };
+}
+
+/**
+ * True when the user already left exactly this run.
+ *
+ * Identity is the message id, so a new run — a new assistant message — always
+ * re-surfaces the row. A known timestamp must still match, which is what makes a
+ * refreshed checkpoint on the same message visible again. An archived run keeps no
+ * timestamp, so a dismissal recorded against the checkpoint form still covers the
+ * archived form of the same message; otherwise a completed and already archived
+ * row could never leave the list. Two forms that both lack a timestamp match on
+ * identity alone: that is the remaining looseness, and it is deliberate, because
+ * such a run can only be re-dated by a new checkpoint on the same message.
+ */
+export function isSessionRunDismissed(
+  dismissal: SessionRunStatusDismissal | undefined,
+  evidence: SessionRunEvidence | undefined
+): boolean {
+  if (!dismissal || !evidence) return false;
+  if (dismissal.messageId !== evidence.messageId) return false;
+  if (!dismissal.proofAt) return !evidence.proofAt;
+  return !evidence.proofAt || dismissal.proofAt === evidence.proofAt;
 }

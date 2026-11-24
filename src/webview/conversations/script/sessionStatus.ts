@@ -94,6 +94,45 @@ export const conversationsSessionStatusFragment: WebviewFragment = {
       return applyRunStatusBadge(badge, sessionRunStatusEntry(sessionId));
     }
 
+    /** Only a live run or a session waiting for the user needs a confirmation. */
+    function sessionRunStopsLiveWork(sessionId) {
+      var kind = sessionRunStatusKind(sessionRunStatusEntry(sessionId));
+      return kind === 'running' || kind === 'waiting';
+    }
+
+    /** Hollow square: leave a finished run. Solid square: stop a live one first. */
+    function applyRunStopButton(button, sessionId) {
+      var live = sessionRunStopsLiveWork(sessionId);
+      var label = live ? t('sessionRunDismissActive') : t('sessionRunDismissIdle');
+      var hint = live ? t('sessionRunDismissActiveHint') : t('sessionRunDismissIdleHint');
+      button.dataset.runStopShape = live ? 'solid' : 'hollow';
+      button.setAttribute('aria-label', label);
+      button.title = hint ? label + ': ' + hint : label;
+      button.innerHTML = live
+        ? '<svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="2.5" y="2.5" width="11" height="11" rx="1.5" fill="currentColor"/></svg>'
+        : '<svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="2.5" y="2.5" width="11" height="11" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>';
+      return button;
+    }
+
+    /** A row with no run keeps the stop column as an inert spacer: no action,
+     * nothing focusable, and the row grid never shifts when a status arrives. */
+    function renderSessionRunStopButton(sessionId) {
+      if (!sessionHasRun(sessionId)) {
+        var spacer = document.createElement('span');
+        spacer.className = 'session-menu-run-stop is-empty';
+        spacer.setAttribute('aria-hidden', 'true');
+        spacer.dataset.sessionStopId = sessionId;
+        return spacer;
+      }
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'session-menu-run-stop';
+      button.dataset.sessionAction = 'dismissSessionRun';
+      button.dataset.sessionId = sessionId;
+      button.dataset.sessionStopId = sessionId;
+      return applyRunStopButton(button, sessionId);
+    }
+
     /** Patch the markers in place: a live status change must never rebuild the
      * panel and steal the caret out of a rename input. */
     function syncSessionStatusBadges(sessions) {
@@ -102,6 +141,11 @@ export const conversationsSessionStatusFragment: WebviewFragment = {
         var sessionId = sessions[i].id;
         var badge = sessionMenu.querySelector('[data-session-status-id="' + cssEscape(sessionId) + '"]');
         if (badge instanceof HTMLElement) applyRunStatusBadge(badge, sessionRunStatusEntry(sessionId));
+        // The stop square is part of the same live surface: patch its shape and
+        // labels instead of rebuilding the row under an open rename input. Idle
+        // rows carry a spacer, so the button selector deliberately misses them.
+        var stopButton = sessionMenu.querySelector('button[data-session-stop-id="' + cssEscape(sessionId) + '"]');
+        if (stopButton instanceof HTMLElement) applyRunStopButton(stopButton, sessionId);
       }
     }`.slice(1)
 };

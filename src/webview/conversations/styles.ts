@@ -152,8 +152,8 @@ export const conversationsStylesFragment: WebviewFragment = {
 
     .session-menu-item {
       display: grid;
-      /* [status] [favourite] [main] [rename] */
-      grid-template-columns: 12px 24px minmax(0, 1fr) 28px;
+      /* [status] [favourite] [main] [stop] [rename] */
+      grid-template-columns: 12px 24px minmax(0, 1fr) 28px 28px;
       align-items: center;
       gap: 6px;
       width: 100%;
@@ -168,7 +168,7 @@ export const conversationsStylesFragment: WebviewFragment = {
     }
 
     .session-menu.is-multi-select .session-menu-item {
-      grid-template-columns: 18px 12px 24px minmax(0, 1fr) 28px;
+      grid-template-columns: 18px 12px 24px minmax(0, 1fr) 28px 28px;
     }
 
     .session-menu-item.is-other-workspace {
@@ -272,9 +272,44 @@ export const conversationsStylesFragment: WebviewFragment = {
     }
 
     .session-menu-item:hover .session-menu-rename,
-    .session-menu-item:focus-within .session-menu-rename {
+    .session-menu-item:focus-within .session-menu-rename,
+    .session-menu-item:hover .session-menu-run-stop,
+    .session-menu-item:focus-within .session-menu-run-stop {
       opacity: 1;
       transform: translateX(0);
+    }
+
+    /* The row's stop square shares the rename pencil's hover reveal. Its shape is
+       the only difference between leaving a finished run and stopping a live one,
+       and a row with no run keeps the column as an inert, invisible spacer. */
+    .session-menu-run-stop {
+      display: grid;
+      place-items: center;
+      width: 26px;
+      height: 26px;
+      padding: 0;
+      border: none;
+      border-radius: 4px;
+      color: var(--vscode-descriptionForeground);
+      background: transparent;
+      opacity: 0;
+      transform: translateX(6px);
+      transition: opacity 120ms ease, transform 120ms ease, background-color 120ms ease, color 120ms ease;
+    }
+
+    .session-menu-run-stop.is-empty {
+      visibility: hidden;
+    }
+
+    .session-menu-run-stop[data-run-stop-shape="solid"] {
+      color: var(--vscode-errorForeground, var(--vscode-descriptionForeground));
+    }
+
+    .session-menu-run-stop:hover,
+    .session-menu-run-stop:focus-visible {
+      color: var(--vscode-textLink-foreground);
+      background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+      outline: none;
     }
 
     .session-menu-rename:hover,

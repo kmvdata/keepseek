@@ -1031,6 +1031,22 @@ export interface ChatSession {
   promptCacheDiagnostics?: PromptCacheDiagnostics;
   lastTraceLogUri?: string;
   repairLoop?: RepairLoopState;
+  /**
+   * 用户把这一行退出“进行时”的持久标记（会话头部，不是消息历史）。
+   *
+   * 当会话最新的运行证据仍是同一 `messageId`（且已知时间戳一致）时，读取端把它
+   * 视为“没有运行结论”，于是重启后这一行仍是空闲；新运行或新 checkpoint 改变身份
+   * 后自然恢复显示。checkpoint/archive 是 Provider 可见的恢复状态，append-only 历史
+   * 不得为了显示而改写。
+   */
+  runStatusDismissal?: {
+    version: 1;
+    /** 最新运行证据所在的那条 assistant 消息。 */
+    messageId: string;
+    /** 存档投影没有 `updatedAt`，因此允许缺省（见 isSessionRunDismissed 的取舍）。 */
+    proofAt?: string;
+    dismissedAt: string;
+  };
   createdAt: string;
   updatedAt: string;
   workspaceKey: string;

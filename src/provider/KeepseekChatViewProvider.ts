@@ -11,7 +11,7 @@ import { classifyHistoryCleanupError, localizeHistoryCleanupIssue, HistoryCleanu
 import { SessionUseConflictError } from '../sessions/sessionDeletionAuthority';
 import { InteractionCoordinator, deriveSessionTitleCapability, deriveHistoryCleanupCapability, type InteractionOperation, type InteractionPhase } from './interactionState';
 import { SessionRunRegistry } from './sessionRunRegistry';
-import { projectSessionRunStatuses, type SessionLastRunObservation, type SessionRunStatusView } from './sessionRunStatus';
+import { deriveSessionRunEvidence, isSessionRunDismissed, projectSessionRunStatuses, type SessionLastRunObservation, type SessionRunStatusView } from './sessionRunStatus';
 import { installWriteGateAuthority, type WriteGateResult } from '../sessions/queue/writeGate';
 import { checkWritePermission, type WriteCapability } from '../sessions/queue/modeGate';
 import { ProjectWriteLeaseStore } from '../sessions/queue/writeLeaseStore';

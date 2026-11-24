@@ -7,9 +7,15 @@ import { test } from 'node:test';
 import { getScript } from '../src/webview/script';
 import { WEBVIEW_TRANSLATIONS } from '../src/shared/i18n';
 import { conversationsStylesFragment } from '../src/webview/conversations/styles';
-import { ChatSessionStore, sortSessionSummariesByCreatedAt } from '../src/sessions/chatSessionStore';
+import { ChatSessionStore, normalizeStoredSessions, sortSessionSummariesByCreatedAt } from '../src/sessions/chatSessionStore';
 import { GlobalSessionStorage } from '../src/sessions/globalSessionStorage';
-import { projectSessionRunStatuses, type SessionLastRunObservation } from '../src/provider/sessionRunStatus';
+import {
+  deriveSessionRunEvidence,
+  isSessionRunDismissed,
+  projectSessionRunStatuses,
+  type SessionLastRunObservation,
+  type SessionRunStatusDismissal
+} from '../src/provider/sessionRunStatus';
 import * as vscode from './stubs/vscode';
 
 const SA = '2024-01-01T00:00:00.000Z';
@@ -199,6 +205,9 @@ test('the webview orders history by creation and marks each row status', () => {
   assert.match(script,
     /item\.append\(renderRunStatusBadge\(session\.id\)\);\s*var favoriteButton = document\.createElement\('button'\);/u,
     'the status marker is placed immediately before the favourite button');
+  assert.match(script,
+    /item\.append\(main\);[\s\S]{0,400}?item\.append\(renderSessionRunStopButton\(session\.id\)\);\s*var renameButton = document\.createElement\('button'\);/u,
+    'the stop square is appended immediately left of the rename pencil');
   assert.match(script, /badge\.className = 'session-status-badge is-' \+ kind;/u,
     'the badge kind maps to a themed marker class');
   for (const declaration of [
@@ -207,6 +216,9 @@ test('the webview orders history by creation and marks each row status', () => {
     'function sessionRunStatusKind(',
     'function sessionRunStatusLabel(',
     'function applyRunStatusBadge(',
+    'function applyRunStopButton(',
+    'function renderSessionRunStopButton(',
+    'function sessionRunStopsLiveWork(',
     'function getSessionCreatedTimestamp(',
     'function formatSessionActivityTitle('
   ]) {
@@ -215,10 +227,10 @@ test('the webview orders history by creation and marks each row status', () => {
   }
 
   const styles = conversationsStylesFragment.source;
-  assert.match(styles, /grid-template-columns: 12px 24px minmax\(0, 1fr\) 28px;/u,
-    'the row reserves a leading column for the status marker');
-  assert.match(styles, /grid-template-columns: 18px 12px 24px minmax\(0, 1fr\) 28px;/u,
-    'the multi-select row keeps the marker column');
+  assert.match(styles, /grid-template-columns: 12px 24px minmax\(0, 1fr\) 28px 28px;/u,
+    'the row reserves a leading column for the status marker and a trailing one for the stop square');
+  assert.match(styles, /grid-template-columns: 18px 12px 24px minmax\(0, 1fr\) 28px 28px;/u,
+    'the multi-select row keeps both trailing columns, so no row collapses');
   assert.match(styles, /\.session-status-badge\.is-failed \{\s*background: var\(--vscode-charts-red/u,
     'a failed run is red');
   assert.match(styles, /\.session-status-badge\.is-running \{\s*background: var\(--vscode-charts-orange/u,
@@ -264,8 +276,8 @@ test('the history filter keeps only rows with a recorded run', () => {
   assert.match(script,
     /sessionMultiSelectMode, sessionRangeDays, sessionWithRunOnly, Array\.from\(selectedSessionIds\),/u,
     'the filter state stays in the render key so toggling it repaints the panel');
-  assert.match(script, /if \(currentTab\) \{\s*var withRunOnlyButton = document\.createElement\('button'\);/u,
-    'the filter is only offered where a status is projected');
+  assert.match(script, /var withRunOnlyButton = document\.createElement\('button'\);/u,
+    'the control strip offers the has-run filter above the current project history');
   assert.match(script, /withRunOnlyButton\.dataset\.sessionAction = 'toggleWithRunOnly';/u,
     'the control strip exposes the has-run toggle');
   assert.match(script,
@@ -282,11 +294,11 @@ test('the history filter keeps only rows with a recorded run', () => {
   assert.doesNotMatch(script, /withRunOnlyButton\.innerHTML = '[^']*<text/u,
     'the glyph never draws a word, so it stays language-neutral');
   assert.match(script,
-    /trailingControls\.append\(withRunOnlyButton\);\s*\}\s*trailingControls\.append\(multiSelectButton\);\s*controls\.append\(trailingControls\);/u,
+    /trailingControls\.append\(withRunOnlyButton\);\s*trailingControls\.append\(multiSelectButton\);\s*controls\.append\(trailingControls\);/u,
     'the leading dropdowns stay left-aligned while the switches share one trailing group');
   assert.match(script,
-    /if \(action === 'toggleWithRunOnly'\) \{\s*if \(!isCurrentWorkspaceTab\(\)\) return;/u,
-    'toggling from another project tab is ignored');
+    /if \(action === 'toggleWithRunOnly'\) \{\s*sessionWithRunOnly = !sessionWithRunOnly;/u,
+    'the row action flips the has-run filter and repaints the panel');
   assert.match(script, /t\('sessionWithRunOnlyEmpty'\)/u,
     'a filtered-to-nothing list names the filter instead of claiming empty history');
   assert.doesNotMatch(script, /sessionFavoritesOnly|toggleFavoritesOnly|sessionCurrentOnly/u,
@@ -359,4 +371,125 @@ test('the history edit toggle is an icon button', () => {
     'both dictionaries still name the mode for assistive tech');
   assert.ok(zh.sessionExitMultiSelect && en.sessionExitMultiSelect,
     'both dictionaries still name the way out of the mode');
+});
+
+/** The row stop square: a finished run is left without a prompt, a live one is
+ * stopped only after a confirmation, and a row with no run keeps the column. */
+test('the history row stop square follows the projected kind', () => {
+  const script = getScript();
+  assert.doesNotThrow(() => new Function(script), 'the generated webview script must compile');
+
+  assert.match(script,
+    /function sessionRunStopsLiveWork\(sessionId\) \{\s*var kind = sessionRunStatusKind\(sessionRunStatusEntry\(sessionId\)\);\s*return kind === 'running' \|\| kind === 'waiting';/u,
+    'only a live run or a waiting session needs a confirmation');
+  assert.match(script,
+    /if \(!sessionHasRun\(sessionId\)\) \{\s*var spacer = document\.createElement\('span'\);/u,
+    'a row with no run reserves the column with an inert spacer instead of a button');
+  assert.match(script, /button\.dataset\.sessionAction = 'dismissSessionRun';/u,
+    'the square is a delegated row action, so a click never selects the conversation');
+  assert.match(script, /button\.dataset\.runStopShape = live \? 'solid' : 'hollow';/u,
+    'a live row draws a solid square and a finished one a hollow square');
+  assert.match(script, /fill="currentColor"\/><\/svg>/u, 'the solid square is filled');
+  assert.match(script, /fill="none" stroke="currentColor"/u, 'the hollow square is outlined');
+  assert.match(script,
+    /if \(action === 'dismissSessionRun'\) \{[\s\S]{0,600}?vscode\.postMessage\(\{ type: 'dismissSessionRun', sessionId: runStopSessionId \}\);/u,
+    'the row action reports the session id and nothing else');
+  assert.match(script,
+    /var stopButton = sessionMenu\.querySelector\('button\[data-session-stop-id="' \+ cssEscape\(sessionId\) \+ '"\]'\);/u,
+    'a live status change patches the square in place instead of rebuilding the row');
+
+  const styles = conversationsStylesFragment.source;
+  assert.match(styles, /\.session-menu-run-stop\.is-empty \{\s*visibility: hidden;/u,
+    'the inert spacer keeps the grid column without showing a control');
+  assert.match(styles,
+    /\.session-menu-item:hover \.session-menu-rename,\s*\.session-menu-item:focus-within \.session-menu-rename,\s*\.session-menu-item:hover \.session-menu-run-stop,\s*\.session-menu-item:focus-within \.session-menu-run-stop \{/u,
+    'the square appears with the same hover/focus reveal as the rename pencil');
+
+  const zh = WEBVIEW_TRANSLATIONS['zh-CN'];
+  const en = WEBVIEW_TRANSLATIONS.en;
+  for (const key of ['sessionRunDismissIdle', 'sessionRunDismissIdleHint', 'sessionRunDismissActive',
+    'sessionRunDismissActiveHint', 'sessionRunDismissConfirm', 'sessionRunDismissConfirmAction',
+    'sessionRunDismissBlocked', 'sessionRunDismissBlockedRunning', 'sessionRunDismissBlockedWaiting',
+    'sessionRunDismissBlockedOther', 'sessionRunDismissStoppedByUser']) {
+    assert.ok(zh[key] && en[key], `${key} exists in both dictionaries`);
+    assert.notEqual(zh[key], en[key], `${key} is translated rather than copied`);
+  }
+  assert.match(zh.sessionRunDismissConfirm, /待确认的改动与命令/u,
+    'the confirmation names the pending changes and commands it discards');
+  assert.equal(zh.sessionWithRunOnly, '只看进行时', 'the filter label stays untouched');
+});
+
+/** "Leave the running list" is a session-level marker, never a history rewrite:
+ * while it still describes the newest run the row has no conclusion, and any new
+ * run or refreshed checkpoint brings the row back. */
+test('a dismissed run stays idle until a newer proof arrives', () => {
+  const completed = { id: 'run-1', role: 'assistant', content: '', createdAt: SB,
+    runCheckpoint: { updatedAt: SB } } as never;
+  const evidence = deriveSessionRunEvidence(completed);
+  assert.deepEqual(evidence, { messageId: 'run-1', proofAt: SB },
+    'the marker and the projection agree on the same message and timestamp');
+
+  const dismissal: SessionRunStatusDismissal = { version: 1, messageId: 'run-1', proofAt: SB, dismissedAt: SB };
+  assert.equal(isSessionRunDismissed(dismissal, evidence), true, 'the same proof counts as already dismissed');
+  assert.equal(isSessionRunDismissed(undefined, evidence), false, 'a session without a marker keeps its status');
+  assert.equal(isSessionRunDismissed(dismissal, { messageId: 'run-2', proofAt: SB }), false,
+    'a new run is a new message, so the row surfaces again');
+  assert.equal(isSessionRunDismissed(dismissal, { messageId: 'run-1', proofAt: '2024-03-01T00:00:00.000Z' }), false,
+    'a refreshed checkpoint on the same message surfaces again');
+  assert.equal(isSessionRunDismissed(dismissal, { messageId: 'run-1' }), true,
+    'the archived form carries no timestamp, so the dismissal still covers it');
+
+  const archivedOnly: SessionRunStatusDismissal = { version: 1, messageId: 'run-1', dismissedAt: SB };
+  assert.equal(isSessionRunDismissed(archivedOnly, { messageId: 'run-1' }), true,
+    'a dismissal recorded against the archived form still matches after a reload');
+  assert.equal(isSessionRunDismissed(archivedOnly, { messageId: 'run-1', proofAt: SB }), false,
+    'once that message records a timestamp it is a newer proof and the row returns');
+
+  // A dismissed run reports no observation, which is what the Host hands to the
+  // projection; live signals never consult history, so they still outrank it.
+  const statuses = projectSessionRunStatuses({
+    sessionIds: ['done', 'live', 'owed'],
+    runningSessionIds: ['live'],
+    awaitingUserSessionIds: new Set(['owed']),
+    readLastRun: () => undefined
+  });
+  assert.equal(statuses.done.kind, 'idle', 'a dismissed run leaves the running list');
+  assert.equal(statuses.live.kind, 'running', 'a live run is unaffected by a dismissal');
+  assert.equal(statuses.owed.kind, 'waiting', 'pending work still waits for the user');
+});
+
+/** The marker lives in the session header, so it has to survive the current
+ * protocol normalizer and never invent a status for data that predates it. */
+test('the dismissal marker is normalized and persisted with the session header', async t => {
+  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-run-dismiss-'));
+  t.after(async () => { await rm(root, { recursive: true, force: true }).catch(() => undefined); });
+
+  const scope = { key: SCOPE_KEY, name: 'dismiss', folderUris: [SCOPE_KEY] };
+  const storage = new GlobalSessionStorage(vscode.Uri.file(root) as never);
+  const store = new ChatSessionStore(storage, 'en', scope);
+  await store.initialize();
+
+  const session = store.getActiveSession();
+  session.messages.push({ id: 'm-1', role: 'user', content: 'task', createdAt: SA } as never);
+  await store.persist();
+  const marked = await store.markSessionRunStatusDismissed(session.id,
+    { version: 1, messageId: 'm-1', proofAt: SB, dismissedAt: SB });
+  assert.equal(marked?.runStatusDismissal?.messageId, 'm-1', 'the header keeps the marker');
+  assert.equal(store.getSessionById(session.id)?.runStatusDismissal?.proofAt, SB,
+    'the loaded session carries the marker after the write');
+  assert.equal(session.messages.length, 1, 'the marker never touches the append-only history');
+
+  const normalized = normalizeStoredSessions({
+    sessions: [
+      { id: 'kept', createdAt: SA, updatedAt: SA, workspaceKey: SCOPE_KEY, messages: [],
+        runStatusDismissal: { version: 1, messageId: 'm-1', proofAt: SB, dismissedAt: SB } },
+      { id: 'legacy', createdAt: SA, updatedAt: SA, workspaceKey: SCOPE_KEY, messages: [] },
+      { id: 'broken', createdAt: SA, updatedAt: SA, workspaceKey: SCOPE_KEY, messages: [],
+        runStatusDismissal: { version: 2, messageId: 'm-1', dismissedAt: SB } }
+    ]
+  }, scope);
+  const byId = new Map(normalized.map(item => [item.id, item]));
+  assert.equal(byId.get('kept')?.runStatusDismissal?.messageId, 'm-1', 'a valid marker round-trips');
+  assert.equal(byId.get('legacy')?.runStatusDismissal, undefined, 'old data has no marker instead of a guess');
+  assert.equal(byId.get('broken')?.runStatusDismissal, undefined, 'an unknown shape is dropped instead of throwing');
 });

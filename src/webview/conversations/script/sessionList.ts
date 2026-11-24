@@ -264,6 +264,10 @@ export const conversationsSessionListFragment: WebviewFragment = {
         });
         item.append(favoriteButton);
         item.append(main);
+        // The stop square leaves the running list. It sits before the rename pencil
+        // so the destructive row action reads left of the edit action; a row with no
+        // run keeps an inert spacer in that column so the grid never shifts.
+        item.append(renderSessionRunStopButton(session.id));
         var renameButton = document.createElement('button');
         renameButton.type = 'button';
         renameButton.className = 'session-menu-rename';
@@ -376,6 +380,17 @@ export const conversationsSessionListFragment: WebviewFragment = {
         sessionWithRunOnly = !sessionWithRunOnly;
         selectedSessionIds.clear();
         renderSessionMenu();
+        return;
+      }
+
+      if (action === 'dismissSessionRun') {
+        // The Host recomputes the kind and owns the confirmation: the glyph only
+        // hints at what will happen, so nothing here carries any authority.
+        var runStopRow = button.closest('.session-menu-item');
+        var runStopSessionId = button.dataset.sessionId || runStopRow?.dataset.sessionId || '';
+        if (runStopSessionId) {
+          vscode.postMessage({ type: 'dismissSessionRun', sessionId: runStopSessionId });
+        }
         return;
       }
 

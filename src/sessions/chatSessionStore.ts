@@ -561,6 +561,29 @@ export class ChatSessionStore {
     return session;
   }
 
+  /**
+   * Records that the user left this run in the history list.
+   *
+   * The marker is session header state, not history: `session.messages` stays
+   * append-only, so the checkpoint and its recovery state are untouched and a
+   * reload keeps the row idle until a new run or checkpoint proves otherwise.
+   * Writing it here also covers an unloaded conversation, so the row can leave the
+   * list exactly like a loaded one.
+   */
+  public async markSessionRunStatusDismissed(
+    sessionId: string,
+    marker: NonNullable<ChatSession['runStatusDismissal']>
+  ): Promise<ChatSession | undefined> {
+    const session = await this.loadSessionById(sessionId);
+    if (!session) {
+      return undefined;
+    }
+
+    session.runStatusDismissal = marker;
+    await this.persist();
+    return session;
+  }
+
   public async renameSession(sessionId: string, title: string): Promise<ChatSession | undefined> {
     const session = await this.loadSessionById(sessionId);
     if (!session) {
@@ -1497,6 +1520,7 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
         ? item.contextInstructions
         : undefined,
       repairLoop: normalizeRepairLoopState(item.repairLoop),
+      runStatusDismissal: normalizeRunStatusDismissal(item.runStatusDismissal),
       contextUsage: normalizeContextUsageEstimateValue(item.contextUsage),
       executionTime: reconcileExecutionTime(item.executionTime, messages),
       userTaskBudgets: normalizeUserTaskBudgets(item.userTaskBudgets),
@@ -1522,6 +1546,19 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
   }
 
   return sortSessionsByUpdatedAt(sessions);
+}
+
+/** Unknown shapes degrade to "no marker" instead of throwing: old data simply has none. */
+function normalizeRunStatusDismissal(value: unknown): ChatSession['runStatusDismissal'] {
+  if (!isRecord(value) || value.version !== 1) return undefined;
+  if (typeof value.messageId !== 'string' || !value.messageId.trim()) return undefined;
+  if (typeof value.dismissedAt !== 'string' || !value.dismissedAt.trim()) return undefined;
+  return {
+    version: 1,
+    messageId: value.messageId,
+    ...(typeof value.proofAt === 'string' && value.proofAt.trim() ? { proofAt: value.proofAt } : {}),
+    dismissedAt: value.dismissedAt
+  };
 }
 
 function normalizeUsageLedgerRef(value: unknown, sessionId: string): ChatSession['usageLedgerRef'] {
