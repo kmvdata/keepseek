@@ -4,9 +4,15 @@ import type { AnthropicReplayContentBlock, OpenAiResponsesReplayItem } from '../
 export type DeepSeekRole = 'system' | 'user' | 'assistant' | 'tool';
 export type DeepSeekThinkingType = 'enabled' | 'disabled';
 
+/** The two wire shapes a Chat Completions content array may carry. `image_url.url`
+ * is the only position allowed to hold base64. */
+export type DeepSeekContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+
 export interface DeepSeekMessage {
   role: DeepSeekRole;
-  content?: string | null;
+  content?: string | DeepSeekContentPart[] | null;
   reasoning_content?: string | null;
   tool_calls?: DeepSeekToolCall[];
   tool_call_id?: string;

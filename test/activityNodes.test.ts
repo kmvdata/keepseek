@@ -403,3 +403,126 @@ test('new content invalidates the cached final answer', () => {
   const second = project(assistantMessage({ content: '先看计划。另一段最终回答。', toolRounds, runDetails }));
   assert.deepEqual(sayNodes(second.activityNodes), ['先看计划。', '另一段最终回答。']);
 });
+
+/**
+ * Adjacent steps that read identically are one step: only what the reader can
+ * see counts, so `id`/`status`/`durationMs` never split a pair and the later
+ * observation represents it.
+ */
+const READ_RANGE = 'keepseek_read_workspace_file_range';
+
+test('adjacent calls that read identically collapse into the later observation', () => {
+  const nodes = buildActivityNodes({
+    content: '',
+    toolRounds: [round(null, [
+      { id: 'failed', name: READ_RANGE, args: { path: 'src/a.ts', startLine: 1, endLine: 20 } },
+      { id: 'retry', name: READ_RANGE, args: { path: 'src/a.ts', startLine: 1, endLine: 20 } }
+    ], [
+      { toolCallId: 'failed', content: JSON.stringify({ ok: false, errorType: 'read_failed' }) },
+      { toolCallId: 'retry', content: JSON.stringify({ ok: true }) }
+    ])],
+    toolDurations: { retry: 42 }
+  });
+  const tools = toolNodes(nodes);
+  assert.equal(tools.length, 1, 'the reader cannot tell the two calls apart, so one row is enough');
+  assert.equal(tools[0].id, 'retry', 'the later observation is the representative');
+  assert.equal(tools[0].status, 'succeeded', 'a retried call shows its final outcome');
+  assert.equal(tools[0].durationMs, 42, 'the shown row carries the shown call duration');
+  assert.equal(tools[0].target, 'src/a.ts');
+});
+
+test('a different target keeps adjacent calls apart', () => {
+  const nodes = buildActivityNodes({
+    content: '',
+    toolRounds: [round(null, [
+      { id: 'c1', name: READ_RANGE, args: { path: 'src/a.ts', startLine: 1, endLine: 20 } },
+      { id: 'c2', name: READ_RANGE, args: { path: 'src/b.ts', startLine: 1, endLine: 20 } }
+    ], [
+      { toolCallId: 'c1', content: JSON.stringify({ ok: true }) },
+      { toolCallId: 'c2', content: JSON.stringify({ ok: true }) }
+    ])]
+  });
+  assert.deepEqual(toolNodes(nodes).map((node) => [node.id, node.target]), [
+    ['c1', 'src/a.ts'],
+    ['c2', 'src/b.ts']
+  ]);
+});
+
+test('narration between identical calls keeps both of them', () => {
+  const nodes = buildActivityNodes({
+    content: '',
+    toolRounds: [
+      round(null, [{ id: 'c1', name: 'keepseek_search_workspace', args: { query: 'needle' } }],
+        [{ toolCallId: 'c1', content: JSON.stringify({ ok: true }) }]),
+      round('再搜一次。\n\n', [{ id: 'c2', name: 'keepseek_search_workspace', args: { query: 'needle' } }],
+        [{ toolCallId: 'c2', content: JSON.stringify({ ok: true }) }])
+    ]
+  });
+  assert.deepEqual(nodes?.map((node) => node.kind === 'say' ? `say:${node.text}` : `tool:${node.id}`), [
+    'tool:c1', 'say:再搜一次。', 'tool:c2'
+  ], 'only adjacent steps merge, so a repeat after narration stays visible');
+});
+
+test('adjacent identical narration collapses into one line', () => {
+  const nodes = buildActivityNodes({
+    content: '',
+    toolRounds: [round('同一条旁白。', [], []), round('同一条旁白。', [], []), round('另一条旁白。', [], [])]
+  });
+  assert.deepEqual(sayNodes(nodes), ['同一条旁白。', '另一条旁白。']);
+});
+
+test('a live step survives collapsing with an identical finished step', () => {
+  // `keepseek_git_status` exposes no target, so a live row and its finished
+  // neighbour read identically: the pair collapses and the running one wins.
+  const nodes = buildActivityNodes({
+    content: '',
+    toolRounds: [round(null, [{ id: 'done', name: 'keepseek_git_status', args: {} }],
+      [{ toolCallId: 'done', content: JSON.stringify({ ok: true }) }])],
+    liveTool: { id: 'live', name: 'keepseek_git_status' }
+  });
+  const tools = toolNodes(nodes);
+  assert.equal(tools.length, 1);
+  assert.equal(tools[0].id, 'live', 'the running observation replaces the finished one');
+  assert.equal(tools[0].status, 'running');
+  assert.equal(tools.filter((node) => node.status === 'running').length, 1, 'at most one running row remains');
+});
+
+test('collapsing runs before the cap, so the marker counts visible steps', () => {
+  const calls: Array<{ id: string; name: string; args: Record<string, unknown> }> = [];
+  for (let index = 0; index < 210; index += 1) {
+    for (const suffix of ['a', 'b']) {
+      calls.push({ id: `c${index}${suffix}`, name: READ_RANGE, args: { path: `f${index}.ts`, startLine: 1, endLine: 5 } });
+    }
+  }
+  const nodes = buildActivityNodes({
+    content: '',
+    toolRounds: [round(null, calls, calls.map((call) => ({ toolCallId: call.id, content: JSON.stringify({ ok: true }) })))]
+  });
+  assert.equal(nodes?.length, 200);
+  assert.equal(toolNodes(nodes).length, 199, 'each identical pair is one visible step and the marker takes the last slot');
+  const last = nodes?.[nodes.length - 1];
+  assert.equal(last?.kind, 'say');
+  assert.match((last as { text: string }).text, /11/u, 'the marker counts the collapsed list, not the raw calls');
+});
+
+test('a streaming message keeps the executing step last after collapsing', () => {
+  const message = assistantMessage({
+    content: '',
+    isStreaming: true,
+    toolRounds: [round(null, [
+      { id: 'first', name: READ_RANGE, args: { path: 'src/a.ts', startLine: 1, endLine: 20 } },
+      { id: 'second', name: READ_RANGE, args: { path: 'src/a.ts', startLine: 1, endLine: 20 } }
+    ], [
+      { toolCallId: 'first', content: JSON.stringify({ ok: true }) },
+      { toolCallId: 'second', content: JSON.stringify({ ok: true }) }
+    ])],
+    runCheckpoint: checkpoint({ id: 'live', name: READ_RANGE })
+  });
+  const [visible] = getVisibleMessages([message]);
+  const nodes = visible.activityNodes ?? [];
+  assert.equal(toolNodes(nodes).length, 2, 'the duplicated read is one finished step plus the live one');
+  const last = nodes[nodes.length - 1];
+  assert.equal(last?.kind, 'tool');
+  assert.equal((last as { id: string }).id, 'live', 'the executing step stays the last visible step');
+  assert.equal((last as { status: string }).status, 'running');
+});

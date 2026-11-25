@@ -53,6 +53,8 @@ import { cloneSessionTitleMetadata, lockSessionTitleMetadata, normalizeSessionTi
 
 export const HISTORY_SESSION_LOAD_TIMEOUT_MS = 15_000;
 const MAX_STORED_SESSIONS = 50;
+const MAX_MESSAGE_ATTACHMENTS = 8;
+const ATTACHMENT_MIME_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] as const;
 export type BoundedSessionSelection =
   | { status: 'selected'; session: ChatSession }
   | { status: 'missing' }
@@ -1585,6 +1587,7 @@ function normalizeStoredMessage(value: unknown): ChatMessage | undefined {
       ? value.dynamicContextHash : undefined,
     contextMeta: normalizeMessageContextMeta(value.contextMeta),
     usedSkills: normalizeMessageUsedSkills(value.usedSkills),
+    attachments: normalizeMessageAttachments(value.attachments),
     runCheckpoint: normalizeRunCheckpoint(value.runCheckpoint),
     runCheckpointArchive: normalizeCheckpointArchive(value.runCheckpointArchive),
     runDetails: normalizeRunDetails(value.runDetails, true),
@@ -2104,6 +2107,67 @@ function normalizeMessageUsedSkills(value: unknown): ChatMessage['usedSkills'] {
     })
     .filter((item): item is NonNullable<ChatMessage['usedSkills']>[number] => Boolean(item));
   return usedSkills.length ? usedSkills : undefined;
+}
+
+function normalizeMessageAttachments(value: unknown): ChatMessage['attachments'] {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const attachments: NonNullable<ChatMessage['attachments']> = [];
+  const seenIds = new Set<string>();
+  for (const item of value) {
+    if (attachments.length >= MAX_MESSAGE_ATTACHMENTS) {
+      break;
+    }
+    if (!isRecord(item)) {
+      continue;
+    }
+    const id = typeof item.id === 'string' ? item.id.trim() : '';
+    const sha256 = typeof item.sha256 === 'string' ? item.sha256 : '';
+    const rawMimeType = item.mimeType;
+    const mimeType = typeof rawMimeType === 'string'
+      ? ATTACHMENT_MIME_TYPES.find((candidate) => candidate === rawMimeType)
+      : undefined;
+    const scope = item.scope === 'user' || item.scope === 'tool' ? item.scope : undefined;
+    const bytes = normalizeAttachmentCount(item.bytes);
+    const width = normalizeAttachmentCount(item.width);
+    const height = normalizeAttachmentCount(item.height);
+    const createdAt = typeof item.createdAt === 'string' && item.createdAt.trim()
+      ? item.createdAt
+      : undefined;
+    if (!id || id.length > 128 || seenIds.has(id) || item.kind !== 'image' || !scope || !mimeType
+      || !/^[a-f0-9]{64}$/u.test(sha256) || bytes === undefined || width === undefined
+      || height === undefined || !createdAt) {
+      continue;
+    }
+    const originalBytes = normalizeAttachmentCount(item.originalBytes);
+    const originalWidth = normalizeAttachmentCount(item.originalWidth);
+    const originalHeight = normalizeAttachmentCount(item.originalHeight);
+    const sourceName = typeof item.sourceName === 'string' && item.sourceName.trim()
+      ? item.sourceName.trim().slice(0, 260)
+      : undefined;
+    seenIds.add(id);
+    attachments.push({
+      id,
+      kind: 'image',
+      scope,
+      sha256,
+      mimeType,
+      bytes,
+      width,
+      height,
+      ...(originalBytes === undefined ? {} : { originalBytes }),
+      ...(originalWidth === undefined ? {} : { originalWidth }),
+      ...(originalHeight === undefined ? {} : { originalHeight }),
+      ...(sourceName ? { sourceName } : {}),
+      createdAt
+    });
+  }
+  return attachments.length ? attachments : undefined;
+}
+
+function normalizeAttachmentCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
 function normalizeMessageContextMeta(value: unknown): ChatMessageContextMeta | undefined {

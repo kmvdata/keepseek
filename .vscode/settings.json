@@ -1,6 +1,6 @@
 {
     "kmvdata.keepseek.thinkingEnabled": true,
-    "kmvdata.keepseek.reasoningEffort": "high",
+    "kmvdata.keepseek.reasoningEffort": "max",
     "kmvdata.keepseek.compressionThreshold": "balanced",
     "kmvdata.keepseek.selectedModelId": "deepseek-v4.1-flash-1017",
     "kmvdata.keepseek.selectedSourceId": "b2e40e9e-5866-4840-a060-20269e9f6c56"

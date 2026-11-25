@@ -17,6 +17,7 @@ import type { ModelSourceProvider } from '../accounts/types';
 import type { OpenAiResponsesFunctionTool, OpenAiResponsesItem } from './providers/responsesTypes';
 import type { AnthropicFunctionTool, AnthropicMessage, AnthropicSystemTextBlock } from './providers/anthropicTypes';
 import { estimateTokenCount } from './tokenEstimate';
+import { projectImagePayloadsForTokenEstimate } from './multimodal/imageTokens';
 
 type ContextUsageBreakdown = ContextUsageEstimate['breakdown'];
 
@@ -65,6 +66,8 @@ export function createContextUsageEstimate(input: {
   );
   const breakdown = estimateInitialBreakdown({
     messages,
+    provider: input.provider ?? normalizeKnownProvider(input.model.provider) ?? input.model.provider,
+    modelId: input.model.id,
     contextFiles: input.contextFiles,
     currentRunContext: input.currentRunContext,
     language: input.language,
@@ -118,10 +121,11 @@ export function createContextUsageEstimateFromAnthropic(input: {
   breakdown?: Partial<ContextUsageBreakdown>;
 }): ContextUsageEstimate {
   const maxTokensEstimate = getEffectiveContextWindowTokens(input.model);
-  const nativeInputTokensEstimate = estimateTokenCount(JSON.stringify({
+  const nativeInputTokensEstimate = estimateSerializedProviderTokens({
     system: input.system,
     messages: input.messages
-  })) + (input.system.length + input.messages.length) * 4;
+  }, { provider: input.model.provider, modelId: input.model.id })
+    + (input.system.length + input.messages.length) * 4;
   const toolSchemaTokensEstimate = input.tools?.length
     ? estimateTokenCount(JSON.stringify(input.tools))
     : 0;
@@ -192,8 +196,9 @@ export function createContextUsageEstimateFromMessages(input: {
   breakdown?: Partial<ContextUsageBreakdown>;
 }): ContextUsageEstimate {
   const maxTokensEstimate = getEffectiveContextWindowTokens(input.model);
+  const messageTokenOptions = { provider: input.model.provider, modelId: input.model.id };
   const messageTokensEstimate = input.messages.reduce(
-    (total, message) => total + estimateDeepSeekMessageTokens(message),
+    (total, message) => total + estimateProjectedMessageTokens(message, messageTokenOptions),
     0
   );
   const toolSchemaTokensEstimate = estimateDeepSeekToolsTokens(input.tools);
@@ -226,7 +231,10 @@ export function createContextUsageEstimateFromResponses(input: {
   breakdown?: Partial<ContextUsageBreakdown>;
 }): ContextUsageEstimate {
   const maxTokensEstimate = getEffectiveContextWindowTokens(input.model);
-  const inputTokensEstimate = estimateTokenCount(JSON.stringify(input.input)) + input.input.length * 4;
+  const inputTokensEstimate = estimateSerializedProviderTokens(input.input, {
+    provider: input.model.provider,
+    modelId: input.model.id
+  }) + input.input.length * 4;
   const toolSchemaTokensEstimate = input.tools?.length
     ? estimateTokenCount(JSON.stringify(input.tools))
     : 0;
@@ -383,8 +391,45 @@ export function resolveOutputReserveTokens(maxTokens: number): number {
   return Math.max(0, Math.floor(maxTokens));
 }
 
+/**
+ * Image-aware companion of `estimateDeepSeekMessageTokens`. Message content is a
+ * string until the multimodal wire stage widens it; the array branch is written
+ * here already so a projected image part is priced by geometry and its base64
+ * payload is never fed to `estimateTokenCount`.
+ */
+function estimateProjectedMessageTokens(
+  message: DeepSeekMessage,
+  options: { provider?: string; modelId?: string }
+): number {
+  const content = message.content as unknown;
+  if (content === null || content === undefined || typeof content === 'string') {
+    return estimateDeepSeekMessageTokens(message);
+  }
+  const projection = projectImagePayloadsForTokenEstimate(JSON.stringify(content), options);
+  const parts = [
+    message.role,
+    projection.text,
+    message.reasoning_content ?? '',
+    message.tool_call_id ?? '',
+    message.tool_calls ? JSON.stringify(message.tool_calls) : ''
+  ];
+  return estimateChatMessageTokens(message.role, parts.join('\n')) + projection.imageTokens;
+}
+
+/** Serialized native payload (Anthropic messages, OpenAI Responses input) with
+ * image payloads priced by geometry instead of characters. */
+function estimateSerializedProviderTokens(
+  value: unknown,
+  options: { provider?: string; modelId?: string }
+): number {
+  const projection = projectImagePayloadsForTokenEstimate(JSON.stringify(value), options);
+  return estimateTokenCount(projection.text) + projection.imageTokens;
+}
+
 function estimateInitialBreakdown(input: {
   messages: DeepSeekMessage[];
+  provider?: string;
+  modelId?: string;
   contextFiles: ContextFile[];
   currentRunContext?: CurrentRunContext;
   language: KeepseekLanguage;
@@ -396,7 +441,9 @@ function estimateInitialBreakdown(input: {
 }): ContextUsageBreakdown {
   const breakdown = createEmptyBreakdown();
   const systemMessage = input.messages[0];
-  const fullSystemTokens = systemMessage ? estimateDeepSeekMessageTokens(systemMessage) : 0;
+  const fullSystemTokens = systemMessage
+    ? estimateProjectedMessageTokens(systemMessage, { provider: input.provider, modelId: input.modelId })
+    : 0;
   const systemOnlyTokens = estimateChatMessageTokens(
     'system',
     getAgentSystemPrompt({
@@ -429,7 +476,10 @@ function estimateInitialBreakdown(input: {
   const promptIndex = findPromptMessageIndex(input.messages, input.prompt);
   for (let index = 1; index < input.messages.length; index += 1) {
     const message = input.messages[index];
-    const tokens = estimateDeepSeekMessageTokens(message);
+    const tokens = estimateProjectedMessageTokens(message, {
+      provider: input.provider,
+      modelId: input.modelId
+    });
     if (index === promptIndex) {
       breakdown.inputTokensEstimate += Math.max(0, tokens - breakdown.contextFileTokensEstimate);
     } else {

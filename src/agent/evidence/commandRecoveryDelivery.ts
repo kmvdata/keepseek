@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { CommandRecoveryObservation } from '../../runs/commandRecovery';
 import { READ_EVIDENCE_TOOL_NAME, RUN_DRAFT_TOOL_NAME } from '../protocol';
+import { projectDeepSeekContentText } from '../multimodal/imageParts';
 import type { ProviderClientRequest } from '../providers/types';
 import type { ToolEvidence } from './types';
 
@@ -89,8 +90,8 @@ export async function getCommandRecoveryDeliveries(input: {
   } else {
     for (const message of body.messages) {
       for (const call of message.tool_calls ?? []) toolNames.set(call.id, call.function.name);
-      if (message.role === 'tool' && message.tool_call_id) inspectToolResult(toolNames.get(message.tool_call_id), message.content);
-      if (message.role === 'user') inspectUserText(message.content);
+      if (message.role === 'tool' && message.tool_call_id) inspectToolResult(toolNames.get(message.tool_call_id), projectDeepSeekContentText(message.content));
+      if (message.role === 'user') inspectUserText(projectDeepSeekContentText(message.content));
     }
   }
 

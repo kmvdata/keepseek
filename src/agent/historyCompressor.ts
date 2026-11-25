@@ -15,6 +15,7 @@ import {
   type ContextCompressionSettings
 } from '../shared/modelProfiles';
 import { getErrorMessage } from '../shared/errors';
+import { projectDeepSeekContentText } from './multimodal/imageParts';
 import type { KeepseekLanguage } from '../shared/i18n';
 import type {
   ChatMessage,
@@ -497,12 +498,12 @@ export class HistoryCompressor {
             model: input.model.id,
             system: input.messages
               .filter((message) => message.role === 'system' && typeof message.content === 'string')
-              .map((message) => ({ type: 'text', text: message.content ?? '' })),
+              .map((message) => ({ type: 'text', text: projectDeepSeekContentText(message.content) })),
             messages: input.messages
               .filter((message) => message.role === 'user' && typeof message.content === 'string')
               .map((message) => ({
                 role: 'user' as const,
-                content: [{ type: 'text' as const, text: message.content ?? '' }]
+                content: [{ type: 'text' as const, text: projectDeepSeekContentText(message.content) }]
               })),
             stream: true,
             max_tokens: maxTokens,

@@ -1928,10 +1928,24 @@ ${conversationsStylesFragment.source}
       border-style: dashed;
     }
 
-    /* Running is a static dashed outline: streaming must not animate. */
+    /* Running keeps the static dashed outline; the breathing lives on the row
+       itself (see .is-current), so the glyph shape never moves. */
     .activity-tool.is-running .activity-icon {
       border-style: dashed;
       background: transparent;
+    }
+
+    /* The newest step of an open run breathes instead of spinning. A pure
+       opacity pulse costs no layout, keeps the glyph and label readable, and
+       needs no ARIA live state that would announce every tick. */
+    .activity-tool.is-current,
+    .activity-say.is-current {
+      animation: activity-current-breathe 1.6s ease-in-out infinite;
+    }
+
+    @keyframes activity-current-breathe {
+      0%, 100% { opacity: 0.45; }
+      50% { opacity: 1; }
     }
 
     .activity-toggle {
@@ -2132,6 +2146,9 @@ ${conversationsStylesFragment.source}
 
     @media (prefers-reduced-motion: reduce) {
       .reasoning-dots { animation: none; opacity: 0.75; }
+      /* The mark still carries meaning, so it keeps a readable static opacity. */
+      .activity-tool.is-current,
+      .activity-say.is-current { animation: none; opacity: 1; }
     }
 
     .reasoning-block pre {

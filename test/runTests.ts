@@ -26,6 +26,9 @@ import './composerReadinessGate.test';
 import './webviewHelperResolution.test';
 import './sessionHistoryOrderAndStatus.test';
 import './sessionRunDismissal.test';
+import './messageAttachments.test';
+import './messageImageTokens.test';
+import './attachmentStore.test';
 import { after } from 'node:test';
 
 // The provider's startup schedules interval timers; a completed run must not

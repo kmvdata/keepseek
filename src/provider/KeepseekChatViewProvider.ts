@@ -1,6 +1,6 @@
 import { KEEPSEEK_CONFIGURATION_NAMESPACE } from '../shared/identity';
 import { withConfigurationRegistrationHelp } from '../shared/configurationRegistration';
-import type { AgentRequest, AgentTaskBudgetAuthority } from '../shared/types';
+import type { AgentRequest, AgentTaskBudgetAuthority, MessageAttachment } from '../shared/types';
 import { createHistoryCleanupController } from './historyCleanupController';
 import { SessionUseLifetime } from './sessionUseLifetime';
 import { SessionAssociatedDataCleanup } from '../sessions/sessionAssociatedDataCleanup';
@@ -53,6 +53,9 @@ import {
 import { formatActiveSkills, formatCurrentRunContextForAgent, getAgentToolNamesForPrompt, READ_PLUGIN_SKILL_TOOL_NAME, RUN_VALIDATION_TOOL_NAME } from '../agent/protocol';
 import { validationAuthorizationRegistry } from '../agent/tools/toolAuthorization';
 import { FileContextStore } from '../context/fileContextStore';
+import { AttachmentStore } from '../attachments/attachmentStore';
+import { intakeUserImages, type ImageIntakeRejectionCode } from '../attachments/imageIntake';
+import { WEBVIEW_TRANSLATIONS } from '../shared/i18n';
 import { SafeFileEditor, type DelegatedEditApproval } from '../edits/safeFileEditor';
 import {
   AgentActivityInput,
@@ -106,7 +109,7 @@ import { gitReleaseIntent } from '../runs/gitTaskIntent';
 import { snapshotProjectGitPushDestination } from '../runs/gitReleaseAuthorization';
 import { dominantPromptRequested, dominantPromptSkill, isPromptInspectionTool, lastUserSelectedPrompt } from '../agent/promptGeneration';
 import { BUILTIN_GEN_PROMPT_ID, isBuiltinGenPrompt } from '../skills/skillTypes';
-import { hasExternalHandoffContext, usedExternalHandoffContext } from '../agent/handoffPrompt';
+import { usedExternalHandoffContext } from '../agent/handoffPrompt';
 import { getApprovalModeUserTail, normalizeApprovalMode } from '../agent/approvalMode';
 import { DraftRunAuthorizationService } from '../runs/draftRunAuthorization';
 import { DraftRunBatchCoordinator } from '../runs/draftRunBatchCoordinator';
@@ -1684,6 +1687,39 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  /**
+   * Turns bridge images into stored attachments before the user message exists.
+   * The bridge payload crosses exactly once and is never persisted: the message
+   * keeps only sha256, geometry and provenance. A rejection writes no blob and
+   * is reported with the composer's own words instead of a second vocabulary.
+   */
+  private async intakePromptImages(images: Extract<WebviewMessage, { type: 'sendPrompt' }>['attachments']): Promise<MessageAttachment[]> {
+    if (!images?.length) return [];
+    const result = await intakeUserImages({
+      images,
+      store: new AttachmentStore(this.globalStorageUri),
+      createdAt: new Date().toISOString()
+    });
+    if (result.rejected.length) {
+      const catalog = WEBVIEW_TRANSLATIONS[this.language];
+      const reasons = result.rejected
+        .map((rejection) => this.imageIntakeRejectionReason(rejection.code))
+        .filter((text, index, all) => all.indexOf(text) === index);
+      this.postToWebview({
+        type: 'modelSelectionFeedback',
+        message: catalog.imageAttachmentRejected.replace('{reason}', reasons.join('; '))
+      });
+    }
+    return result.attachments;
+  }
+
+  private imageIntakeRejectionReason(code: ImageIntakeRejectionCode): string {
+    const catalog = WEBVIEW_TRANSLATIONS[this.language];
+    const oversized = code === 'too_many_images' || code === 'image_too_large'
+      || code === 'request_too_large' || code === 'store_quota_exceeded';
+    return oversized ? catalog.droppedFilesTooLarge : catalog.droppedFilesUnreadable;
+  }
+
   private async handleSubmission(message: Extract<WebviewMessage, { type: 'sendPrompt' | 'editUserPrompt' }>): Promise<void> {
     const requestId = message.requestId;
     const sessionId = message.sessionId ?? this.sessionStore.activeSessionId;
@@ -1723,10 +1759,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
     // sendPrompt takes its owner synchronously, before this call can yield.
     if (requestId) (this.pendingSubmissionIds ??= new Set()).add(key);
+    let promptAttachments: MessageAttachment[] | undefined;
     try {
+      promptAttachments = await this.intakePromptImages(message.attachments);
       await this.sendPrompt(message.prompt, message.sourceId, message.modelId, message.settings, {
         ...(message.type === 'editUserPrompt' ? { replaceMessageId: message.messageId } : {}),
-        references: message.references, skillIds: message.skillIds,
+        references: message.references, skillIds: message.skillIds, attachments: promptAttachments,
         onSubmissionAccepted: () => feedback('accepted')
       });
       if (!accepted) feedback('rejected', this.interactionFailure?.message ?? (this.language === 'en'
@@ -6947,21 +6985,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async historyUsedExternalContext(session: ChatSession, messages: readonly ChatMessage[], signal: AbortSignal): Promise<boolean> {
-    if (messages.some(hasExternalHandoffContext)) return true;
-    // Current messages carry a receipt. A historical source may lack it:
-    // resolve only those legacy-in-this-format checkpoints at export time.
-    for (const message of messages) {
-      if (signal.aborted) return true;
-      if (message.externalHandoffContext !== undefined || !message.runCheckpointArchive) continue;
-      try {
-        const saved = await this.sessionStore.getTaskCheckpoint(message.id, session.id);
-        if (!saved || usedExternalHandoffContext(saved.request)) return true;
-      } catch { return true; }
-    }
-    return false;
-  }
-
   private async markAskDraftRunCorrections(session: ChatSession, segmentId: string, rootTaskId: string, ids: string[]): Promise<void> {
     // Diagnose every argv separately. Approval order alone is not a dependency.
     for (const id of ids) {
@@ -7416,6 +7439,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       interactionOperation?: InteractionOperation;
       onSubmissionAccepted?: () => void;
       replaceMessageId?: string;
+      attachments?: MessageAttachment[];
       references?: PromptReferenceInput[];
       skillIds?: string[];
       repairLoop?: RepairLoopState;
@@ -7551,17 +7575,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
     try {
       const promptOnlyRequested = this.promptOnlyTurnRequested(this.sessionStore.getActiveSession(), options?.skillIds);
-      // A reference grant for this conversation is not permission to export the file.
-      if (promptOnlyRequested && (this.fileContext.getAll().some(file => file.source === 'external')
-        || options?.references?.some(ref => {
-          const uri = resolveFileReferenceUri(ref.path);
-          return uri && !vscode.workspace.getWorkspaceFolder(uri);
-        }))) {
-        vscode.window.showWarningMessage(this.language === 'en'
-          ? 'Remove external attachments and references before generating a portable execution prompt.'
-          : '请先移除外部附件与引用，再生成可带入新会话的执行提示词。');
-        return;
-      }
       const authorizedExternalReferenceUris = promptOnlyRequested ? new Set<string>()
         : this.collectAuthorizedExternalReferenceUris(options?.references, !options?.replaceMessageId);
       this.setAgentActivity({
@@ -7709,16 +7722,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       // Preview derived state without mutating live history before the durable
       // intent exists. The commit/recovery hook performs the same reconciliation.
       const retainedMessages = truncation ? activeSession.messages.slice(0, replacementIndex) : activeSession.messages;
-      if (promptSkill) {
-        const external = await this.historyUsedExternalContext(activeSession, retainedMessages, abortController.signal);
-        if (abortController.signal.aborted) return;
-        if (external) {
-          vscode.window.showWarningMessage(this.language === 'en'
-            ? 'This conversation used external context. Generate the prompt in a new session with only the project material you intend to share.'
-            : '此会话使用过外部资料。请新建会话，仅加入允许交接的项目资料，再生成提示词。');
-          return;
-        }
-      }
       const projectedContextSession = truncation ? {
         ...activeSession,
         requestProtocol: activeSession.requestProtocol ? { ...activeSession.requestProtocol } : undefined,
@@ -7822,6 +7825,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         userTask: options?.userTask,
         role: 'user',
         content: trimmedPrompt,
+        ...(options?.attachments?.length ? { attachments: options.attachments } : {}),
         createdAt: now,
         modelId: model.id,
         usedSkills: toChatMessageSkills(activeSkills),

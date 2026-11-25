@@ -44,6 +44,7 @@ interface FakeNode {
   dataset: Record<string, string>;
   attributes: Record<string, string>;
   classes: string[];
+  classList?: { add(name: string): void; contains(name: string): boolean };
   children: FakeNode[];
   append(...nodes: FakeNode[]): void;
   setAttribute(name: string, value: string): void;
@@ -123,7 +124,7 @@ test('the frozen prompt renders as one copyable block with the copy button in it
   assert.equal(toolbar.querySelectorAll('button[data-code-action="copy"]').length, 1, 'the button stays in the top toolbar');
   assert.equal(toolbar.children[0].className, 'message-code-language', 'the language label keeps the left slot');
   assert.deepEqual(toolbar.children.at(-1), buttons[0], 'the copy button keeps the right-hand slot');
-  assert.ok(buttons[0].classList.contains('message-prompt-copy'));
+  assert.ok(buttons[0].classList?.contains('message-prompt-copy'));
 });
 
 const projectRoot = 'file:///Users/kermit/Projects/keepseek';

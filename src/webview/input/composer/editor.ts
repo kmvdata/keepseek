@@ -132,6 +132,11 @@ export const editorPasteBindingFragment: WebviewFragment = {
   source: `
       promptInput.addEventListener('paste', function(event) {
         event.preventDefault();
+        var pastedImages = attachmentClipboardImageFiles(event.clipboardData);
+        if (pastedImages.length) {
+          attachmentAddFiles(pastedImages);
+          return;
+        }
         var text = event.clipboardData ? event.clipboardData.getData('text/plain') : '';
         if (text) {
           insertPlainText(text);

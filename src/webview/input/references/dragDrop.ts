@@ -24,16 +24,17 @@ export const dragDropExtractionFragment: WebviewFragment = {
         return false;
       }
 
-      function addReference(references, seen, value) {
+      function addReference(references, seen, value, excludedNames) {
         var reference = normalizeDraggedReference(value);
         if (!reference) { return; }
         var key = makeFileHref(reference);
+        if (excludedNames && excludedNames[attachmentDropNameKey(reference.path)]) { return; }
         if (seen[key]) { return; }
         seen[key] = true;
         references.push(reference);
       }
 
-      function extractFileReferences(dataTransfer, allowPlainTextPaths) {
+      function extractFileReferences(dataTransfer, allowPlainTextPaths, excludedNames) {
         var references = [];
         var dt = dataTransfer;
         var seen = Object.create(null);
@@ -43,7 +44,7 @@ export const dragDropExtractionFragment: WebviewFragment = {
           for (var i = 0; i < dt.files.length; i++) {
             var filePath = dt.files[i].path;
             if (filePath) {
-              addReference(references, seen, filePath);
+              addReference(references, seen, filePath, excludedNames);
             }
           }
         }
@@ -54,7 +55,7 @@ export const dragDropExtractionFragment: WebviewFragment = {
             if (item.kind !== 'file' || !item.getAsFile) { continue; }
             var file = item.getAsFile();
             if (file && file.path) {
-              addReference(references, seen, file.path);
+              addReference(references, seen, file.path, excludedNames);
             }
           }
         }
@@ -62,14 +63,14 @@ export const dragDropExtractionFragment: WebviewFragment = {
         if (hasType(dt, 'text/uri-list')) {
           var uriList = dt.getData('text/uri-list');
           if (uriList) {
-            addReferenceList(references, seen, uriList);
+            addReferenceList(references, seen, uriList, excludedNames);
           }
         }
 
         if (hasType(dt, 'application/vnd.code.uri-list')) {
           var codeUris = dt.getData('application/vnd.code.uri-list');
           if (codeUris) {
-            addReferenceList(references, seen, codeUris);
+            addReferenceList(references, seen, codeUris, excludedNames);
           }
         }
 
@@ -186,12 +187,12 @@ export const dragDropExtractionFragment: WebviewFragment = {
         return btoa(binary);
       }
 
-      function addReferenceList(references, seen, value) {
+      function addReferenceList(references, seen, value, excludedNames) {
         var entries = splitDragLines(value);
         for (var i = 0; i < entries.length; i++) {
           var entry = entries[i].trim();
           if (!entry || entry.charAt(0) === '#') { continue; }
-          addReference(references, seen, entry);
+          addReference(references, seen, entry, excludedNames);
         }
       }
 
@@ -274,7 +275,11 @@ export const dragDropBindingsFragment: WebviewFragment = {
         if (!isInsideDropArea(e.target)) { return; }
 
         placeCaretFromDropPoint(e);
-        var references = extractFileReferences(e.dataTransfer);
+        var droppedImages = attachmentDroppedImageFiles(e.dataTransfer);
+        if (droppedImages.files.length) {
+          attachmentAddFiles(droppedImages.files);
+        }
+        var references = extractFileReferences(e.dataTransfer, true, droppedImages.names);
         if (references.length) {
           insertFileReferences(references);
           return;
@@ -286,7 +291,9 @@ export const dragDropBindingsFragment: WebviewFragment = {
           return;
         }
 
-        setComposerStatus(t('noReferencePath'));
+        if (!droppedImages.files.length) {
+          setComposerStatus(t('noReferencePath'));
+        }
       }, true);
 
 `.slice(1)

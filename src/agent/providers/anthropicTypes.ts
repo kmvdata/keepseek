@@ -16,7 +16,9 @@ export type AnthropicAssistantContentBlock =
 
 export type AnthropicUserContentBlock =
   | { type: 'text'; text: string }
-  | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean };
+  | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean }
+  /** `source.data` is the only position allowed to hold base64. */
+  | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } };
 
 export type AnthropicMessage =
   | { role: 'assistant'; content: AnthropicAssistantContentBlock[] }

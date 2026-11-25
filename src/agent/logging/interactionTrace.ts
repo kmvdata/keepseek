@@ -8,6 +8,7 @@ import { withPerformanceTrace, withOwnedTraceWrite, traceOwnerIndexUri, type Tra
 import { SessionDeletionAuthority } from '../../sessions/sessionDeletionAuthority';
 import { assertManagedStoragePath, readAssociatedJson, deleteAssociatedUri, isMissingAssociatedFile } from '../../sessions/sessionAssociatedPersistence';
 import { getRuntimeIdentity } from '../../shared/runtimeIdentity';
+import { projectDeepSeekContentText } from '../multimodal/imageParts';
 import {
   getConfiguredInteractionTraceSettings,
   type InteractionTraceLevel,
@@ -534,7 +535,7 @@ export function summarizeText(value: string | null | undefined): Record<string, 
 export function summarizeDeepSeekMessage(message: DeepSeekMessage | DeepSeekAssistantMessage): Record<string, unknown> {
   return {
     role: message.role,
-    content: summarizeText(message.content),
+    content: summarizeText(projectDeepSeekContentText(message.content)),
     reasoningContent: summarizeText(message.reasoning_content),
     toolCallId: 'tool_call_id' in message ? message.tool_call_id : undefined,
     toolCalls: message.tool_calls?.map(summarizeDeepSeekToolCall) ?? null

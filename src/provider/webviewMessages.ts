@@ -19,6 +19,22 @@ export interface DroppedFileReferenceInput {
   dataBase64: string;
 }
 
+/**
+ * One composer image crossing the webview -> host bridge exactly once.
+ * Only `dataUrl` carries bytes; the host re-validates magic and geometry before
+ * storing a blob, and the message keeps only the resulting sha256.
+ */
+export interface PromptImageInput {
+  dataUrl: string;
+  declaredMimeType?: string;
+  sourceName?: string;
+  originalBytes?: number;
+  originalWidth?: number;
+  originalHeight?: number;
+  reportedWidth?: number;
+  reportedHeight?: number;
+}
+
 export type WebviewMessage =
   | { type: 'setApprovalMode'; mode: ApprovalMode }
   | { type: 'ready' }
@@ -26,8 +42,8 @@ export type WebviewMessage =
   | { type: 'startupRendered'; revision?: number }
   | { type: 'loadOlderMessages' }
   | { type: 'refreshBalance' }
-  | { type: 'sendPrompt'; requestId?: string; sessionId?: string; stateRevision?: number; prompt: string; sourceId: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[]; skillIds?: string[] }
-  | { type: 'editUserPrompt'; requestId?: string; sessionId?: string; stateRevision?: number; messageId: string; prompt: string; sourceId: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[]; skillIds?: string[] }
+  | { type: 'sendPrompt'; attachments?: PromptImageInput[]; requestId?: string; sessionId?: string; stateRevision?: number; prompt: string; sourceId: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[]; skillIds?: string[] }
+  | { type: 'editUserPrompt'; attachments?: PromptImageInput[]; requestId?: string; sessionId?: string; stateRevision?: number; messageId: string; prompt: string; sourceId: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[]; skillIds?: string[] }
   | { type: 'abortPrompt'; operationId?: string; sessionId?: string }
   | { type: 'continueAgentTask'; messageId: string }
   | { type: 'continueRepair' }

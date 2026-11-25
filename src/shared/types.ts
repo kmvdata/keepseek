@@ -746,6 +746,24 @@ export interface HandoffPromptBlock {
   bodyHash: string;
 }
 
+/** One image attachment. Bytes live only in the content-addressed attachment
+ * store; the message keeps identity, geometry and provenance. */
+export interface MessageAttachment {
+  id: string;
+  kind: 'image';
+  scope: 'user' | 'tool';
+  sha256: string;
+  mimeType: 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif';
+  bytes: number;
+  width: number;
+  height: number;
+  originalBytes?: number;
+  originalWidth?: number;
+  originalHeight?: number;
+  sourceName?: string;
+  createdAt: string;
+}
+
 export interface ChatMessage {
   /** Host-only provenance for portable prompt export. Absence predates the receipt. */
   externalHandoffContext?: boolean;
@@ -780,6 +798,8 @@ export interface ChatMessage {
   isStreaming?: boolean;
   contextMeta?: ChatMessageContextMeta;
   usedSkills?: ChatMessageSkill[];
+  /** Image attachments by content hash. Bytes never enter the message body or a provider string. */
+  attachments?: MessageAttachment[];
   runDetails?: RunDetailsSummary;
   /**
    * 本 assistant 消息对应的工具轮序列（跨轮重建时逐字节还原）。

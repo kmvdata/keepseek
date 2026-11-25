@@ -8,7 +8,7 @@ import type {
   UsageSource
 } from '../shared/types';
 import { getCanonicalModelIdentity } from '../shared/deepSeekModels';
-import { estimateTokenCount } from './tokenEstimate';
+import { estimateProjectedTokenCount } from './multimodal/imageTokens';
 import { getProviderRequestLane } from './providerRequestProjection';
 import type { DeepSeekChatRequestBody } from './deepseek/types';
 import type { OpenAiResponsesRequestBody } from './providers/responsesTypes';
@@ -122,7 +122,10 @@ export function createProviderCacheObservation(input: CreateCacheObservationInpu
   ]));
   const projection = projectNativeRequest(input.body, input.contextInstructions);
   const estimatedPromptTokens = positiveInteger(input.estimatedPromptTokens)
-    ?? estimateTokenCount(decode(projection.full));
+    ?? estimateProjectedTokenCount(decode(projection.full), {
+      provider: input.provider,
+      modelId: input.body.model
+    });
   const previous = input.conversationPrevious ?? input.previous;
   const sameLane = Boolean(previous && previous.laneKey === laneKey);
   const previousIdentity = previous ? requestIdentity(previous.requestId, previous.attemptIndex) : undefined;
@@ -432,7 +435,10 @@ function floorToProviderCacheBlock(tokens: number, provider: ModelSourceProvider
 
 function fingerprint(value: Uint8Array): CacheProjectionFingerprint {
   const text = decode(value);
-  return { hash: hashBytes(value), byteLength: value.byteLength, tokensEstimate: estimateTokenCount(text) };
+  // Geometry-priced, never character-priced: a base64 payload would otherwise
+  // read as tens of thousands of tokens. `estimatedPromptTokens` stays the
+  // authoritative figure for admission and cache health; this is a byte-scaled aid.
+  return { hash: hashBytes(value), byteLength: value.byteLength, tokensEstimate: estimateProjectedTokenCount(text) };
 }
 
 function concatBytes(...values: Uint8Array[]): Uint8Array {

@@ -1,5 +1,9 @@
 import * as composerScript from './composer/script';
 import * as editorScript from './composer/editor';
+import * as attachmentScript from './composer/attachmentScript';
+import * as attachmentStyles from './composer/attachmentStyles';
+import * as attachmentTemplate from './composer/attachmentTemplate';
+import * as attachmentTransform from './composer/attachmentTransform';
 import * as serializationScript from './composer/serialization';
 import * as referenceMenu from './references/menu';
 import * as referenceMention from './references/mention';
@@ -86,6 +90,10 @@ export const INPUT_SCRIPT_FRAGMENTS = [
   editorScript.editorSelectionBindingFragment,
   referenceChips.referenceChipClickBindingFragment,
   editorScript.editorPasteBindingFragment,
+  attachmentTransform.attachmentTransformFragment,
+  attachmentScript.attachmentStateFragment,
+  attachmentScript.attachmentCollectionFragment,
+  attachmentScript.attachmentBindingsFragment,
   commandMenuScript.commandMenuImplementationFragment,
   referenceMenu.referenceMenuImplementationFragment,
   composerScript.composerRenderFragment,
@@ -151,6 +159,7 @@ export const INPUT_SCRIPT_FRAGMENTS = [
 
 export const INPUT_STYLE_FRAGMENTS = [
   editorStyles.editorStylesFragment,
+  attachmentStyles.attachmentStylesFragment,
   referenceStyles.referenceChipStylesFragment,
   skillStyles.skillChipStylesFragment,
   composerStyles.composerBaseStylesFragment,
@@ -175,6 +184,7 @@ export const INPUT_STYLE_FRAGMENTS = [
 
 export const INPUT_TEMPLATE_FRAGMENTS = [
   composerTemplate.composerTemplateFragment,
+  attachmentTemplate.attachmentTemplateFragment,
   commandMenuTemplate.commandMenuTemplateFragment,
   referenceTemplate.referenceMenuTemplateFragment,
   usageTemplate.usageTemplateFragment,

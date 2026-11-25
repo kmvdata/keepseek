@@ -197,3 +197,93 @@ for (const mode of ['ask', 'approve-all'] as const) {
     assert.equal(tamperedMessage.handoffPrompt, undefined);
   });
 }
+
+test('a historical external receipt no longer blocks gen-prompt', async t => {
+  const root = await realpath(await mkdtemp(path.join(tmpdir(), 'keepseek-gen-prompt-external-')));
+  const project = path.join(root, 'project');
+  await mkdir(project);
+  const folder = vscode.Uri.file(project);
+  const state = vscode.Uri.file(path.join(root, 'state'));
+  const prevFolders = vscode.workspace.workspaceFolders;
+  const prevWindow = { ...vscode.window };
+  const notices: string[] = [];
+  const alignment = (vscode as unknown as { StatusBarAlignment?: unknown }).StatusBarAlignment;
+  Object.assign(vscode, { StatusBarAlignment: { Left: 1, Right: 2 } });
+  Object.assign(vscode.window, { createStatusBarItem: () => ({ show() {}, hide() {}, dispose() {} }),
+    showWarningMessage: async (s: string) => { notices.push(s); },
+    showErrorMessage: async (s: string) => { notices.push(s); } });
+  vscode.workspace.workspaceFolders = [{ uri: folder, name: 'project' }];
+  const storage = new GlobalSessionStorage(state as never);
+  const scope = { key: 'folders:' + folder.toString(), name: 'project', folderUris: [folder.toString()] };
+  const queue = new ProjectQueueService(key => storage.getProjectQueueUri(key));
+  const store = new ChatSessionStore(storage, 'en', scope, queue);
+  const init = store.initialize({ fresh: true });
+  await init;
+  await new ModelSourceStore(state as never).createSource({ id: 'mock', provider: 'openai-compatible', name: 'Mock',
+    apiKey: 'fixture', baseUrl: 'https://gen-prompt.invalid/v1', models: [{ id: 'mock', maxOutputTokens: 8192, contextWindowTokens: 128000 }] });
+  const session = store.getActiveSession();
+  session.messages.push({ id: 'external-history', role: 'user',
+    content: 'Earlier note: the fixture was /tmp/keepseek-external/notes.md', createdAt: new Date().toISOString(),
+    externalHandoffContext: true });
+  session.messages.push({ id: 'legacy-history', role: 'assistant', content: 'Earlier answer',
+    createdAt: new Date().toISOString(), runCheckpointArchive: { version: 1, objectHash: 'c'.repeat(64),
+      summary: { taskId: 'legacy-task', status: 'completed', usedMs: 1, maxExecutionMs: 1_000, limitSource: 'test',
+        attempt: 1, modelRequests: 1, retries: 0, steps: 1, canResume: false } } });
+  await store.persist();
+  let legacyLookups = 0;
+  t.mock.method(store, 'getTaskCheckpoint', async () => {
+    legacyLookups++;
+    return { request: { contextFiles: [{ source: 'external' }] } } as never;
+  });
+  const provider = new KeepseekChatViewProvider(vscode.Uri.file(process.cwd()) as never, store, state as never,
+    { keys: () => [], get: (_k: string, fallback: unknown) => fallback, update: async () => undefined } as never,
+    { displayName: 'KeepSeek', version: 'test', publisher: 'keepseek', author: 'keepseek', repositoryUrl: '', license: 'MIT' }, init);
+  const host = provider as unknown as TestHost;
+  const events: Array<Record<string, unknown>> = [];
+  host.views.add({ webview: { postMessage: async (event: Record<string, unknown>) => { events.push(event); return true; } } });
+  t.after(async () => {
+    provider.dispose();
+    store.dispose();
+    vscode.workspace.workspaceFolders = prevFolders;
+    Object.assign(vscode.window, prevWindow);
+    Object.assign(vscode, { StatusBarAlignment: alignment });
+    await storage.flush();
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 40 });
+  });
+  let turnIntent: string | undefined;
+  const run = host.agentRunner.run.bind(host.agentRunner);
+  t.mock.method(host.agentRunner, 'run', async (req: AgentRequest, cb: Parameters<AgentRunner['run']>[1] = {}) => {
+    turnIntent = req.turnIntent;
+    return run(req, cb);
+  });
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async (url: string, init: RequestInit) => {
+    assert.equal(String(url), 'https://gen-prompt.invalid/v1/chat/completions');
+    const payload = JSON.parse(String(init.body));
+    const names = (payload.tools ?? []).map((tool: { function: { name: string } }) => tool.function.name);
+    if (names.length) {
+      assert.ok(names.includes('keepseek_read_evidence'));
+      assert.ok(forbidden.every(name => !names.includes(name)));
+    }
+    calls++;
+    const delta = { role: 'assistant', content: 'Update counter.ts to export addOne. Verify addOne(3) equals 4.' };
+    return new Response('data: ' + JSON.stringify({ choices: [{ index: 0, delta, finish_reason: 'stop' }] })
+      + '\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } });
+  });
+  await host.initializeAfterWebviewReady();
+  await host.handleMessage({ type: 'sendPrompt', sessionId: session.id, requestId: 'external-history', sourceId: 'mock', modelId: 'mock',
+    skillIds: [BUILTIN_GEN_PROMPT_ID], prompt: 'Implement addOne in counter.ts now.' });
+  assert.equal(turnIntent, 'generate_prompt');
+  assert.ok(calls >= 1);
+  assert.equal(legacyLookups, 0, 'the legacy checkpoint receipt is no longer consulted for export');
+  assert.ok(!notices.some(notice => /外部资料|external context|external attachments|外部附件|外部引用|new session|新建会话/iu.test(notice)),
+    notices.join('\n'));
+  const answer = session.messages.at(-1)!;
+  const block = answer.handoffPrompt;
+  assert.ok(block, JSON.stringify({ notices, events: events.filter(event => event.type === 'submissionResult') }));
+  assert.equal(block.body, 'Update counter.ts to export addOne. Verify addOne(3) equals 4.');
+  assert.equal(block.bodyHash, createHash('sha256').update(block.body).digest('hex'));
+  const persisted = await new GlobalSessionStorage(state as never)
+    .loadSession(scope.key, session.id, { readOnly: true });
+  assert.deepEqual(persisted?.messages.find(message => message.id === answer.id)?.handoffPrompt, block);
+});

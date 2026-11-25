@@ -49,6 +49,9 @@ const DENIED_ERROR_TYPE = 'authorization_denied';
  * signal for the caller to keep its original whole-message rendering. That is
  * the compatibility guarantee for the DSML fallback path and for historical
  * messages that never recorded `toolRounds`.
+ *
+ * Adjacent steps that read identically are merged into the later one before the
+ * list is capped; see `collapseAdjacentDuplicates` for what "identically" means.
  */
 export function buildActivityNodes(input: BuildActivityNodesInput): ActivityNode[] | undefined {
   const rounds = Array.isArray(input.toolRounds) ? input.toolRounds : [];
@@ -91,16 +94,50 @@ export function buildActivityNodes(input: BuildActivityNodesInput): ActivityNode
     });
   }
 
-  if (!nodes.length) return undefined;
+  // Collapsing runs before the cap, so the marker counts the steps a reader can
+  // actually see and the returned list never exceeds MAX_ACTIVITY_NODES.
+  const visible = collapseAdjacentDuplicates(nodes);
+  if (!visible.length) return undefined;
 
-  if (nodes.length > MAX_ACTIVITY_NODES) {
+  if (visible.length > MAX_ACTIVITY_NODES) {
     // Truncation is stated in the transcript itself rather than silently
     // dropping steps, so a long run never looks shorter than it was.
-    const kept = nodes.slice(0, MAX_ACTIVITY_NODES - 1);
-    kept.push({ kind: 'say', text: localize(language, 'activityNodesTruncated', { count: nodes.length - kept.length }) });
+    const kept = visible.slice(0, MAX_ACTIVITY_NODES - 1);
+    kept.push({ kind: 'say', text: localize(language, 'activityNodesTruncated', { count: visible.length - kept.length }) });
     return kept;
   }
-  return nodes;
+  return visible;
+}
+
+/**
+ * Two steps are duplicates only when everything the reader can see matches:
+ * a `say` by its text, a `tool` by its name and target. `id`, `status` and
+ * `durationMs` never take part — they are different observations of the same
+ * step, and only the later one is still true.
+ */
+function activityNodeSignature(node: ActivityNode): string {
+  return node.kind === 'say'
+    ? `say\u0000${node.text}`
+    : `tool\u0000${node.name}\u0000${node.target ?? ''}`;
+}
+
+/**
+ * Collapse only *adjacent* duplicates: the same call twice in a row is one
+ * visible step, while a repeat after any other node keeps its own line. The
+ * later observation replaces the earlier one in place, so a retried call shows
+ * its final status and a finished row can never shadow a running one.
+ */
+function collapseAdjacentDuplicates(nodes: readonly ActivityNode[]): ActivityNode[] {
+  const collapsed: ActivityNode[] = [];
+  for (const node of nodes) {
+    const previous = collapsed[collapsed.length - 1];
+    if (previous && activityNodeSignature(previous) === activityNodeSignature(node)) {
+      collapsed[collapsed.length - 1] = node;
+      continue;
+    }
+    collapsed.push(node);
+  }
+  return collapsed;
 }
 
 /**

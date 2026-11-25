@@ -50,6 +50,7 @@ export const composerSubmitBindingsFragment: WebviewFragment = {
           modelId: state.selectedModelId,
           settings: readAgentSettingsFromControls(),
           references: collectPromptFileReferences(),
+          ...(attachmentHasImages() ? { attachments: attachmentCollect() } : {}),
           skillIds: collectActiveSkillIds()
         });
         renderInputControls();
@@ -136,6 +137,7 @@ export const composerStatusFragment: WebviewFragment = {
         promptInput.innerHTML = '';
         promptShortcutController.deactivateMark();
         savedPromptRange = null;
+        attachmentClear();
         updatePromptVisualState();
       }
 

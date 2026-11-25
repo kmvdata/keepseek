@@ -26,13 +26,13 @@ export function normalizeHandoffPromptBlock(value: unknown): HandoffPromptBlock 
 const errorMessages = {
   'zh-CN': {
     invalid: '提示词或正文版本已变化。请查看最新版本后重试。',
-    disclosure: '正文涉及本轮读取过的项目外内容，或包含私钥。请改述为项目相对路径，或在本会话直接执行。',
+    disclosure: '正文包含私钥材料。请移除后重新预览。',
     oversize: '完整正文超过首条消息容量。请在当前会话执行，或缩短可选说明并保留全部验收条件后重新预览。',
     missing_context: '正文仍依赖原会话的证据或引用。请把必要的目标、项目相对路径和验证方法写入后重新预览。'
   },
   en: {
     invalid: 'The prompt has changed. Review its latest version and try again.',
-    disclosure: 'The prompt reflects content read outside this project, or contains a private key. Use project-relative paths, or run in this session.',
+    disclosure: 'The prompt contains a private key. Remove it and preview again.',
     oversize: 'The complete prompt exceeds the first-message limit. Run in this session, or shorten optional details while preserving all acceptance criteria and preview again.',
     missing_context: 'This prompt still depends on evidence or references from its original session. Revise it with the necessary goal, project-relative paths and verification steps.'
   }
@@ -85,160 +85,12 @@ export function normalizeRoots(folders: readonly string[]): string[] {
   return [...new Set(roots)];
 }
 
-const TRAILING_PUNCTUATION = /[.,;:!?。，；：、！？…·、)\]}>"'`」』】》〉]+$/u;
-
-/**
- * Extracts path-shaped candidates without deciding whether they are private. The leading
- * condition is "not preceded by an ASCII path character" instead of an enumerated character
- * class, so CJK prose, full-width punctuation, backticks and table pipes all count as starts.
- * Host classification happens in isOutsideRoot(), which is the only place that knows a root.
- */
-export function findPathLikeTokens(text: string): string[] {
-  const decoded = text.replace(/%(?:2f|5c|3a)/giu, escape => String.fromCharCode(parseInt(escape.slice(1), 16)));
-  const tokens: string[] = [];
-  // One shared leading boundary: a candidate never starts inside an existing path or word, so
-  // the `s:` of `https://` is not read as a drive letter.
-  const candidate = /(?<![A-Za-z0-9._\-/\\])(?:file:[^\s，。；：、）】」』"'`]*|vscode-remote:[^\s，。；：、）】」』"'`]*|\\\\[^\\\s]+\\[^\s，。；：、）】」』"'`]*|[A-Za-z]:(?![\\/]{2})[\\/][^\s，。；：、）】」』"'`]*|\/(?!\/)[\p{L}\p{N}._\-/]*)/gu;
-  for (const match of decoded.matchAll(candidate)) {
-    const token = match[0].replace(TRAILING_PUNCTUATION, '');
-    if (token && !tokens.includes(token)) tokens.push(token);
-  }
-  return tokens;
-}
-
-function toFsPath(token: string): string {
-  let value = token.trim();
-  if (/^(?:file|vscode-remote):/iu.test(value)) {
-    try {
-      value = decodeURIComponent(new URL(value).pathname);
-    } catch {
-      // A malformed URI still names the same place once the scheme is stripped.
-      value = '/' + value.replace(/^[a-z-]+:\/*/iu, '').replace(/^\/+/u, '');
-    }
-  }
-  return value.replace(/\\/gu, '/');
-}
-
-function looksLikeHostPath(path: string): boolean {
-  if (/^\/?[A-Za-z]:\//u.test(path)) return true;
-  if (path.startsWith('//')) return true;
-  return /^\/(?:Users|home|root|private|etc|opt|var|tmp|usr|Volumes|mnt|srv)\//u.test(path);
-}
-
-/**
- * Two spellings name the same place on macOS (`/tmp` is `/private/tmp`) and on Windows (drive
- * letters are case-insensitive). POSIX path case is left alone because it is significant.
- */
-function comparable(path: string): string {
-  const privateResolved = path.startsWith('/private/') ? path.slice('/private'.length) : path;
-  return privateResolved.replace(/^([a-z]):\//u, (_, letter: string) => letter.toUpperCase() + ':/');
-}
-
-function isUnderRoot(path: string, roots: readonly string[]): boolean {
-  const target = comparable(path);
-  for (const root of roots) {
-    const normalized = toFsPath(root).replace(/\/$/u, '');
-    if (!normalized) continue;
-    const base = comparable(normalized);
-    if (target === base || target.startsWith(base + '/')) return true;
-  }
-  return false;
-}
-
-/**
- * True only for a path that is outside every workspace root and also recognisable as a host
- * path. `/v1/chat/completions`, `/api/users`, `/test` and the single segment `/home` are
- * routes or commands, not host paths, and stay allowed.
- *
- * With no root at all nothing can be shown to be outside the project, so the body comparison
- * stays silent; production always supplies the session's workspace folders.
- */
-export function isOutsideRoot(token: string, roots: readonly string[]): boolean {
-  if (!roots.length) return false;
-  const path = toFsPath(token);
-  return Boolean(path) && !isUnderRoot(path, roots) && looksLikeHostPath(path);
-}
-
-const PATH_FIELD_SEGMENTS = new Set(['uri', 'url', 'path', 'root', 'cwd', 'folder', 'directory', 'file', 'dir']);
-const EVIDENCE_SCAN_DEPTH = 4;
-const EVIDENCE_SCAN_STRING = 4_096;
-const EVIDENCE_SCAN_NODES = 5_000;
-
-/** `path`, `cwd`, `canonicalUri` and `folderUris` all name a location; `specHash` does not. */
-function isPathFieldName(key: string): boolean {
-  const segments = key.replace(/([a-z0-9])([A-Z])/gu, '$1_$2').toLowerCase().split(/[^a-z0-9]+/u).filter(Boolean);
-  const last = segments.at(-1);
-  if (!last) return false;
-  return PATH_FIELD_SEGMENTS.has(last) || (last.endsWith('s') && PATH_FIELD_SEGMENTS.has(last.slice(0, -1)));
-}
-
-/** A value that is nothing but a path names one wherever it appears, whatever its key. */
-function wholePathValue(value: string): string | undefined {
-  const trimmed = value.trim();
-  if (!trimmed) return undefined;
-  const [token, ...rest] = findPathLikeTokens(trimmed);
-  if (!token || rest.length) return undefined;
-  return trimmed.replace(TRAILING_PUNCTUATION, '') === token ? token : undefined;
-}
-
-/**
- * Structured tool output carries trustworthy boundaries, so the same candidate extraction is
- * safe here. Limits keep a large evidence envelope from slowing down every plan-card render.
- * Only string values of location-shaped fields are read; prose fields such as `content` are not
- * interpreted, so a quoted sentence inside a file cannot manufacture a path.
- */
-function collectStructuredPaths(value: unknown, into: Set<string>): void {
-  let budget = EVIDENCE_SCAN_NODES;
-  const walk = (node: unknown, depth: number): void => {
-    if (budget <= 0 || depth > EVIDENCE_SCAN_DEPTH) return;
-    budget--;
-    if (typeof node === 'string') return;
-    if (Array.isArray(node)) {
-      for (const item of node) walk(item, depth + 1);
-      return;
-    }
-    if (!node || typeof node !== 'object') return;
-    for (const [key, child] of Object.entries(node as Record<string, unknown>)) {
-      if (typeof child === 'string') {
-        if (child.length > EVIDENCE_SCAN_STRING) continue;
-        if (isPathFieldName(key)) {
-          for (const token of findPathLikeTokens(child)) into.add(toFsPath(token));
-          continue;
-        }
-        const whole = wholePathValue(child);
-        if (whole) into.add(toFsPath(whole));
-        continue;
-      }
-      walk(child, depth + 1);
-    }
-  };
-  walk(value, 0);
-}
-
-/** A location field names a real path only once it has more than one segment. */
-function isPathValue(path: string): boolean {
-  return Boolean(path) && path.replace(/\/$/u, '').split('/').filter(Boolean).length >= 2;
-}
-
-function mentionsExternalPath(tokens: readonly string[], externalPaths: ReadonlySet<string>): boolean {
-  if (!externalPaths.size) return false;
-  for (const token of tokens) {
-    const path = toFsPath(token);
-    for (const external of externalPaths) {
-      if (path === external || path.startsWith(external + '/')) return true;
-    }
-  }
-  return false;
-}
-
 // Only a host read of the complete byte stream produces fileSha256. Evidence
 // contentHash and scope fingerprints do not enter the file checksum column.
 function inspectFileReads(rounds: ChatMessage['toolRounds'], folders: readonly string[], mentioned: string): {
-  externalRead: boolean; anchors: Map<string, string>; externalPaths: Set<string>;
+  anchors: Map<string, string>;
 } {
   const anchors = new Map<string, string>();
-  const externalPaths = new Set<string>();
-  const roots = normalizeRoots(folders);
   for (const round of rounds ?? []) {
     const reads = new Map(round.toolCalls
       .filter(call => ['keepseek_read_workspace_file', 'keepseek_read_workspace_file_range'].includes(call.function.name))
@@ -248,13 +100,15 @@ function inspectFileReads(rounds: ChatMessage['toolRounds'], folders: readonly s
       try {
         data = JSON.parse(result.content);
       } catch {
-        // Omitted, archived or non-JSON tool output supplies no checksum and no fields.
+        // Omitted, archived or non-JSON tool output supplies no checksum.
         continue;
       }
       const record = data as { ok?: unknown; uri?: unknown; fileSha256?: unknown } | null;
       if (reads.has(result.toolCallId) && record?.ok === true && typeof record.uri === 'string') {
         const relative = projectRelativeText(record.uri, folders);
-        if (!relative.startsWith('./') || relative.split('/').includes('..')) return { externalRead: true, anchors, externalPaths };
+        // External reads inform the authored body but never the checksum appendix: only a
+        // complete read that is still project-relative can be measured here.
+        if (!relative.startsWith('./') || relative.split('/').includes('..')) continue;
         const name = reads.get(result.toolCallId);
         if (name === 'keepseek_read_workspace_file' && typeof record.fileSha256 === 'string'
           && /^[a-f0-9]{64}$/u.test(record.fileSha256)
@@ -262,34 +116,20 @@ function inspectFileReads(rounds: ChatMessage['toolRounds'], folders: readonly s
           anchors.set(relative, record.fileSha256);
         }
       }
-      // Reading a file is not the only way external material enters: any structured field of
-      // any tool result can name one. These are compared exactly, without character classes,
-      // and anything not beneath a root is external — a field has no prose to be a false alarm.
-      const found = new Set<string>();
-      collectStructuredPaths(data, found);
-      for (const path of found) {
-        if (isPathValue(path) && !isUnderRoot(path, roots)) externalPaths.add(path);
-      }
     }
   }
-  return { externalRead: false, anchors, externalPaths };
+  return { anchors };
 }
 
 interface PromptGuardContext {
-  roots: readonly string[];
   anchors: Map<string, string>;
-  externalPaths: ReadonlySet<string>;
 }
-
 function renderPrompt(requirement: string, steps: string, language: KeepseekLanguage, context: PromptGuardContext): GeneratedHandoffPrompt {
   if (!requirement || !steps) return { ok: false, reason: 'missing_context' };
-  // Four stages, fixed order: the hard refusals must inspect the original bytes, and every
-  // length-based decision below must run on the redacted text that is actually delivered.
+  // Four stages, fixed order: the private-key refusal must inspect the original bytes, and
+  // every length-based decision below must run on the redacted text that is actually delivered.
   const text = requirement + '\n' + steps;
   if (hasPrivateKeyBlock(text)) return { ok: false, reason: 'disclosure' };
-  const tokens = findPathLikeTokens(text);
-  if (tokens.some(token => isOutsideRoot(token, context.roots))
-    || mentionsExternalPath(tokens, context.externalPaths)) return { ok: false, reason: 'disclosure' };
   const safeRequirement = redactSensitiveMaterial(requirement);
   const safeSteps = redactSensitiveMaterial(steps);
   const safeText = safeRequirement + '\n' + safeSteps;
@@ -331,18 +171,13 @@ export function renderGeneratedHandoffPrompt(requirement: string, authoredPrompt
     : '';
   const authored = projectRelativeText(authoredPrompt, workspaceFolders);
   const steps = directive && !authored.includes(directive) ? directive + '\n\n' + authored : authored;
-  // The original requirement still drives both guards; it never enters the delivered body.
+  // The original requirement still drives the guards; it never enters the delivered body.
   const reads = inspectFileReads(toolRounds, workspaceFolders, plain + '\n' + steps);
-  if (reads.externalRead) return { ok: false, reason: 'disclosure' };
-  return renderPrompt(plain, steps, language, {    roots: normalizeRoots(workspaceFolders), anchors: reads.anchors, externalPaths: reads.externalPaths
-  });
+  return renderPrompt(plain, steps, language, { anchors: reads.anchors });
 }
 
 export function usedExternalHandoffContext(request: { contextFiles?: readonly { source: string }[]; authorizedExternalReferenceUris?: readonly string[] }): boolean {
   return Boolean(request.contextFiles?.some(file => file.source === 'external') || request.authorizedExternalReferenceUris?.length);
 }
 
-export function hasExternalHandoffContext(message: ChatMessage): boolean {
-  return message.externalHandoffContext === true || Boolean(message.runCheckpoint && usedExternalHandoffContext(message.runCheckpoint.request));
-}
 

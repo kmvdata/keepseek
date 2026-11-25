@@ -35,6 +35,7 @@ import {
   getAgentToolNamesForPrompt,
   getAgentTools
 } from './protocol';
+import { appendImagePlaceholders, resolveImageParts, toAnthropicUserContent } from './multimodal/imageParts';
 
 export const CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION = CURRENT_AGENT_PROTOCOL_VERSION;
 export const CURRENT_PROVIDER_TOOL_SCHEMA_VERSION = CURRENT_AGENT_PROTOCOL_VERSION;
@@ -86,6 +87,9 @@ export interface ProviderRequestProjectionInput {
   provider?: ModelSourceProvider;
   sourceId?: string;
   baseUrl?: string;
+  /** Image data URLs keyed by attachment sha256, produced once by the runner.
+   * Absent means every image degrades to placeholder text. */
+  imageDataUrlByHash?: ReadonlyMap<string, string>;
 }
 
 export interface OpenAiResponsesRequestProjection {
@@ -218,7 +222,8 @@ export function buildProviderRequestProjection(
     language: input.language,
     projection: historyProjection,
     requestProtocolVersion,
-    systemPrompt: input.systemPrompt
+    systemPrompt: input.systemPrompt,
+    imageDataUrlByHash: input.imageDataUrlByHash
   }), provider);
   // Tool exposure is an execution capability, not a model capability or a
   // budget sentinel. Callers that need a no-tools lane must say so explicitly.
@@ -253,7 +258,8 @@ export function buildProviderRequestProjection(
         history: historyProjection.history,
         prompt: input.prompt,
         sourceId: input.sourceId ?? input.model.sourceId ?? '',
-        baseUrl: input.baseUrl ?? ''
+        baseUrl: input.baseUrl ?? '',
+        imageDataUrlByHash: input.imageDataUrlByHash
       })
     : undefined;
 
@@ -288,6 +294,7 @@ function buildAnthropicMessagesRequestProjection(input: {
   prompt: string;
   sourceId: string;
   baseUrl: string;
+  imageDataUrlByHash?: ReadonlyMap<string, string>;
 }): AnthropicMessagesRequestProjection {
   const lane = {
     sourceId: input.sourceId,
@@ -306,8 +313,13 @@ function buildAnthropicMessagesRequestProjection(input: {
   for (const message of input.history) {
     if (message.role === 'user') {
       const content = getMessageContentForAgent(message);
-      if (!content) continue;
-      messages.push({ role: 'user', content: [{ type: 'text', text: content }] });
+      const imageParts = resolveImageParts(message.attachments, input.imageDataUrlByHash);
+      const projectedText = appendImagePlaceholders(content, imageParts.missing);
+      if (!projectedText && !imageParts.images.length) continue;
+      messages.push({
+        role: 'user',
+        content: toAnthropicUserContent(projectedText, imageParts.images)
+      });
       const originalContent = (message.expandedContent ?? message.content).trim();
       currentPromptIncluded = currentPromptIncluded || Boolean(normalizedPrompt
         && (content === normalizedPrompt
@@ -372,10 +384,13 @@ function buildOpenAiResponsesRequestProjection(input: {
   for (const message of input.history) {
     if (message.role === 'user') {
       const content = getMessageContentForAgent(message);
-      if (!content) {
+      // Responses carries no image in v1, so the turn degrades to placeholder
+      // text: deterministic, and never a base64 payload.
+      const projected = appendImagePlaceholders(content, message.attachments);
+      if (!projected) {
         continue;
       }
-      responseInput.push({ role: 'user', content });
+      responseInput.push({ role: 'user', content: projected });
       const originalContent = (message.expandedContent ?? message.content).trim();
       currentPromptIncluded = currentPromptIncluded || Boolean(normalizedPrompt
         && (content === normalizedPrompt

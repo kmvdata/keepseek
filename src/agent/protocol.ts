@@ -4,6 +4,7 @@ import { formatBytes } from '../shared/format';
 import type { KeepseekLanguage } from '../shared/i18n';
 import { getMarkdownFence, getMarkdownLanguage } from '../shared/markdown';
 import { estimateTokenCount } from './tokenEstimate';
+import { appendImagePlaceholders, projectDeepSeekContentText, resolveImageParts, toChatCompletionsContent } from './multimodal/imageParts';
 import {
   ActivatedSkill,
   ChatMessage,
@@ -109,6 +110,10 @@ export interface BuildAgentMessagesInput {
   /** Child-only system prompt override. Undefined preserves the main prompt
    * byte-for-byte for every existing protocol lane. */
   systemPrompt?: string;
+  /** Image data URLs keyed by attachment sha256. The runner loads them once per
+   * request from the content-addressed store; absent means every image degrades
+   * to placeholder text, which is the only correct reading for text-only callers. */
+  imageDataUrlByHash?: ReadonlyMap<string, string>;
 }
 
 export function buildInitialAgentMessages(input: BuildAgentMessagesInput): DeepSeekMessage[] {
@@ -146,7 +151,7 @@ export function buildInitialAgentMessages(input: BuildAgentMessagesInput): DeepS
   // 再追加最终文本；user 消息一律 (expandedContent ?? content)。当前 prompt 消息
   // 与历史消息走完全相同的字节路径，保证跨轮前缀稳定。
   for (const message of history) {
-    appendHistoryMessage(messages, message);
+    appendHistoryMessage(messages, message, input.imageDataUrlByHash);
   }
 
   if (input.prompt.trim() && !currentPromptMessage) {
@@ -161,7 +166,8 @@ export function buildInitialAgentMessages(input: BuildAgentMessagesInput): DeepS
 
 function appendHistoryMessage(
   messages: DeepSeekMessage[],
-  message: ChatMessage
+  message: ChatMessage,
+  imageDataUrlByHash?: ReadonlyMap<string, string>
 ): void {
   if (message.role === 'assistant') {
     for (const round of message.toolRounds ?? []) {
@@ -188,7 +194,12 @@ function appendHistoryMessage(
     });
     return;
   }
-  const content = getMessageContentForAgent(message);
+  const text = getMessageContentForAgent(message);
+  const imageParts = resolveImageParts(message.attachments, imageDataUrlByHash);
+  const content = toChatCompletionsContent(
+    appendImagePlaceholders(text, imageParts.missing),
+    imageParts.images
+  );
   if (!content) {
     return;
   }
@@ -1280,10 +1291,12 @@ function canonicalizeJsonValue(value: unknown, key = ''): unknown {
   return canonical;
 }
 
+/** Image parts are priced as their text plus one `[image]` placeholder each, so
+ * a base64 payload never reaches the character-based `estimateTokenCount`. */
 export function estimateDeepSeekMessageTokens(message: DeepSeekMessage): number {
   const parts = [
     message.role,
-    message.content ?? '',
+    projectDeepSeekContentText(message.content),
     message.reasoning_content ?? '',
     message.tool_call_id ?? '',
     message.tool_calls ? JSON.stringify(message.tool_calls) : ''

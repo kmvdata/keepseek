@@ -4327,6 +4327,11 @@ ${conversationsSessionListFragment.source}
       return label === key || !label ? t('activityToolFallback') : label;
     }
 
+    /** The one-line identity of a tool step: exactly what the reader can see. */
+    function getActivityToolTitle(node) {
+      return node.target ? String(node.name || '') + ' · ' + String(node.target) : String(node.name || '');
+    }
+
     function createActivityToolRow(node) {
       var row = document.createElement('div');
       row.className = 'activity-tool status-' + String(node.status || 'succeeded');
@@ -4334,7 +4339,7 @@ ${conversationsSessionListFragment.source}
       if (node.status === 'running') row.classList.add('is-running');
       var label = getActivityToolLabel(node);
       var detail = node.target ? label + ' · ' + node.target : label;
-      row.title = node.target ? String(node.name || '') + ' · ' + String(node.target) : String(node.name || '');
+      row.title = getActivityToolTitle(node);
       row.setAttribute('aria-label', detail + ' · ' + t('activityStatus_' + String(node.status || 'succeeded')));
       row.append(createActivityIcon());
       var text = document.createElement('span');
@@ -4409,6 +4414,8 @@ ${conversationsSessionListFragment.source}
         }
         stream.append(document.createTextNode(contentTail));
       }
+      // syncActivityToolRows re-derives the current row after the say insert, so
+      // the breathing mark always lands on the newest step of the list.
       syncActivityToolRows(list, targetMessage);
       return true;
     }
@@ -4439,6 +4446,25 @@ ${conversationsSessionListFragment.source}
         && previous.querySelector('.is-stream-text') ? previous : null;
     }
 
+    /**
+     * Only the newest step of an open run breathes. The mark is re-derived from
+     * the rendered list on every full render and every delta, so no path can
+     * leave two rows marked and a settled list cannot keep one pulsing.
+     */
+    function syncActivityCurrentRow(list, streaming) {
+      if (!list) return;
+      var marked = list.querySelectorAll('.is-current');
+      for (var index = 0; index < marked.length; index += 1) marked[index].classList.remove('is-current');
+      if (!streaming) return;
+      for (var scan = list.children.length - 1; scan >= 0; scan -= 1) {
+        var child = list.children[scan];
+        // The toggle is a control, not a step: it is never the current step.
+        if (!child.classList.contains('activity-tool') && !child.classList.contains('activity-say')) continue;
+        child.classList.add('is-current');
+        return;
+      }
+    }
+
     function syncActivityToolRows(list, message) {
       var nodes = Array.isArray(message?.activityNodes) ? message.activityNodes : [];
       var toolNodes = nodes.filter(function(node) { return node.kind === 'tool'; });
@@ -4451,6 +4477,18 @@ ${conversationsSessionListFragment.source}
       });
       toolNodes.forEach(function(node) {
         var row = rowsById.get(node.id);
+        if (!row) {
+          // The host collapses adjacent steps that read identically, so the
+          // representative of a pair can be a newer id than the row already on
+          // screen. Reuse that tail row instead of appending the copy the
+          // projection just removed.
+          var tail = list.lastElementChild;
+          if (tail && tail.classList.contains('activity-tool') && tail.title === getActivityToolTitle(node)) {
+            row = tail;
+            row.dataset.toolNodeId = String(node.id || '');
+            rowsById.set(node.id, row);
+          }
+        }
         if (!row) {
           list.append(createActivityToolRow(node));
           return;
@@ -4471,6 +4509,9 @@ ${conversationsSessionListFragment.source}
         }
         duration.textContent = text;
       });
+      // Rows above may have been appended or finished, so the tail claim is
+      // re-derived here rather than assumed from the previous render.
+      syncActivityCurrentRow(list, Boolean(message && message.isStreaming));
     }
 
     function renderActivityNodes(container, message, streaming) {
@@ -4518,6 +4559,9 @@ ${conversationsSessionListFragment.source}
       else if (expanded && tools.length > ACTIVITY_COLLAPSED_TOOL_LIMIT) {
         container.append(createActivityToggle(message, 0, true));
       }
+      // The newest step of a streaming run breathes; a settled render clears the
+      // mark so a finished run cannot leave one row pulsing forever.
+      syncActivityCurrentRow(container, streaming);
     }
 
     function createActivityToggle(message, hiddenCount, expanded) {

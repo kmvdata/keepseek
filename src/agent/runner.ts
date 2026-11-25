@@ -50,7 +50,14 @@ import {
   UsagePriceSnapshot,
   UsageSource
 } from '../shared/types';
-import type { ProviderReplayState } from '../shared/types';
+import type {
+  AnthropicReplayMessage,
+  AnthropicReplayUserContentBlock,
+  ProviderReplayState
+} from '../shared/types';
+import { AttachmentStore } from '../attachments/attachmentStore';
+import { projectDeepSeekContentText, toDataUrl } from './multimodal/imageParts';
+import { refusesNewImages, resolveImageLaneCapability } from './multimodal/imageCapability';
 import {
   getConfiguredMaxRepairIterations,
   getConfiguredMaxValidationRuns,
@@ -990,6 +997,49 @@ export class AgentLoop {
       const deadline = logicalBudget.deadlineAt;
       return deadline === undefined ? undefined : deadline + hostWaitOffsetMs;
     };
+    // The only attachment I/O on the request path: one deterministic read per
+    // distinct sha256, taken before the synchronous projection closure exists.
+    // A missing or mismatched blob degrades that image to placeholder text; it
+    // never fails the turn and never retries an unknown side effect.
+    const imageLaneDecision = resolveImageLaneCapability({
+      provider: runtimeConfig.provider,
+      protocol: runtimeConfig.provider,
+      baseUrl: runtimeConfig.baseUrl,
+      modelId: request.model.id
+    });
+    const attachmentRoot = this.globalStorageUri;
+    const imageDataUrlByHash = new Map<string, string>();
+    if (imageLaneDecision.capability === 'supported' && attachmentRoot) {
+      const mimeTypeByHash = new Map<string, string>();
+      for (const historyMessage of request.history) {
+        for (const attachment of historyMessage.attachments ?? []) {
+          if (!mimeTypeByHash.has(attachment.sha256)) {
+            mimeTypeByHash.set(attachment.sha256, attachment.mimeType);
+          }
+        }
+      }
+      const attachmentStore = new AttachmentStore(attachmentRoot);
+      for (const [sha256, mimeType] of mimeTypeByHash) {
+        try {
+          imageDataUrlByHash.set(sha256, toDataUrl(mimeType, await attachmentStore.getBlob(sha256)));
+        } catch {
+          // getBlob verifies the content hash; an unreadable or mismatched blob
+          // stays out of the map so that image degrades to its placeholder.
+        }
+      }
+    }
+    // A new image on a lane that may not carry one stops the turn with a reason
+    // instead of dropping it silently. History images degrade instead, so a text
+    // follow-up on the same lane still works.
+    const currentTurnUserMessage = [...request.history].reverse().find((message) => message.role === 'user');
+    const currentTurnAttachments = currentTurnUserMessage
+      && (currentTurnUserMessage.expandedContent ?? currentTurnUserMessage.content).trim() === request.prompt.trim()
+      ? currentTurnUserMessage.attachments ?? []
+      : [];
+    if (refusesNewImages(imageLaneDecision, currentTurnAttachments.length > 0)) {
+      throw new AgentInterruptedError('waiting_for_user',
+        imageLaneDecision.reason[request.language === 'en' ? 'en' : 'zh']);
+    }
     taskPlan.beginExecution();
     const buildCurrentProviderProjection = (boundaryIds?: Set<string>): ReturnType<typeof buildProviderRequestProjection> => buildProviderRequestProjection({
       model: request.model,
@@ -1009,7 +1059,8 @@ export class AgentLoop {
       provider: runtimeConfig.provider,
       sourceId: runtimeConfig.sourceId,
       baseUrl: runtimeConfig.baseUrl,
-      systemPrompt: request.persona?.systemPrompt
+      systemPrompt: request.persona?.systemPrompt,
+      imageDataUrlByHash
     });
     let providerProjection = buildCurrentProviderProjection();
     const projection = providerProjection.historyProjection;
@@ -1774,7 +1825,7 @@ export class AgentLoop {
           providerRunState.replayMessages.push(blockedMessage);
         }
         toolRounds.push({
-          assistantContent: assistantToolCallMessage.content ?? null,
+          assistantContent: projectDeepSeekContentText(assistantToolCallMessage.content),
           reasoningContent: assistantToolCallMessage.reasoning_content ?? null,
           toolCalls: rawToolCalls,
           toolResults: blockedResults.map((blocked) => ({
@@ -2478,7 +2529,7 @@ export class AgentLoop {
         }
         // 保存本工具轮的原样字节快照，供跨轮重建（toolRounds 展开 == 本轮发送序列）。
         toolRounds.push({
-          assistantContent: assistantToolCallMessage.content ?? null,
+          assistantContent: projectDeepSeekContentText(assistantToolCallMessage.content),
           reasoningContent: assistantToolCallMessage.reasoning_content ?? null,
           toolCalls,
           toolResults: roundToolResults
@@ -2538,7 +2589,7 @@ export class AgentLoop {
             }
           });
         }
-        this.appendProviderUserText(providerRunState, emulatedToolResultMessage.content ?? '');
+        this.appendProviderUserText(providerRunState, projectDeepSeekContentText(emulatedToolResultMessage.content));
         trace.record({
           type: 'agent_message_appended',
           reason: 'dsml_emulated_tool_results',
@@ -3179,7 +3230,7 @@ export class AgentLoop {
         && finishReason === 'pause_turn';
       const anthropicContinuationMessage: AnthropicMessage = {
         role: 'user',
-        content: [{ type: 'text', text: instructionMessage.content ?? '' }]
+        content: [{ type: 'text', text: projectDeepSeekContentText(instructionMessage.content) }]
       };
       if (!saved?.continuation?.inFlight) {
       input.messages.push(assistantMessage, instructionMessage);
@@ -3388,7 +3439,7 @@ export class AgentLoop {
         protocol: 'anthropic-messages',
         sourceId: state.lane.sourceId,
         baseUrl: state.lane.baseUrl,
-        messages: state.replayMessages
+        messages: state.replayMessages.map(toAnthropicReplayMessage)
       };
     }
     return undefined;
@@ -4786,8 +4837,8 @@ export class AgentLoop {
       const nextBlock: AnthropicUserContentBlock = {
         type: 'tool_result',
         tool_use_id: input.shapedToolMessage.tool_call_id ?? '',
-        content: input.shapedToolMessage.content ?? '',
-        ...(this.isToolResultError(input.shapedToolMessage.content ?? '') ? { is_error: true } : {})
+        content: projectDeepSeekContentText(input.shapedToolMessage.content),
+        ...(this.isToolResultError(projectDeepSeekContentText(input.shapedToolMessage.content)) ? { is_error: true } : {})
       };
       const afterMessages: AnthropicMessage[] = [
         ...input.providerRunState.messages,
@@ -5619,9 +5670,26 @@ function formatMessagesForTrace(
   if (!includeRequestPayload) {
     return messages.map(summarizeDeepSeekMessage);
   }
-  return messages.map((message) => isCurrentRunContextEnvelope(message.content)
+  return messages.map((message) => isCurrentRunContextEnvelope(projectDeepSeekContentText(message.content))
     ? summarizeDeepSeekMessage(message)
     : message);
+}
+
+/** Replay never carries image bytes: the persisted shapes are text, thinking,
+ * tool_use and tool_result only. An image block exists solely on the live
+ * request projection, so it is dropped here instead of letting base64 reach the
+ * stored replay state. */
+function toAnthropicReplayMessage(message: AnthropicMessage): AnthropicReplayMessage {
+  if (message.role === 'assistant') {
+    return { role: 'assistant', content: message.content };
+  }
+  return {
+    role: 'user',
+    content: message.content.filter(
+      (block): block is AnthropicReplayUserContentBlock =>
+        block.type === 'text' || block.type === 'tool_result'
+    )
+  };
 }
 
 function formatRequestBodyForTrace(
@@ -5643,6 +5711,8 @@ function formatRequestBodyForTrace(
             : block.type === 'thinking' ? block.thinking.length
             : block.type === 'redacted_thinking' ? block.data.length
             : block.type === 'tool_use' ? JSON.stringify(block.input).length
+            // Payload length only: the base64 body itself never enters a trace.
+            : block.type === 'image' ? block.source.data.length
             : block.content.length
         }))
       })),
