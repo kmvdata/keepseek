@@ -29,6 +29,8 @@
 
 不要在 Provider 或 Webview 复制调度、工具集或权限判断。
 
+`runtime.ts` 是本节涉及的最大模块（`src/agent/subagents/runtime.ts`，≈81 KB）：定位委派参数校验、batch 预检、child 生命周期或结果信封生成时，先按工具名/函数名搜索，不要整读。`subagentUsageStats.ts`（≈47 KB）与 `store.ts`（≈34 KB）同理。
+
 ## 3. profile 与工具集（`profiles.ts`）
 
 - `READ_TOOLS`：workspace 列表/目录/搜索/读文件/读行段/诊断 + 语义符号 4 项 + Git 只读 5 项（status、diff、branch、create_patch、suggest_commit_message）。
@@ -165,6 +167,9 @@ bun run test
 | `test/approveAllBoundary.test.ts`、`test/approveAllExecution.test.ts` | approve-all 边界、ledger 与真实执行 |
 | `test/validationBarrier.test.ts`、`test/validationAuthorization.test.ts`、`test/runValidationReconciliation.test.ts` | 验证屏障、授权与结果对账 |
 | `test/writeLease.test.ts` | 项目写租约：单一写者、TTL+pid 回收、epoch、嵌套深度 |
+| `test/handoffPromptBlock.test.ts` | 委派 prompt 块注入与文本边界 |
+
+`test/` 现有 28 个 `*.test.ts`，全部已在 `test/runTests.ts` 登记；文件级索引见 [`AGENTS.md`](AGENTS.md) 附录 A。上表只列与子代理直接相关的契约。
 
 调度、结果合同、continuation、store 恢复与用量归集目前**没有专属用例**；改动这些区域时须自行补断言，并优先扩展上表最接近的既有契约。
 

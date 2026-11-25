@@ -1,7 +1,6 @@
 > **⚠️ Back up your account details before upgrading to 0.5.3**
 >
-> Version 0.5.3 redesigns the file layout and configuration structure and **no longer supports the previous version's history or account configurations**. After upgrading, configure your accounts again; earlier conversation history is not kept. This trade-off prepares KeepSeek for asynchronous multi-agent support, and we apologize for the inconvenience.
-
+> Version 0.5.3 ships under a new extension identity, `keepseek.keepseek` (publisher `keepseek`), with a redesigned file layout and configuration structure. It does **not** read, import, or migrate the previous identity's history or account configuration: after upgrading, configure your accounts again, and earlier conversations are not restored. This trade-off prepares KeepSeek for asynchronous multi-agent support, and we apologize for the inconvenience.
 > **English: This document | 中文：[README.md](./README.md)**
 
 <p align="center">
@@ -10,8 +9,7 @@
 
 # KeepSeek
 
-Version 0.5.3 starts a fresh baseline under `kmvdata.keepseek`; earlier data and settings are not imported. See the storage-baseline section in [AGENTS.md](AGENTS.md) for data locations and reset rules.
-
+Version 0.5.3 is a fresh baseline: the extension identity is `keepseek.keepseek` (publisher `keepseek`), settings keep the `kmvdata.keepseek` namespace, and the data root is `com.kmvdata.keepseek` inside the host's native application-data directory. Earlier data and settings are not imported. See the storage-baseline section in [AGENTS.md](AGENTS.md) for data locations and reset rules.
 ## 1. Turn the Model You Choose into an Agent That Gets Real Work Done
 
 **KeepSeek is an open-source coding agent in the VS Code sidebar: you choose the models, control the context, and decide how edits and commands are approved.**
@@ -63,8 +61,11 @@ KeepSeek lives in the Secondary Sidebar. Open `KeepSeek: Open Chat`, choose an a
 
 When the model needs details, it re-reads the current file instead of relying indefinitely on code from several turns ago. Files outside the workspace require authorization first, while binary, media, archive, and oversized content is not read as text context.
 
-A project-level `AGENTS.md` can define persistent development rules, while Codex-compatible Skills package workflows for specific tasks. Browse Skills from the command menu, or type `$` in the input box to open the Skills picker.
+A project-level `AGENTS.md` defines persistent development rules, while Codex-compatible Skills package workflows for specific tasks. KeepSeek shares project `.agents/skills/<name>/SKILL.md`, the optional `agents/openai.yaml`, and the `AGENTS.md` / `AGENTS.override.md` chain in the global and task-directory path with Codex. Personal Skills live in `~/.agents/skills`; `CODEX_HOME` (default `~/.codex`) supplies configuration and global instructions without changing the personal Skill directory.
 
+Browse Skills from the command menu, or type `$` in the input box to pick one by name and source. For multi-root or subdirectory work, choose the task directory first with **KeepSeek: Select Task Directory**; otherwise the single-root workspace folder is used. Standard YAML implicit eligibility is on by default, and a session selection cannot override a shared-config disable. Creating a Skill puts the standard Markdown and the policy YAML in one pending ChangeSet.
+
+Shared scope is limited to those documented files and configuration subset: KeepSeek keeps its own approval and execution boundaries and provides no Codex MCP runtime. MCP servers, Codex accounts, and private tools are out of scope.
 ### 3. Let the Agent Edit and Validate Within Clear Boundaries
 
 KeepSeek separates proposing an action from carrying it out:
@@ -79,9 +80,8 @@ The agent can therefore complete real engineering work without silently changing
 Larger workloads stay just as controllable:
 
 - **Batched command execution**: pending commands proposed in one turn can be grouped into a batch, approved once, run in order with per-command progress, and stopped at any time. Approvals automatically expire when the session, approval mode, or workspace trust changes;
-- **Auto-continue after budget exhaustion**: when a foreground task hits the tool-turn or step limit, KeepSeek starts a new round to finish outstanding work—but only when there is real progress to show (up to 8 rounds by default, configurable). Edits and commands still follow the selected approval mode;
-- **Surgical edits in huge files**: oversized files are handled with resumable range reads and precise incremental edits, so every change stays visible and reviewable.
-
+- **Budgets pause instead of stalling silently**: tool-round, tool-call, time, and token grants are explicit per task segment (`0` = unlimited). When a positive limit is reached, KeepSeek runs one tool-free finalization, reports what it completed and what remains, and waits for you to continue; each Continue opens a new segment while cumulative counters, completed work, and evidence are preserved. Stops caused by a length or `pause_turn` cut-off have their own separate auto-continuation limit. Edits and commands still follow the selected approval mode;- **Surgical edits in huge files**: oversized files are handled with resumable range reads and precise incremental edits, so every change stays visible and reviewable;
+- **Command cards state what actually happened**: preflight-blocked, authorization- or dependency-blocked, failed to start, exited with a failure, unknown result, and superseded are distinct states, and each card can expand the historical argv, diagnostic version, and the offending argument index. A draft stopped by preflight offers *Clone for correction*, which copies its original arguments into the composer without sending a request or creating a runnable draft; a finished draft whose result is known offers *Run again…*, which only prepares an identical pending command. Neither executes anything, and both need fresh approval.
 ### 4. Control the Current Task from the Command Menu
 
 Click the **`/` button** below the input box to open the command menu. From here, you can launch Skills, switch the main and subagent models, adjust the approval mode and auto-compaction threshold, and control Thinking effort.
@@ -94,13 +94,14 @@ The menu screenshot above shows a historical UI. The current approval controls w
 
 There are two approval modes:
 
-- **Ask for approval** (default, `ask`): you approve file writes and commands individually or as a batch;
-- **Approve for me** (`delegate`): the host directly approves eligible routine actions, then sends other verifiable actions to an independent, tool-free approval model. When a decision remains unresolved, the host requests a precise one-time user decision. A safety denial cannot be overridden by a user click.
+- **Ask for approval** (default, `ask`): you approve file writes and commands yourself, individually or as a batch, and each validation run needs its own confirmation;
+- **Approve all** (`approve-all`): the host applies eligible drafts and starts eligible commands immediately after they are created, with no confirmation prompt and no reviewer or approval model.
+The selected mode is saved per project and reused across its sessions, and only a user action in the chat can switch it. Approve all is scoped to the whole project rather than the current session: one pass walks every session that still has pending drafts, advances one unit per session, and lets each completed write trigger the next boundary, so drafts from a session you are not looking at are still served. Commands are dispatched while their owning session is open.
+Both modes keep the hard boundaries: workspace trust, exact external-scope grants, draft identity and hashes, file conflicts, dirty editors, protected paths, and one-time execution permits. Every draft is re-checked before it is written or started.
 
-The selected mode is saved per workspace and reused across its sessions. Configure the approval model under **`/` → Subagent models → Approval model**, following the actual main model for the task segment or choosing a fixed account and model. This uses the separate user-level `kmvdata.keepseek.autoApprovalReviewer` setting and does not inherit ordinary subagent defaults or role settings. Only Ask for approval and Approve for me are supported; earlier approval modes and settings are not imported.
+Approve all never retries inside one pass, and every draft that stays pending has either a scheduled next attempt or a recorded, visible reason. A file draft the host cannot apply is recorded as waiting for manual approval with a manual button that still re-runs the same checks; hard gates such as an untrusted workspace or an unresolved identity never offer a forced apply. A command draft has no manual fallback and states why it did not start.
 
-Approve for me retains workspace-trust, external-scope, file-conflict, dirty-editor, and one-time execution-permit checks. Processes run with extension-host privileges and have no OS sandbox. Stop the task at any time or switch back to Ask for approval to cancel subsequent automatic actions.
-
+Project commands and fixed validation run in platform isolation by default and keep an explicit reason when isolation is unavailable; only the user-level `kmvdata.keepseek.projectExecution=host` setting runs them with the extension host account's permissions, where there is no OS sandbox. Stop the task at any time or switch back to Ask for approval to cancel subsequent automatic actions.
 ### 5. Keep Long Tasks Moving—and Keep Costs Visible
 
 Sessions are saved by project and can be bookmarked, renamed, filtered, or copied. For complex work, restricted subagents can investigate, review, or prepare edit proposals in parallel. Their intermediate work stays isolated, only distilled results return to the main session, and final changes retain the same review boundaries. See [SUBAGENTS.md](SUBAGENTS.md) for details.
@@ -128,8 +129,7 @@ Performance starts from the first second VS Code opens: an empty session is read
 ## 3. Development, Packaging, and Project Resources
 
 ### Local Development
-
-The project requires VS Code `^1.98.0`. Common development commands run through Bun:
+The project requires VS Code `^1.106.0`. Common development commands run through Bun:The project requires VS Code `^1.98.0`. Common development commands run through Bun:
 
 ```bash
 bun install
