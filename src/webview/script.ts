@@ -122,6 +122,7 @@ export function getScript(): string {
         sequence: 0
       },
       maxFileBytes: 200000,
+      attachmentImageMaxEdge: 1568,
       historyRetentionDays: 1,
       debugMode: false,
       hasCurrentSessionLog: false,

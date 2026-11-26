@@ -76,7 +76,7 @@ export const dragDropExtractionFragment: WebviewFragment = {
 
         if (hasType(dt, 'text/plain')) {
           var text = dt.getData('text/plain');
-          addPlainTextReferences(references, seen, text, allowPlainTextPaths !== false);
+          addPlainTextReferences(references, seen, text, allowPlainTextPaths !== false, excludedNames);
         }
 
         return references;
@@ -89,7 +89,7 @@ export const dragDropExtractionFragment: WebviewFragment = {
         if (!dt) { return files; }
 
         function addFile(file) {
-          if (!file || file.path) { return; }
+          if (!file || file.path || attachmentLooksLikeImage(file)) { return; }
           var key = [
             file.name || '',
             String(file.size || 0),
@@ -121,7 +121,7 @@ export const dragDropExtractionFragment: WebviewFragment = {
         setComposerStatus(t('importingDroppedFiles'));
         readDroppedFilePayloads(files).then(function(result) {
           if (result.files.length) {
-            vscode.postMessage({ type: 'insertDroppedFileReferences', files: result.files });
+            vscode.postMessage({ type: 'insertDroppedFileReferences', files: result.files, sessionId: state.activeSessionId });
             return;
           }
           setComposerStatus(result.skipped > 0
@@ -277,6 +277,9 @@ export const dragDropBindingsFragment: WebviewFragment = {
         placeCaretFromDropPoint(e);
         var droppedImages = attachmentDroppedImageFiles(e.dataTransfer);
         if (droppedImages.files.length) {
+          // One file, one representation: the thumbnail replaces any reference to
+          // the same path instead of being added next to it.
+          removePromptFileReferences(attachmentDroppedFilePaths(droppedImages.files));
           attachmentAddFiles(droppedImages.files);
         }
         var references = extractFileReferences(e.dataTransfer, true, droppedImages.names);
@@ -285,7 +288,7 @@ export const dragDropBindingsFragment: WebviewFragment = {
           return;
         }
 
-        var droppedFiles = extractDroppedFilesWithoutPath(e.dataTransfer);
+        var droppedFiles = extractDroppedFilesWithoutPath(e.dataTransfer, droppedImages.names);
         if (droppedFiles.length) {
           importDroppedFilesWithoutPath(droppedFiles);
           return;

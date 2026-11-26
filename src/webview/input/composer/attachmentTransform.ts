@@ -11,13 +11,34 @@ import type { WebviewFragment } from '../composition';
 export const attachmentTransformFragment: WebviewFragment = {
   id: 'composer.attachment-transform',
   source: `
-      var ATTACHMENT_MAX_EDGE = 1568;
+      var ATTACHMENT_DEFAULT_MAX_EDGE = 1568;
+      var ATTACHMENT_MAX_EDGE_LIMIT = 4096;
       var ATTACHMENT_JPEG_QUALITY = 0.85;
       var ATTACHMENT_MAX_SOURCE_BYTES = 32 * 1024 * 1024;
       var ATTACHMENT_MAX_COUNT = 8;
       var ATTACHMENT_TEXT_DENSITY = 0.06;
       var ATTACHMENT_IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp', '.gif'];
       var ATTACHMENT_IMAGE_MIME_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+
+      /** The host publishes the long edge its lane actually recognises: the
+       * composer crops to that range on the way in, so no byte is uploaded that
+       * the model would only resample away. */
+      function attachmentMaxEdge() {
+        var configured = Number(state.attachmentImageMaxEdge);
+        if (!Number.isFinite(configured) || configured < 64) { return ATTACHMENT_DEFAULT_MAX_EDGE; }
+        return Math.min(Math.round(configured), ATTACHMENT_MAX_EDGE_LIMIT);
+      }
+
+      /** Decoded size of a data URL payload, so a chip can show the bytes this
+       * composer keeps instead of the size of the source file. */
+      function attachmentStoredBytes(dataUrl) {
+        var text = String(dataUrl || '');
+        var comma = text.indexOf(',');
+        if (comma < 0) { return 0; }
+        var base64 = text.slice(comma + 1);
+        var padding = base64.slice(-2) === '==' ? 2 : (base64.slice(-1) === '=' ? 1 : 0);
+        return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
+      }
 
       function attachmentImageMimeType(file) {
         var declared = String((file && file.type) || '').toLowerCase();
@@ -40,8 +61,9 @@ export const attachmentTransformFragment: WebviewFragment = {
 
       function attachmentLongEdgeScale(width, height) {
         var longEdge = Math.max(width, height);
+        var maxEdge = attachmentMaxEdge();
         if (!Number.isFinite(longEdge) || longEdge <= 0) { return 1; }
-        return longEdge > ATTACHMENT_MAX_EDGE ? ATTACHMENT_MAX_EDGE / longEdge : 1;
+        return longEdge > maxEdge ? maxEdge / longEdge : 1;
       }
 
       function attachmentHasAlphaChannel(bytes, mimeType) {
@@ -140,6 +162,7 @@ export const attachmentTransformFragment: WebviewFragment = {
             ok: true,
             dataUrl: dataUrl,
             mimeType: outputMime,
+            bytes: attachmentStoredBytes(dataUrl),
             width: targetWidth,
             height: targetHeight,
             originalBytes: sourceBytes,

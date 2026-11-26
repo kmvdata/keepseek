@@ -57,7 +57,9 @@ import { AttachmentStore } from '../attachments/attachmentStore';
 import { AttachmentPreviewStore } from '../attachments/attachmentPreviewStore';
 import { routePickedEntry } from '../attachments/attachmentRouting';
 import { sniffImageMimeType } from '../attachments/imageHeader';
-import { intakeUserImages, MAX_IMAGE_ATTACHMENT_BYTES, type ImageIntakeRejectionCode } from '../attachments/imageIntake';
+import { intakeUserImages, MAX_IMAGE_ATTACHMENT_BYTES, MAX_MESSAGE_ATTACHMENTS, type ImageIntakeRejectionCode } from '../attachments/imageIntake';
+import { ComposerImageStagingError, ComposerImageStagingStore } from '../attachments/composerImageStaging';
+import { resolveImageAttachmentMaxEdge } from '../attachments/imageLimits';
 import { WEBVIEW_TRANSLATIONS } from '../shared/i18n';
 import { SafeFileEditor, type DelegatedEditApproval } from '../edits/safeFileEditor';
 import {
@@ -163,7 +165,7 @@ import type { StartupPerformanceTrace } from '../shared/startupPerformance';
 import { ContextUsageEstimateCache, createContextUsageCacheKey } from '../agent/contextUsageCache';
 import { focusView } from './focusView';
 import { saveModelRequestTimeout } from './requestTimeoutSettings';
-import type { DroppedFileReferenceInput, PromptReferenceInput, WebviewMessage } from './webviewMessages';
+import type { DroppedFileReferenceInput, PromptImageInput, PromptReferenceInput, WebviewMessage } from './webviewMessages';
 import { InteractionTraceLogService } from '../agent/logging/interactionTrace';
 import { applyChangeSetEventToRunDetails } from '../agent/logging/runDetails';
 import { fetchModelSourceBalance } from '../agent/balance';
@@ -259,6 +261,9 @@ const MESSAGE_PAGE_SIZE = 50;
 /** The startup history read may delay the composer by at most this long. */
 const STARTUP_COMPOSER_PROJECTION_TIMEOUT_MS = 600;
 const MAX_DELETE_CONFIRMATION_PATHS = 10;
+/** Session-scoped copies of dropped files that carried no absolute path. */
+const DROPPED_FILE_REFERENCE_STORAGE_DIR = 'dropped-file-references';
+const SESSION_STORAGE_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/u;
 /** One preview response materializes at most this many images. */
 const MESSAGE_IMAGE_PREVIEW_BATCH_LIMIT = 64;
 /** File states ChangeSetStore.applyAll still attempts, mirrored for drain decisions. */
@@ -1629,14 +1634,18 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  public async insertDroppedFileReferencesToInput(files: DroppedFileReferenceInput[]): Promise<void> {
+  public async insertDroppedFileReferencesToInput(files: DroppedFileReferenceInput[], sessionId?: string): Promise<void> {
     if (!Array.isArray(files) || !files.length) {
       return;
     }
 
     try {
       const maxBytes = getConfiguredMaxFileBytes();
-      const dropDir = vscode.Uri.joinPath(this.globalStorageUri, 'dropped-file-references', randomUUID());
+      // The copy belongs to the session that dropped it: it outlives the source
+      // file and is reclaimed with the conversation, not with the original.
+      const requestedSessionKey = String(sessionId ?? '').trim();
+      const sessionKey = SESSION_STORAGE_KEY_PATTERN.test(requestedSessionKey) ? requestedSessionKey : randomUUID();
+      const dropDir = vscode.Uri.joinPath(this.globalStorageUri, DROPPED_FILE_REFERENCE_STORAGE_DIR, sessionKey, randomUUID());
       await vscode.workspace.fs.createDirectory(dropDir);
 
       let inserted = 0;
@@ -1755,17 +1764,42 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
-   * Turns bridge images into stored attachments before the user message exists.
-   * The bridge payload crosses exactly once and is never persisted: the message
-   * keeps only sha256, geometry and provenance. A rejection writes no blob and
-   * is reported with the composer's own words instead of a second vocabulary.
+   * Turns composer images into stored attachments before the user message exists.
+   *
+   * An image that was already staged when it entered the composer is resolved
+   * from its own session directory, so submitting carries the id and never a
+   * second copy of the bytes. A payload without a staged id (an older window,
+   * tests) keeps the one-shot base64 path. A rejection writes no blob and is
+   * reported with the composer's own words instead of a second vocabulary.
    */
-  private async intakePromptImages(images: Extract<WebviewMessage, { type: 'sendPrompt' }>['attachments']): Promise<MessageAttachment[]> {
+  private async intakePromptImages(
+    images: Extract<WebviewMessage, { type: 'sendPrompt' }>['attachments'],
+    sessionId: string
+  ): Promise<MessageAttachment[]> {
     if (!images?.length) return [];
+    const createdAt = new Date().toISOString();
+    const stagedIds: string[] = [];
+    const inlineImages: PromptImageInput[] = [];
+    const seenStagedIds = new Set<string>();
+    for (const image of images) {
+      if (!image) continue;
+      const stagedId = typeof image.stagedId === 'string' ? image.stagedId.trim() : '';
+      if (!stagedId) {
+        inlineImages.push(image);
+        continue;
+      }
+      if (seenStagedIds.has(stagedId)) continue;
+      seenStagedIds.add(stagedId);
+      stagedIds.push(stagedId);
+    }
+    const staged = stagedIds.length
+      ? await this.composerImageStaging().resolveAttachments(sessionId, stagedIds, createdAt)
+      : [];
     const result = await intakeUserImages({
-      images,
+      images: inlineImages,
       store: new AttachmentStore(this.globalStorageUri),
-      createdAt: new Date().toISOString()
+      createdAt,
+      maxImages: Math.max(0, MAX_MESSAGE_ATTACHMENTS - staged.length)
     });
     if (result.rejected.length) {
       const catalog = WEBVIEW_TRANSLATIONS[this.language];
@@ -1777,7 +1811,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         message: catalog.imageAttachmentRejected.replace('{reason}', reasons.join('; '))
       });
     }
-    return result.attachments;
+    return [...staged, ...result.attachments];
   }
 
   private imageIntakeRejectionReason(code: ImageIntakeRejectionCode): string {
@@ -1785,6 +1819,65 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const oversized = code === 'too_many_images' || code === 'image_too_large'
       || code === 'request_too_large' || code === 'store_quota_exceeded';
     return oversized ? catalog.droppedFilesTooLarge : catalog.droppedFilesUnreadable;
+  }
+
+  /** Session-scoped staging: the copy is written when an image enters the
+   * composer, so it no longer depends on the source file existing. */
+  private composerImageStaging(): ComposerImageStagingStore {
+    return new ComposerImageStagingStore(this.globalStorageUri);
+  }
+
+  /**
+   * Stores one composer image the moment it becomes a thumbnail.
+   *
+   * The reply carries the host's own byte count and geometry, which is what the
+   * chip then shows: a dropped file's size is read once, by the host, from the
+   * bytes it actually keeps. The copy is bound to this session, so a late answer
+   * can never resolve bytes for another conversation.
+   */
+  private async stageComposerImage(message: Extract<WebviewMessage, { type: 'stageComposerImage' }>): Promise<void> {
+    const clientId = message.clientId;
+    if (!clientId) return;
+    const sessionId = message.sessionId.trim() || this.sessionStore.activeSessionId;
+    const reply = (payload: {
+      stagedId?: string;
+      bytes?: number;
+      width?: number;
+      height?: number;
+      mimeType?: string;
+      error?: string;
+    }): void => this.postToWebview({ type: 'composerImageStaged', clientId, sessionId, ...payload });
+    if (sessionId !== this.sessionStore.activeSessionId) {
+      reply({ error: 'session_changed' });
+      return;
+    }
+    try {
+      const staged = await this.composerImageStaging().stage({ sessionId, image: message.image });
+      reply({
+        stagedId: staged.stagedId,
+        bytes: staged.bytes,
+        width: staged.width,
+        height: staged.height,
+        mimeType: staged.mimeType
+      });
+    } catch (error) {
+      reply({ error: error instanceof ComposerImageStagingError ? error.code : 'store_write_failed' });
+    }
+  }
+
+  /** Staged copies and dropped-file copies belong to the session, not to the
+   * source file: deleting the session reclaims them, deleting the source never
+   * does. Best effort — a deletion flow must not fail on cleanup. */
+  private async forgetSessionAttachments(sessionId: string): Promise<void> {
+    await this.composerImageStaging().deleteSession(sessionId);
+    const sessionKey = typeof sessionId === 'string' ? sessionId.trim() : '';
+    if (!SESSION_STORAGE_KEY_PATTERN.test(sessionKey)) return;
+    try {
+      await vscode.workspace.fs.delete(
+        vscode.Uri.joinPath(this.globalStorageUri, DROPPED_FILE_REFERENCE_STORAGE_DIR, sessionKey),
+        { recursive: true, useTrash: false }
+      );
+    } catch { /* nothing to reclaim */ }
   }
 
   /**
@@ -1908,7 +2001,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     if (requestId) (this.pendingSubmissionIds ??= new Set()).add(key);
     let promptAttachments: MessageAttachment[] | undefined;
     try {
-      promptAttachments = await this.intakePromptImages(message.attachments);
+      promptAttachments = await this.intakePromptImages(message.attachments, sessionId);
       await this.sendPrompt(message.prompt, message.sourceId, message.modelId, message.settings, {
         ...(message.type === 'editUserPrompt' ? { replaceMessageId: message.messageId } : {}),
         references: message.references, skillIds: message.skillIds, attachments: promptAttachments,
@@ -2367,7 +2460,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         await this.openMessageImage(message.sessionId, message.sha256);
         return;
       case 'insertDroppedFileReferences':
-        await this.insertDroppedFileReferencesToInput(message.files);
+        await this.insertDroppedFileReferencesToInput(message.files, message.sessionId);
+        return;
+      case 'stageComposerImage':
+        await this.stageComposerImage(message);
         return;
       case 'requestReferenceResources':
         await this.postReferenceResources(message.requestId);
@@ -3936,6 +4032,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         this.taskPlansBySession.delete(sessionId);
         await this.usageLedgerStore.deleteSession(sessionId);
         this.referenceCostViews.delete(sessionId);
+        await this.forgetSessionAttachments(sessionId);
       }
 
       if (result.activeSessionChanged) {
@@ -9424,6 +9521,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         isBusy: this.runBelongsToViewed() && this.isBusy && !this.activeDraftRunId,
         agentActivity: this.runBelongsToViewed() ? this.agentActivity : { base: 'idle', phase: 'idle', updatedAt: this.agentActivity.updatedAt, sequence: this.agentActivity.sequence },
         maxFileBytes: getConfiguredMaxFileBytes(),
+        // The composer crops to the long edge this lane really recognises, so no
+        // uploaded byte is resampled away by the model.
+        attachmentImageMaxEdge: resolveImageAttachmentMaxEdge({
+          provider: selectedModelSource?.provider,
+          modelId: selectedModel.id
+        }),
         historyRetentionDays: getConfiguredHistoryRetentionDays(),
         debugMode: getConfiguredDebugMode(),
         modelRequestTimeoutSeconds: getConfiguredModelRequestTimeoutMs() / 1_000,

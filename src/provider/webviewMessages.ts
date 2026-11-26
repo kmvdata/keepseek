@@ -20,12 +20,19 @@ export interface DroppedFileReferenceInput {
 }
 
 /**
- * One composer image crossing the webview -> host bridge exactly once.
- * Only `dataUrl` carries bytes; the host re-validates magic and geometry before
- * storing a blob, and the message keeps only the resulting sha256.
+ * One composer image crossing the webview -> host bridge.
+ *
+ * Either it still carries its bytes once (`dataUrl`), or the host already staged
+ * it for this session and only the id is sent. The host re-validates magic bytes
+ * and geometry before storing a blob, and the message keeps only the resulting
+ * sha256.
  */
 export interface PromptImageInput {
-  dataUrl: string;
+  /** One-shot bridge payload; absent once the host holds a staged copy. */
+  dataUrl?: string;
+  /** Set when the host already staged this image: the submit path then carries
+   * this id instead of the bytes. */
+  stagedId?: string;
   declaredMimeType?: string;
   sourceName?: string;
   originalBytes?: number;
@@ -109,7 +116,8 @@ export type WebviewMessage =
   | { type: 'pickExternalFileReferences' }
   | { type: 'requestMessageImagePreviews'; sessionId: string; sha256s: string[] }
   | { type: 'openMessageImage'; sessionId: string; sha256: string }
-  | { type: 'insertDroppedFileReferences'; files: DroppedFileReferenceInput[] }
+  | { type: 'insertDroppedFileReferences'; files: DroppedFileReferenceInput[]; sessionId?: string }
+  | { type: 'stageComposerImage'; clientId: string; sessionId: string; image: PromptImageInput }
   | { type: 'requestReferenceResources'; requestId: string }
   | { type: 'requestSkills' }
   | { type: 'selectProjectScope' }

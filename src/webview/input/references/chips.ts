@@ -83,6 +83,31 @@ export const referenceInsertionFragment: WebviewFragment = {
         return makeFileReferenceHref(reference);
       }
 
+      /** One file keeps exactly one representation: an image that becomes a
+       * thumbnail drops the reference chip for the same path, so the same file
+       * can never be sent twice from one composer. */
+      function removePromptFileReferences(paths) {
+        if (!paths || !paths.length) { return 0; }
+        var wanted = Object.create(null);
+        for (var i = 0; i < paths.length; i++) {
+          var normalized = String(paths[i] || '').trim().split(String.fromCharCode(92)).join('/');
+          if (normalized) { wanted[normalized] = true; }
+        }
+        var removed = 0;
+        var links = promptInput.querySelectorAll('a.rich-file-link');
+        links.forEach(function(link) {
+          if (link.dataset && link.dataset.kind === 'directory') { return; }
+          var path = String((link.dataset && link.dataset.path) || '').split(String.fromCharCode(92)).join('/');
+          if (!path || !wanted[path]) { return; }
+          if (link.parentNode) {
+            link.parentNode.removeChild(link);
+            removed += 1;
+          }
+        });
+        if (removed) { updatePromptVisualState(); }
+        return removed;
+      }
+
       function makeDirectoryHref(reference) {
         return 'keepseek-dir:' + reference.path;
       }

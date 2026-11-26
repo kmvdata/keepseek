@@ -68,11 +68,17 @@ export const attachmentCollectionFragment: WebviewFragment = {
         for (var i = 0; i < composerAttachments.length; i++) {
           var entry = composerAttachments[i];
           if (entry.sessionId !== state.activeSessionId) { continue; }
+          // A staged image is already stored for this session: submitting carries
+          // its id, never a second copy of the bytes.
+          if (entry.stagedId) {
+            payload.push({ stagedId: entry.stagedId });
+            continue;
+          }
           payload.push({
             dataUrl: entry.dataUrl,
             declaredMimeType: entry.mimeType,
             sourceName: entry.sourceName,
-            originalBytes: entry.bytes,
+            originalBytes: entry.originalBytes,
             originalWidth: entry.originalWidth,
             originalHeight: entry.originalHeight,
             reportedWidth: entry.width,
@@ -140,7 +146,10 @@ export const attachmentCollectionFragment: WebviewFragment = {
         }
         var size = chip.querySelector('.composer-attachment-size');
         if (size) {
-          size.textContent = attachmentFormatBytes(entry.bytes) + ' \u00b7 ' + entry.width + '\u00d7' + entry.height;
+          var stored = attachmentFormatBytes(entry.bytes) + ' \u00b7 ' + entry.width + '\u00d7' + entry.height;
+          size.textContent = Number(entry.originalBytes) > Number(entry.bytes) && Number(entry.bytes) > 0
+            ? attachmentFormatBytes(entry.originalBytes) + ' \u2192 ' + stored
+            : stored;
         }
         var remove = chip.querySelector('.composer-attachment-remove');
         if (remove) {
@@ -170,8 +179,20 @@ export const attachmentCollectionFragment: WebviewFragment = {
       function attachmentAddFiles(files) {
         var candidates = [];
         var total = files ? files.length : 0;
+        var known = Object.create(null);
+        var existing = attachmentSessionEntries();
+        for (var e = 0; e < existing.length; e++) {
+          if (existing[e].fileKey) { known[existing[e].fileKey] = true; }
+        }
         for (var i = 0; i < total; i++) {
-          if (attachmentLooksLikeImage(files[i])) { candidates.push(files[i]); }
+          var file = files[i];
+          if (!attachmentLooksLikeImage(file)) { continue; }
+          var fileKey = attachmentFileKey(file);
+          // One file, one thumbnail: the same image added twice (drag, paste,
+          // re-drag) keeps the entry it already has.
+          if (fileKey && known[fileKey]) { continue; }
+          if (fileKey) { known[fileKey] = true; }
+          candidates.push({ file: file, fileKey: fileKey });
         }
         if (!candidates.length) { return Promise.resolve(0); }
         attachmentEnsureUi();
@@ -182,7 +203,7 @@ export const attachmentCollectionFragment: WebviewFragment = {
             setComposerStatus(t('imageAttachmentRejected', { reason: attachmentStatusReason('too_many_images') }));
             break;
           }
-          tasks.push(attachmentTranscode(candidates[j]));
+          tasks.push(attachmentTranscode(candidates[j].file));
         }
         return Promise.all(tasks).then(function(results) {
           var added = 0;
@@ -195,18 +216,25 @@ export const attachmentCollectionFragment: WebviewFragment = {
               continue;
             }
             composerAttachmentSeq += 1;
-            composerAttachments.push({
+            var entry = {
               id: 'attachment-' + composerAttachmentSeq,
               dataUrl: result.dataUrl,
               mimeType: result.mimeType,
-              bytes: result.originalBytes,
+              bytes: result.bytes,
+              originalBytes: result.originalBytes,
               width: result.width,
               height: result.height,
               originalWidth: result.originalWidth,
               originalHeight: result.originalHeight,
               sourceName: result.sourceName,
+              fileKey: candidates[k] ? candidates[k].fileKey : '',
+              stagedId: '',
               sessionId: state.activeSessionId
-            });
+            };
+            composerAttachments.push(entry);
+            // Copied into the session right away: from here on the image no
+            // longer depends on the source file existing.
+            attachmentStageEntry(entry);
             added += 1;
           }
           attachmentRender();
@@ -264,6 +292,69 @@ export const attachmentCollectionFragment: WebviewFragment = {
         }
         return { files: files, names: names };
       }
+
+      /** Absolute paths of dropped images: they are what keeps one file to one
+       * representation in the composer. */
+      function attachmentDroppedFilePaths(files) {
+        var paths = [];
+        for (var i = 0; i < (files ? files.length : 0); i++) {
+          if (files[i] && files[i].path) { paths.push(files[i].path); }
+        }
+        return paths;
+      }
+
+      /** Identity of a source file, so the same image cannot become two chips. */
+      function attachmentFileKey(file) {
+        if (!file) { return ''; }
+        if (file.path) { return 'path:' + String(file.path).split(String.fromCharCode(92)).join('/'); }
+        return 'name:' + [String(file.name || ''), String(file.size || 0), String(file.lastModified || 0)].join(':');
+      }
+
+      function attachmentStageEntry(entry) {
+        if (!entry || !entry.dataUrl) { return; }
+        vscode.postMessage({
+          type: 'stageComposerImage',
+          clientId: entry.id,
+          sessionId: entry.sessionId,
+          image: {
+            dataUrl: entry.dataUrl,
+            declaredMimeType: entry.mimeType,
+            sourceName: entry.sourceName,
+            originalBytes: entry.originalBytes,
+            originalWidth: entry.originalWidth,
+            originalHeight: entry.originalHeight,
+            reportedWidth: entry.width,
+            reportedHeight: entry.height
+          }
+        });
+      }
+
+      /** The host is authoritative for the stored copy: its byte count and
+       * geometry replace what the browser reported. */
+      function attachmentApplyStaged(msg) {
+        if (!msg || !msg.clientId) { return; }
+        var entry = null;
+        for (var i = 0; i < composerAttachments.length; i++) {
+          if (composerAttachments[i].id === msg.clientId) { entry = composerAttachments[i]; break; }
+        }
+        if (!entry) { return; }
+        if (msg.error) {
+          attachmentRemove(entry.id);
+          if (entry.sessionId === state.activeSessionId) {
+            setComposerStatus(t('imageAttachmentRejected', { reason: attachmentStatusReason(msg.error) }));
+          }
+          return;
+        }
+        var stagedId = String(msg.stagedId || '');
+        if (!stagedId) { return; }
+        entry.stagedId = stagedId;
+        if (Number(msg.bytes) > 0) { entry.bytes = Number(msg.bytes); }
+        if (Number(msg.width) > 0 && Number(msg.height) > 0) {
+          entry.width = Number(msg.width);
+          entry.height = Number(msg.height);
+        }
+        if (entry.sessionId === state.activeSessionId) { attachmentRender(); }
+      }
 `.slice(1)
 };
 
@@ -298,6 +389,10 @@ export const attachmentHostMessageFragment: WebviewFragment = {
   source: `
       window.addEventListener('message', function(event) {
         var msg = event.data;
+        if (msg && msg.type === 'composerImageStaged') {
+          attachmentApplyStaged(msg);
+          return;
+        }
         if (!msg || msg.type !== 'insertComposerImage') { return; }
         if (!canChangeContext()) { return; }
         var bytes = null;

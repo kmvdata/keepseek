@@ -3,7 +3,7 @@ import type { WebviewFragment } from '../composition';
 export const referenceCodecFragment: WebviewFragment = {
   id: 'references.codec',
   source: `
-      function addPlainTextReferences(references, seen, value, allowPlainTextPaths) {
+      function addPlainTextReferences(references, seen, value, allowPlainTextPaths, excludedNames) {
         if (!value) { return; }
         var entries = splitDragLines(value).map(function (entry) {
           return entry.trim();
@@ -14,7 +14,7 @@ export const referenceCodecFragment: WebviewFragment = {
 
         for (var i = 0; i < entries.length; i++) {
           var reference = normalizePlainTextReference(entries[i], allowPlainTextPaths);
-          if (!reference) { continue; }
+          if (!reference || (excludedNames && excludedNames[attachmentDropNameKey(reference.path)])) { continue; }
           var key = reference.kind === 'directory' ? makeDirectoryHref(reference) : makeFileHref(reference);
           if (seen[key]) { continue; }
           seen[key] = true;
