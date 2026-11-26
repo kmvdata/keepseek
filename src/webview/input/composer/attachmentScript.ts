@@ -48,27 +48,19 @@ export const attachmentCollectionFragment: WebviewFragment = {
         return host;
       }
 
+      /** Only the active conversation's images are visible or counted: an
+       * entry remembers the session it was added in, so switching sessions
+       * must not show, number or send another task's images. */
+      function attachmentSessionEntries() {
+        var entries = [];
+        for (var i = 0; i < composerAttachments.length; i++) {
+          if (composerAttachments[i].sessionId === state.activeSessionId) { entries.push(composerAttachments[i]); }
+        }
+        return entries;
+      }
+
       function attachmentHasImages() {
-        return composerAttachments.length > 0;
-      }
-
-      function attachmentPickerElement() {
-        return document.getElementById('composerAttachmentInput');
-      }
-
-      function attachmentOpenPicker() {
-        var input = attachmentPickerElement();
-        if (!input) { return; }
-        input.value = '';
-        input.click();
-      }
-
-      /** The "+" menu entry closes the menu first, then opens the same native
-       * picker the composer already uses; a chosen file joins the identical
-       * attachment pipeline as paste and drop. */
-      function pickPromptImageFromMenu() {
-        closeReferenceMenu(false);
-        attachmentOpenPicker();
+        return attachmentSessionEntries().length > 0;
       }
 
       function attachmentCollect() {
@@ -107,7 +99,7 @@ export const attachmentCollectionFragment: WebviewFragment = {
         attachmentRender();
       }
 
-      function attachmentCreateChip(entry) {
+      function attachmentCreateChip(entry, position) {
         var template = document.getElementById('composerAttachmentChipTemplate');
         var chip = template && template.content && template.content.firstElementChild
           ? template.content.firstElementChild.cloneNode(true)
@@ -115,6 +107,10 @@ export const attachmentCollectionFragment: WebviewFragment = {
         if (!chip) {
           chip = document.createElement('div');
           chip.className = 'composer-attachment-chip';
+          var fallbackIndex = document.createElement('span');
+          fallbackIndex.className = 'composer-attachment-index';
+          fallbackIndex.setAttribute('aria-hidden', 'true');
+          chip.appendChild(fallbackIndex);
           var fallbackThumb = document.createElement('img');
           fallbackThumb.className = 'composer-attachment-thumb';
           chip.appendChild(fallbackThumb);
@@ -126,6 +122,12 @@ export const attachmentCollectionFragment: WebviewFragment = {
           fallbackRemove.className = 'composer-attachment-remove';
           chip.appendChild(fallbackRemove);
         }
+        var index = chip.querySelector('.composer-attachment-index');
+        if (index) {
+          index.textContent = String(position + 1);
+        }
+        chip.setAttribute('data-attachment-index', String(position + 1));
+        chip.setAttribute('aria-label', t('imageAttachmentOrdinal', { index: position + 1 }) + ': ' + entry.sourceName);
         var thumb = chip.querySelector('.composer-attachment-thumb');
         if (thumb) {
           thumb.src = entry.dataUrl;
@@ -154,13 +156,14 @@ export const attachmentCollectionFragment: WebviewFragment = {
         var host = attachmentEnsureUi();
         if (!host) { return; }
         while (host.firstChild) { host.removeChild(host.firstChild); }
-        if (!composerAttachments.length) {
+        var visibleEntries = attachmentSessionEntries();
+        if (!visibleEntries.length) {
           host.classList.add('hidden');
           return;
         }
         host.classList.remove('hidden');
-        for (var i = 0; i < composerAttachments.length; i++) {
-          host.appendChild(attachmentCreateChip(composerAttachments[i]));
+        for (var i = 0; i < visibleEntries.length; i++) {
+          host.appendChild(attachmentCreateChip(visibleEntries[i], i));
         }
       }
 
@@ -172,9 +175,10 @@ export const attachmentCollectionFragment: WebviewFragment = {
         }
         if (!candidates.length) { return Promise.resolve(0); }
         attachmentEnsureUi();
+        var visibleCount = attachmentSessionEntries().length;
         var tasks = [];
         for (var j = 0; j < candidates.length; j++) {
-          if (composerAttachments.length + tasks.length >= ATTACHMENT_MAX_COUNT) {
+          if (visibleCount + tasks.length >= ATTACHMENT_MAX_COUNT) {
             setComposerStatus(t('imageAttachmentRejected', { reason: attachmentStatusReason('too_many_images') }));
             break;
           }
@@ -267,16 +271,6 @@ export const attachmentCollectionFragment: WebviewFragment = {
 export const attachmentBindingsFragment: WebviewFragment = {
   id: 'composer.attachment-bindings',
   source: `
-      var attachmentFileInput = attachmentPickerElement();
-      if (attachmentFileInput) {
-        attachmentFileInput.addEventListener('change', function() {
-          var chosen = attachmentFileInput.files;
-          if (chosen && chosen.length) {
-            attachmentAddFiles(chosen);
-          }
-          attachmentFileInput.value = '';
-        });
-      }
       var attachmentHostElement = attachmentEnsureUi();
       if (attachmentHostElement) {
         attachmentHostElement.addEventListener('click', function(event) {
@@ -288,5 +282,35 @@ export const attachmentBindingsFragment: WebviewFragment = {
           attachmentRemove(button.getAttribute('data-attachment-id'));
         });
       }
+`.slice(1)
+};
+
+/**
+ * One-shot bridge for a host-picked image.
+ *
+ * The host sniffs the picked bytes and hands them over exactly once; this
+ * handler rebuilds a `File` and drops it into the identical pipeline paste and
+ * drop use. Nothing is written into the composer text, so the caret never moves
+ * and a picked image can never become a file reference.
+ */
+export const attachmentHostMessageFragment: WebviewFragment = {
+  id: 'composer.attachment-host-message',
+  source: `
+      window.addEventListener('message', function(event) {
+        var msg = event.data;
+        if (!msg || msg.type !== 'insertComposerImage') { return; }
+        if (!canChangeContext()) { return; }
+        var bytes = null;
+        try {
+          var binary = atob(String(msg.dataBase64 || ''));
+          bytes = new Uint8Array(binary.length);
+          for (var i = 0; i < binary.length; i++) { bytes[i] = binary.charCodeAt(i); }
+        } catch (error) {
+          bytes = null;
+        }
+        if (!bytes || !bytes.length) { return; }
+        var file = new File([bytes], String(msg.name || 'image'), { type: String(msg.mimeType || '') });
+        attachmentAddFiles([file]);
+      });
 `.slice(1)
 };

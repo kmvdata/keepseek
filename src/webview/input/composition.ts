@@ -93,6 +93,7 @@ export const INPUT_SCRIPT_FRAGMENTS = [
   attachmentTransform.attachmentTransformFragment,
   attachmentScript.attachmentStateFragment,
   attachmentScript.attachmentCollectionFragment,
+  attachmentScript.attachmentHostMessageFragment,
   attachmentScript.attachmentBindingsFragment,
   commandMenuScript.commandMenuImplementationFragment,
   referenceMenu.referenceMenuImplementationFragment,

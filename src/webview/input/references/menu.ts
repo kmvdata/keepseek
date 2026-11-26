@@ -323,13 +323,9 @@ export const referenceMenuImplementationFragment: WebviewFragment = {
         notice.textContent = message;
         referenceMenu.append(notice);
       }
-
       function createReferenceMenuEntryButton(entry, index) {
-        if (entry.kind === 'externalPicker') {
-          return createExternalPickerReferenceButton(index);
-        }
-        if (entry.kind === 'imagePicker') {
-          return createImagePickerReferenceButton(index);
+        if (entry.kind === 'fileOrImagePicker') {
+          return createFileOrImagePickerReferenceButton(index);
         }
         if (entry.kind === 'skill') {
           return createSkillReferenceButton(entry.skill, index);
@@ -337,7 +333,10 @@ export const referenceMenuImplementationFragment: WebviewFragment = {
         return createReferenceResourceButton(entry.resource, index);
       }
 
-      function createExternalPickerReferenceButton(index) {
+      // One merged action entry: the host opens a single file/folder dialog and
+      // routes each pick by content, so the composer no longer needs a second
+      // row that only images could use.
+      function createFileOrImagePickerReferenceButton(index) {
         var option = document.createElement('button');
         option.type = 'button';
         option.id = getReferenceMenuOptionId(index);
@@ -348,34 +347,11 @@ export const referenceMenuImplementationFragment: WebviewFragment = {
 
         var name = document.createElement('span');
         name.className = 'reference-menu-item-name';
-        name.textContent = t('chooseExternalFiles');
+        name.textContent = t('addFileOrImage');
 
         var pathLabel = document.createElement('span');
         pathLabel.className = 'reference-menu-item-path';
-        pathLabel.textContent = t('chooseExternalFilesDescription');
-
-        option.append(name, pathLabel);
-        return option;
-      }
-
-      // 图片入口与外部文件入口同为“动作型”条目：它不插入引用文本，
-      // 而是打开本地图片选择器，把文件交给 composer 的附件链路。
-      function createImagePickerReferenceButton(index) {
-        var option = document.createElement('button');
-        option.type = 'button';
-        option.id = getReferenceMenuOptionId(index);
-        option.className = 'reference-menu-item reference-menu-action' + (index === activeReferenceIndex ? ' is-active' : '');
-        option.dataset.referenceIndex = String(index + 1);
-        option.setAttribute('role', 'option');
-        option.setAttribute('aria-selected', index === activeReferenceIndex ? 'true' : 'false');
-
-        var name = document.createElement('span');
-        name.className = 'reference-menu-item-name';
-        name.textContent = t('addImage');
-
-        var pathLabel = document.createElement('span');
-        pathLabel.className = 'reference-menu-item-path';
-        pathLabel.textContent = t('addImageDescription');
+        pathLabel.textContent = t('addFileOrImageDescription');
 
         option.append(name, pathLabel);
         return option;
@@ -471,11 +447,7 @@ export const referenceMenuImplementationFragment: WebviewFragment = {
 
       /** Action entries never consume the mention query: they open a picker. */
       function getReferenceMenuActionEntries() {
-        return [createExternalPickerReferenceEntry(), createImagePickerReferenceEntry()];
-      }
-
-      function createImagePickerReferenceEntry() {
-        return { kind: 'imagePicker' };
+        return [createFileOrImagePickerReferenceEntry()];
       }
 
       function shouldShowExternalPickerReferenceEntry() {
@@ -488,8 +460,8 @@ export const referenceMenuImplementationFragment: WebviewFragment = {
         return !normalizeReferenceQuery(activeMentionQuery);
       }
 
-      function createExternalPickerReferenceEntry() {
-        return { kind: 'externalPicker' };
+      function createFileOrImagePickerReferenceEntry() {
+        return { kind: 'fileOrImagePicker' };
       }
 
       function normalizeReferenceQuery(value) {
@@ -620,12 +592,8 @@ export const referenceMenuImplementationFragment: WebviewFragment = {
         var entries = getReferenceMenuEntries();
         var entry = entries[index];
         if (!entry) { return; }
-        if (entry.kind === 'externalPicker') {
+        if (entry.kind === 'fileOrImagePicker') {
           pickExternalFileReferences();
-          return;
-        }
-        if (entry.kind === 'imagePicker') {
-          pickPromptImageFromMenu();
           return;
         }
         if (entry.kind === 'skill') {

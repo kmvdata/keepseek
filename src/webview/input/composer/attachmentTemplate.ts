@@ -10,20 +10,11 @@ import type { WebviewFragment } from '../composition';
 export const attachmentTemplateFragment: WebviewFragment = {
   id: 'template.composer-attachments',
   source: `
-    <!-- A plain file input keeps the picker local: the host never hands image
-         bytes back to the webview, so no base64 enters a state snapshot. -->
-    <input
-      id="composerAttachmentInput"
-      class="composer-attachment-input"
-      type="file"
-      accept="image/png,image/jpeg,image/webp,image/gif"
-      multiple
-      hidden
-      tabindex="-1"
-      aria-hidden="true"
-    />
+    <!-- One chip per attached image. The ordinal badge is filled in by the
+         composer script, so numbering always follows the visible order. -->
     <template id="composerAttachmentChipTemplate">
       <div class="composer-attachment-chip" role="listitem">
+        <span class="composer-attachment-index" aria-hidden="true"></span>
         <img class="composer-attachment-thumb" alt="" />
         <span class="composer-attachment-meta">
           <span class="composer-attachment-name"></span>

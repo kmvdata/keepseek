@@ -1412,6 +1412,31 @@ ${conversationsStylesFragment.source}
       padding: 0 2px;
     }
 
+    /* A user message shows the images it was sent with using the composer's
+       chip vocabulary, so the two surfaces cannot drift apart. Only alignment
+       and the button reset differ: here the chip opens the image. */
+    .message-attachments {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      justify-content: flex-end;
+      max-width: 100%;
+      margin-bottom: 6px;
+    }
+    .message-attachment-chip {
+      font: inherit;
+      font-size: 11px;
+      text-align: left;
+      cursor: pointer;
+    }
+    .message-attachment-chip:hover {
+      border-color: var(--vscode-focusBorder, var(--vscode-input-border, rgba(128, 128, 128, 0.35)));
+    }
+    .message-attachment-placeholder {
+      background: var(--vscode-editorWidget-background, transparent);
+      border: 1px dashed var(--vscode-input-border, rgba(128, 128, 128, 0.35));
+      box-sizing: border-box;
+    }
     .message-content.is-placeholder {
       color: var(--vscode-descriptionForeground);
       font-style: italic;

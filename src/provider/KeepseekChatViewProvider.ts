@@ -54,7 +54,10 @@ import { formatActiveSkills, formatCurrentRunContextForAgent, getAgentToolNamesF
 import { validationAuthorizationRegistry } from '../agent/tools/toolAuthorization';
 import { FileContextStore } from '../context/fileContextStore';
 import { AttachmentStore } from '../attachments/attachmentStore';
-import { intakeUserImages, type ImageIntakeRejectionCode } from '../attachments/imageIntake';
+import { AttachmentPreviewStore } from '../attachments/attachmentPreviewStore';
+import { routePickedEntry } from '../attachments/attachmentRouting';
+import { sniffImageMimeType } from '../attachments/imageHeader';
+import { intakeUserImages, MAX_IMAGE_ATTACHMENT_BYTES, type ImageIntakeRejectionCode } from '../attachments/imageIntake';
 import { WEBVIEW_TRANSLATIONS } from '../shared/i18n';
 import { SafeFileEditor, type DelegatedEditApproval } from '../edits/safeFileEditor';
 import {
@@ -256,6 +259,8 @@ const MESSAGE_PAGE_SIZE = 50;
 /** The startup history read may delay the composer by at most this long. */
 const STARTUP_COMPOSER_PROJECTION_TIMEOUT_MS = 600;
 const MAX_DELETE_CONFIRMATION_PATHS = 10;
+/** One preview response materializes at most this many images. */
+const MESSAGE_IMAGE_PREVIEW_BATCH_LIMIT = 64;
 /** File states ChangeSetStore.applyAll still attempts, mirrored for drain decisions. */
 const APPROVE_ALL_APPLICABLE: ReadonlySet<string> = new Set(['pending', 'apply_failed', 'interrupted']);
 /** Structured reasons a drain pass can stop before a draft reaches the disk. */
@@ -1335,7 +1340,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     webviewView.webview.options = {
       enableScripts: true,
       enableDragAndDrop: true,
-      localResourceRoots: [this.extensionUri]
+      // Composer images are already stored; preview copies live in the
+      // extension's own storage so `asWebviewUri` can serve them without CSP
+      // changes and without a second encoding pass.
+      localResourceRoots: [this.extensionUri, new AttachmentPreviewStore(this.globalStorageUri).previewRoot]
     } as vscode.WebviewOptions;
     const html = this.startupTrace
       ? this.startupTrace.measureSync(
@@ -1512,53 +1520,112 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  public async pickExternalFileReferencesToInput(): Promise<void> {
+  /**
+   * The single "add file or image" entry behind the composer's "+" menu.
+   *
+   * Every picked URI is probed once: a folder becomes a directory reference, a
+   * file whose magic bytes prove it is a PNG/JPEG/WebP/GIF (and whose size fits
+   * the attachment limit) crosses the bridge once as an attachment, and
+   * everything else stays a plain file reference at the caret. The image branch
+   * is the only one that never writes the composer text.
+   */
+  public async pickFilesOrImagesToInput(): Promise<void> {
     try {
-      const picked = await vscode.window.showOpenDialog({
-        canSelectFiles: true,
-        canSelectFolders: false,
-        canSelectMany: true,
-        openLabel: this.t('addExternalFilesLabel')
-      });
-
+      const picked = await this.showFileOrImagePicker();
       if (!picked?.length) {
         return;
       }
 
-      const files: vscode.Uri[] = [];
-      let skipped = 0;
+      let unreadable = 0;
+      let oversizedImages = 0;
+      const maxImageBytes = MAX_IMAGE_ATTACHMENT_BYTES;
       for (const uri of picked) {
+        let stat: vscode.FileStat;
         try {
-          const stat = await vscode.workspace.fs.stat(uri);
-          if (stat.type === vscode.FileType.File) {
-            files.push(uri);
-          } else {
-            skipped += 1;
-          }
+          stat = await vscode.workspace.fs.stat(uri);
         } catch {
-          skipped += 1;
+          unreadable += 1;
+          continue;
         }
+        const name = getUriBaseName(uri);
+        const isDirectory = stat.type === vscode.FileType.Directory;
+        if (!isDirectory && stat.type !== vscode.FileType.File) {
+          unreadable += 1;
+          continue;
+        }
+
+        let route = routePickedEntry({ name, isDirectory, size: stat.size }, { maxImageBytes });
+        let imageBytes: Uint8Array | undefined;
+        if (route.kind === 'probe_image') {
+          try {
+            imageBytes = await vscode.workspace.fs.readFile(uri);
+          } catch {
+            unreadable += 1;
+            continue;
+          }
+          // The read is authoritative: it is what the limit and the sniff apply to.
+          route = routePickedEntry({
+            name,
+            isDirectory: false,
+            size: imageBytes.byteLength,
+            sniffedMimeType: sniffImageMimeType(imageBytes) ?? null
+          }, { maxImageBytes });
+        }
+
+        if (route.kind === 'directory') {
+          this.authorizeExternalReferenceUri(uri);
+          this.postToWebview({ type: 'insertDirectoryReference', path: uri.fsPath });
+          continue;
+        }
+        if (route.kind === 'image_too_large') {
+          oversizedImages += 1;
+          continue;
+        }
+        if (route.kind === 'image' && imageBytes) {
+          // One-shot bridge: the host keeps no copy of these bytes and this
+          // message is never persisted, logged or traced.
+          this.postToWebview({
+            type: 'insertComposerImage',
+            name,
+            mimeType: route.mimeType,
+            dataBase64: Buffer.from(imageBytes).toString('base64')
+          });
+          continue;
+        }
+        this.authorizeExternalReferenceUri(uri);
+        this.postToWebview({ type: 'insertFileReference', path: uri.fsPath, startLine: 0, endLine: 0 });
       }
 
-      if (!files.length) {
-        vscode.window.showWarningMessage(this.t('canOnlyInsertFileReferencesForFiles'));
-        return;
+      if (unreadable > 0) {
+        vscode.window.showWarningMessage(this.t('skippedUnreadableItems', { count: unreadable }));
       }
-      if (skipped > 0) {
-        vscode.window.showWarningMessage(this.t('skippedUnreadableItems', { count: skipped }));
-      }
-
-      for (const file of files) {
-        this.authorizeExternalReferenceUri(file);
-        this.postToWebview({
-          type: 'insertFileReference',
-          path: file.fsPath,
-          startLine: 0,
-          endLine: 0
-        });
+      if (oversizedImages > 0) {
+        vscode.window.showWarningMessage(this.t('imageAttachmentTooLarge', {
+          count: oversizedImages,
+          limit: formatBytes(maxImageBytes)
+        }));
       }
     } catch (error) {
       vscode.window.showErrorMessage(this.t('cannotAddExternalFileReference', { message: getErrorMessage(error) }));
+    }
+  }
+
+  /**
+   * Files and folders in one dialog. A host that refuses the mixed selection
+   * throws here; degrading to files-only keeps one menu entry instead of
+   * adding a second one for images.
+   */
+  private async showFileOrImagePicker(): Promise<vscode.Uri[] | undefined> {
+    const options: vscode.OpenDialogOptions = {
+      canSelectFiles: true,
+      canSelectFolders: true,
+      canSelectMany: true,
+      openLabel: this.t('addExternalFilesLabel')
+    };
+    try {
+      return await vscode.window.showOpenDialog(options);
+    } catch {
+      return await vscode.window.showOpenDialog({ ...options, canSelectFolders: false });
     }
   }
 
@@ -1718,6 +1785,86 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const oversized = code === 'too_many_images' || code === 'image_too_large'
       || code === 'request_too_large' || code === 'store_quota_exceeded';
     return oversized ? catalog.droppedFilesTooLarge : catalog.droppedFilesUnreadable;
+  }
+
+  /**
+   * Whitelist for previews and opens: a hash may only be resolved when the
+   * active conversation really carries that attachment. Answering any other
+   * hash would turn the content-addressed blob store into a hash oracle.
+   */
+  private activeSessionImageAttachments(sessionId: string): Map<string, MessageAttachment> | undefined {
+    if (!sessionId || sessionId !== this.sessionStore.activeSessionId) {
+      return undefined;
+    }
+    const session = this.sessionStore.getSessionById(sessionId);
+    if (!session) {
+      return undefined;
+    }
+    const images = new Map<string, MessageAttachment>();
+    for (const message of session.messages) {
+      for (const attachment of message.attachments ?? []) {
+        if (attachment.kind !== 'image' || images.has(attachment.sha256)) continue;
+        images.set(attachment.sha256, attachment);
+      }
+    }
+    return images;
+  }
+
+  /**
+   * Materializes the stored bytes as a preview file. The blob stays the source
+   * of truth: the copy is byte identical, never re-encoded, and rebuildable.
+   */
+  private async ensureAttachmentPreview(sessionId: string, attachment: MessageAttachment): Promise<vscode.Uri> {
+    const bytes = await new AttachmentStore(this.globalStorageUri).getBlob(attachment.sha256);
+    return new AttachmentPreviewStore(this.globalStorageUri).ensure({
+      sessionId,
+      sha256: attachment.sha256,
+      mimeType: attachment.mimeType,
+      bytes
+    });
+  }
+
+  /**
+   * Preview URIs are per view (`asWebviewUri` differs per webview), so they are
+   * projected inside the view loop instead of being broadcast as one payload.
+   */
+  private async postMessageImagePreviews(sessionId: string, sha256s: string[]): Promise<void> {
+    const images = this.activeSessionImageAttachments(sessionId);
+    if (!images) {
+      return;
+    }
+    const uris: Array<[string, vscode.Uri]> = [];
+    let attempted = 0;
+    for (const sha256 of new Set(Array.isArray(sha256s) ? sha256s : [])) {
+      if (attempted >= MESSAGE_IMAGE_PREVIEW_BATCH_LIMIT) break;
+      const attachment = images.get(sha256);
+      if (!attachment) continue;
+      attempted += 1;
+      try {
+        uris.push([sha256, await this.ensureAttachmentPreview(sessionId, attachment)]);
+      } catch { /* a blob that cannot be read simply has no preview */ }
+    }
+    this.postToEachWebview((view) => {
+      const projected: Record<string, string> = {};
+      for (const [sha256, uri] of uris) {
+        projected[sha256] = view.webview.asWebviewUri(uri).toString();
+      }
+      return { type: 'messageImagePreviews', sessionId, uris: projected };
+    });
+  }
+
+  private async openMessageImage(sessionId: string, sha256: string): Promise<void> {
+    try {
+      const attachment = this.activeSessionImageAttachments(sessionId)?.get(sha256);
+      if (!attachment) {
+        return;
+      }
+      // The preview file, never the `.image` blob: the blob has no image suffix
+      // and no editor association.
+      await vscode.commands.executeCommand('vscode.open', await this.ensureAttachmentPreview(sessionId, attachment));
+    } catch (error) {
+      vscode.window.showErrorMessage(this.t('cannotOpenMessageImage', { message: getErrorMessage(error) }));
+    }
   }
 
   private async handleSubmission(message: Extract<WebviewMessage, { type: 'sendPrompt' | 'editUserPrompt' }>): Promise<void> {
@@ -2211,7 +2358,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         await this.pickExternalFilesToContext();
         return;
       case 'pickExternalFileReferences':
-        await this.pickExternalFileReferencesToInput();
+        await this.pickFilesOrImagesToInput();
+        return;
+      case 'requestMessageImagePreviews':
+        await this.postMessageImagePreviews(message.sessionId, message.sha256s);
+        return;
+      case 'openMessageImage':
+        await this.openMessageImage(message.sessionId, message.sha256);
         return;
       case 'insertDroppedFileReferences':
         await this.insertDroppedFileReferencesToInput(message.files);
@@ -9843,6 +9996,17 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  /**
+   * Posts one payload per view. `postToWebview` shares a single object across
+   * views, which cannot carry a resource URI: `asWebviewUri` is view-specific,
+   * so a URI computed once would only resolve in one of them.
+   */
+  private postToEachWebview(build: (view: vscode.WebviewView) => unknown): void {
+    for (const view of this.views) {
+      void view.webview.postMessage(build(view));
+    }
+  }
+
   private getHtmlForWebview(webview: vscode.Webview): string {
     return getHtmlForWebview({
       webview,
@@ -9853,6 +10017,15 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 }
 
+
+/** Display name of a picked item. `Uri.path` is slash separated on every
+ * platform, so its last segment is the file name the dialog showed. */
+function getUriBaseName(uri: vscode.Uri): string {
+  const value = String(uri.path || uri.fsPath || '');
+  const trimmed = value.endsWith('/') ? value.slice(0, -1) : value;
+  const index = trimmed.lastIndexOf('/');
+  return index >= 0 ? trimmed.slice(index + 1) : trimmed;
+}
 
 function draftReplanResult(run: DraftRun, rootTaskId: string, diagnosis: GitCommandReplan): DraftRunReplanResult {
   return { draftRunId: run.id, specHash: run.specHash, rootTaskId, executionSegmentId: run.agentRunId,

@@ -21,6 +21,7 @@ import { SessionQuarantine } from './sessionQuarantine';
 import { assertManagedStoragePath } from './sessionAssociatedPersistence';
 import type { HistoryCleanupCatalogEntry, HistoryCleanupTargetResult } from './sessionHistoryCleanup';
 import { HistoryCleanupFailure, type HistoryCleanupIssueCode, type HistoryCleanupPhase } from './historyCleanupErrors';
+import { AttachmentPreviewStore } from '../attachments/attachmentPreviewStore';
 
 export const SESSION_CLEANUP_MIN_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
@@ -331,10 +332,12 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     if (!index) return;
     const removed = index.sessions.filter((entry) => ids.has(entry.id));
     if (!removed.length) return;
+    const previews = new AttachmentPreviewStore(this.rootUri);
     await Promise.all(removed.flatMap((entry) => [
       this.deleteFile(this.getSessionUri(getWorkspaceHash(normalizedWorkspaceKey), entry.id)),
       this.objects(this.getSessionUri(getWorkspaceHash(normalizedWorkspaceKey), entry.id)).deleteObjects(),
-      this.evidenceStore.deleteSessionEvidence(entry.id)
+      this.evidenceStore.deleteSessionEvidence(entry.id),
+      previews.deleteSession(entry.id)
     ]));
     index.sessions = index.sessions.filter((entry) => !ids.has(entry.id));
     index.activeSessionId = chooseActiveSessionIdFromEntries(index.sessions, index.activeSessionId);
@@ -357,7 +360,13 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     const hash = getWorkspaceHash(normalizedWorkspaceKey);
     this.forgetScheduledManifestWorkspace(hash);
     const index = await this.loadIndexByWorkspaceKey(normalizedWorkspaceKey);
-    if (index) await Promise.all(index.sessions.map((entry) => this.evidenceStore.deleteSessionEvidence(entry.id)));
+    if (index) {
+      const previews = new AttachmentPreviewStore(this.rootUri);
+      await Promise.all(index.sessions.map(async (entry) => {
+        await this.evidenceStore.deleteSessionEvidence(entry.id);
+        await previews.deleteSession(entry.id);
+      }));
+    }
     await this.deleteFile(this.getWorkspaceDirectoryUri(hash), true);
     const manifest = await this.readManifest();
     if (manifest.workspaces[hash]) {

@@ -107,6 +107,8 @@ export type WebviewMessage =
   | { type: 'pickWorkspaceFiles' }
   | { type: 'pickExternalFiles' }
   | { type: 'pickExternalFileReferences' }
+  | { type: 'requestMessageImagePreviews'; sessionId: string; sha256s: string[] }
+  | { type: 'openMessageImage'; sessionId: string; sha256: string }
   | { type: 'insertDroppedFileReferences'; files: DroppedFileReferenceInput[] }
   | { type: 'requestReferenceResources'; requestId: string }
   | { type: 'requestSkills' }

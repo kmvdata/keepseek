@@ -29,6 +29,8 @@ import './sessionRunDismissal.test';
 import './messageAttachments.test';
 import './messageImageTokens.test';
 import './attachmentStore.test';
+import './attachmentPickedRouting.test';
+import './attachmentPreviewStore.test';
 import { after } from 'node:test';
 
 // The provider's startup schedules interval timers; a completed run must not

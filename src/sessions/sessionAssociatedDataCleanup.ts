@@ -5,6 +5,7 @@ import { UsageLedgerStore } from '../agent/usageLedgerStore';
 import { InteractionTraceCleanup } from '../agent/logging/interactionTrace';
 import { ChangeSetStore, deleteStoredChangeSetsForSession, hasStoredChangeSetsForSession } from '../edits/changeSetStore';
 import { DraftRunStore } from '../runs/draftRunStore';
+import { AttachmentPreviewStore, PREVIEW_ROOT_SEGMENTS } from '../attachments/attachmentPreviewStore';
 import { SessionDeletionAuthority } from './sessionDeletionAuthority';
 import { assertManagedStoragePath } from './sessionAssociatedPersistence';
 
@@ -33,7 +34,8 @@ export class SessionAssociatedDataCleanup {
       () => this.traces.hasSessionHistory(sessionId),
       () => (this.live.usageLedgerStore ?? new UsageLedgerStore(this.root)).hasSessionHistory(sessionId),
       () => hasStoredChangeSetsForSession(this.root, sessionId),
-      () => (this.live.draftRuns ?? new DraftRunStore(this.root)).hasSessionHistory(sessionId)
+      () => (this.live.draftRuns ?? new DraftRunStore(this.root)).hasSessionHistory(sessionId),
+      () => new AttachmentPreviewStore(this.root).hasSession(sessionId)
     ];
     for (const has of stores) if (await has()) return true;
     return false;
@@ -46,6 +48,7 @@ export class SessionAssociatedDataCleanup {
     const evidence = new ToolEvidenceStore(this.root), subagents = new SubagentStore(this.root, workspaceKey);
     const runs = this.live.draftRuns ?? new DraftRunStore(this.root);
     const ledger = this.live.usageLedgerStore ?? new UsageLedgerStore(this.root);
+    const previews = new AttachmentPreviewStore(this.root);
     const stores: Array<[string, string[], () => Promise<unknown>]> = [
       ['evidence', ['chat-sessions'], () => evidence.deleteSessionEvidence(sessionId)],
       ['subagents', ['chat-sessions'], () => subagents.deleteSession(sessionId)],
@@ -53,6 +56,7 @@ export class SessionAssociatedDataCleanup {
       ['change-sets', ['change-sets', 'change-sets.json'], () => this.live.changeSets
         ? this.live.changeSets.deleteSession(sessionId) : deleteStoredChangeSetsForSession(this.root, sessionId)],
       ['draft-runs', ['draft-runs.json'], () => runs.deleteSession(sessionId)],
+      ['attachments', [...PREVIEW_ROOT_SEGMENTS], () => previews.deleteSession(sessionId)],
       ['interaction-traces', ['interaction-logs'], async () => {
         const traces = await this.traces.cleanup(sessionId);
         if (traces.unverifiedSources) {

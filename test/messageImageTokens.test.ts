@@ -385,23 +385,35 @@ test('one 100 KB image adds far less than 3000 estimated tokens', () => {
   assert.ok(delta <= 3000, `a ~100 KB image must stay under the 3000-token allowance (got ${delta})`);
 });
 
-test('the composer attaches a local image from the reference menu', () => {
+test('one merged entry adds a reference or an image attachment', () => {
   const template = getInputTemplate();
   const script = getInputScript();
 
-  // One hidden file input owns the picker, so no state snapshot ever carries bytes.
-  assert.equal(countOccurrences(template, 'id="composerAttachmentInput"'), 1,
-    'exactly one attachment file input is rendered');
-  assert.ok(template.includes('type="file"'), 'the picker is a plain file input');
-  assert.ok(template.includes('accept="image/png,image/jpeg,image/webp,image/gif"'),
-    'the picker only offers formats the intake can validate');
+  // The local file control is gone: the host picker is the only entry, so no
+  // webview file control ever reads bytes on its own.
+  assert.equal(countOccurrences(template, 'composerAttachmentInput'), 0,
+    'the hidden attachment file input is removed');
+  assert.equal(countOccurrences(script, 'pickPromptImageFromMenu'), 0,
+    'the local image picker entry point is removed');
 
-  // The menu entry must feed the existing attachment pipeline, not insert a reference.
-  assert.ok(script.includes("entry.kind === 'imagePicker'"), 'the menu dispatches an image entry');
-  assert.ok(script.includes('function pickPromptImageFromMenu('), 'the entry opens the picker');
-  assert.ok(script.includes("getElementById('composerAttachmentInput')"),
-    'the picker is the node the change binding reads');
-  assert.ok(script.includes('attachmentAddFiles(chosen)'),
-    'a picked file joins the same transcode path as paste and drop');
+  // One action row, routed by the host after it sniffs the picked bytes.
+  assert.ok(script.includes("kind: 'fileOrImagePicker'"),
+    'the menu exposes exactly one file-or-image action entry');
+  assert.equal(countOccurrences(script, "'imagePicker'"), 0,
+    'the separate image entry is gone');
+
+  // The host bridge feeds the same attachment pipeline as paste and drop, so a
+  // picked image can never turn into a file reference at the caret.
+  assert.ok(script.includes("msg.type !== 'insertComposerImage'"),
+    'the composer handles the host image bridge');
+  assert.ok(script.includes('attachmentAddFiles([file])'),
+    'a bridged image joins the identical transcode path');
+
+  // Numbering is presentation only and follows the visible order.
+  assert.ok(template.includes('composer-attachment-index'), 'a chip carries its ordinal badge');
+  assert.ok(script.includes("t('imageAttachmentOrdinal'"), 'the chip names its ordinal');
+  assert.ok(script.includes('attachmentCreateChip(visibleEntries[i], i)'),
+    'chips are numbered by their position in the visible list');
+
   assert.doesNotThrow(() => new Function(script), 'the composed input script still compiles');
 });

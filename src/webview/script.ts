@@ -157,6 +157,15 @@ export function getScript(): string {
     var historyCleanupDeletedSessionIds = new Set();
     var historyCleanupDeletedSessionKeys = new Set();
     var historyCleanupPendingDrafts = new Map();
+    // Message images are served per view: the host answers a request with
+    // asWebviewUri links that only resolve in this webview, so the map is
+    // dropped whenever the visible conversation changes.
+    var MESSAGE_IMAGE_PREVIEW_REQUEST_SIZE = 32;
+    var messageImagePreviews = Object.create(null);
+    var messageImagePreviewSessionId = '';
+    var messageImagePreviewPending = Object.create(null);
+    var messageImagePreviewPendingActive = false;
+    var messageImagePreviewExhausted = false;
 
     function currentInteraction() {
       return state.interaction && state.interaction.sessionId === state.activeSessionId ? state.interaction : null;
@@ -220,6 +229,11 @@ export function getScript(): string {
 
     function changeVisibleSession(previousSessionId, nextSessionId) {
       if (previousSessionId === nextSessionId) return;
+      messageImagePreviews = Object.create(null);
+      messageImagePreviewPending = Object.create(null);
+      messageImagePreviewPendingActive = false;
+      messageImagePreviewExhausted = false;
+      messageImagePreviewSessionId = String(nextSessionId || '');
       inlineShortcutController.invalidateYank();
       inlineShortcutController.closeContextMenu();
       var startupDraft = !previousSessionId && promptInput ? promptInput.innerHTML : '';
@@ -1330,6 +1344,10 @@ ${conversationsMenuBindingsFragment.source}
         });
         sessionMenuRenderKey = '';
         renderSessionMenu();
+        return;
+      }
+      if (message.type === 'messageImagePreviews') {
+        applyMessageImagePreviews(message);
         return;
       }
       if (message.type === 'submissionResult') {
@@ -4217,6 +4235,10 @@ ${conversationsSessionListFragment.source}
         if (message.role === 'assistant' && Array.isArray(message.usedSkills) && message.usedSkills.length) {
           body.append(createUsedSkillsNotice(message.usedSkills));
         }
+        if (message.role === 'user' && !isDraftRunAutoContinuation) {
+          var messageImageStrip = createMessageImageStrip(message);
+          if (messageImageStrip) body.append(messageImageStrip);
+        }
 
         if (isEditing) {
           body.append(createInlineMessageEditor(message));
@@ -4280,12 +4302,147 @@ ${conversationsSessionListFragment.source}
         transcript.append(item);
       }
 
+      requestMissingMessageImagePreviews();
       transcript.append(unlinkedChangeSetRegion);
       renderUnlinkedChangeSets(changeSetProjection.unlinked, draftRunProjection.unlinked);
 
       if (shouldStick) {
         transcript.scrollTop = transcript.scrollHeight;
       }
+    }
+
+    // ------------------------------------------------------------------ images
+    // A user message draws the images it was sent with using the composer's own
+    // chip vocabulary. The ordinal is presentation only: it never enters
+    // message.content or expandedContent, so the request bytes and the
+    // persisted bytes stay exactly what the user sent.
+
+    function messageImagePreviewUri(sha256) {
+      var uri = messageImagePreviews[sha256];
+      return typeof uri === 'string' ? uri : '';
+    }
+
+    function messageImageAttachments(message) {
+      var attachments = Array.isArray(message.attachments) ? message.attachments : [];
+      var images = [];
+      for (var i = 0; i < attachments.length; i++) {
+        var attachment = attachments[i];
+        if (!attachment || attachment.kind !== 'image') continue;
+        if (!/^[a-f0-9]{64}$/.test(String(attachment.sha256 || ''))) continue;
+        images.push(attachment);
+      }
+      return images;
+    }
+
+    function createMessageImageStrip(message) {
+      var images = messageImageAttachments(message);
+      if (!images.length) return null;
+      var strip = document.createElement('div');
+      strip.className = 'message-attachments';
+      for (var i = 0; i < images.length; i++) {
+        strip.append(createMessageImageChip(images[i], i));
+      }
+      return strip;
+    }
+
+    function createMessageImageChip(attachment, position) {
+      var sha256 = String(attachment.sha256 || '');
+      var name = String(attachment.sourceName || '');
+      var ordinal = t('imageAttachmentOrdinal', { index: position + 1 });
+      var label = name ? ordinal + ': ' + name : ordinal;
+
+      var chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'composer-attachment-chip message-attachment-chip';
+      chip.dataset.attachmentIndex = String(position + 1);
+      chip.dataset.messageImageSha256 = sha256;
+      chip.setAttribute('aria-label', label);
+      chip.title = label;
+
+      var index = document.createElement('span');
+      index.className = 'composer-attachment-index';
+      index.setAttribute('aria-hidden', 'true');
+      index.textContent = String(position + 1);
+      chip.append(index);
+
+      var previewUri = messageImagePreviewUri(sha256);
+      if (previewUri) {
+        var thumb = document.createElement('img');
+        thumb.className = 'composer-attachment-thumb';
+        thumb.alt = '';
+        thumb.src = previewUri;
+        chip.append(thumb);
+      } else {
+        // No preview yet: keep the row stable and never render a broken image.
+        var placeholder = document.createElement('span');
+        placeholder.className = 'composer-attachment-thumb message-attachment-placeholder';
+        placeholder.setAttribute('aria-hidden', 'true');
+        chip.append(placeholder);
+      }
+
+      var meta = document.createElement('span');
+      meta.className = 'composer-attachment-meta';
+      var nameElement = document.createElement('span');
+      nameElement.className = 'composer-attachment-name';
+      nameElement.textContent = name || t('messageImageUnavailable');
+      meta.append(nameElement);
+      var size = document.createElement('span');
+      size.className = 'composer-attachment-size';
+      size.textContent = formatBytes(Number(attachment.bytes) || 0) + ' \u00b7 ' + attachment.width + '\u00d7' + attachment.height;
+      meta.append(size);
+      chip.append(meta);
+
+      chip.addEventListener('click', function(event) {
+        event.preventDefault();
+        vscode.postMessage({ type: 'openMessageImage', sessionId: state.activeSessionId, sha256: sha256 });
+      });
+      return chip;
+    }
+
+    function applyMessageImagePreviews(message) {
+      var sessionId = String(message.sessionId || '');
+      if (!sessionId || sessionId !== String(state.activeSessionId || '')) return;
+      if (messageImagePreviewSessionId !== sessionId) return;
+      var uris = message.uris && typeof message.uris === 'object' ? message.uris : {};
+      var resolved = 0;
+      for (var sha256 in uris) {
+        if (!Object.prototype.hasOwnProperty.call(uris, sha256)) continue;
+        var uri = uris[sha256];
+        if (typeof uri !== 'string' || !uri) continue;
+        if (messageImagePreviews[sha256] === uri) continue;
+        messageImagePreviews[sha256] = uri;
+        resolved += 1;
+      }
+      messageImagePreviewPending = Object.create(null);
+      messageImagePreviewPendingActive = false;
+      // A response that resolved nothing will not resolve anything by asking
+      // again, so stop the supplementary rounds for this conversation.
+      if (!resolved) messageImagePreviewExhausted = true;
+      render();
+    }
+
+    function requestMissingMessageImagePreviews() {
+      var sessionId = String(state.activeSessionId || '');
+      if (!sessionId || messageImagePreviewPendingActive || messageImagePreviewExhausted) return;
+      if (messageImagePreviewSessionId !== sessionId) return;
+      var requested = [];
+      for (var i = 0; i < state.messages.length; i++) {
+        if (requested.length >= MESSAGE_IMAGE_PREVIEW_REQUEST_SIZE) break;
+        var message = state.messages[i];
+        if (!message || message.role !== 'user') continue;
+        var images = messageImageAttachments(message);
+        for (var j = 0; j < images.length; j++) {
+          if (requested.length >= MESSAGE_IMAGE_PREVIEW_REQUEST_SIZE) break;
+          var sha256 = String(images[j].sha256 || '');
+          if (messageImagePreviews[sha256] || messageImagePreviewPending[sha256]) continue;
+          if (requested.indexOf(sha256) >= 0) continue;
+          requested.push(sha256);
+        }
+      }
+      if (!requested.length) return;
+      for (var k = 0; k < requested.length; k++) messageImagePreviewPending[requested[k]] = true;
+      messageImagePreviewPendingActive = true;
+      vscode.postMessage({ type: 'requestMessageImagePreviews', sessionId: sessionId, sha256s: requested });
     }
 
     function getReasoningKey(message) {

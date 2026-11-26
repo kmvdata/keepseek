@@ -25,6 +25,15 @@ export const attachmentStylesFragment: WebviewFragment = {
         color: var(--vscode-foreground, inherit);
         font-size: 11px;
       }
+      .composer-attachment-index {
+        flex: 0 0 auto;
+        min-width: 12px;
+        color: var(--vscode-descriptionForeground, inherit);
+        font-size: 10px;
+        font-variant-numeric: tabular-nums;
+        text-align: right;
+        white-space: nowrap;
+      }
       .composer-attachment-thumb {
         width: 28px;
         height: 28px;
