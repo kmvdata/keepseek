@@ -239,7 +239,7 @@ export const referenceMenuImplementationFragment: WebviewFragment = {
 
         if (referenceResourcesLoading && !referenceResourcesLoaded) {
           count.textContent = t('loading');
-          var loadingEntries = shouldShowExternalPickerReferenceEntry() ? [createExternalPickerReferenceEntry()] : [];
+          var loadingEntries = shouldShowExternalPickerReferenceEntry() ? getReferenceMenuActionEntries() : [];
           if (loadingEntries.length) {
             appendReferenceMenuEntries(loadingEntries);
           }
@@ -248,7 +248,7 @@ export const referenceMenuImplementationFragment: WebviewFragment = {
         }
 
         if (referenceResourcesError) {
-          var errorEntries = shouldShowExternalPickerReferenceEntry() ? [createExternalPickerReferenceEntry()] : [];
+          var errorEntries = shouldShowExternalPickerReferenceEntry() ? getReferenceMenuActionEntries() : [];
           count.textContent = String(errorEntries.length);
           if (errorEntries.length) {
             appendReferenceMenuEntries(errorEntries);
@@ -328,6 +328,9 @@ export const referenceMenuImplementationFragment: WebviewFragment = {
         if (entry.kind === 'externalPicker') {
           return createExternalPickerReferenceButton(index);
         }
+        if (entry.kind === 'imagePicker') {
+          return createImagePickerReferenceButton(index);
+        }
         if (entry.kind === 'skill') {
           return createSkillReferenceButton(entry.skill, index);
         }
@@ -350,6 +353,29 @@ export const referenceMenuImplementationFragment: WebviewFragment = {
         var pathLabel = document.createElement('span');
         pathLabel.className = 'reference-menu-item-path';
         pathLabel.textContent = t('chooseExternalFilesDescription');
+
+        option.append(name, pathLabel);
+        return option;
+      }
+
+      // 图片入口与外部文件入口同为“动作型”条目：它不插入引用文本，
+      // 而是打开本地图片选择器，把文件交给 composer 的附件链路。
+      function createImagePickerReferenceButton(index) {
+        var option = document.createElement('button');
+        option.type = 'button';
+        option.id = getReferenceMenuOptionId(index);
+        option.className = 'reference-menu-item reference-menu-action' + (index === activeReferenceIndex ? ' is-active' : '');
+        option.dataset.referenceIndex = String(index + 1);
+        option.setAttribute('role', 'option');
+        option.setAttribute('aria-selected', index === activeReferenceIndex ? 'true' : 'false');
+
+        var name = document.createElement('span');
+        name.className = 'reference-menu-item-name';
+        name.textContent = t('addImage');
+
+        var pathLabel = document.createElement('span');
+        pathLabel.className = 'reference-menu-item-path';
+        pathLabel.textContent = t('addImageDescription');
 
         option.append(name, pathLabel);
         return option;
@@ -440,7 +466,16 @@ export const referenceMenuImplementationFragment: WebviewFragment = {
           return resources;
         }
 
-        return [createExternalPickerReferenceEntry()].concat(resources);
+        return getReferenceMenuActionEntries().concat(resources);
+      }
+
+      /** Action entries never consume the mention query: they open a picker. */
+      function getReferenceMenuActionEntries() {
+        return [createExternalPickerReferenceEntry(), createImagePickerReferenceEntry()];
+      }
+
+      function createImagePickerReferenceEntry() {
+        return { kind: 'imagePicker' };
       }
 
       function shouldShowExternalPickerReferenceEntry() {
@@ -587,6 +622,10 @@ export const referenceMenuImplementationFragment: WebviewFragment = {
         if (!entry) { return; }
         if (entry.kind === 'externalPicker') {
           pickExternalFileReferences();
+          return;
+        }
+        if (entry.kind === 'imagePicker') {
+          pickPromptImageFromMenu();
           return;
         }
         if (entry.kind === 'skill') {

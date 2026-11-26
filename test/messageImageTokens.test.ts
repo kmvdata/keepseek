@@ -11,6 +11,8 @@ import {
   toChatCompletionsContent
 } from '../src/agent/multimodal/imageParts';
 import { refusesNewImages, resolveImageLaneCapability } from '../src/agent/multimodal/imageCapability';
+import { getInputScript } from '../src/webview/input/script';
+import { getInputTemplate } from '../src/webview/input/template';
 import type { MessageAttachment } from '../src/shared/types';
 import {
   estimateAnthropicImageTokens,
@@ -381,4 +383,25 @@ test('one 100 KB image adds far less than 3000 estimated tokens', () => {
   const delta = withImage - plainTokens;
   assert.ok(delta > 0, 'the image is not free');
   assert.ok(delta <= 3000, `a ~100 KB image must stay under the 3000-token allowance (got ${delta})`);
+});
+
+test('the composer attaches a local image from the reference menu', () => {
+  const template = getInputTemplate();
+  const script = getInputScript();
+
+  // One hidden file input owns the picker, so no state snapshot ever carries bytes.
+  assert.equal(countOccurrences(template, 'id="composerAttachmentInput"'), 1,
+    'exactly one attachment file input is rendered');
+  assert.ok(template.includes('type="file"'), 'the picker is a plain file input');
+  assert.ok(template.includes('accept="image/png,image/jpeg,image/webp,image/gif"'),
+    'the picker only offers formats the intake can validate');
+
+  // The menu entry must feed the existing attachment pipeline, not insert a reference.
+  assert.ok(script.includes("entry.kind === 'imagePicker'"), 'the menu dispatches an image entry');
+  assert.ok(script.includes('function pickPromptImageFromMenu('), 'the entry opens the picker');
+  assert.ok(script.includes("getElementById('composerAttachmentInput')"),
+    'the picker is the node the change binding reads');
+  assert.ok(script.includes('attachmentAddFiles(chosen)'),
+    'a picked file joins the same transcode path as paste and drop');
+  assert.doesNotThrow(() => new Function(script), 'the composed input script still compiles');
 });

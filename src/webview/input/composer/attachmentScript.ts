@@ -52,6 +52,25 @@ export const attachmentCollectionFragment: WebviewFragment = {
         return composerAttachments.length > 0;
       }
 
+      function attachmentPickerElement() {
+        return document.getElementById('composerAttachmentInput');
+      }
+
+      function attachmentOpenPicker() {
+        var input = attachmentPickerElement();
+        if (!input) { return; }
+        input.value = '';
+        input.click();
+      }
+
+      /** The "+" menu entry closes the menu first, then opens the same native
+       * picker the composer already uses; a chosen file joins the identical
+       * attachment pipeline as paste and drop. */
+      function pickPromptImageFromMenu() {
+        closeReferenceMenu(false);
+        attachmentOpenPicker();
+      }
+
       function attachmentCollect() {
         var payload = [];
         for (var i = 0; i < composerAttachments.length; i++) {
@@ -248,6 +267,16 @@ export const attachmentCollectionFragment: WebviewFragment = {
 export const attachmentBindingsFragment: WebviewFragment = {
   id: 'composer.attachment-bindings',
   source: `
+      var attachmentFileInput = attachmentPickerElement();
+      if (attachmentFileInput) {
+        attachmentFileInput.addEventListener('change', function() {
+          var chosen = attachmentFileInput.files;
+          if (chosen && chosen.length) {
+            attachmentAddFiles(chosen);
+          }
+          attachmentFileInput.value = '';
+        });
+      }
       var attachmentHostElement = attachmentEnsureUi();
       if (attachmentHostElement) {
         attachmentHostElement.addEventListener('click', function(event) {
