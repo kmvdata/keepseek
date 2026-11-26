@@ -15,6 +15,9 @@ import { getInputScript } from '../src/webview/input/script';
 import { getInputTemplate } from '../src/webview/input/template';
 import type { MessageAttachment } from '../src/shared/types';
 import {
+  DEEPSEEK_IMAGE_TOKEN_RULE,
+  IMPLEMENTATION_IMAGE_TOKEN_RULE_VERSION,
+  describeImageTokenRule,
   estimateAnthropicImageTokens,
   estimateDeepSeekImageTokens,
   estimateImageTokens,
@@ -70,6 +73,50 @@ function writeUint32BE(bytes: Uint8Array, offset: number, value: number): void {
 function toDataUrl(mimeType: string, bytes: Uint8Array): string {
   return `data:${mimeType};base64,${Buffer.from(bytes).toString('base64')}`;
 }
+
+test('the deepseek rule object drives every coefficient and stays unverified', () => {
+  // No DeepSeek-published text is quoted anywhere in this repository: every
+  // number below is the Stage 0 probe reverse derivation. `verified` must stay
+  // false while `measured` records the weaker, provable claim.
+  assert.equal(DEEPSEEK_IMAGE_TOKEN_RULE.verified, false);
+  assert.equal(DEEPSEEK_IMAGE_TOKEN_RULE.measured, true);
+  assert.equal(DEEPSEEK_IMAGE_TOKEN_RULE.version, 'measured-probe-v1');
+  assert.ok(DEEPSEEK_IMAGE_TOKEN_RULE.source.includes('image-tokenization-report'),
+    'a version bump must move the quoted source with it');
+
+  const rule = DEEPSEEK_IMAGE_TOKEN_RULE;
+  const expected = (width: number, height: number) => Math.min(
+    rule.ceilingTokens,
+    Math.ceil(height / rule.gridPixels)
+      * (Math.ceil(width / rule.gridPixels) + rule.columnOverhead)
+      + rule.tailTokens
+  );
+  const anchors: Array<[number, number]> = [
+    [512, 512], [800, 800], [1302, 1302], [1568, 1568], [160, 160], [10, 10]
+  ];
+  for (const [width, height] of anchors) {
+    assert.equal(estimateDeepSeekImageTokens(width, height), expected(width, height),
+      `${width}x${height} must come from the rule object`);
+  }
+  assert.equal(estimateDeepSeekImageTokens(160, 160), 22, 'a 4x4 grid is rows*(columns+1)+2');
+  assert.equal(estimateDeepSeekImageTokens(100_000, 100_000), rule.ceilingTokens,
+    'the ceiling clamps an over-large image');
+  assert.equal(rule.hasFloor, false, 'no floor is encoded; 512x512 measured 184, far below any clamp');
+
+  const deepseek = describeImageTokenRule('deepseek');
+  assert.equal(deepseek.verified, false);
+  assert.equal(deepseek.measured, true);
+  assert.ok(deepseek.formula.includes(String(rule.gridPixels)),
+    'the description is built from the rule object, never re-typed');
+  for (const provider of ['qwencloud', 'anthropic-compatible', 'glm', undefined]) {
+    const described = describeImageTokenRule(provider);
+    assert.equal(described.verified, false,
+      `${provider} carries no vendor text in this repository`);
+    assert.equal(described.measured, false);
+    assert.equal(described.version, IMPLEMENTATION_IMAGE_TOKEN_RULE_VERSION);
+    assert.ok(described.formula.length > 0 && described.source.length > 0);
+  }
+});
 
 test('deepseek image tokens reproduce the measured anchors and clamp conservatively', () => {
   assert.equal(estimateDeepSeekImageTokens(512, 512), 184, 'the 2 KB solid colour and the 787 KB noise probe both measured 184');

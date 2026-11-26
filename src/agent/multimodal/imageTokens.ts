@@ -36,8 +36,22 @@ export interface ImageTokenEstimateOptions {
 /** Placeholder that replaces a base64 payload before character counting. */
 export const IMAGE_TOKEN_PLACEHOLDER = '[image]';
 
-const DEEPSEEK_GRID_PIXELS = 42;
-const DEEPSEEK_IMAGE_TOKEN_CEILING = 1024;
+export const DEEPSEEK_IMAGE_TOKEN_RULE = Object.freeze({
+  provider: 'deepseek',
+  version: 'measured-probe-v1',
+  source: 'out-test/image-tokenization-report.json (Stage 0 probe, deepseek-v4.1-flash-1017)',
+  verified: false,
+  measured: true,
+  gridPixels: 42,
+  columnOverhead: 1,
+  tailTokens: 2,
+  ceilingTokens: 1024,
+  hasFloor: false
+});
+
+/** Qwen and Anthropic lanes carry no vendor text in this repository at all. */
+export const IMPLEMENTATION_IMAGE_TOKEN_RULE_VERSION = 'implementation-v1';
+
 const QWEN_DEFAULT_TILE_PIXELS = 32;
 const QWEN25_VL_TILE_PIXELS = 28;
 const QWEN_IMAGE_TOKEN_MIN = 4;
@@ -49,13 +63,75 @@ const DATA_URL_PATTERN = /data:image\/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/=
 const BASE64_FIELD_PATTERN = /("(?:data|url)"\s*:\s*")([A-Za-z0-9+/=]{256,})(")/gu;
 
 /**
- * `rows = ceil(h/42)`, `columns = ceil(w/42)`,
- * `tokens = min(1024, rows * (columns + 1) + 2)`.
+ * `rows = ceil(h/gridPixels)`, `columns = ceil(w/gridPixels)`,
+ * `tokens = min(ceilingTokens, rows * (columns + columnOverhead) + tailTokens)`.
+ *
+ * Every coefficient is read from `DEEPSEEK_IMAGE_TOKEN_RULE`; no other module
+ * may restate a bare grid size, tail or ceiling.
  */
 export function estimateDeepSeekImageTokens(width: number, height: number): number {
-  const columns = Math.ceil(width / DEEPSEEK_GRID_PIXELS);
-  const rows = Math.ceil(height / DEEPSEEK_GRID_PIXELS);
-  return Math.min(DEEPSEEK_IMAGE_TOKEN_CEILING, rows * (columns + 1) + 2);
+  const rule = DEEPSEEK_IMAGE_TOKEN_RULE;
+  const columns = Math.ceil(width / rule.gridPixels);
+  const rows = Math.ceil(height / rule.gridPixels);
+  return Math.min(rule.ceilingTokens, rows * (columns + rule.columnOverhead) + rule.tailTokens);
+}
+
+export interface ImageTokenRuleDescription {
+  provider: string;
+  formula: string;
+  source: string;
+  version: string;
+  /** True only when vendor-published text is quoted next to the coefficients. */
+  verified: boolean;
+  /** True when a live probe measured this lane in this repository. */
+  measured: boolean;
+}
+
+/**
+ * Describes the rule a lane is priced with, so trace and UI can show provenance
+ * instead of implying that every lane is officially specified.
+ */
+export function describeImageTokenRule(provider?: string | null): ImageTokenRuleDescription {
+  const rule = DEEPSEEK_IMAGE_TOKEN_RULE;
+  switch (normalizeImageProviderKey(provider)) {
+    case 'deepseek':
+      return {
+        provider: 'deepseek',
+        formula: `tokens = min(${rule.ceilingTokens}, ceil(h/${rule.gridPixels})`
+          + ` * (ceil(w/${rule.gridPixels}) + ${rule.columnOverhead}) + ${rule.tailTokens})`,
+        source: rule.source,
+        version: rule.version,
+        verified: rule.verified,
+        measured: rule.measured
+      };
+    case 'qwen':
+      return {
+        provider: 'qwen',
+        formula: 'tokens = clamp(ceil(h/tile) * ceil(w/tile) + 2, 4, 1280), tile = 28 | 32',
+        source: 'implementation only: no qwen image-token text was read or measured here',
+        version: IMPLEMENTATION_IMAGE_TOKEN_RULE_VERSION,
+        verified: false,
+        measured: false
+      };
+    case 'anthropic':
+      return {
+        provider: 'anthropic',
+        formula: 'tokens = ceil(w * h / 750)',
+        source: 'implementation comment only (~1 token per 750 px^2); never measured here',
+        version: IMPLEMENTATION_IMAGE_TOKEN_RULE_VERSION,
+        verified: false,
+        measured: false
+      };
+    default:
+      return {
+        provider: 'unknown',
+        formula: 'tokens = max(1280, ceil(w * h / 750))',
+        source: 'conservative allowance for an unmeasured lane',
+        version: IMPLEMENTATION_IMAGE_TOKEN_RULE_VERSION,
+        verified: false,
+        measured: false
+      };
+  }
 }
 
 /** Qwen3-VL/qwen-vl-max use a 32 px tile, Qwen2.5-VL a 28 px tile. Unknown
