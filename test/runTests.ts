@@ -32,6 +32,7 @@ import './attachmentStore.test';
 import './attachmentPickedRouting.test';
 import './attachmentPreviewStore.test';
 import './composerImageStaging.test';
+import './referenceInlineBudget.test';
 import { after } from 'node:test';
 
 // The provider's startup schedules interval timers; a completed run must not

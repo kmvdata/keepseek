@@ -27,6 +27,15 @@ export interface PromptFileReference {
 export interface ExpandFileReferencesOptions {
   authorizedExternalReferenceUris?: Iterable<string>;
   language?: KeepseekLanguage;
+  /**
+   * Characters this message may spend inlining file-reference bodies, derived
+   * from the model's declared window by `resolveReferenceInlineBudget`. The
+   * decision is a budget decision only: no Skill identity, round type,
+   * calibration value or observed runtime state may take part in it. Omitted
+   * means unbounded, which keeps callers that were not migrated on their
+   * previous inline behavior.
+   */
+  referenceInlineBudgetChars?: number;
 }
 
 interface ExpandedFileReference {
@@ -43,6 +52,12 @@ export async function expandFileReferencesInPrompt(prompt: string, options: Expa
   }
 
   const authorizedExternalReferenceUris = new Set(options.authorizedExternalReferenceUris ?? []);
+  // Read the per-file limit and the inline budget once per message: both stay
+  // constant for the whole pass, so no reference can observe a value that
+  // changed because of the order in which it was visited.
+  const maxFileBytes = getReferenceExpansionMaxBytes();
+  const totalInlineChars = normalizeReferenceInlineBudgetChars(options.referenceInlineBudgetChars);
+  let remainingInlineChars = totalInlineChars;
   let expandedPrompt = '';
   let cursor = 0;
 
@@ -51,13 +66,24 @@ export async function expandFileReferencesInPrompt(prompt: string, options: Expa
       continue;
     }
 
-    const expandedReference = await expandPromptFileReference(prompt, reference, authorizedExternalReferenceUris);
-    if (!expandedReference) {
+    const expansion = await expandPromptFileReference(prompt, reference, authorizedExternalReferenceUris, {
+      language,
+      maxFileBytes,
+      remainingInlineChars,
+      totalInlineChars
+    });
+    if (expansion.kind === 'skip') {
       continue;
     }
 
+    // Pointers cost nothing: they exist so a degraded reference keeps the
+    // user's intent without spending the budget that caused the degradation.
+    if (expansion.kind === 'inline' && remainingInlineChars !== undefined) {
+      remainingInlineChars = Math.max(0, remainingInlineChars - expansion.inlineChars);
+    }
+
     expandedPrompt += prompt.slice(cursor, reference.replacementStart);
-    expandedPrompt += withPromptBlockBoundaries(prompt, reference.replacementStart, reference.matchEnd, expandedReference);
+    expandedPrompt += withPromptBlockBoundaries(prompt, reference.replacementStart, reference.matchEnd, expansion.text);
     cursor = reference.matchEnd;
   }
 
@@ -216,42 +242,92 @@ function getBracketFileReferenceReplacementStart(prompt: string, matchStart: num
   return beforeLabel.trim() ? undefined : labelStart;
 }
 
+type PromptFileReferenceExpansion =
+  | { kind: 'inline'; text: string; inlineChars: number }
+  | { kind: 'pointer'; text: string }
+  | { kind: 'skip' };
+
+const SKIP_REFERENCE_EXPANSION: PromptFileReferenceExpansion = { kind: 'skip' };
+
+interface ReferenceExpansionLimits {
+  language: KeepseekLanguage;
+  maxFileBytes: number;
+  remainingInlineChars?: number;
+  totalInlineChars?: number;
+}
+
 async function expandPromptFileReference(
   prompt: string,
   reference: PromptFileReference,
-  authorizedExternalReferenceUris: ReadonlySet<string>
-): Promise<string | undefined> {
+  authorizedExternalReferenceUris: ReadonlySet<string>,
+  limits: ReferenceExpansionLimits
+): Promise<PromptFileReferenceExpansion> {
+  // Unauthorized external targets are skipped instead of pointed at: the read
+  // tools enforce the same authorization, so a pointer would advertise content
+  // that every follow-up call refuses.
   if (!canExpandReferenceUri(reference.uri, authorizedExternalReferenceUris)) {
-    return undefined;
+    return SKIP_REFERENCE_EXPANSION;
   }
 
+  const pointer = (reason: ReferencePointerReason): PromptFileReferenceExpansion => ({
+    kind: 'pointer',
+    text: formatReferencePointer({
+      reference,
+      reason,
+      totalInlineChars: limits.totalInlineChars,
+      language: limits.language
+    })
+  });
+
+  // A skipped extension is still a real file the agent can reach with other
+  // tools, so it degrades to a pointer. Keeping the original line would leave a
+  // "(全文)" claim and a file: URI in the message while no content arrived.
   if (shouldSkipReferenceUri(reference.uri)) {
-    return undefined;
+    return pointer(getUnsupportedTypeReason(limits.language));
   }
 
   try {
     const stat = await vscode.workspace.fs.stat(reference.uri);
     if (stat.type !== vscode.FileType.File) {
-      return undefined;
+      // Directories and special provider entries have no readable text range,
+      // so the previous behavior (leaving the user's text alone) still holds.
+      return SKIP_REFERENCE_EXPANSION;
     }
 
-    if (reference.startLine <= 0 && stat.size > getReferenceExpansionMaxBytes()) {
-      return undefined;
+    if (reference.startLine <= 0 && stat.size > limits.maxFileBytes) {
+      return pointer(getFileSizeReason(limits.language, limits.maxFileBytes));
     }
 
     const document = await vscode.workspace.openTextDocument(reference.uri);
     const content = getReferenceDocumentText(document, reference.startLine, reference.endLine, reference.startColumn, reference.endColumn);
-    if (!isReadableTextContent(content) || exceedsReferenceExpansionLimit(content)) {
-      return undefined;
+    if (!isReadableTextContent(content)) {
+      return pointer(getUnreadableContentReason(limits.language));
+    }
+    if (getTextByteLength(content) > limits.maxFileBytes) {
+      return pointer(getFileSizeReason(limits.language, limits.maxFileBytes));
     }
 
-    return formatExpandedFileReference({
-      heading: prompt.slice(reference.replacementStart, reference.matchEnd).trim(),
-      content,
-      languageId: getMarkdownLanguage(document.languageId)
-    });
+    // One reference is either inlined in full or described by a pointer. A
+    // truncated inline block would ship partial content with no marker saying
+    // so, which is worse for the agent than an honest pointer.
+    const inlineChars = content.length;
+    if (limits.remainingInlineChars !== undefined && inlineChars > limits.remainingInlineChars) {
+      return pointer(getInlineBudgetReason(limits.language, limits.remainingInlineChars, limits.totalInlineChars));
+    }
+
+    return {
+      kind: 'inline',
+      text: formatExpandedFileReference({
+        heading: prompt.slice(reference.replacementStart, reference.matchEnd).trim(),
+        content,
+        languageId: getMarkdownLanguage(document.languageId)
+      }),
+      inlineChars
+    };
   } catch {
-    return undefined;
+    // Unknown target or provider failure: keep the user's own text rather than
+    // pointing at a file that could not even be stat'ed.
+    return SKIP_REFERENCE_EXPANSION;
   }
 }
 
@@ -289,6 +365,125 @@ function formatExpandedFileReference(reference: ExpandedFileReference): string {
   return `${reference.heading}\n${fence}${reference.languageId}\n${fencedContent}${fence}`;
 }
 
+interface ReferencePointerReason {
+  text: string;
+  /** True when the reason itself already states the budget in force. */
+  statesBudget: boolean;
+}
+
+/**
+ * Renders the degraded form of a reference: one self-contained line the agent
+ * can act on. It names the file, its workspace-relative path, the line range
+ * when the user asked for one, why nothing was inlined, the budget that
+ * applied, and the tools that can still fetch it.
+ */
+function formatReferencePointer(input: {
+  reference: PromptFileReference;
+  reason: ReferencePointerReason;
+  totalInlineChars?: number;
+  language: KeepseekLanguage;
+}): string {
+  const fileName = getUriFileName(input.reference.uri);
+  const lineLabel = input.reference.startLine > 0
+    ? formatReferenceLabel(input.reference, input.language)
+    : '';
+  const heading = lineLabel ? `${fileName} (${lineLabel})` : fileName;
+  // Only a workspace-relative path may be printed. A pointer is persisted in
+  // the session and replayed to every later request, so an absolute path, a
+  // file: URI, a host user name or any other session identifier would leak host
+  // state into text the model reads and the user keeps.
+  const relativePath = getWorkspaceRelativeReferencePath(input.reference.uri);
+  const location = relativePath ? ` — ./${relativePath}` : '';
+  // Every pointer states the budget in force, but a budget reason already names
+  // it; repeating the same number twice would only add noise.
+  const budgetClause = input.totalInlineChars === undefined || input.reason.statesBudget
+    ? ''
+    : input.language === 'en'
+      ? `; inline budget for this message: ${formatInlineCount(input.totalInlineChars)} characters`
+      : `；本轮内联预算 ${formatInlineCount(input.totalInlineChars)} 字符`;
+  const reason = `${input.reason.text}${budgetClause}`;
+  return input.language === 'en'
+    ? `[reference not inlined] ${heading}${location} (reason: ${reason}). Call keepseek_read_workspace_file_range (preferred) or keepseek_search_workspace to read it.`
+    : `[引用未内联] ${heading}${location}（原因：${reason}）。需要内容时调用 keepseek_read_workspace_file_range（优先）或 keepseek_search_workspace 读取。`;
+}
+
+function formatReferenceLabel(reference: PromptFileReference, language: KeepseekLanguage): string {
+  return formatReferenceLineLabel(
+    reference.startLine,
+    reference.endLine,
+    reference.startColumn,
+    reference.endColumn,
+    language
+  );
+}
+
+function getWorkspaceRelativeReferencePath(uri: vscode.Uri): string | undefined {
+  if (!vscode.workspace.getWorkspaceFolder(uri)) {
+    return undefined;
+  }
+  const relativePath = vscode.workspace.asRelativePath(uri, false);
+  if (!relativePath || path.isAbsolute(relativePath) || relativePath.startsWith('..')) {
+    return undefined;
+  }
+  return relativePath.split(path.sep).join('/');
+}
+
+function getUnsupportedTypeReason(language: KeepseekLanguage): ReferencePointerReason {
+  return {
+    text: language === 'en' ? 'this file type is outside the inlineable text set' : '该文件类型不在可内联的文本范围内',
+    statesBudget: false
+  };
+}
+
+function getUnreadableContentReason(language: KeepseekLanguage): ReferencePointerReason {
+  return {
+    text: language === 'en' ? 'the content is not readable text' : '内容不是可读文本',
+    statesBudget: false
+  };
+}
+
+function getFileSizeReason(language: KeepseekLanguage, maxFileBytes: number): ReferencePointerReason {
+  return {
+    text: language === 'en'
+      ? `the file exceeds the per-file inline limit of ${formatInlineCount(maxFileBytes)} bytes`
+      : `超过单文件内联上限 ${formatInlineCount(maxFileBytes)} 字节`,
+    statesBudget: false
+  };
+}
+
+function getInlineBudgetReason(
+  language: KeepseekLanguage,
+  limitChars: number,
+  totalInlineChars: number | undefined
+): ReferencePointerReason {
+  // Failing the whole-message budget and failing only the remaining budget are
+  // different facts, and the printed number must be the limit that applied.
+  const remaining = totalInlineChars !== undefined && limitChars < totalInlineChars;
+  const formatted = formatInlineCount(limitChars);
+  return {
+    text: language === 'en'
+      ? remaining
+        ? `the remaining inline budget for this message is ${formatted} characters`
+        : `the file exceeds the single-reference inline budget of ${formatted} characters`
+      : remaining
+        ? `超过本轮剩余内联预算 ${formatted} 字符`
+        : `超过单次内联预算 ${formatted} 字符`,
+    statesBudget: true
+  };
+}
+
+function formatInlineCount(value: number): string {
+  const digits = String(Math.max(0, Math.trunc(value)));
+  let formatted = '';
+  for (let index = 0; index < digits.length; index += 1) {
+    if (index > 0 && (digits.length - index) % 3 === 0) {
+      formatted += ',';
+    }
+    formatted += digits.charAt(index);
+  }
+  return formatted;
+}
+
 function withPromptBlockBoundaries(prompt: string, start: number, end: number, block: string): string {
   const needsLeadingBreak = start > 0 && !isLineBreak(prompt.charAt(start - 1));
   const needsTrailingBreak = end < prompt.length && !isLineBreak(prompt.charAt(end));
@@ -299,8 +494,15 @@ function isLineBreak(value: string): boolean {
   return value === '\n' || value === '\r';
 }
 
-function exceedsReferenceExpansionLimit(content: string): boolean {
-  return new TextEncoder().encode(content).byteLength > getReferenceExpansionMaxBytes();
+function getTextByteLength(content: string): number {
+  return new TextEncoder().encode(content).byteLength;
+}
+
+function normalizeReferenceInlineBudgetChars(value: number | undefined): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return undefined;
+  }
+  return Math.max(0, Math.floor(value));
 }
 
 function getReferenceExpansionMaxBytes(): number {

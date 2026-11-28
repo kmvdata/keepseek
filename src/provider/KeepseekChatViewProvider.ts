@@ -158,6 +158,7 @@ import { getAgentRuntimeProfile } from '../shared/modelProfiles';
 import { getErrorMessage } from '../shared/errors';
 import { formatBytes } from '../shared/format';
 import { expandPromptReferencesInPrompt } from '../context/references/promptReferences';
+import { resolveReferenceInlineBudget } from '../context/references/referenceInlineBudget';
 import { resolvePluginSkillReferences } from '../context/references/skillReference';
 import { getWorkspaceReferenceResources } from '../context/references/referenceResources';
 import { getHtmlForWebview } from '../webview/html';
@@ -8034,8 +8035,14 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       });
       // Host-generated approval results are already serialized evidence. Never
       // interpret references or agent selectors embedded in that evidence.
+      // Reference inlining spends at most one message's share of the window the
+      // model declares. The budget comes from that declaration alone, so an
+      // active Skill, a prompt-only round or any equivalent identity input can
+      // never change which references get inlined.
+      const referenceInlineBudget = resolveReferenceInlineBudget({ model });
       const expandedPrompt = await expandPromptReferencesInPrompt(trimmedPrompt, {
         authorizedExternalReferenceUris,
+        referenceInlineBudgetChars: referenceInlineBudget.chars,
         skillManifests: this.skillStore.getManifests(),
         expandSkillContents: false,
         language: this.language

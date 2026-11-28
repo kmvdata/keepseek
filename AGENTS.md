@@ -118,6 +118,7 @@ eval/                  行为评估用例与说明（agent-behavior/）
 - `accounts/accountResolver.ts` 是凭据解析唯一入口；主请求、摘要、reviewer、子代理、模型发现和余额必须使用一致来源语义。密钥不进入 workspace、prompt、会话或 trace。
 - 优先级：KeepSeek 核心安全 > 当前用户请求 > 全局与任务 root→cwd 指令 > Skills。Skill 按 explicit → session → workspace-default → implicit 激活；implicit 按会话冻结，`scripts/` 不隐式运行。
 - 外部文件/目录以精确 `uri.toString()` 授权；不可读内容不得绕过守卫。旧项目配置不扫描、不迁移；保留历史会话审计和恢复。
+- 文件引用是否内联只由字节预算决定：预算由模型**声明**窗口经 `resolveReferenceInlineBudget` 按既有 `token × 4` 折算并夹逼到 `[REFERENCE_INLINE_FLOOR_CHARS, REFERENCE_INLINE_CEIL_CHARS]`，`guessed`/`fallback` 直接取下限；判据禁止引入 Skill 身份、轮次类型，也禁止读取 `learnedEffectiveWindowTokens`、校准值或历史观测。超预算的引用降级为独占行指针块（含工作区相对路径、原因、实际预算与读取工具名），不得半截内联、不得保留 `(全文)` 标签、不得写入绝对路径或 `file:` URI；判定在提交时一次完成并随 `expandedContent` 落盘，切换模型只影响新消息。
 - Webview → Host 消息只在 `provider/webviewMessages.ts` 定义；Host 主动消息不加入该联合类型。保持 DOM id、type 和当前引用语法稳定。
 - 交互能力只由 `provider/interactionState.ts` 派生；异步拥有者须在首个 await 前取得带会话身份的预占，只有持有者可完成/交接。持续提示随操作终态同次清除；提交接受须有正文持久化屏障。后台功能须声明能力、预算、durability 与失败/恢复依赖。
 - `webview/input/composition.ts` 的 fragment 顺序是运行时契约；样式、模板、行为放各自 fragment。共享编辑器快捷键只放 `richTextShortcuts.ts`。
